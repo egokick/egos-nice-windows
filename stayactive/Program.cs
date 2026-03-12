@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
@@ -30,6 +31,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _jiggleMouseMenuItem;
     private readonly ToolStripMenuItem _typeTextMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
+    private readonly ToolStripMenuItem _dimScreenMenuItem;
     private readonly ToolStripMenuItem _editTextMenuItem;
     private readonly Icon _activeIcon;
     private readonly Icon _inactiveIcon;
@@ -70,6 +72,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _startupMenuItem.Click += (_, _) => ToggleStartup();
 
+        _dimScreenMenuItem = new ToolStripMenuItem("Dim screen when active")
+        {
+            CheckOnClick = true
+        };
+        _dimScreenMenuItem.Click += (_, _) => ToggleDimScreen();
+
         _editTextMenuItem = new ToolStripMenuItem("Edit text file");
         _editTextMenuItem.Click += (_, _) => OpenTextFile();
 
@@ -83,6 +91,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_jiggleMouseMenuItem);
         menu.Items.Add(_typeTextMenuItem);
         menu.Items.Add(_startupMenuItem);
+        menu.Items.Add(_dimScreenMenuItem);
         menu.Items.Add(_editTextMenuItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitMenuItem);
@@ -122,6 +131,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _settings.IsActive = isActive;
         SettingsStore.Save(_settings);
+
+        if (isActive && _settings.DimScreenWhenActiveEnabled)
+        {
+            TryDimScreen();
+        }
+
         RefreshUi();
         ApplyRunnerState();
 
@@ -145,6 +160,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
         SettingsStore.Save(_settings);
         RefreshUi();
         ApplyRunnerState();
+    }
+
+    private void ToggleDimScreen()
+    {
+        _settings.DimScreenWhenActiveEnabled = _dimScreenMenuItem.Checked;
+        SettingsStore.Save(_settings);
+
+        if (_settings.IsActive && _settings.DimScreenWhenActiveEnabled)
+        {
+            TryDimScreen();
+        }
+
+        RefreshUi();
     }
 
     private void OpenTextFile()
@@ -187,6 +215,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             ShowErrorBalloon($"Startup setup failed: {ex.Message}");
+        }
+    }
+
+    private void TryDimScreen()
+    {
+        try
+        {
+            if (!BrightnessService.TrySetLowestBrightness())
+            {
+                ShowErrorBalloon("Could not dim the screen on this display.");
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowErrorBalloon($"Screen dim failed: {ex.Message}");
         }
     }
 
@@ -294,6 +337,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _jiggleMouseMenuItem.Checked = _settings.JiggleMouseEnabled;
         _typeTextMenuItem.Checked = _settings.TypeTextEnabled;
         _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
+        _dimScreenMenuItem.Checked = _settings.DimScreenWhenActiveEnabled;
 
         _notifyIcon.Icon = _settings.IsActive ? _activeIcon : _inactiveIcon;
         _notifyIcon.Text = _settings.IsActive
@@ -321,6 +365,8 @@ internal sealed class AppSettings
     public bool JiggleMouseEnabled { get; set; } = true;
 
     public bool TypeTextEnabled { get; set; }
+
+    public bool DimScreenWhenActiveEnabled { get; set; }
 }
 
 internal static class StartupService
@@ -423,6 +469,54 @@ internal static class SettingsStore
     public static string ReadTypingText()
     {
         return File.ReadAllText(EnsureTextFileExists());
+    }
+}
+
+internal static class BrightnessService
+{
+    public static bool TrySetLowestBrightness()
+    {
+        var lowestBrightness = GetLowestSupportedBrightness();
+        var updated = false;
+
+        using var methodsSearcher = new ManagementObjectSearcher(
+            @"root\wmi",
+            "SELECT * FROM WmiMonitorBrightnessMethods WHERE Active = TRUE");
+
+        foreach (ManagementObject method in methodsSearcher.Get())
+        {
+            method.InvokeMethod("WmiSetBrightness", new object[] { 1u, lowestBrightness });
+            updated = true;
+        }
+
+        return updated;
+    }
+
+    private static byte GetLowestSupportedBrightness()
+    {
+        using var brightnessSearcher = new ManagementObjectSearcher(
+            @"root\wmi",
+            "SELECT * FROM WmiMonitorBrightness WHERE Active = TRUE");
+
+        byte? lowest = null;
+        foreach (ManagementObject brightness in brightnessSearcher.Get())
+        {
+            if (brightness["Levels"] is not Array levels)
+            {
+                continue;
+            }
+
+            foreach (var level in levels)
+            {
+                var brightnessLevel = Convert.ToByte(level);
+                if (lowest is null || brightnessLevel < lowest.Value)
+                {
+                    lowest = brightnessLevel;
+                }
+            }
+        }
+
+        return lowest ?? 0;
     }
 }
 
