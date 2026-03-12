@@ -1,0 +1,20 @@
+# Build output
+bin/
+obj/
+publish/
+
+# IDE state
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Test and tooling output
+TestResults/
+artifacts/
+
+# OS files
+Thumbs.db
+.DS_Store
