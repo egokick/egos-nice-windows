@@ -2,6 +2,8 @@
 bin/
 obj/
 publish/
+AppxStage/
+PackageLayout/
 
 # IDE state
 .vs/
@@ -15,7 +17,16 @@ publish/
 TestResults/
 artifacts/
 .dotnet/
+*.log
 
 # OS files
 Thumbs.db
 .DS_Store
+
+# Signing and packaging artifacts
+*.pfx
+*.snk
+*.appx
+*.appxbundle
+*.msix
+*.msixbundle
