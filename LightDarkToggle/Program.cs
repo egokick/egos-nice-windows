@@ -64,11 +64,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _timedModeMenuItem.Click += (_, _) => ToggleTimedMode();
 
         _lightSliderControl = new ScheduleSliderControl("Light", _settings.LightHour);
-        _lightSliderControl.HourChanged += (_, _) => UpdateScheduledHour(isLightHour: true, _lightSliderControl.Hour);
+        _lightSliderControl.HourCommitted += (_, _) => UpdateScheduledHour(isLightHour: true, _lightSliderControl.Hour);
         _lightSliderHost = CreateSliderHost(_lightSliderControl);
 
         _darkSliderControl = new ScheduleSliderControl("Dark", _settings.DarkHour);
-        _darkSliderControl.HourChanged += (_, _) => UpdateScheduledHour(isLightHour: false, _darkSliderControl.Hour);
+        _darkSliderControl.HourCommitted += (_, _) => UpdateScheduledHour(isLightHour: false, _darkSliderControl.Hour);
         _darkSliderHost = CreateSliderHost(_darkSliderControl);
 
         _timedSeparatorMenuItem = new ToolStripSeparator();
@@ -225,8 +225,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
         _timedModeMenuItem.Checked = _settings.TimedModeEnabled;
-        _lightSliderControl.Hour = _settings.LightHour;
-        _darkSliderControl.Hour = _settings.DarkHour;
+        if (!_lightSliderControl.IsInteracting)
+        {
+            _lightSliderControl.Hour = _settings.LightHour;
+        }
+
+        if (!_darkSliderControl.IsInteracting)
+        {
+            _darkSliderControl.Hour = _settings.DarkHour;
+        }
 
         var showTimedControls = _settings.TimedModeEnabled;
         _timedSeparatorMenuItem.Visible = showTimedControls;
@@ -283,52 +290,77 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
 internal sealed class ScheduleSliderControl : UserControl
 {
+    private readonly Label _titleLabel;
     private readonly Label _valueLabel;
     private readonly TrackBar _trackBar;
+    private bool _isInteracting;
 
     public ScheduleSliderControl(string title, int hour)
     {
-        Size = new Size(260, 64);
+        Size = new Size(280, 78);
         Margin = Padding.Empty;
+        Padding = Padding.Empty;
+        BackColor = SystemColors.Control;
+        DoubleBuffered = true;
 
-        var titleLabel = new Label
+        _titleLabel = new Label
         {
             AutoSize = true,
-            Location = new Point(8, 8),
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            Location = new Point(10, 8),
             Text = title
         };
 
         _valueLabel = new Label
         {
             AutoSize = true,
-            Location = new Point(190, 8)
+            Location = new Point(196, 10)
         };
 
         _trackBar = new TrackBar
         {
             Minimum = 0,
-            Maximum = 23,
+            Maximum = 24,
             TickFrequency = 1,
             LargeChange = 1,
             SmallChange = 1,
             AutoSize = false,
-            Bounds = new Rectangle(8, 24, 244, 28),
-            Value = Math.Clamp(hour, 0, 23)
+            Bounds = new Rectangle(10, 30, 260, 36),
+            Value = Math.Clamp(hour, 0, 24)
         };
-        _trackBar.ValueChanged += (_, _) =>
+        _trackBar.Scroll += (_, _) =>
         {
             _valueLabel.Text = FormatHour(_trackBar.Value);
-            HourChanged?.Invoke(this, EventArgs.Empty);
+        };
+        _trackBar.MouseDown += (_, _) => _isInteracting = true;
+        _trackBar.MouseUp += (_, _) => CommitCurrentValue();
+        _trackBar.KeyUp += (_, e) =>
+        {
+            if (e.KeyCode is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.PageDown or Keys.PageUp)
+            {
+                CommitCurrentValue();
+            }
+        };
+        _trackBar.MouseCaptureChanged += (_, _) =>
+        {
+            if (_isInteracting && Control.MouseButtons == MouseButtons.None)
+            {
+                CommitCurrentValue();
+            }
         };
 
-        Controls.Add(titleLabel);
+        Controls.Add(_titleLabel);
         Controls.Add(_valueLabel);
         Controls.Add(_trackBar);
 
         _valueLabel.Text = FormatHour(_trackBar.Value);
     }
 
-    public event EventHandler? HourChanged;
+    public event EventHandler? HourCommitted;
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool IsInteracting => _isInteracting || _trackBar.Capture;
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -337,7 +369,7 @@ internal sealed class ScheduleSliderControl : UserControl
         get => _trackBar.Value;
         set
         {
-            var normalized = Math.Clamp(value, 0, 23);
+            var normalized = Math.Clamp(value, 0, 24);
             if (_trackBar.Value == normalized)
             {
                 return;
@@ -350,7 +382,14 @@ internal sealed class ScheduleSliderControl : UserControl
 
     private static string FormatHour(int hour)
     {
-        return DateTime.Today.AddHours(hour).ToString("h tt");
+        return DateTime.Today.AddHours(hour % 24).ToString("h tt");
+    }
+
+    private void CommitCurrentValue()
+    {
+        _isInteracting = false;
+        _valueLabel.Text = FormatHour(_trackBar.Value);
+        HourCommitted?.Invoke(this, EventArgs.Empty);
     }
 }
 
