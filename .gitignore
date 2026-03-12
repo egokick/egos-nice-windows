@@ -14,6 +14,7 @@ publish/
 # Test and tooling output
 TestResults/
 artifacts/
+.dotnet/
 
 # OS files
 Thumbs.db
