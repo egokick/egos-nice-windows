@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Sync Library</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <section id="playerPanel" class="player-panel">
+      <div class="player-header">
+        <div>
+          <p class="player-label">Now Playing</p>
+          <h2 id="playerTitle">Select a video</h2>
+        </div>
+      </div>
+      <div id="playerPlaceholder" class="player-placeholder">
+        <p class="player-placeholder-title">Pick a video from the grid</p>
+        <p class="player-placeholder-text">The thumbnail opens it here without leaving the browser.</p>
+      </div>
+      <video id="videoPlayer" class="video-player hidden" controls preload="metadata"></video>
+    </section>
+
+    <section class="toolbar-panel">
+      <div class="toolbar-leading">
+        <button id="searchToggle" class="icon-button" type="button" aria-expanded="false" aria-controls="searchPanel" aria-label="Open search">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M10.5 4a6.5 6.5 0 1 0 4.03 11.6l4.43 4.44 1.07-1.07-4.44-4.43A6.5 6.5 0 0 0 10.5 4Zm0 1.5a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z" />
+          </svg>
+        </button>
+        <div id="searchPanel" class="search-panel" aria-hidden="true">
+          <label class="search-field" for="searchInput">
+            <span>Search</span>
+            <input id="searchInput" type="search" placeholder="Filter downloaded videos">
+          </label>
+        </div>
+      </div>
+
+      <div class="toolbar-summary">
+        <p id="selectionSummary">No videos selected</p>
+        <p id="refreshSummary">Waiting for the first library refresh.</p>
+      </div>
+
+      <div class="toolbar-actions">
+        <button id="syncButton" class="primary-button" type="button">Sync Now</button>
+        <button id="selectVisibleButton" class="ghost-button" type="button">Select Visible</button>
+        <button id="clearSelectionButton" class="ghost-button" type="button">Clear Selection</button>
+        <button id="removeSelectedButton" class="danger-button" type="button" disabled>Remove Selected</button>
+        <button id="settingsButton" class="secondary-button" type="button">Settings</button>
+      </div>
+    </section>
+
+    <main>
+      <section id="emptyState" class="empty-state hidden">
+        <h2>No downloaded videos yet</h2>
+        <p>Run a sync from the tray app or from the button above. New videos will appear here automatically.</p>
+      </section>
+
+      <section id="libraryGrid" class="library-grid" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <div class="monitor">
+    <button id="monitorToggle" class="monitor-toggle" type="button" aria-expanded="false" aria-controls="monitorPanel">
+      <span id="monitorPill" class="status-pill">Checking...</span>
+      <span class="monitor-toggle-label">Sync Details</span>
+    </button>
+
+    <aside id="monitorPanel" class="monitor-panel hidden" aria-hidden="true">
+      <div class="monitor-header">
+        <div>
+          <p class="monitor-kicker">Background Sync</p>
+          <h2>Activity</h2>
+        </div>
+        <button id="monitorClose" class="monitor-close" type="button" aria-label="Close sync details">x</button>
+      </div>
+
+      <p id="statusText" class="status-text">Connecting to the tray app...</p>
+
+      <ul id="activityFeed" class="activity-feed">
+        <li>Waiting for activity...</li>
+      </ul>
+    </aside>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

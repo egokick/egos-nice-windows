@@ -30,3 +30,18 @@ Thumbs.db
 *.appxbundle
 *.msix
 *.msixbundle
+
+# Sensitive app data
+YouTubeSyncTray/Downloads/
+YouTubeSyncTray/youtube-sync/legacy-downloads/
+YouTubeSyncTray/youtube-sync/legacy-youtube-cookies.txt
+YouTubeSyncTray/youtube-sync/legacy-watch-later.archive.txt
+YouTubeSyncTray/youtube-sync/legacy-browser-profiles/
+YouTubeSyncTray/youtube-sync/legacy-logs/
+YouTubeSyncTray/youtube-sync/legacy-temp/
+YouTubeSyncTray/youtube-sync/legacy-thumb-cache/
+YouTubeSyncTray/youtube-sync/tools/ffmpeg-master-latest-win64-gpl
+YouTubeSyncTray/youtube-sync/legacy-__pycache__
+YouTubeSyncTray/youtube-sync/legacy-bulk-remove-watch-later.py
+YouTubeSyncTray/youtube-sync/yt-dlp.exe
+YouTubeSyncTray/youtube-sync/legacy-sync-watch-later.ps1

@@ -32,14 +32,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _typeTextMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
     private readonly ToolStripMenuItem _dimScreenMenuItem;
+    private readonly ToolStripMenuItem _enableAfterInactivityMenuItem;
+    private readonly ToolStripControlHost _idleThresholdHost;
     private readonly ToolStripMenuItem _editTextMenuItem;
     private readonly Icon _activeIcon;
     private readonly Icon _inactiveIcon;
     private readonly SynchronizationContext _uiContext;
+    private readonly InactivitySliderControl _idleThresholdControl;
+    private readonly StickyContextMenuStrip _contextMenu;
 
     private AppSettings _settings;
     private CancellationTokenSource? _runnerCancellation;
     private Task? _runnerTask;
+    private bool _isIdleTriggeredActive;
+    private bool _powerAssertionActive;
 
     public TrayApplicationContext()
     {
@@ -78,27 +84,45 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _dimScreenMenuItem.Click += (_, _) => ToggleDimScreen();
 
+        _enableAfterInactivityMenuItem = new ToolStripMenuItem("Enable after inactivity")
+        {
+            CheckOnClick = true
+        };
+        _enableAfterInactivityMenuItem.Click += (_, _) => ToggleEnableAfterInactivity();
+
+        _idleThresholdControl = new InactivitySliderControl(_settings.EnableAfterInactivitySeconds);
+        _idleThresholdControl.ThresholdCommitted += (_, _) => UpdateIdleThreshold(_idleThresholdControl.TotalSeconds);
+        _idleThresholdHost = CreateControlHost(_idleThresholdControl);
+
         _editTextMenuItem = new ToolStripMenuItem("Edit text file");
         _editTextMenuItem.Click += (_, _) => OpenTextFile();
 
         var exitMenuItem = new ToolStripMenuItem("Exit");
         exitMenuItem.Click += (_, _) => ExitThread();
 
-        var menu = new ContextMenuStrip();
-        menu.Opening += (_, _) => RefreshUi();
-        menu.Items.Add(_activeMenuItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(_jiggleMouseMenuItem);
-        menu.Items.Add(_typeTextMenuItem);
-        menu.Items.Add(_startupMenuItem);
-        menu.Items.Add(_dimScreenMenuItem);
-        menu.Items.Add(_editTextMenuItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(exitMenuItem);
+        _contextMenu = new StickyContextMenuStrip();
+        _contextMenu.Opening += (_, _) => RefreshUi();
+        _contextMenu.RegisterStickyItem(_activeMenuItem);
+        _contextMenu.RegisterStickyItem(_jiggleMouseMenuItem);
+        _contextMenu.RegisterStickyItem(_typeTextMenuItem);
+        _contextMenu.RegisterStickyItem(_startupMenuItem);
+        _contextMenu.RegisterStickyItem(_dimScreenMenuItem);
+        _contextMenu.RegisterStickyItem(_enableAfterInactivityMenuItem);
+        _contextMenu.Items.Add(_activeMenuItem);
+        _contextMenu.Items.Add(new ToolStripSeparator());
+        _contextMenu.Items.Add(_jiggleMouseMenuItem);
+        _contextMenu.Items.Add(_typeTextMenuItem);
+        _contextMenu.Items.Add(_startupMenuItem);
+        _contextMenu.Items.Add(_dimScreenMenuItem);
+        _contextMenu.Items.Add(_enableAfterInactivityMenuItem);
+        _contextMenu.Items.Add(_idleThresholdHost);
+        _contextMenu.Items.Add(_editTextMenuItem);
+        _contextMenu.Items.Add(new ToolStripSeparator());
+        _contextMenu.Items.Add(exitMenuItem);
 
         _notifyIcon = new NotifyIcon
         {
-            ContextMenuStrip = menu,
+            ContextMenuStrip = _contextMenu,
             Icon = _settings.IsActive ? _activeIcon : _inactiveIcon,
             Visible = true
         };
@@ -167,12 +191,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settings.DimScreenWhenActiveEnabled = _dimScreenMenuItem.Checked;
         SettingsStore.Save(_settings);
 
-        if (_settings.IsActive && _settings.DimScreenWhenActiveEnabled)
+        if (IsEffectivelyActive(_settings) && _settings.DimScreenWhenActiveEnabled)
         {
             TryDimScreen();
         }
 
         RefreshUi();
+    }
+
+    private void ToggleEnableAfterInactivity()
+    {
+        _settings.EnableAfterInactivityEnabled = _enableAfterInactivityMenuItem.Checked;
+        SettingsStore.Save(_settings);
+        RefreshUi();
+        ApplyRunnerState();
     }
 
     private void OpenTextFile()
@@ -233,9 +265,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void UpdateIdleThreshold(int totalSeconds)
+    {
+        _settings.EnableAfterInactivitySeconds = totalSeconds;
+        SettingsStore.Save(_settings);
+        RefreshUi();
+        ApplyRunnerState();
+    }
+
     private void ApplyRunnerState()
     {
-        if (_settings.IsActive && (_settings.JiggleMouseEnabled || _settings.TypeTextEnabled))
+        var hasWorkEnabled = _settings.JiggleMouseEnabled || _settings.TypeTextEnabled;
+        if (hasWorkEnabled && (_settings.IsActive || _settings.EnableAfterInactivityEnabled))
         {
             StartRunner();
             return;
@@ -259,6 +300,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         var cancellation = _runnerCancellation;
         _runnerCancellation = null;
+        PowerAssertion.Clear();
+        _powerAssertionActive = false;
         if (cancellation is null)
         {
             return;
@@ -277,6 +320,36 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             try
             {
+                var effectiveActive = IsEffectivelyActive(settings);
+                if (_isIdleTriggeredActive != effectiveActive && !settings.IsActive)
+                {
+                    _isIdleTriggeredActive = effectiveActive;
+                    _uiContext.Post(_ => RefreshUi(), null);
+                }
+
+                if (!effectiveActive)
+                {
+                    if (_powerAssertionActive)
+                    {
+                        PowerAssertion.Clear();
+                        _powerAssertionActive = false;
+                    }
+
+                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                    continue;
+                }
+
+                if (!_powerAssertionActive)
+                {
+                    PowerAssertion.Enable();
+                    _powerAssertionActive = true;
+                }
+
+                if (settings.DimScreenWhenActiveEnabled)
+                {
+                    TryDimScreen();
+                }
+
                 if (settings.JiggleMouseEnabled)
                 {
                     InputSimulator.JiggleMouse();
@@ -338,10 +411,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _typeTextMenuItem.Checked = _settings.TypeTextEnabled;
         _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
         _dimScreenMenuItem.Checked = _settings.DimScreenWhenActiveEnabled;
+        _enableAfterInactivityMenuItem.Checked = _settings.EnableAfterInactivityEnabled;
+        _idleThresholdControl.TotalSeconds = _settings.EnableAfterInactivitySeconds;
+        _idleThresholdHost.Visible = _settings.EnableAfterInactivityEnabled;
 
-        _notifyIcon.Icon = _settings.IsActive ? _activeIcon : _inactiveIcon;
-        _notifyIcon.Text = _settings.IsActive
-            ? "StayActive: active"
+        var effectiveActive = IsEffectivelyActive(_settings);
+        _notifyIcon.Icon = effectiveActive ? _activeIcon : _inactiveIcon;
+        _notifyIcon.Text = effectiveActive
+            ? (_settings.IsActive ? "StayActive: active" : "StayActive: active after inactivity")
             : "StayActive: inactive";
     }
 
@@ -353,6 +430,24 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private void ShowErrorBalloon(string message)
     {
         _notifyIcon.ShowBalloonTip(2500, "StayActive", message, ToolTipIcon.Error);
+    }
+
+    private static ToolStripControlHost CreateControlHost(Control control)
+    {
+        return new ToolStripControlHost(control)
+        {
+            AutoSize = false,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            Size = control.Size
+        };
+    }
+
+    private static bool IsEffectivelyActive(AppSettings settings)
+    {
+        return settings.IsActive
+            || (settings.EnableAfterInactivityEnabled
+                && IdleMonitor.GetInactiveDuration() >= TimeSpan.FromSeconds(settings.EnableAfterInactivitySeconds));
     }
 }
 
@@ -367,6 +462,10 @@ internal sealed class AppSettings
     public bool TypeTextEnabled { get; set; }
 
     public bool DimScreenWhenActiveEnabled { get; set; }
+
+    public bool EnableAfterInactivityEnabled { get; set; }
+
+    public int EnableAfterInactivitySeconds { get; set; } = 300;
 }
 
 internal static class StartupService
@@ -520,6 +619,221 @@ internal static class BrightnessService
     }
 }
 
+internal sealed class InactivitySliderControl : UserControl
+{
+    private static readonly int[] SliderValues = BuildSliderValues();
+
+    private readonly Label _valueLabel;
+    private readonly TrackBar _trackBar;
+    private bool _isInteracting;
+
+    public InactivitySliderControl(int totalSeconds)
+    {
+        Size = new Size(300, 78);
+        Margin = Padding.Empty;
+        Padding = Padding.Empty;
+        BackColor = SystemColors.Control;
+        DoubleBuffered = true;
+
+        var titleLabel = new Label
+        {
+            AutoSize = true,
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            Location = new Point(10, 8),
+            Text = "After idle for"
+        };
+
+        _valueLabel = new Label
+        {
+            AutoSize = true,
+            Location = new Point(172, 10)
+        };
+
+        _trackBar = new TrackBar
+        {
+            Minimum = 0,
+            Maximum = SliderValues.Length - 1,
+            TickFrequency = 5,
+            LargeChange = 3,
+            SmallChange = 1,
+            AutoSize = false,
+            Bounds = new Rectangle(10, 30, 280, 36),
+            Value = SecondsToSliderIndex(totalSeconds)
+        };
+        _trackBar.Scroll += (_, _) => _valueLabel.Text = FormatDuration(TotalSeconds);
+        _trackBar.MouseDown += (_, _) => _isInteracting = true;
+        _trackBar.MouseUp += (_, _) => CommitCurrentValue();
+        _trackBar.KeyUp += (_, e) =>
+        {
+            if (e.KeyCode is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.PageDown or Keys.PageUp)
+            {
+                CommitCurrentValue();
+            }
+        };
+        _trackBar.MouseCaptureChanged += (_, _) =>
+        {
+            if (_isInteracting && Control.MouseButtons == MouseButtons.None)
+            {
+                CommitCurrentValue();
+            }
+        };
+
+        Controls.Add(titleLabel);
+        Controls.Add(_valueLabel);
+        Controls.Add(_trackBar);
+
+        _valueLabel.Text = FormatDuration(TotalSeconds);
+    }
+
+    public event EventHandler? ThresholdCommitted;
+
+    [System.ComponentModel.Browsable(false)]
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public int TotalSeconds
+    {
+        get => SliderValues[_trackBar.Value];
+        set
+        {
+            var normalized = SecondsToSliderIndex(value);
+            if (_trackBar.Value == normalized)
+            {
+                return;
+            }
+
+            _trackBar.Value = normalized;
+            _valueLabel.Text = FormatDuration(TotalSeconds);
+        }
+    }
+
+    private static int SecondsToSliderIndex(int totalSeconds)
+    {
+        var normalized = Math.Clamp(totalSeconds, SliderValues[0], SliderValues[^1]);
+        var bestIndex = 0;
+        var bestDistance = int.MaxValue;
+
+        for (var index = 0; index < SliderValues.Length; index++)
+        {
+            var distance = Math.Abs(SliderValues[index] - normalized);
+            if (distance >= bestDistance)
+            {
+                continue;
+            }
+
+            bestDistance = distance;
+            bestIndex = index;
+        }
+
+        return bestIndex;
+    }
+
+    private static string FormatDuration(int totalSeconds)
+    {
+        var duration = TimeSpan.FromSeconds(totalSeconds);
+        if (duration.TotalMinutes < 1)
+        {
+            return "30 sec";
+        }
+
+        if (duration.TotalMinutes < 60)
+        {
+            return duration.TotalMinutes == 1
+                ? "1 min"
+                : $"{duration.TotalMinutes:0} min";
+        }
+
+        if (duration.TotalHours < 24)
+        {
+            return Math.Abs(duration.TotalHours - Math.Round(duration.TotalHours)) < 0.001
+                ? $"{duration.TotalHours:0} hr"
+                : $"{duration.TotalHours:0.#} hr";
+        }
+
+        return "24 hr";
+    }
+
+    private void CommitCurrentValue()
+    {
+        _isInteracting = false;
+        _valueLabel.Text = FormatDuration(TotalSeconds);
+        ThresholdCommitted?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static int[] BuildSliderValues()
+    {
+        var values = new List<int>();
+
+        for (var seconds = 30; seconds <= 45 * 60; seconds += 30)
+        {
+            values.Add(seconds);
+        }
+
+        for (var hours = 1; hours <= 24; hours++)
+        {
+            values.Add(hours * 60 * 60);
+        }
+
+        return values.ToArray();
+    }
+}
+
+internal sealed class StickyContextMenuStrip : ContextMenuStrip
+{
+    private readonly HashSet<ToolStripItem> _stickyItems = new();
+    private ToolStripItem? _lastClickedItem;
+
+    public StickyContextMenuStrip()
+    {
+        ItemClicked += (_, e) => _lastClickedItem = e.ClickedItem;
+        Closing += OnClosing;
+    }
+
+    public void RegisterStickyItem(ToolStripItem item)
+    {
+        _stickyItems.Add(item);
+    }
+
+    private void OnClosing(object? sender, ToolStripDropDownClosingEventArgs e)
+    {
+        if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked
+            && _lastClickedItem is not null
+            && _stickyItems.Contains(_lastClickedItem))
+        {
+            e.Cancel = true;
+        }
+    }
+}
+
+internal static class IdleMonitor
+{
+    public static TimeSpan GetInactiveDuration()
+    {
+        var info = new LastInputInfo
+        {
+            cbSize = (uint)Marshal.SizeOf<LastInputInfo>()
+        };
+
+        if (!GetLastInputInfo(ref info))
+        {
+            return TimeSpan.Zero;
+        }
+
+        var elapsedMilliseconds = Environment.TickCount64 - info.dwTime;
+        return elapsedMilliseconds <= 0
+            ? TimeSpan.Zero
+            : TimeSpan.FromMilliseconds(elapsedMilliseconds);
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetLastInputInfo(ref LastInputInfo plii);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LastInputInfo
+    {
+        public uint cbSize;
+        public uint dwTime;
+    }
+}
+
 internal static class TypingProfile
 {
     private static readonly object SyncLock = new();
@@ -636,21 +950,27 @@ internal static class InputSimulator
 
     public static void JiggleMouse()
     {
-        var before = Cursor.Position;
         var pattern = ActivityProfile.GetCirclePattern();
+        var previousX = 0;
+        var previousY = 0;
 
         for (var step = 0; step < pattern.Steps; step++)
         {
             var angle = (pattern.StartAngleDegrees + (step * 360.0 / pattern.Steps)) * Math.PI / 180.0;
             var wobble = Math.Sin(angle * 2.0) * 1.5;
             var radius = pattern.Radius + wobble;
-            Cursor.Position = new Point(
-                before.X + (int)Math.Round(Math.Cos(angle) * radius),
-                before.Y + (int)Math.Round(Math.Sin(angle) * radius));
+            var nextX = (int)Math.Round(Math.Cos(angle) * radius);
+            var nextY = (int)Math.Round(Math.Sin(angle) * radius);
+            SendMouseMove(nextX - previousX, nextY - previousY);
+            previousX = nextX;
+            previousY = nextY;
             Thread.Sleep(30);
         }
 
-        Cursor.Position = before;
+        if (previousX != 0 || previousY != 0)
+        {
+            SendMouseMove(-previousX, -previousY);
+        }
     }
 
     public static void TypeCharacter(char character)
@@ -797,6 +1117,26 @@ internal static class InputSimulator
         public uint time;
         public IntPtr dwExtraInfo;
     }
+}
+
+internal static class PowerAssertion
+{
+    private const uint EsSystemRequired = 0x00000001;
+    private const uint EsDisplayRequired = 0x00000002;
+    private const uint EsContinuous = 0x80000000;
+
+    public static void Enable()
+    {
+        _ = SetThreadExecutionState(EsContinuous | EsSystemRequired | EsDisplayRequired);
+    }
+
+    public static void Clear()
+    {
+        _ = SetThreadExecutionState(EsContinuous);
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint SetThreadExecutionState(uint esFlags);
 }
 
 internal static class TrayIconFactory
