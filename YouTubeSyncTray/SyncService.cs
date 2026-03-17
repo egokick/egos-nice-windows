@@ -108,7 +108,8 @@ internal sealed class SyncService
         IProgress<string>? progress,
         CancellationToken cancellationToken,
         IProgress<int>? watchLaterTotalProgress = null,
-        IProgress<IReadOnlyList<string>>? watchLaterOrderProgress = null)
+        IProgress<IReadOnlyList<string>>? watchLaterOrderProgress = null,
+        IProgress<IReadOnlyList<string>>? syncTargetProgress = null)
     {
         settings.Normalize();
         TrayLog.Write(_paths, $"SyncRecentAsync started. Requested count: {settings.DownloadCount}");
@@ -133,6 +134,7 @@ internal sealed class SyncService
         }
 
         var targetIds = await GetTargetWatchLaterIdsAsync(settings, clampedCount, cancellationToken, auth);
+        syncTargetProgress?.Report(targetIds);
         if (watchLaterTotalCount.HasValue
             && targetIds.Count > 0
             && targetIds.Count >= watchLaterTotalCount.Value)

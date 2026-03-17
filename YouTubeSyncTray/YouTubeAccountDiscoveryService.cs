@@ -89,17 +89,17 @@ internal sealed class YouTubeAccountDiscoveryService
         bool allowNetwork = true)
     {
         var accounts = DiscoverAccounts(settings, browserAuthUserIndex, allowNetwork);
-        if (accounts.Count == 0)
-        {
-            return null;
-        }
-
         var explicitAccountKey = settings.SelectedYouTubeAccountKey;
         if (string.IsNullOrWhiteSpace(explicitAccountKey)
             && !string.IsNullOrWhiteSpace(settings.SelectedAccountKey)
             && settings.SelectedAccountKey.StartsWith("yt|", StringComparison.Ordinal))
         {
             explicitAccountKey = settings.SelectedAccountKey;
+        }
+
+        if (accounts.Count == 0)
+        {
+            return BuildFallbackSelectedAccount(explicitAccountKey, browserAuthUserIndex ?? 0);
         }
 
         if (!string.IsNullOrWhiteSpace(explicitAccountKey))
@@ -110,6 +110,8 @@ internal sealed class YouTubeAccountDiscoveryService
             {
                 return explicitSelection;
             }
+
+            return BuildFallbackSelectedAccount(explicitAccountKey, browserAuthUserIndex ?? 0);
         }
 
         var currentSelection = accounts.FirstOrDefault(account => account.IsSelected);
@@ -119,6 +121,70 @@ internal sealed class YouTubeAccountDiscoveryService
         }
 
         return accounts[0];
+    }
+
+    internal static YouTubeAccountOption? BuildFallbackSelectedAccount(string? accountKey, int fallbackAuthUserIndex)
+    {
+        if (string.IsNullOrWhiteSpace(accountKey))
+        {
+            return null;
+        }
+
+        var trimmedKey = accountKey.Trim();
+        var parts = trimmedKey.Split('|', StringSplitOptions.TrimEntries);
+        if (parts.Length < 3 || !string.Equals(parts[0], "yt", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return parts[1] switch
+        {
+            "page" => new YouTubeAccountOption(
+                trimmedKey,
+                $"Channel {parts[2]}",
+                string.Empty,
+                "Saved account",
+                string.Empty,
+                parts[2],
+                string.Empty,
+                string.Empty,
+                Math.Max(fallbackAuthUserIndex, 0),
+                true),
+            "handle" => new YouTubeAccountOption(
+                trimmedKey,
+                parts[2].TrimStart('@'),
+                parts[2],
+                "Saved account",
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                Math.Max(fallbackAuthUserIndex, 0),
+                true),
+            "name" => new YouTubeAccountOption(
+                trimmedKey,
+                parts[2],
+                string.Empty,
+                "Saved account",
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                Math.Max(fallbackAuthUserIndex, 0),
+                true),
+            "authuser" when int.TryParse(parts[2], out var parsedAuthUserIndex) => new YouTubeAccountOption(
+                trimmedKey,
+                $"YouTube {parts[2]}",
+                string.Empty,
+                "Saved account",
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                Math.Max(parsedAuthUserIndex, 0),
+                true),
+            _ => null
+        };
     }
 
     internal static IReadOnlyList<YouTubeAccountOption> ParseAccountsListResponse(JsonElement root, int fallbackAuthUserIndex)
@@ -515,7 +581,13 @@ internal sealed class YouTubeAccountDiscoveryService
             }
 
             var persisted = JsonSerializer.Deserialize<PersistedCache>(File.ReadAllText(GetPersistentCachePath()));
-            if (persisted is null || !MatchesPersistedCache(persisted, cacheKey))
+            if (persisted is null)
+            {
+                return null;
+            }
+
+            if (!MatchesPersistedCache(persisted, cacheKey)
+                && !MatchesPersistedCacheFallback(persisted, cacheKey))
             {
                 return null;
             }
@@ -560,6 +632,14 @@ internal sealed class YouTubeAccountDiscoveryService
             && string.Equals(persistedCache.CookiesPath, cacheKey.CookiesPath, StringComparison.OrdinalIgnoreCase)
             && persistedCache.CookiesLength == cacheKey.Length
             && persistedCache.CookiesLastWriteTimeUtcTicks == cacheKey.LastWriteTimeUtcTicks
+            && persistedCache.PreferredAuthUserIndex == cacheKey.PreferredAuthUserIndex;
+    }
+
+    private static bool MatchesPersistedCacheFallback(PersistedCache persistedCache, CacheKey cacheKey)
+    {
+        return persistedCache.Browser == cacheKey.Browser
+            && string.Equals(persistedCache.Profile, cacheKey.Profile, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(persistedCache.CookiesPath, cacheKey.CookiesPath, StringComparison.OrdinalIgnoreCase)
             && persistedCache.PreferredAuthUserIndex == cacheKey.PreferredAuthUserIndex;
     }
 

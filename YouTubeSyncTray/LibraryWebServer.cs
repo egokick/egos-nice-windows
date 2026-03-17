@@ -27,6 +27,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private readonly AccountScopeResolver _accountScopeResolver;
     private readonly Func<Task<LibraryCommandResponse>> _requestSyncAsync;
     private readonly Func<IReadOnlyList<string>, bool, Task<LibraryCommandResponse>> _requestRemoveAsync;
+    private readonly Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> _requestRestoreAsync;
     private readonly Func<Task<LibraryCommandResponse>> _requestOpenDownloadsFolderAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectBrowserAccountAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectYouTubeAccountAsync;
@@ -55,6 +56,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         AccountScopeResolver accountScopeResolver,
         Func<Task<LibraryCommandResponse>> requestSyncAsync,
         Func<IReadOnlyList<string>, bool, Task<LibraryCommandResponse>> requestRemoveAsync,
+        Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> requestRestoreAsync,
         Func<Task<LibraryCommandResponse>> requestOpenDownloadsFolderAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectBrowserAccountAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectYouTubeAccountAsync,
@@ -74,6 +76,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         _accountScopeResolver = accountScopeResolver;
         _requestSyncAsync = requestSyncAsync;
         _requestRemoveAsync = requestRemoveAsync;
+        _requestRestoreAsync = requestRestoreAsync;
         _requestOpenDownloadsFolderAsync = requestOpenDownloadsFolderAsync;
         _requestSelectBrowserAccountAsync = requestSelectBrowserAccountAsync;
         _requestSelectYouTubeAccountAsync = requestSelectYouTubeAccountAsync;
@@ -103,7 +106,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
 
             foreach (var plan in GetBindingPlans())
             {
-                var openAddress = BuildHttpUrl("127.0.0.1", plan.PrimaryPort);
+                var openAddress = BuildHttpUrl(LocalBrowserHost.Resolve(), plan.PrimaryPort);
                 var phoneAccessProbe = new PhoneAccessProbe(plan.PrimaryPort);
 
                 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -265,6 +268,11 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                 .Distinct(StringComparer.Ordinal)
                 .ToArray(),
                 request.MarkHidden)));
+        app.MapPost("/api/restore", async (RestoreVideosRequest request) => ToHttpResult(
+            await _requestRestoreAsync(request.VideoIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray())));
         app.MapPost("/api/downloads/open", async (HttpContext context) =>
         {
             if (!IsLocalRequest(context))
@@ -301,6 +309,13 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             settings,
             selectedBrowserAccount?.AuthUserIndex,
             allowNetwork: false);
+        var visibleYouTubeAccounts = youTubeAccounts.ToList();
+        if (selectedYouTubeAccount.HasValue
+            && visibleYouTubeAccounts.All(account =>
+                !string.Equals(account.AccountKey, selectedYouTubeAccount.Value.AccountKey, StringComparison.Ordinal)))
+        {
+            visibleYouTubeAccounts.Insert(0, selectedYouTubeAccount.Value);
+        }
 
         return new BrowserLibraryStatusDto(
             snapshot.IsBusy,
@@ -309,6 +324,9 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             snapshot.LibraryVersion,
             snapshot.ConfiguredDownloadCount,
             snapshot.WatchLaterTotalCount,
+            snapshot.SyncScopeDownloadedCount,
+            snapshot.SyncScopeTargetCount,
+            snapshot.SyncScopeFailedCount,
             snapshot.SyncAuthState.ToString().ToLowerInvariant(),
             snapshot.SyncAuthMessage,
             snapshot.BrowserName,
@@ -332,7 +350,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             isRefreshingYouTubeAccounts,
             selectedYouTubeAccount?.AccountKey ?? settings.SelectedYouTubeAccountKey ?? string.Empty,
             selectedYouTubeAccount?.Label ?? string.Empty,
-            youTubeAccounts
+            visibleYouTubeAccounts
                 .Select(account => new YouTubeAccountDto(
                     account.AccountKey,
                     account.Label,
@@ -349,7 +367,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
         var items = LoadVideoItems(accountScope.DownloadsPath);
         var videoStates = _videoStateStore.Load(accountScope.FolderName);
-        _state.SetVideoCount(items.Count);
+        _state.SetVideoIds(items.Select(item => item.VideoId).ToList());
 
         return items
             .Select(item =>
@@ -637,6 +655,11 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         public bool MarkHidden { get; set; }
     }
 
+    private sealed class RestoreVideosRequest
+    {
+        public List<string> VideoIds { get; set; } = [];
+    }
+
     private sealed class SelectAccountRequest
     {
         public string? AccountKey { get; set; }
@@ -694,6 +717,9 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         long LibraryVersion,
         int ConfiguredDownloadCount,
         int? WatchLaterTotalCount,
+        int? SyncScopeDownloadedCount,
+        int? SyncScopeTargetCount,
+        int? SyncScopeFailedCount,
         string SyncAuthState,
         string SyncAuthMessage,
         string BrowserName,

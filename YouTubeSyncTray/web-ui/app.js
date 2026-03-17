@@ -27,6 +27,9 @@ const state = {
   showWatchedOnly: false,
   searchTerm: "",
   configuredDownloadCount: null,
+  syncScopeDownloadedCount: null,
+  syncScopeFailedCount: null,
+  syncScopeTargetCount: null,
   hotspotAction: "",
   hotspotActionInFlight: false,
   lastPhoneAccessRefreshAt: 0,
@@ -43,6 +46,7 @@ const state = {
   watchedMarkingIds: new Set(),
   watchLaterTotalCount: null,
   youtubeAccounts: [],
+  youtubeAccountCacheByBrowserKey: new Map(),
   youtubeAccountButtonKey: "",
   youtubeAccountOptionsKey: "",
   youtubeAccountsSourceBrowserKey: "",
@@ -110,6 +114,7 @@ const elements = {
   youtubeAccountList: document.getElementById("youtubeAccountList"),
   youtubeAccountMenu: document.getElementById("youtubeAccountMenu"),
   youtubeAccountPicker: document.getElementById("youtubeAccountPicker"),
+  youtubeAccountRefreshStatus: document.getElementById("youtubeAccountRefreshStatus"),
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -276,10 +281,8 @@ function wireEvents() {
       return;
     }
 
-    const confirmed = window.confirm(
-      `Hide ${ids.length} selected video(s)? They will be marked watched locally and removed from the main library view.`,
-    );
-    if (!confirmed) {
+    if (state.showWatchedOnly) {
+      await restoreVideos(ids);
       return;
     }
 
@@ -347,6 +350,7 @@ function wireEvents() {
     state.captionTrackPreferenceLanguageCode = selectedTrackKey === ""
       ? ""
       : state.currentCaptionTracks.find((track) => track.trackKey === selectedTrackKey)?.languageCode || "";
+    syncCaptionSelectWidth();
     applyCaptionSelection(selectedTrackKey);
   });
 
@@ -892,6 +896,70 @@ function applyLocalVideoStateUpdate(videoIds, markHidden) {
   updateEmptyState();
 }
 
+async function restoreVideos(videoIds, silent = false) {
+  const normalizedIds = [...new Set((Array.isArray(videoIds) ? videoIds : [])
+    .filter((videoId) => typeof videoId === "string" && videoId.trim() !== "")
+    .map((videoId) => videoId.trim()))];
+  const idsToUpdate = normalizedIds.filter((videoId) => {
+    const video = state.videos.get(videoId);
+    return isWatchedVideo(video);
+  });
+
+  if (idsToUpdate.length === 0) {
+    return false;
+  }
+
+  for (const videoId of idsToUpdate) {
+    state.watchedMarkingIds.add(videoId);
+  }
+
+  try {
+    const response = await post("/api/restore", { videoIds: idsToUpdate });
+    applyLocalVideoRestore(idsToUpdate);
+    if (!silent) {
+      showToast(response?.message || "Videos restored to the main library.", false);
+    }
+
+    return true;
+  } catch (error) {
+    if (!silent) {
+      showToast(error instanceof Error ? error.message : "The request failed.", true);
+    }
+
+    return false;
+  } finally {
+    for (const videoId of idsToUpdate) {
+      state.watchedMarkingIds.delete(videoId);
+    }
+  }
+}
+
+function applyLocalVideoRestore(videoIds) {
+  clearSelectedVideos(videoIds);
+  for (const videoId of videoIds) {
+    const video = state.videos.get(videoId);
+    if (!video) {
+      continue;
+    }
+
+    const updatedVideo = {
+      ...video,
+      isWatched: false,
+      isHidden: false,
+    };
+    state.videos.set(videoId, updatedVideo);
+
+    const card = state.cards.get(videoId);
+    if (card) {
+      updateCard(card, updatedVideo);
+    }
+  }
+
+  applyFilters();
+  updateSelectionUi();
+  updateEmptyState();
+}
+
 function reconcileVideos(videos) {
   state.videos = new Map(videos.map((video) => [video.videoId, video]));
   const nextIds = new Set(videos.map((video) => video.videoId));
@@ -1138,6 +1206,7 @@ function renderCaptionLoadingState() {
   loadingOption.textContent = "Loading captions...";
   elements.captionSelect.replaceChildren(loadingOption);
   elements.captionSelect.disabled = true;
+  syncCaptionSelectWidth();
 }
 
 function renderCaptionOptions(tracks) {
@@ -1175,11 +1244,13 @@ function renderCaptionOptions(tracks) {
   elements.captionSelect.replaceChildren(options);
   elements.captionSelect.disabled = false;
   elements.captionSelect.value = selectedTrackKey;
+  syncCaptionSelectWidth();
   syncPlayerCaptionTracks(captionTracks, selectedTrackKey);
 }
 
 function renderCaptionUnavailable(message) {
   elements.captionPicker.classList.add("hidden");
+  clearCaptionSelectWidth();
   if (message) {
     elements.captionStatus.classList.remove("hidden");
     elements.captionStatus.textContent = message;
@@ -1195,6 +1266,51 @@ function resetCaptionUi() {
   elements.captionStatus.textContent = "";
   elements.captionSelect.replaceChildren();
   elements.captionSelect.disabled = true;
+  clearCaptionSelectWidth();
+}
+
+function syncCaptionSelectWidth() {
+  const selectedOption = elements.captionSelect.selectedOptions[0];
+  const label = (selectedOption?.textContent || "").trim();
+  if (label === "") {
+    clearCaptionSelectWidth();
+    return;
+  }
+
+  const styles = window.getComputedStyle(elements.captionSelect);
+  const measure = document.createElement("span");
+  measure.textContent = label;
+  measure.style.position = "absolute";
+  measure.style.visibility = "hidden";
+  measure.style.whiteSpace = "pre";
+  measure.style.fontFamily = styles.fontFamily;
+  measure.style.fontSize = styles.fontSize;
+  measure.style.fontWeight = styles.fontWeight;
+  measure.style.fontStyle = styles.fontStyle;
+  measure.style.letterSpacing = styles.letterSpacing;
+  document.body.append(measure);
+
+  const textWidth = measure.getBoundingClientRect().width;
+  measure.remove();
+
+  const paddingLeft = Number.parseFloat(styles.paddingLeft) || 0;
+  const paddingRight = Number.parseFloat(styles.paddingRight) || 0;
+  const borderLeft = Number.parseFloat(styles.borderLeftWidth) || 0;
+  const borderRight = Number.parseFloat(styles.borderRightWidth) || 0;
+  const indicatorAllowance = 28;
+  const totalWidth = Math.ceil(
+    textWidth
+    + paddingLeft
+    + paddingRight
+    + borderLeft
+    + borderRight
+    + indicatorAllowance);
+
+  elements.captionSelect.style.width = `${totalWidth}px`;
+}
+
+function clearCaptionSelectWidth() {
+  elements.captionSelect.style.width = "";
 }
 
 function resolvePreferredCaptionTrackKey(tracks) {
@@ -1300,6 +1416,14 @@ function applyFilters() {
   return visibleCount;
 }
 
+function getRemoveSelectedButtonLabel() {
+  return state.showWatchedOnly ? "Unhide Selected" : "Hide Selected";
+}
+
+function getWatchedVideosButtonLabel() {
+  return state.showWatchedOnly ? "Unwatched Videos" : "Watched Videos";
+}
+
 function buildSearchMatcher(searchTerm) {
   if (!searchTerm) {
     return null;
@@ -1325,44 +1449,62 @@ function updateSelectionUi() {
       : `${selectedCount} selected across ${visibleCount} visible videos`;
 
   elements.removeSelectedButton.disabled = selectedCount === 0;
-  elements.removeSelectedButton.textContent = "Hide Selected";
+  elements.removeSelectedButton.textContent = getRemoveSelectedButtonLabel();
+  elements.watchedVideosButton.textContent = getWatchedVideosButtonLabel();
   elements.watchedVideosButton.classList.toggle("is-active", state.showWatchedOnly);
   elements.watchedVideosButton.setAttribute("aria-pressed", String(state.showWatchedOnly));
 }
 
 function buildLibrarySummary() {
-  const downloadedCount = state.videos.size;
+  const downloadedCount = state.videos.size > 0 || state.downloadedVideoCount === 0
+    ? state.videos.size
+    : state.downloadedVideoCount;
   const watchedCount = countWatchedVideos();
   const activeCount = Math.max(downloadedCount - watchedCount, 0);
   const configuredDownloadCount = Number.isInteger(state.configuredDownloadCount)
     ? Math.max(state.configuredDownloadCount, 0)
     : null;
-  const watchLaterTotalCount = Number.isInteger(state.watchLaterTotalCount)
-    ? Math.max(state.watchLaterTotalCount, 0)
-    : null;
-  const summaryParts = [
-    state.showWatchedOnly
-      ? `${watchedCount} watched or hidden videos`
-      : `${activeCount} videos in the main library`,
-  ];
+  const lines = [];
+  const syncScopeLine = buildSyncScopeSummaryLine(configuredDownloadCount);
 
-  if (!state.showWatchedOnly && watchedCount > 0) {
-    summaryParts.push(`${watchedCount} watched or hidden`);
+  if (syncScopeLine) {
+    lines.push(syncScopeLine);
   }
 
-  if (state.showWatchedOnly && activeCount > 0) {
-    summaryParts.push(`${activeCount} still in the main library`);
-  }
+  lines.push(`${activeCount} videos in the main library`);
+  lines.push(`${watchedCount} watched or hidden`);
 
   if (configuredDownloadCount !== null) {
-    summaryParts.push(`sync limit ${configuredDownloadCount}`);
+    lines.push(`sync limit ${configuredDownloadCount}`);
   }
 
-  if (watchLaterTotalCount !== null) {
-    summaryParts.push(`${watchLaterTotalCount} currently in Watch Later`);
+  return lines.join("\n");
+}
+
+function buildSyncScopeSummaryLine(configuredDownloadCount) {
+  const targetCount = Number.isInteger(state.syncScopeTargetCount)
+    ? Math.max(state.syncScopeTargetCount, 0)
+    : null;
+  const downloadedCount = Number.isInteger(state.syncScopeDownloadedCount)
+    ? Math.max(state.syncScopeDownloadedCount, 0)
+    : null;
+  const failedCount = Number.isInteger(state.syncScopeFailedCount)
+    ? Math.max(state.syncScopeFailedCount, 0)
+    : null;
+
+  if (targetCount === null || downloadedCount === null) {
+    return "";
   }
 
-  return summaryParts.join(", ");
+  const boundedTargetCount = configuredDownloadCount !== null
+    ? Math.min(targetCount, configuredDownloadCount)
+    : targetCount;
+  let text = `${downloadedCount}/${boundedTargetCount} downloaded`;
+  if (failedCount !== null && failedCount > 0) {
+    text += ` - ${failedCount} failed`;
+  }
+
+  return text;
 }
 
 function updateStatus(status) {
@@ -1379,6 +1521,15 @@ function updateStatus(status) {
     : state.downloadedVideoCount;
   state.configuredDownloadCount = Number.isInteger(status.configuredDownloadCount)
     ? status.configuredDownloadCount
+    : null;
+  state.syncScopeDownloadedCount = Number.isInteger(status.syncScopeDownloadedCount)
+    ? status.syncScopeDownloadedCount
+    : null;
+  state.syncScopeTargetCount = Number.isInteger(status.syncScopeTargetCount)
+    ? status.syncScopeTargetCount
+    : null;
+  state.syncScopeFailedCount = Number.isInteger(status.syncScopeFailedCount)
+    ? status.syncScopeFailedCount
     : null;
   state.watchLaterTotalCount = Number.isInteger(status.watchLaterTotalCount)
     ? status.watchLaterTotalCount
@@ -1415,7 +1566,7 @@ function updateStatus(status) {
   elements.settingsButton.disabled = false;
   elements.clearSelectionButton.disabled = state.isBusy && state.selectedIds.size === 0;
   elements.removeSelectedButton.disabled = state.selectedIds.size === 0;
-  elements.removeSelectedButton.textContent = "Hide Selected";
+  elements.removeSelectedButton.textContent = getRemoveSelectedButtonLabel();
   if (state.settingsOpen && state.isBusy && !state.settingsLoading && !state.settingsRefreshing && !state.settingsSaving) {
     elements.settingsSummary.textContent =
       "The app is busy. You can still change settings now; refresh the Watch Later total after the current operation finishes.";
@@ -1688,37 +1839,31 @@ function renderYouTubeAccountPicker(accounts, selectedAccountKey, options = {}) 
   const browserAccountKey = typeof options.browserAccountKey === "string"
     ? options.browserAccountKey
     : state.selectedBrowserAccountKey;
-  const previousBrowserAccountKey = typeof options.previousBrowserAccountKey === "string"
-    ? options.previousBrowserAccountKey
-    : browserAccountKey;
   const isRefreshing = Boolean(options.isRefreshing);
   const nextAccounts = Array.isArray(accounts) ? accounts : [];
-  const shouldPreserveExistingAccounts =
-    nextAccounts.length === 0
-    && isRefreshing
-    && browserAccountKey !== ""
-    && browserAccountKey === previousBrowserAccountKey
-    && browserAccountKey === state.youtubeAccountsSourceBrowserKey
-    && state.youtubeAccounts.length > 0;
+  let effectiveAccounts = nextAccounts;
+  let effectiveSelectedAccountKey = typeof selectedAccountKey === "string" ? selectedAccountKey : "";
 
-  state.youtubeAccounts = shouldPreserveExistingAccounts ? state.youtubeAccounts : nextAccounts;
-  if (!shouldPreserveExistingAccounts) {
-    state.youtubeAccountsSourceBrowserKey = state.youtubeAccounts.length > 0 ? browserAccountKey : "";
+  updateYouTubeAccountRefreshStatus(browserAccountKey, isRefreshing);
+
+  if (nextAccounts.length > 0) {
+    rememberYouTubeAccountsForBrowser(browserAccountKey, nextAccounts, effectiveSelectedAccountKey);
+  } else {
+    const cachedEntry = getCachedYouTubeAccountsForBrowser(browserAccountKey);
+    if (cachedEntry !== null && cachedEntry.accounts.length > 0) {
+      effectiveAccounts = cachedEntry.accounts;
+      effectiveSelectedAccountKey = effectiveSelectedAccountKey || cachedEntry.selectedAccountKey || "";
+    }
   }
+
+  state.youtubeAccounts = effectiveAccounts;
+  state.youtubeAccountsSourceBrowserKey = state.youtubeAccounts.length > 0 ? browserAccountKey : "";
 
   if (state.youtubeAccounts.length === 0) {
     state.youtubeAccountOptionsKey = "";
-    state.selectedYouTubeAccountKey = selectedAccountKey || "";
+    state.selectedYouTubeAccountKey = effectiveSelectedAccountKey;
     elements.youtubeAccountList.replaceChildren();
     setYouTubeAccountMenuOpen(false);
-    if (browserAccountKey !== "") {
-      state.youtubeAccountButtonKey = "__pending__";
-      elements.youtubeAccountPicker.classList.remove("hidden");
-      renderPendingYouTubeAccountButton();
-      elements.youtubeAccountButton.disabled = true;
-      return;
-    }
-
     state.youtubeAccountButtonKey = "";
     elements.youtubeAccountPicker.classList.add("hidden");
     elements.youtubeAccountButton.replaceChildren();
@@ -1728,7 +1873,7 @@ function renderYouTubeAccountPicker(accounts, selectedAccountKey, options = {}) 
 
   elements.youtubeAccountPicker.classList.remove("hidden");
   const selectedKey =
-    selectedAccountKey
+    effectiveSelectedAccountKey
     || state.selectedYouTubeAccountKey
     || state.youtubeAccounts[0].accountKey;
   const selectedAccount = state.youtubeAccounts.find((account) => account.accountKey === selectedKey)
@@ -1755,9 +1900,9 @@ function renderYouTubeAccountPicker(accounts, selectedAccountKey, options = {}) 
 
   elements.youtubeAccountButton.disabled =
     state.browserAccountSelectionInFlight ||
-    state.youtubeAccountSelectionInFlight ||
-    state.youtubeAccounts.length === 1;
+    state.youtubeAccountSelectionInFlight;
   state.selectedYouTubeAccountKey = selectedAccount.accountKey;
+  rememberSelectedYouTubeAccountForBrowser(browserAccountKey, selectedAccount.accountKey);
 
   for (const option of elements.youtubeAccountList.querySelectorAll(".account-menu-option")) {
     if (!(option instanceof HTMLButtonElement)) {
@@ -1776,34 +1921,57 @@ function renderYouTubeAccountPicker(accounts, selectedAccountKey, options = {}) 
   }
 }
 
+function updateYouTubeAccountRefreshStatus(browserAccountKey, isRefreshing) {
+  if (!(elements.youtubeAccountRefreshStatus instanceof HTMLElement)) {
+    return;
+  }
+
+  const shouldShow = browserAccountKey !== "" && isRefreshing;
+  elements.youtubeAccountRefreshStatus.classList.toggle("hidden", !shouldShow);
+  elements.youtubeAccountRefreshStatus.textContent = shouldShow ? "Refreshing YouTube accounts..." : "";
+}
+
+function getCachedYouTubeAccountsForBrowser(browserAccountKey) {
+  if (typeof browserAccountKey !== "string" || browserAccountKey === "") {
+    return null;
+  }
+
+  return state.youtubeAccountCacheByBrowserKey.get(browserAccountKey) || null;
+}
+
+function rememberYouTubeAccountsForBrowser(browserAccountKey, accounts, selectedAccountKey) {
+  if (typeof browserAccountKey !== "string" || browserAccountKey === "" || !Array.isArray(accounts) || accounts.length === 0) {
+    return;
+  }
+
+  state.youtubeAccountCacheByBrowserKey.set(browserAccountKey, {
+    accounts: accounts.map((account) => ({ ...account })),
+    selectedAccountKey: selectedAccountKey || "",
+  });
+}
+
+function rememberSelectedYouTubeAccountForBrowser(browserAccountKey, selectedAccountKey) {
+  if (typeof browserAccountKey !== "string" || browserAccountKey === "" || typeof selectedAccountKey !== "string") {
+    return;
+  }
+
+  const cachedEntry = getCachedYouTubeAccountsForBrowser(browserAccountKey);
+  if (cachedEntry !== null) {
+    cachedEntry.selectedAccountKey = selectedAccountKey;
+    return;
+  }
+
+  state.youtubeAccountCacheByBrowserKey.set(browserAccountKey, {
+    accounts: [],
+    selectedAccountKey,
+  });
+}
+
 function renderYouTubeAccountButton(account) {
   elements.youtubeAccountButton.title = account.label || "YouTube account";
   elements.youtubeAccountButton.setAttribute("aria-label", account.label || "YouTube account");
 
   const content = createYouTubeAccountContent(account);
-  content.classList.add("is-button");
-
-  const chevron = document.createElement("span");
-  chevron.className = "account-menu-chevron";
-  chevron.setAttribute("aria-hidden", "true");
-  chevron.textContent = "▾";
-
-  elements.youtubeAccountButton.replaceChildren(content, chevron);
-}
-
-function renderPendingYouTubeAccountButton() {
-  const pendingAccount = {
-    label: "Refreshing YouTube accounts",
-    displayName: "Refreshing YouTube accounts...",
-    handle: "",
-    byline: "The selected browser account is loading.",
-    avatarUrl: "",
-  };
-
-  elements.youtubeAccountButton.title = pendingAccount.label;
-  elements.youtubeAccountButton.setAttribute("aria-label", pendingAccount.label);
-
-  const content = createYouTubeAccountContent(pendingAccount);
   content.classList.add("is-button");
 
   const chevron = document.createElement("span");

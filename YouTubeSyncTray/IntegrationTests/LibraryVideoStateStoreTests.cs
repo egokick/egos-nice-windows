@@ -65,6 +65,28 @@ public sealed class LibraryVideoStateStoreTests
         }
     }
 
+    [Fact]
+    public void RestoreVideos_ClearsWatchedAndHiddenFlags()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var store = new LibraryVideoStateStore(CreatePaths(root));
+            store.MarkVideos("scope-a", ["video-1"], markHidden: false);
+            store.MarkVideos("scope-a", ["video-2"], markHidden: true);
+
+            var restoredCount = store.RestoreVideos("scope-a", ["video-1", "video-2"]);
+            var state = store.Load("scope-a");
+
+            Assert.Equal(2, restoredCount);
+            Assert.Empty(state);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static string CreateRoot()
     {
         var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));

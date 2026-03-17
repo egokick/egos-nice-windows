@@ -220,4 +220,140 @@ public sealed class YouTubeAccountDiscoveryServiceTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [Fact]
+    public void ResolveSelectedAccount_FallsBackToExplicitSelectionWhenDiscoveryIsUnavailable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var paths = new YoutubeSyncPaths
+            {
+                RootPath = root,
+                BrowserProfilesPath = Path.Combine(root, "browser-profiles"),
+                DownloadsPath = Path.Combine(root, "downloads"),
+                YtDlpPath = Path.Combine(root, "yt-dlp.exe"),
+                CookiesPath = Path.Combine(root, "youtube-cookies.txt"),
+                CookiesMetadataPath = Path.Combine(root, "youtube-cookies.metadata.json"),
+                ArchivePath = Path.Combine(root, "watch-later.archive.txt"),
+                TempPath = Path.Combine(root, "temp"),
+                LogsPath = Path.Combine(root, "logs"),
+                ThumbnailCachePath = Path.Combine(root, "thumb-cache")
+            };
+
+            var service = new YouTubeAccountDiscoveryService(paths);
+            var settings = new AppSettings
+            {
+                BrowserCookies = BrowserCookieSource.Chrome,
+                BrowserProfile = "Default",
+                SelectedYouTubeAccountKey = "yt|page|101659640671648366543"
+            };
+
+            var selected = service.ResolveSelectedAccount(settings, browserAuthUserIndex: 2, allowNetwork: false);
+
+            Assert.True(selected.HasValue);
+            Assert.Equal("yt|page|101659640671648366543", selected.Value.AccountKey);
+            Assert.Equal("101659640671648366543", selected.Value.PageId);
+            Assert.Equal(2, selected.Value.AuthUserIndex);
+            Assert.Contains("Saved account", selected.Value.Byline, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DiscoverAccounts_CachedOnlyUsesPersistedAccountsWhenCookieExportChanges()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var paths = new YoutubeSyncPaths
+            {
+                RootPath = root,
+                BrowserProfilesPath = Path.Combine(root, "browser-profiles"),
+                DownloadsPath = Path.Combine(root, "downloads"),
+                YtDlpPath = Path.Combine(root, "yt-dlp.exe"),
+                CookiesPath = Path.Combine(root, "youtube-cookies.txt"),
+                CookiesMetadataPath = Path.Combine(root, "youtube-cookies.metadata.json"),
+                ArchivePath = Path.Combine(root, "watch-later.archive.txt"),
+                TempPath = Path.Combine(root, "temp"),
+                LogsPath = Path.Combine(root, "logs"),
+                ThumbnailCachePath = Path.Combine(root, "thumb-cache")
+            };
+
+            Directory.CreateDirectory(paths.BrowserProfilesPath);
+            Directory.CreateDirectory(paths.DownloadsPath);
+            Directory.CreateDirectory(paths.TempPath);
+            Directory.CreateDirectory(paths.LogsPath);
+            Directory.CreateDirectory(paths.ThumbnailCachePath);
+
+            File.WriteAllText(paths.CookiesPath, "old-cookie-data");
+            new CookieExportMetadataStore(paths).Save(BrowserCookieSource.Chrome, "Default");
+
+            var originalCookiesInfo = new FileInfo(paths.CookiesPath);
+            var persistedAccounts = new[]
+            {
+                new YouTubeAccountOption(
+                    "yt|page|101659640671648366543",
+                    "egokick",
+                    "@egokick",
+                    "33 subscribers",
+                    string.Empty,
+                    "101659640671648366543",
+                    string.Empty,
+                    string.Empty,
+                    0,
+                    false),
+                new YouTubeAccountOption(
+                    "yt|handle|@egokickdoge3550",
+                    "egokick doge",
+                    "@egokickdoge3550",
+                    "No subscribers",
+                    string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    0,
+                    true)
+            };
+            var persistedCache = new YouTubeAccountDiscoveryService.PersistedCache(
+                BrowserCookieSource.Chrome,
+                "Default",
+                paths.CookiesPath,
+                originalCookiesInfo.Length,
+                originalCookiesInfo.LastWriteTimeUtc.Ticks,
+                0,
+                DateTimeOffset.UtcNow,
+                persistedAccounts);
+            File.WriteAllText(
+                Path.Combine(root, "youtube-account-discovery-cache.json"),
+                JsonSerializer.Serialize(persistedCache));
+
+            File.WriteAllText(paths.CookiesPath, "new-cookie-data-that-does-not-match-the-old-cache-metadata");
+
+            var service = new YouTubeAccountDiscoveryService(paths);
+            var settings = new AppSettings
+            {
+                BrowserCookies = BrowserCookieSource.Chrome,
+                BrowserProfile = "Default",
+                SelectedYouTubeAccountKey = "yt|handle|@egokickdoge3550"
+            };
+
+            var accounts = service.DiscoverAccounts(settings, browserAuthUserIndex: 0, allowNetwork: false);
+
+            Assert.Equal(2, accounts.Count);
+            Assert.Contains(accounts, account => account.AccountKey == "yt|page|101659640671648366543");
+            Assert.Contains(accounts, account => account.AccountKey == "yt|handle|@egokickdoge3550");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }

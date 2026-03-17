@@ -103,7 +103,8 @@ internal sealed class VideoItem
             .ThenBy(item => watchLaterOrderByVideoId.TryGetValue(item.VideoId, out var currentPlaylistIndex)
                 ? currentPlaylistIndex
                 : int.MaxValue)
-            .ThenBy(item => item.PlaylistIndex == 0 ? int.MaxValue : item.PlaylistIndex)
+            // yt-dlp's stored Watch Later playlist_index is oldest-first, so higher values are newer additions.
+            .ThenByDescending(item => item.PlaylistIndex == 0 ? int.MinValue : item.PlaylistIndex)
             .ThenBy(item => Path.GetFileName(item.VideoPath), StringComparer.OrdinalIgnoreCase)
             .ToList();
     }

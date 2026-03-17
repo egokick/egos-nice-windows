@@ -84,6 +84,41 @@ internal sealed class LibraryVideoStateStore
         }
     }
 
+    public int RestoreVideos(string scopeFolderName, IEnumerable<string> videoIds)
+    {
+        lock (_gate)
+        {
+            var file = LoadFile(scopeFolderName);
+            var changedCount = 0;
+
+            foreach (var videoId in videoIds
+                         .Where(id => !string.IsNullOrWhiteSpace(id))
+                         .Select(id => id.Trim())
+                         .Distinct(StringComparer.Ordinal))
+            {
+                if (!file.Videos.TryGetValue(videoId, out var entry))
+                {
+                    continue;
+                }
+
+                if (!entry.WatchedAtUtc.HasValue && !entry.HiddenAtUtc.HasValue)
+                {
+                    continue;
+                }
+
+                file.Videos.Remove(videoId);
+                changedCount++;
+            }
+
+            if (changedCount > 0)
+            {
+                SaveFile(scopeFolderName, file);
+            }
+
+            return changedCount;
+        }
+    }
+
     private VideoStateFile LoadFile(string scopeFolderName)
     {
         var path = GetStatePath(scopeFolderName);

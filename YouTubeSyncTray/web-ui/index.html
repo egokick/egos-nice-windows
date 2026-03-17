@@ -18,19 +18,19 @@
           <p class="player-label">Now Playing</p>
           <h2 id="playerTitle">Select a video</h2>
         </div>
-        <div id="captionPicker" class="caption-picker hidden">
-          <label class="caption-label" for="captionSelect">Captions</label>
-          <select id="captionSelect" class="caption-select" disabled>
-            <option value="">Off</option>
-          </select>
-        </div>
       </div>
-      <p id="captionStatus" class="caption-status hidden"></p>
       <div id="playerPlaceholder" class="player-placeholder">
         <p class="player-placeholder-title">Pick a video from the grid</p>
         <p class="player-placeholder-text">The thumbnail opens it here without leaving the browser.</p>
       </div>
       <video id="videoPlayer" class="video-player hidden" controls preload="metadata"></video>
+      <div id="captionPicker" class="caption-picker hidden">
+        <label class="caption-label" for="captionSelect">Captions</label>
+        <select id="captionSelect" class="caption-select" disabled>
+          <option value="">Off</option>
+        </select>
+      </div>
+      <p id="captionStatus" class="caption-status hidden"></p>
     </section>
 
     <section class="toolbar-panel">
@@ -69,7 +69,10 @@
           </div>
         </div>
         <div id="youtubeAccountPicker" class="account-picker hidden">
-          <span class="account-picker-label">YouTube account</span>
+          <div class="account-picker-heading">
+            <span class="account-picker-label">YouTube account</span>
+            <span id="youtubeAccountRefreshStatus" class="account-picker-status hidden" aria-live="polite"></span>
+          </div>
           <div id="youtubeAccountMenu" class="account-menu">
             <button
               id="youtubeAccountButton"

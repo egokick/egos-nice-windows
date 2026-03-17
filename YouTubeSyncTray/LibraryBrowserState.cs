@@ -13,6 +13,8 @@ internal sealed class LibraryBrowserState
 
     private readonly object _syncRoot = new();
     private readonly Queue<string> _recentMessages = new();
+    private HashSet<string> _downloadedVideoIds = new(StringComparer.Ordinal);
+    private List<string> _syncTargetVideoIds = [];
     private Dictionary<string, int> _watchLaterOrderByVideoId = new(StringComparer.Ordinal);
     private bool _isBusy;
     private string _status;
@@ -23,10 +25,11 @@ internal sealed class LibraryBrowserState
     private long _libraryVersion = 1;
     private DateTimeOffset _updatedAtUtc;
 
-    public LibraryBrowserState(int initialVideoCount)
+    public LibraryBrowserState(IReadOnlyCollection<string> initialVideoIds)
     {
-        _videoCount = initialVideoCount;
-        _status = $"{initialVideoCount} downloaded videos";
+        _downloadedVideoIds = NormalizeVideoIds(initialVideoIds);
+        _videoCount = _downloadedVideoIds.Count;
+        _status = $"{_videoCount} downloaded videos";
         _updatedAtUtc = DateTimeOffset.UtcNow;
     }
 
@@ -64,13 +67,15 @@ internal sealed class LibraryBrowserState
         }
     }
 
-    public void SetVideoCount(int videoCount)
+    public void SetVideoIds(IReadOnlyCollection<string> videoIds)
     {
+        var normalizedVideoIds = NormalizeVideoIds(videoIds);
         lock (_syncRoot)
         {
-            if (_videoCount != videoCount)
+            if (!HasSameVideoIds(_downloadedVideoIds, normalizedVideoIds))
             {
-                _videoCount = videoCount;
+                _downloadedVideoIds = normalizedVideoIds;
+                _videoCount = _downloadedVideoIds.Count;
                 _libraryVersion++;
             }
 
@@ -147,6 +152,37 @@ internal sealed class LibraryBrowserState
         }
     }
 
+    public void SetSyncTargetIds(IReadOnlyList<string> syncTargetVideoIds)
+    {
+        var normalizedVideoIds = NormalizeOrderedVideoIds(syncTargetVideoIds);
+        lock (_syncRoot)
+        {
+            if (HasSameOrderedVideoIds(_syncTargetVideoIds, normalizedVideoIds))
+            {
+                _updatedAtUtc = DateTimeOffset.UtcNow;
+                return;
+            }
+
+            _syncTargetVideoIds = normalizedVideoIds;
+            _updatedAtUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
+    public void ClearSyncTargetIds()
+    {
+        lock (_syncRoot)
+        {
+            if (_syncTargetVideoIds.Count == 0)
+            {
+                _updatedAtUtc = DateTimeOffset.UtcNow;
+                return;
+            }
+
+            _syncTargetVideoIds = [];
+            _updatedAtUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
     public void ClearWatchLaterOrder()
     {
         lock (_syncRoot)
@@ -171,13 +207,14 @@ internal sealed class LibraryBrowserState
         }
     }
 
-    public void MarkLibraryChanged(int? videoCount = null)
+    public void MarkLibraryChanged(IReadOnlyCollection<string>? videoIds = null)
     {
         lock (_syncRoot)
         {
-            if (videoCount.HasValue)
+            if (videoIds is not null)
             {
-                _videoCount = videoCount.Value;
+                _downloadedVideoIds = NormalizeVideoIds(videoIds);
+                _videoCount = _downloadedVideoIds.Count;
             }
 
             _libraryVersion++;
@@ -191,6 +228,9 @@ internal sealed class LibraryBrowserState
 
         lock (_syncRoot)
         {
+            var syncScope = CalculateSyncScopeCounts(
+                _downloadedVideoIds,
+                _syncTargetVideoIds);
             return new BrowserLibraryStatusSnapshot(
                 _isBusy,
                 _status,
@@ -198,6 +238,9 @@ internal sealed class LibraryBrowserState
                 _libraryVersion,
                 settings.DownloadCount,
                 _watchLaterTotalCount,
+                syncScope.DownloadedCount,
+                syncScope.TargetCount,
+                syncScope.FailedCount,
                 _syncAuthState,
                 _syncAuthMessage,
                 ChromiumBrowserLocator.GetDisplayName(settings.BrowserCookies),
@@ -214,12 +257,42 @@ internal sealed class LibraryBrowserState
         long LibraryVersion,
         int ConfiguredDownloadCount,
         int? WatchLaterTotalCount,
+        int? SyncScopeDownloadedCount,
+        int? SyncScopeTargetCount,
+        int? SyncScopeFailedCount,
         SyncAuthState SyncAuthState,
         string SyncAuthMessage,
         string BrowserName,
         string BrowserProfile,
         IReadOnlyList<string> RecentMessages,
         DateTimeOffset UpdatedAtUtc);
+
+    internal static SyncScopeCounts CalculateSyncScopeCounts(
+        IReadOnlyCollection<string> downloadedVideoIds,
+        IReadOnlyList<string> syncTargetVideoIds)
+    {
+        if (syncTargetVideoIds.Count == 0)
+        {
+            return new SyncScopeCounts(null, null, null);
+        }
+
+        var normalizedDownloadedVideoIds = downloadedVideoIds as HashSet<string>
+            ?? new HashSet<string>(downloadedVideoIds, StringComparer.Ordinal);
+        var downloadedCount = 0;
+        foreach (var videoId in syncTargetVideoIds)
+        {
+            if (normalizedDownloadedVideoIds.Contains(videoId))
+            {
+                downloadedCount++;
+            }
+        }
+
+        var targetCount = syncTargetVideoIds.Count;
+        return new SyncScopeCounts(
+            downloadedCount,
+            targetCount,
+            Math.Max(targetCount - downloadedCount, 0));
+    }
 
     private void AppendRecentMessage(string message)
     {
@@ -254,4 +327,75 @@ internal sealed class LibraryBrowserState
 
         return true;
     }
+
+    private static HashSet<string> NormalizeVideoIds(IEnumerable<string> videoIds)
+    {
+        var normalized = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var videoId in videoIds)
+        {
+            if (string.IsNullOrWhiteSpace(videoId))
+            {
+                continue;
+            }
+
+            normalized.Add(videoId.Trim());
+        }
+
+        return normalized;
+    }
+
+    private static List<string> NormalizeOrderedVideoIds(IEnumerable<string> videoIds)
+    {
+        var normalized = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var videoId in videoIds)
+        {
+            if (string.IsNullOrWhiteSpace(videoId))
+            {
+                continue;
+            }
+
+            var trimmedVideoId = videoId.Trim();
+            if (!seen.Add(trimmedVideoId))
+            {
+                continue;
+            }
+
+            normalized.Add(trimmedVideoId);
+        }
+
+        return normalized;
+    }
+
+    private static bool HasSameVideoIds(
+        IReadOnlySet<string> left,
+        IReadOnlySet<string> right)
+    {
+        return left.SetEquals(right);
+    }
+
+    private static bool HasSameOrderedVideoIds(
+        IReadOnlyList<string> left,
+        IReadOnlyList<string> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.Count; index++)
+        {
+            if (!string.Equals(left[index], right[index], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal readonly record struct SyncScopeCounts(
+        int? DownloadedCount,
+        int? TargetCount,
+        int? FailedCount);
 }
