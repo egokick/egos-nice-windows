@@ -47,6 +47,21 @@ internal sealed class SyncService
         return await GetWatchLaterTotalAsync(settings, auth, cancellationToken);
     }
 
+    public async Task<IReadOnlyList<string>> GetWatchLaterOrderedIdsAsync(
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        settings.Normalize();
+        var auth = await EnsureAuthAsync(settings, cancellationToken);
+        auth = await PrepareManagedChromiumAuthAsync(settings, auth, progress: null, cancellationToken);
+        return await GetWatchLaterIdsAsync(
+            settings,
+            cancellationToken,
+            auth,
+            playlistItemsRange: null,
+            newestFirst: true);
+    }
+
     private async Task<int> GetWatchLaterTotalAsync(
         AppSettings settings,
         AuthConfig auth,
@@ -92,7 +107,8 @@ internal sealed class SyncService
         AppSettings settings,
         IProgress<string>? progress,
         CancellationToken cancellationToken,
-        IProgress<int>? watchLaterTotalProgress = null)
+        IProgress<int>? watchLaterTotalProgress = null,
+        IProgress<IReadOnlyList<string>>? watchLaterOrderProgress = null)
     {
         settings.Normalize();
         TrayLog.Write(_paths, $"SyncRecentAsync started. Requested count: {settings.DownloadCount}");
@@ -117,6 +133,12 @@ internal sealed class SyncService
         }
 
         var targetIds = await GetTargetWatchLaterIdsAsync(settings, clampedCount, cancellationToken, auth);
+        if (watchLaterTotalCount.HasValue
+            && targetIds.Count > 0
+            && targetIds.Count >= watchLaterTotalCount.Value)
+        {
+            watchLaterOrderProgress?.Report([.. targetIds.AsEnumerable().Reverse()]);
+        }
         TrayLog.Write(_paths, $"Target id count: {targetIds.Count}");
         var existingIdsBefore = VideoItem.LoadFromDownloads(accountScope.DownloadsPath)
             .Select(item => item.VideoId)
@@ -617,25 +639,38 @@ internal sealed class SyncService
         CancellationToken cancellationToken,
         AuthConfig auth)
     {
+        return await GetWatchLaterIdsAsync(settings, cancellationToken, auth, $"1:{downloadCount}");
+    }
+
+    private async Task<List<string>> GetWatchLaterIdsAsync(
+        AppSettings settings,
+        CancellationToken cancellationToken,
+        AuthConfig auth,
+        string? playlistItemsRange,
+        bool newestFirst = false)
+    {
         var watchLaterUrl = BuildWatchLaterUrl(settings);
+        var playlistItemsArg = string.IsNullOrWhiteSpace(playlistItemsRange)
+            ? string.Empty
+            : $" --playlist-items {playlistItemsRange}";
         var result = await RunYtDlpWithRetryAsync(
             new AppSettings
             {
-                DownloadCount = downloadCount,
+                DownloadCount = settings.DownloadCount,
                 BrowserCookies = auth.Browser,
                 BrowserProfile = auth.Profile,
                 SelectedBrowserAccountKey = settings.SelectedBrowserAccountKey,
                 SelectedYouTubeAccountKey = settings.SelectedYouTubeAccountKey
             },
             auth,
-            $"--flat-playlist --playlist-items 1:{downloadCount} --print \"%(id)s\" \"{watchLaterUrl}\"",
+            $"--flat-playlist{playlistItemsArg} --print \"%(id)s\" \"{watchLaterUrl}\"",
             cancellationToken);
 
         if (result.ExitCode != 0)
         {
             var effectiveAuth = _refreshedAuth ?? auth;
             throw new InvalidOperationException(BuildYtDlpFailureMessage(
-                "Could not inspect the current Watch Later items before syncing.",
+                "Could not inspect the current Watch Later items.",
                 effectiveAuth,
                 result));
         }
@@ -645,7 +680,12 @@ internal sealed class SyncService
             .Where(line => line.Length >= 6 && !line.StartsWith("[", StringComparison.Ordinal))
             .Distinct(StringComparer.Ordinal)
             .ToList();
-        TrayLog.Write(_paths, $"GetTargetWatchLaterIdsAsync returned {ids.Count} ids.");
+        if (newestFirst)
+        {
+            ids.Reverse();
+        }
+
+        TrayLog.Write(_paths, $"GetWatchLaterIdsAsync returned {ids.Count} ids.");
         return ids;
     }
 

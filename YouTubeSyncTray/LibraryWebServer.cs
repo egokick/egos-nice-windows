@@ -18,13 +18,16 @@ internal sealed class LibraryWebServer : IAsyncDisposable
 
     private readonly YoutubeSyncPaths _paths;
     private readonly ThumbnailCacheService _thumbnailCacheService;
+    private readonly LibraryVideoStateStore _videoStateStore;
     private readonly LibraryBrowserState _state;
     private readonly Func<AppSettings> _getSettings;
+    private readonly Func<AppSettings, bool> _isYouTubeAccountRefreshInFlight;
     private readonly BrowserAccountDiscoveryService _accountDiscovery;
     private readonly YouTubeAccountDiscoveryService _youTubeAccountDiscovery;
     private readonly AccountScopeResolver _accountScopeResolver;
     private readonly Func<Task<LibraryCommandResponse>> _requestSyncAsync;
-    private readonly Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> _requestRemoveAsync;
+    private readonly Func<IReadOnlyList<string>, bool, Task<LibraryCommandResponse>> _requestRemoveAsync;
+    private readonly Func<Task<LibraryCommandResponse>> _requestOpenDownloadsFolderAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectBrowserAccountAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectYouTubeAccountAsync;
     private readonly Func<Task<SettingsResponse>> _requestGetSettingsAsync;
@@ -43,13 +46,16 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     public LibraryWebServer(
         YoutubeSyncPaths paths,
         ThumbnailCacheService thumbnailCacheService,
+        LibraryVideoStateStore videoStateStore,
         LibraryBrowserState state,
         Func<AppSettings> getSettings,
+        Func<AppSettings, bool> isYouTubeAccountRefreshInFlight,
         BrowserAccountDiscoveryService accountDiscovery,
         YouTubeAccountDiscoveryService youTubeAccountDiscovery,
         AccountScopeResolver accountScopeResolver,
         Func<Task<LibraryCommandResponse>> requestSyncAsync,
-        Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> requestRemoveAsync,
+        Func<IReadOnlyList<string>, bool, Task<LibraryCommandResponse>> requestRemoveAsync,
+        Func<Task<LibraryCommandResponse>> requestOpenDownloadsFolderAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectBrowserAccountAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectYouTubeAccountAsync,
         Func<Task<SettingsResponse>> requestGetSettingsAsync,
@@ -59,13 +65,16 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     {
         _paths = paths;
         _thumbnailCacheService = thumbnailCacheService;
+        _videoStateStore = videoStateStore;
         _state = state;
         _getSettings = getSettings;
+        _isYouTubeAccountRefreshInFlight = isYouTubeAccountRefreshInFlight;
         _accountDiscovery = accountDiscovery;
         _youTubeAccountDiscovery = youTubeAccountDiscovery;
         _accountScopeResolver = accountScopeResolver;
         _requestSyncAsync = requestSyncAsync;
         _requestRemoveAsync = requestRemoveAsync;
+        _requestOpenDownloadsFolderAsync = requestOpenDownloadsFolderAsync;
         _requestSelectBrowserAccountAsync = requestSelectBrowserAccountAsync;
         _requestSelectYouTubeAccountAsync = requestSelectYouTubeAccountAsync;
         _requestGetSettingsAsync = requestGetSettingsAsync;
@@ -214,7 +223,9 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         app.MapGet("/api/network-info", (HttpContext context) => Results.Json(
             phoneAccessProbe.GetSnapshot(IsLocalRequest(context)),
             _jsonOptions));
-        app.MapGet("/api/status", () => Results.Json(BuildStatusDto(), _jsonOptions));
+        app.MapGet("/api/status", (HttpContext context) => Results.Json(
+            BuildStatusDto(IsLocalRequest(context)),
+            _jsonOptions));
         app.MapGet("/api/settings", async () => Results.Json(await _requestGetSettingsAsync(), _jsonOptions));
         app.MapGet("/api/videos", () => Results.Json(BuildVideoDtos(), _jsonOptions));
         app.MapGet("/api/videos/{videoId}/thumbnail", GetThumbnailAsync);
@@ -252,7 +263,17 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             await _requestRemoveAsync(request.VideoIds
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .Distinct(StringComparer.Ordinal)
-                .ToArray())));
+                .ToArray(),
+                request.MarkHidden)));
+        app.MapPost("/api/downloads/open", async (HttpContext context) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestOpenDownloadsFolderAsync());
+        });
         app.MapPost("/api/browser-account/select", async (SelectAccountRequest request) => ToHttpResult(
             await _requestSelectBrowserAccountAsync(request.AccountKey ?? string.Empty)));
         app.MapPost("/api/youtube-account/select", async (SelectAccountRequest request) => ToHttpResult(
@@ -265,7 +286,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         app.MapPost("/api/settings/open", async () => ToHttpResult(await _requestOpenSettingsAsync()));
     }
 
-    private BrowserLibraryStatusDto BuildStatusDto()
+    private BrowserLibraryStatusDto BuildStatusDto(bool canOpenDownloadsFolder)
     {
         var settings = _getSettings();
         var snapshot = _state.GetSnapshot(settings);
@@ -275,6 +296,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             settings,
             selectedBrowserAccount?.AuthUserIndex,
             allowNetwork: false);
+        var isRefreshingYouTubeAccounts = _isYouTubeAccountRefreshInFlight(settings);
         var selectedYouTubeAccount = _youTubeAccountDiscovery.ResolveSelectedAccount(
             settings,
             selectedBrowserAccount?.AuthUserIndex,
@@ -285,12 +307,15 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             snapshot.Status,
             snapshot.VideoCount,
             snapshot.LibraryVersion,
-            snapshot.DownloadCount,
+            snapshot.ConfiguredDownloadCount,
             snapshot.WatchLaterTotalCount,
+            snapshot.SyncAuthState.ToString().ToLowerInvariant(),
+            snapshot.SyncAuthMessage,
             snapshot.BrowserName,
             snapshot.BrowserProfile,
             snapshot.RecentMessages,
             snapshot.UpdatedAtUtc,
+            canOpenDownloadsFolder,
             selectedBrowserAccount?.AccountKey ?? settings.SelectedBrowserAccountKey ?? string.Empty,
             selectedBrowserAccount?.Label ?? string.Empty,
             browserAccounts
@@ -304,6 +329,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                     account.AvatarUrl,
                     account.AuthUserIndex))
                 .ToList(),
+            isRefreshingYouTubeAccounts,
             selectedYouTubeAccount?.AccountKey ?? settings.SelectedYouTubeAccountKey ?? string.Empty,
             selectedYouTubeAccount?.Label ?? string.Empty,
             youTubeAccounts
@@ -322,17 +348,26 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
         var items = LoadVideoItems(accountScope.DownloadsPath);
+        var videoStates = _videoStateStore.Load(accountScope.FolderName);
         _state.SetVideoCount(items.Count);
 
         return items
-            .Select(item => new LibraryVideoDto(
-                item.VideoId,
-                item.Title,
-                item.UploaderName,
-                item.DisplayIndex,
-                $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/thumbnail?v={GetThumbnailRevision(item)}",
-                $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/stream",
-                $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/captions"))
+            .Select(item =>
+            {
+                var videoState = videoStates.TryGetValue(item.VideoId, out var state)
+                    ? state
+                    : default;
+                return new LibraryVideoDto(
+                    item.VideoId,
+                    item.Title,
+                    item.UploaderName,
+                    item.DisplayIndex,
+                    $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/thumbnail?v={GetThumbnailRevision(item)}",
+                    $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/stream",
+                    $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/captions",
+                    videoState.IsWatched,
+                    videoState.IsHidden);
+            })
             .ToList();
     }
 
@@ -414,7 +449,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
 
     private IReadOnlyList<VideoItem> LoadVideoItems(string downloadsPath)
     {
-        var items = VideoItem.LoadFromDownloads(downloadsPath);
+        var items = VideoItem.LoadFromDownloads(downloadsPath, _state.GetWatchLaterOrderSnapshot());
         UpdateVideoCache(downloadsPath, items);
         return items;
     }
@@ -598,6 +633,8 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private sealed class RemoveVideosRequest
     {
         public List<string> VideoIds { get; set; } = [];
+
+        public bool MarkHidden { get; set; }
     }
 
     private sealed class SelectAccountRequest
@@ -621,7 +658,9 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         string DisplayIndex,
         string ThumbnailUrl,
         string StreamUrl,
-        string CaptionsUrl);
+        string CaptionsUrl,
+        bool IsWatched,
+        bool IsHidden);
 
     private sealed record CaptionTrackDto(
         string TrackKey,
@@ -653,15 +692,19 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         string Status,
         int VideoCount,
         long LibraryVersion,
-        int DownloadCount,
+        int ConfiguredDownloadCount,
         int? WatchLaterTotalCount,
+        string SyncAuthState,
+        string SyncAuthMessage,
         string BrowserName,
         string BrowserProfile,
         IReadOnlyList<string> RecentMessages,
         DateTimeOffset UpdatedAtUtc,
+        bool CanOpenDownloadsFolder,
         string SelectedBrowserAccountKey,
         string SelectedBrowserAccountLabel,
         IReadOnlyList<BrowserAccountDto> AvailableBrowserAccounts,
+        bool IsRefreshingYouTubeAccounts,
         string SelectedYouTubeAccountKey,
         string SelectedYouTubeAccountLabel,
         IReadOnlyList<YouTubeAccountDto> AvailableYouTubeAccounts);

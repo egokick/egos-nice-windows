@@ -129,4 +129,51 @@ public sealed class VideoItemTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [Fact]
+    public void LoadFromDownloads_PrefersCurrentWatchLaterOrderOverStoredPlaylistIndex()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            WriteVideo(root, "001 - Older Entry [older01]", "older01", "Older Entry", 1);
+            WriteVideo(root, "002 - Newer Entry [newer01]", "newer01", "Newer Entry", 2);
+
+            var items = VideoItem.LoadFromDownloads(
+                root,
+                new Dictionary<string, int>(StringComparer.Ordinal)
+                {
+                    ["newer01"] = 1,
+                    ["older01"] = 2
+                });
+
+            Assert.Collection(
+                items,
+                first => Assert.Equal("newer01", first.VideoId),
+                second => Assert.Equal("older01", second.VideoId));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void WriteVideo(string root, string fileName, string videoId, string title, int playlistIndex)
+    {
+        var basePath = Path.Combine(root, fileName);
+        File.WriteAllText(basePath + ".mp4", "video");
+        File.WriteAllText(basePath + ".jpg", "thumb");
+        File.WriteAllText(
+            basePath + ".info.json",
+            JsonSerializer.Serialize(new
+            {
+                id = videoId,
+                title,
+                uploader = "Example Creator",
+                ext = "mp4",
+                playlist_index = playlistIndex
+            }));
+    }
 }

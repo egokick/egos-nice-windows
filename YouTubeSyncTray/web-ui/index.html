@@ -83,8 +83,10 @@
           </div>
         </div>
         <button id="syncButton" class="primary-button" type="button">Sync Now</button>
+        <button id="openDownloadsButton" class="ghost-button hidden" type="button">Open Downloads Folder</button>
         <button id="clearSelectionButton" class="ghost-button" type="button">Clear Selection</button>
-        <button id="removeSelectedButton" class="danger-button" type="button" disabled>Remove Selected</button>
+        <button id="removeSelectedButton" class="danger-button" type="button" disabled>Hide Selected</button>
+        <button id="watchedVideosButton" class="secondary-button" type="button" aria-pressed="false">Watched Videos</button>
         <button
           id="settingsButton"
           class="secondary-button"
@@ -184,8 +186,8 @@
 
     <main>
       <section id="emptyState" class="empty-state hidden">
-        <h2>No downloaded videos yet</h2>
-        <p>Run a sync from the tray app or from the button above. New videos will appear here automatically.</p>
+        <h2 id="emptyStateTitle">No downloaded videos yet</h2>
+        <p id="emptyStateText">Run a sync from the tray app or from the button above. New videos will appear here automatically.</p>
       </section>
 
       <section id="libraryGrid" class="library-grid" aria-live="polite"></section>

@@ -38,7 +38,9 @@ internal sealed class VideoItem
     public int PlaylistIndex { get; init; }
     public string DisplayIndex => PlaylistIndex > 0 ? PlaylistIndex.ToString("000") : "---";
 
-    public static IReadOnlyList<VideoItem> LoadFromDownloads(string downloadsPath)
+    public static IReadOnlyList<VideoItem> LoadFromDownloads(
+        string downloadsPath,
+        IReadOnlyDictionary<string, int>? watchLaterOrderByVideoId = null)
     {
         if (!Directory.Exists(downloadsPath))
         {
@@ -94,8 +96,14 @@ internal sealed class VideoItem
             }
         }
 
+        watchLaterOrderByVideoId ??= new Dictionary<string, int>(StringComparer.Ordinal);
+
         return items
-            .OrderBy(item => item.PlaylistIndex == 0 ? int.MaxValue : item.PlaylistIndex)
+            .OrderBy(item => watchLaterOrderByVideoId.ContainsKey(item.VideoId) ? 0 : 1)
+            .ThenBy(item => watchLaterOrderByVideoId.TryGetValue(item.VideoId, out var currentPlaylistIndex)
+                ? currentPlaylistIndex
+                : int.MaxValue)
+            .ThenBy(item => item.PlaylistIndex == 0 ? int.MaxValue : item.PlaylistIndex)
             .ThenBy(item => Path.GetFileName(item.VideoPath), StringComparer.OrdinalIgnoreCase)
             .ToList();
     }

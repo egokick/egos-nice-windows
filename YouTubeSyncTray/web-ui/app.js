@@ -11,6 +11,7 @@ const state = {
   currentVideoId: null,
   currentCaptionTracks: [],
   currentVideoTitle: "",
+  downloadedVideoCount: 0,
   isBusy: false,
   libraryVersion: -1,
   lastVideoRefreshAt: 0,
@@ -23,6 +24,7 @@ const state = {
   settingsOpen: false,
   settingsRefreshing: false,
   settingsSaving: false,
+  showWatchedOnly: false,
   searchTerm: "",
   configuredDownloadCount: null,
   hotspotAction: "",
@@ -33,13 +35,18 @@ const state = {
   phoneAccessLoading: false,
   selectedBrowserAccountKey: "",
   selectedIds: new Set(),
+  syncAuthMessage: "Authentication has not been verified yet for the selected account.",
+  syncAuthState: "missing",
   syncButtonAnimationFrame: 0,
   syncButtonAnimationTimer: null,
   toastTimer: null,
+  watchedMarkingIds: new Set(),
   watchLaterTotalCount: null,
   youtubeAccounts: [],
   youtubeAccountButtonKey: "",
   youtubeAccountOptionsKey: "",
+  youtubeAccountsSourceBrowserKey: "",
+  isRefreshingYouTubeAccounts: false,
   youtubeAccountSelectionInFlight: false,
   selectedYouTubeAccountKey: "",
   videos: new Map(),
@@ -55,12 +62,15 @@ const elements = {
   captionSelect: document.getElementById("captionSelect"),
   captionStatus: document.getElementById("captionStatus"),
   clearSelectionButton: document.getElementById("clearSelectionButton"),
+  emptyStateText: document.getElementById("emptyStateText"),
+  emptyStateTitle: document.getElementById("emptyStateTitle"),
   emptyState: document.getElementById("emptyState"),
   libraryGrid: document.getElementById("libraryGrid"),
   monitorClose: document.getElementById("monitorClose"),
   monitorPanel: document.getElementById("monitorPanel"),
   monitorPill: document.getElementById("monitorPill"),
   monitorToggle: document.getElementById("monitorToggle"),
+  openDownloadsButton: document.getElementById("openDownloadsButton"),
   phoneAccessCandidates: document.getElementById("phoneAccessCandidates"),
   phoneAccessClients: document.getElementById("phoneAccessClients"),
   phoneAccessControlHint: document.getElementById("phoneAccessControlHint"),
@@ -95,6 +105,7 @@ const elements = {
   syncButton: document.getElementById("syncButton"),
   toast: document.getElementById("toast"),
   videoPlayer: document.getElementById("videoPlayer"),
+  watchedVideosButton: document.getElementById("watchedVideosButton"),
   youtubeAccountButton: document.getElementById("youtubeAccountButton"),
   youtubeAccountList: document.getElementById("youtubeAccountList"),
   youtubeAccountMenu: document.getElementById("youtubeAccountMenu"),
@@ -221,6 +232,10 @@ function wireEvents() {
     await runCommand("/api/sync", null, "Sync requested.");
   });
 
+  elements.openDownloadsButton.addEventListener("click", async () => {
+    await runCommand("/api/downloads/open", null, "Opened the downloads folder for the selected account.");
+  });
+
   elements.settingsButton.addEventListener("click", async () => {
     await toggleSettingsPanel();
   });
@@ -250,12 +265,7 @@ function wireEvents() {
   });
 
   elements.clearSelectionButton.addEventListener("click", () => {
-    state.selectedIds.clear();
-    for (const card of state.cards.values()) {
-      card.querySelector(".video-selector").checked = false;
-      card.classList.remove("selected");
-    }
-
+    clearSelectedVideos();
     updateSelectionUi();
   });
 
@@ -267,13 +277,21 @@ function wireEvents() {
     }
 
     const confirmed = window.confirm(
-      `Remove ${ids.length} selected video(s) from Watch Later? Local files stay on disk.`,
+      `Hide ${ids.length} selected video(s)? They will be marked watched locally and removed from the main library view.`,
     );
     if (!confirmed) {
       return;
     }
 
-    await runCommand("/api/remove", { videoIds: ids }, `Queued removal for ${ids.length} video(s).`);
+    await markVideos(ids, true);
+  });
+
+  elements.watchedVideosButton.addEventListener("click", () => {
+    clearSelectedVideos();
+    state.showWatchedOnly = !state.showWatchedOnly;
+    applyFilters();
+    updateSelectionUi();
+    updateEmptyState();
   });
 
   elements.searchInput.addEventListener("input", () => {
@@ -281,6 +299,7 @@ function wireEvents() {
     state.searchMatcher = buildSearchMatcher(state.searchTerm);
     applyFilters();
     updateSelectionUi();
+    updateEmptyState();
   });
 
   elements.searchToggle.addEventListener("click", () => {
@@ -291,6 +310,7 @@ function wireEvents() {
       state.searchMatcher = null;
       applyFilters();
       updateSelectionUi();
+      updateEmptyState();
     }
 
     const shouldOpen = !isOpen;
@@ -311,6 +331,14 @@ function wireEvents() {
 
   elements.videoPlayer.addEventListener("error", () => {
     showToast("This video could not be played in the browser.", true);
+  });
+
+  elements.videoPlayer.addEventListener("timeupdate", () => {
+    void maybeMarkCurrentVideoWatched(false);
+  });
+
+  elements.videoPlayer.addEventListener("ended", () => {
+    void maybeMarkCurrentVideoWatched(true);
   });
 
   elements.captionSelect.addEventListener("change", () => {
@@ -731,11 +759,137 @@ async function refreshStatus(forceVideoRefresh) {
 async function refreshVideos() {
   const videos = await fetchJson("/api/videos");
   state.lastVideoRefreshAt = Date.now();
+  state.downloadedVideoCount = Array.isArray(videos) ? videos.length : 0;
   reconcileVideos(videos);
   applyFilters();
   updateSelectionUi();
-  updateEmptyState(videos.length === 0);
+  updateEmptyState();
   elements.refreshSummary.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
+}
+
+function clearSelectedVideos(videoIds = null) {
+  const targetIds = videoIds === null
+    ? new Set(state.selectedIds)
+    : new Set(videoIds);
+  for (const videoId of targetIds) {
+    state.selectedIds.delete(videoId);
+    const card = state.cards.get(videoId);
+    if (!card) {
+      continue;
+    }
+
+    const selector = card.querySelector(".video-selector");
+    selector.checked = false;
+    card.classList.remove("selected");
+  }
+}
+
+function isWatchedVideo(video) {
+  return Boolean(video && (video.isWatched || video.isHidden));
+}
+
+function countWatchedVideos() {
+  let watchedCount = 0;
+  for (const video of state.videos.values()) {
+    if (isWatchedVideo(video)) {
+      watchedCount += 1;
+    }
+  }
+
+  return watchedCount;
+}
+
+function getVisibleVideoCount() {
+  return [...state.cards.values()].filter((card) => !card.classList.contains("is-hidden")).length;
+}
+
+async function maybeMarkCurrentVideoWatched(force) {
+  const videoId = elements.videoPlayer.dataset.videoId || state.currentVideoId;
+  if (!videoId || state.watchedMarkingIds.has(videoId)) {
+    return;
+  }
+
+  const video = state.videos.get(videoId);
+  if (!video || isWatchedVideo(video)) {
+    return;
+  }
+
+  if (!force) {
+    const duration = Number.isFinite(elements.videoPlayer.duration) ? elements.videoPlayer.duration : 0;
+    if (duration <= 0 || elements.videoPlayer.currentTime < duration * 0.9) {
+      return;
+    }
+  }
+
+  await markVideos([videoId], false, true);
+}
+
+async function markVideos(videoIds, markHidden, silent = false) {
+  const normalizedIds = [...new Set((Array.isArray(videoIds) ? videoIds : [])
+    .filter((videoId) => typeof videoId === "string" && videoId.trim() !== "")
+    .map((videoId) => videoId.trim()))];
+  const idsToUpdate = normalizedIds.filter((videoId) => {
+    const video = state.videos.get(videoId);
+    if (!video) {
+      return false;
+    }
+
+    return markHidden ? !video.isHidden : !isWatchedVideo(video);
+  });
+
+  if (idsToUpdate.length === 0) {
+    return false;
+  }
+
+  for (const videoId of idsToUpdate) {
+    state.watchedMarkingIds.add(videoId);
+  }
+
+  try {
+    const response = await post("/api/remove", { videoIds: idsToUpdate, markHidden });
+    applyLocalVideoStateUpdate(idsToUpdate, markHidden);
+    if (!silent) {
+      showToast(response?.message || (markHidden ? "Videos hidden." : "Marked as watched."), false);
+    }
+
+    return true;
+  } catch (error) {
+    if (!silent) {
+      showToast(error instanceof Error ? error.message : "The request failed.", true);
+    }
+
+    return false;
+  } finally {
+    for (const videoId of idsToUpdate) {
+      state.watchedMarkingIds.delete(videoId);
+    }
+  }
+}
+
+function applyLocalVideoStateUpdate(videoIds, markHidden) {
+  clearSelectedVideos(videoIds);
+  for (const videoId of videoIds) {
+    const video = state.videos.get(videoId);
+    if (!video) {
+      continue;
+    }
+
+    const updatedVideo = {
+      ...video,
+      isWatched: true,
+      isHidden: markHidden || Boolean(video.isHidden),
+    };
+    state.videos.set(videoId, updatedVideo);
+
+    const card = state.cards.get(videoId);
+    if (card) {
+      updateCard(card, updatedVideo);
+    }
+  }
+
+  applyFilters();
+  updateSelectionUi();
+  updateEmptyState();
 }
 
 function reconcileVideos(videos) {
@@ -1127,9 +1281,14 @@ function setActiveCaptionTrack(selectedTrackKey) {
 function applyFilters() {
   let visibleCount = 0;
   for (const card of state.cards.values()) {
-    const matches = !state.searchMatcher || state.searchMatcher(card.dataset.search);
-    card.classList.toggle("is-hidden", !matches);
-    if (matches) {
+    const video = state.videos.get(card.dataset.videoId);
+    const matchesSearch = !state.searchMatcher || state.searchMatcher(card.dataset.search);
+    const matchesWatchState = state.showWatchedOnly
+      ? isWatchedVideo(video)
+      : !isWatchedVideo(video);
+    const isVisible = matchesSearch && matchesWatchState;
+    card.classList.toggle("is-hidden", !isVisible);
+    if (isVisible) {
       visibleCount += 1;
     }
   }
@@ -1137,6 +1296,8 @@ function applyFilters() {
   if (state.searchTerm && visibleCount === 0 && state.cards.size > 0) {
     elements.refreshSummary.textContent = "No matches for the current search.";
   }
+
+  return visibleCount;
 }
 
 function buildSearchMatcher(searchTerm) {
@@ -1156,45 +1317,68 @@ function buildSearchMatcher(searchTerm) {
 
 function updateSelectionUi() {
   const selectedCount = state.selectedIds.size;
-  const visibleCount = [...state.cards.values()].filter((card) => !card.classList.contains("is-hidden")).length;
-  const downloadedCount = state.cards.size;
+  const visibleCount = getVisibleVideoCount();
 
   elements.selectionSummary.textContent =
     selectedCount === 0
-      ? buildLibrarySummary(downloadedCount)
+      ? buildLibrarySummary()
       : `${selectedCount} selected across ${visibleCount} visible videos`;
 
   elements.removeSelectedButton.disabled = selectedCount === 0;
+  elements.removeSelectedButton.textContent = "Hide Selected";
+  elements.watchedVideosButton.classList.toggle("is-active", state.showWatchedOnly);
+  elements.watchedVideosButton.setAttribute("aria-pressed", String(state.showWatchedOnly));
 }
 
-function buildLibrarySummary(downloadedCount) {
+function buildLibrarySummary() {
+  const downloadedCount = state.videos.size;
+  const watchedCount = countWatchedVideos();
+  const activeCount = Math.max(downloadedCount - watchedCount, 0);
   const configuredDownloadCount = Number.isInteger(state.configuredDownloadCount)
     ? Math.max(state.configuredDownloadCount, 0)
     : null;
   const watchLaterTotalCount = Number.isInteger(state.watchLaterTotalCount)
     ? Math.max(state.watchLaterTotalCount, 0)
     : null;
+  const summaryParts = [
+    state.showWatchedOnly
+      ? `${watchedCount} watched or hidden videos`
+      : `${activeCount} videos in the main library`,
+  ];
 
-  if (configuredDownloadCount !== null && watchLaterTotalCount !== null) {
-    return `${downloadedCount} downloaded on disk, ${configuredDownloadCount} configured to download, ${watchLaterTotalCount} total in playlist`;
+  if (!state.showWatchedOnly && watchedCount > 0) {
+    summaryParts.push(`${watchedCount} watched or hidden`);
+  }
+
+  if (state.showWatchedOnly && activeCount > 0) {
+    summaryParts.push(`${activeCount} still in the main library`);
   }
 
   if (configuredDownloadCount !== null) {
-    return `${downloadedCount} downloaded on disk, ${configuredDownloadCount} configured to download`;
+    summaryParts.push(`sync limit ${configuredDownloadCount}`);
   }
 
   if (watchLaterTotalCount !== null) {
-    return `${downloadedCount} downloaded on disk, ${watchLaterTotalCount} total in playlist`;
+    summaryParts.push(`${watchLaterTotalCount} currently in Watch Later`);
   }
 
-  return `${downloadedCount} downloaded videos`;
+  return summaryParts.join(", ");
 }
 
 function updateStatus(status) {
   const previousSelectionKey = `${state.selectedBrowserAccountKey}|${state.selectedYouTubeAccountKey}`;
+  const previousBrowserAccountKey = state.selectedBrowserAccountKey;
   state.isBusy = Boolean(status.isBusy);
-  state.configuredDownloadCount = Number.isInteger(status.downloadCount)
-    ? status.downloadCount
+  state.isRefreshingYouTubeAccounts = Boolean(status.isRefreshingYouTubeAccounts);
+  state.syncAuthState = normalizeSyncAuthState(status.syncAuthState);
+  state.syncAuthMessage = typeof status.syncAuthMessage === "string" && status.syncAuthMessage.trim() !== ""
+    ? status.syncAuthMessage.trim()
+    : "Authentication has not been verified yet for the selected account.";
+  state.downloadedVideoCount = Number.isInteger(status.videoCount)
+    ? status.videoCount
+    : state.downloadedVideoCount;
+  state.configuredDownloadCount = Number.isInteger(status.configuredDownloadCount)
+    ? status.configuredDownloadCount
     : null;
   state.watchLaterTotalCount = Number.isInteger(status.watchLaterTotalCount)
     ? status.watchLaterTotalCount
@@ -1202,6 +1386,8 @@ function updateStatus(status) {
   elements.monitorPill.dataset.state = status.isBusy ? "busy" : "ready";
   elements.monitorPill.textContent = status.isBusy ? "Busy" : "Ready";
   elements.statusText.textContent = status.status;
+  elements.openDownloadsButton.classList.toggle("hidden", !status.canOpenDownloadsFolder);
+  elements.openDownloadsButton.disabled = !status.canOpenDownloadsFolder;
   renderBrowserAccountPicker(
     Array.isArray(status.availableBrowserAccounts) ? status.availableBrowserAccounts : [],
     status.selectedBrowserAccountKey || "",
@@ -1209,6 +1395,11 @@ function updateStatus(status) {
   renderYouTubeAccountPicker(
     Array.isArray(status.availableYouTubeAccounts) ? status.availableYouTubeAccounts : [],
     status.selectedYouTubeAccountKey || "",
+    {
+      browserAccountKey: state.selectedBrowserAccountKey,
+      previousBrowserAccountKey,
+      isRefreshing: state.isRefreshingYouTubeAccounts,
+    },
   );
   const nextSelectionKey = `${state.selectedBrowserAccountKey}|${state.selectedYouTubeAccountKey}`;
   if (previousSelectionKey !== nextSelectionKey) {
@@ -1224,7 +1415,7 @@ function updateStatus(status) {
   elements.settingsButton.disabled = false;
   elements.clearSelectionButton.disabled = state.isBusy && state.selectedIds.size === 0;
   elements.removeSelectedButton.disabled = state.selectedIds.size === 0;
-  elements.removeSelectedButton.textContent = state.isBusy ? "Queue Remove Selected" : "Remove Selected";
+  elements.removeSelectedButton.textContent = "Hide Selected";
   if (state.settingsOpen && state.isBusy && !state.settingsLoading && !state.settingsRefreshing && !state.settingsSaving) {
     elements.settingsSummary.textContent =
       "The app is busy. You can still change settings now; refresh the Watch Later total after the current operation finishes.";
@@ -1235,6 +1426,10 @@ function updateStatus(status) {
 }
 
 function updateSyncButtonState(isBusy) {
+  const authState = normalizeSyncAuthState(state.syncAuthState);
+  elements.syncButton.dataset.authState = authState;
+  elements.syncButton.title = state.syncAuthMessage;
+
   if (!isBusy) {
     if (state.syncButtonAnimationTimer !== null) {
       window.clearInterval(state.syncButtonAnimationTimer);
@@ -1243,11 +1438,13 @@ function updateSyncButtonState(isBusy) {
 
     state.syncButtonAnimationFrame = 0;
     elements.syncButton.textContent = "Sync Now";
+    elements.syncButton.setAttribute("aria-label", `Sync Now. ${state.syncAuthMessage}`);
     return;
   }
 
   const frames = ["Syncing.", "Syncing..", "Syncing..."];
   elements.syncButton.textContent = frames[state.syncButtonAnimationFrame % frames.length];
+  elements.syncButton.setAttribute("aria-label", `${elements.syncButton.textContent} ${state.syncAuthMessage}`);
 
   if (state.syncButtonAnimationTimer !== null) {
     return;
@@ -1256,7 +1453,12 @@ function updateSyncButtonState(isBusy) {
   state.syncButtonAnimationTimer = window.setInterval(() => {
     state.syncButtonAnimationFrame = (state.syncButtonAnimationFrame + 1) % frames.length;
     elements.syncButton.textContent = frames[state.syncButtonAnimationFrame];
+    elements.syncButton.setAttribute("aria-label", `${elements.syncButton.textContent} ${state.syncAuthMessage}`);
   }, 500);
+}
+
+function normalizeSyncAuthState(value) {
+  return value === "ready" || value === "failed" ? value : "missing";
 }
 
 async function selectBrowserAccount(accountKey) {
@@ -1482,14 +1684,34 @@ function buildBrowserAccountSecondaryText(account, primaryText) {
   return parts.join(" / ");
 }
 
-function renderYouTubeAccountPicker(accounts, selectedAccountKey) {
-  state.youtubeAccounts = Array.isArray(accounts) ? accounts : [];
+function renderYouTubeAccountPicker(accounts, selectedAccountKey, options = {}) {
+  const browserAccountKey = typeof options.browserAccountKey === "string"
+    ? options.browserAccountKey
+    : state.selectedBrowserAccountKey;
+  const previousBrowserAccountKey = typeof options.previousBrowserAccountKey === "string"
+    ? options.previousBrowserAccountKey
+    : browserAccountKey;
+  const isRefreshing = Boolean(options.isRefreshing);
+  const nextAccounts = Array.isArray(accounts) ? accounts : [];
+  const shouldPreserveExistingAccounts =
+    nextAccounts.length === 0
+    && isRefreshing
+    && browserAccountKey !== ""
+    && browserAccountKey === previousBrowserAccountKey
+    && browserAccountKey === state.youtubeAccountsSourceBrowserKey
+    && state.youtubeAccounts.length > 0;
+
+  state.youtubeAccounts = shouldPreserveExistingAccounts ? state.youtubeAccounts : nextAccounts;
+  if (!shouldPreserveExistingAccounts) {
+    state.youtubeAccountsSourceBrowserKey = state.youtubeAccounts.length > 0 ? browserAccountKey : "";
+  }
+
   if (state.youtubeAccounts.length === 0) {
     state.youtubeAccountOptionsKey = "";
     state.selectedYouTubeAccountKey = selectedAccountKey || "";
     elements.youtubeAccountList.replaceChildren();
     setYouTubeAccountMenuOpen(false);
-    if (state.selectedBrowserAccountKey !== "") {
+    if (browserAccountKey !== "") {
       state.youtubeAccountButtonKey = "__pending__";
       elements.youtubeAccountPicker.classList.remove("hidden");
       renderPendingYouTubeAccountButton();
@@ -1505,7 +1727,10 @@ function renderYouTubeAccountPicker(accounts, selectedAccountKey) {
   }
 
   elements.youtubeAccountPicker.classList.remove("hidden");
-  const selectedKey = selectedAccountKey || state.youtubeAccounts[0].accountKey;
+  const selectedKey =
+    selectedAccountKey
+    || state.selectedYouTubeAccountKey
+    || state.youtubeAccounts[0].accountKey;
   const selectedAccount = state.youtubeAccounts.find((account) => account.accountKey === selectedKey)
     || state.youtubeAccounts[0];
   const accountOptionsKey = state.youtubeAccounts
@@ -1707,11 +1932,27 @@ function renderActivityFeed(messages) {
   }
 }
 
-function updateEmptyState(isEmpty) {
+function updateEmptyState() {
+  const hasAnyVideos = state.cards.size > 0;
+  const isEmpty = getVisibleVideoCount() === 0;
   elements.emptyState.classList.toggle("hidden", !isEmpty);
   elements.libraryGrid.classList.toggle("hidden", isEmpty);
   if (isEmpty) {
-    clearPlayer();
+    if (!hasAnyVideos) {
+      elements.emptyStateTitle.textContent = "No downloaded videos yet";
+      elements.emptyStateText.textContent = "Run a sync from the tray app or from the button above. New videos will appear here automatically.";
+      clearPlayer();
+      return;
+    }
+
+    if (state.showWatchedOnly) {
+      elements.emptyStateTitle.textContent = "No watched videos yet";
+      elements.emptyStateText.textContent = "Videos you watch past 90%, or videos you hide manually, will appear here.";
+      return;
+    }
+
+    elements.emptyStateTitle.textContent = "No videos in the main library";
+    elements.emptyStateText.textContent = "Everything downloaded here is already marked watched or hidden. Toggle Watched Videos to review them.";
   }
 }
 

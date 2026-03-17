@@ -23,6 +23,12 @@
   --button-secondary-bg: rgba(255, 255, 255, 0.76);
   --button-danger-start: #c14428;
   --button-danger-end: #9f2819;
+  --button-auth-ready-start: #2f8b5e;
+  --button-auth-ready-end: #1f6d4f;
+  --button-auth-missing-start: #d98935;
+  --button-auth-missing-end: #b8611b;
+  --button-auth-failed-start: #c14428;
+  --button-auth-failed-end: #9f2819;
   --status-ok-bg: rgba(31, 109, 79, 0.12);
   --status-warn-bg: rgba(154, 63, 29, 0.12);
   --status-offline-bg: rgba(32, 24, 21, 0.12);
@@ -80,6 +86,12 @@
     --button-secondary-bg: rgba(255, 255, 255, 0.05);
     --button-danger-start: #ff6a43;
     --button-danger-end: #d24626;
+    --button-auth-ready-start: #8be0b6;
+    --button-auth-ready-end: #63bf92;
+    --button-auth-missing-start: #f0bb73;
+    --button-auth-missing-end: #d58d42;
+    --button-auth-failed-start: #ff6a43;
+    --button-auth-failed-end: #d24626;
     --status-ok-bg: rgba(123, 214, 169, 0.12);
     --status-warn-bg: rgba(241, 177, 109, 0.14);
     --status-offline-bg: rgba(255, 255, 255, 0.08);
@@ -394,6 +406,12 @@ button {
   border: 1px solid var(--line);
 }
 
+.secondary-button.is-active {
+  color: var(--button-text-strong);
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  border-color: transparent;
+}
+
 .ghost-button {
   color: var(--text);
   background: var(--surface-muted);
@@ -413,6 +431,27 @@ button {
 
 #syncButton {
   min-inline-size: 112px;
+}
+
+#syncButton[data-auth-state="ready"] {
+  background: linear-gradient(135deg, var(--button-auth-ready-start) 0%, var(--button-auth-ready-end) 100%);
+}
+
+#syncButton[data-auth-state="missing"] {
+  background: linear-gradient(135deg, var(--button-auth-missing-start) 0%, var(--button-auth-missing-end) 100%);
+}
+
+#syncButton[data-auth-state="failed"] {
+  color: var(--button-danger-text);
+  background: linear-gradient(135deg, var(--button-auth-failed-start) 0%, var(--button-auth-failed-end) 100%);
+}
+
+#syncButton:disabled {
+  opacity: 0.9;
+}
+
+#watchedVideosButton {
+  min-inline-size: 138px;
 }
 
 .primary-button:disabled,
@@ -989,11 +1028,11 @@ select.settings-input {
   align-items: center;
   justify-self: end;
   align-self: end;
-  min-height: 30px;
-  padding: 0 12px;
-  border-radius: 999px;
-  color: var(--index-pill-text);
-  background: var(--index-pill-bg);
+  min-height: auto;
+  padding: 0;
+  border-radius: 0;
+  color: var(--text-soft);
+  background: transparent;
   font-size: 0.82rem;
   font-weight: 700;
   letter-spacing: 0.06em;
