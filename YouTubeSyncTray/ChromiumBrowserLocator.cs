@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Win32;
 
 namespace YouTubeSyncTray;
@@ -131,6 +132,73 @@ internal static class ChromiumBrowserLocator
         return true;
     }
 
+    public static IReadOnlyList<string> EnumerateProfiles(BrowserCookieSource browser)
+    {
+        if (!TryGetUserDataPath(browser, out var userDataPath))
+        {
+            return [];
+        }
+
+        var profiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Default"
+        };
+
+        try
+        {
+            foreach (var directory in Directory.GetDirectories(userDataPath, "*", SearchOption.TopDirectoryOnly))
+            {
+                var profileDirectoryName = Path.GetFileName(directory);
+                if (string.IsNullOrWhiteSpace(profileDirectoryName))
+                {
+                    continue;
+                }
+
+                if (File.Exists(Path.Combine(directory, "Preferences")))
+                {
+                    profiles.Add(profileDirectoryName);
+                }
+            }
+        }
+        catch
+        {
+            return profiles.ToList();
+        }
+
+        return profiles.ToList();
+    }
+
+    public static string GetProfileDisplayName(BrowserCookieSource browser, string profile)
+    {
+        if (!TryGetProfilePreferencesPath(browser, profile, out var preferencesPath))
+        {
+            return string.IsNullOrWhiteSpace(profile) ? "Default" : profile.Trim();
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(preferencesPath));
+            if (document.RootElement.TryGetProperty("profile", out var profileElement)
+                && profileElement.ValueKind == JsonValueKind.Object)
+            {
+                if (profileElement.TryGetProperty("name", out var nameElement)
+                    && nameElement.ValueKind == JsonValueKind.String)
+                {
+                    var name = nameElement.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        return name;
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return string.IsNullOrWhiteSpace(profile) ? "Default" : profile.Trim();
+    }
+
     public static bool TryGetUserDataPath(BrowserCookieSource browser, out string userDataPath)
     {
         userDataPath = browser switch
@@ -149,6 +217,57 @@ internal static class ChromiumBrowserLocator
         };
 
         return userDataPath.Length > 0 && Directory.Exists(userDataPath);
+    }
+
+    public static bool TryGetProfileAvatarPath(BrowserCookieSource browser, string profile, out string avatarPath)
+    {
+        avatarPath = string.Empty;
+        if (!TryGetUserDataPath(browser, out var userDataPath))
+        {
+            return false;
+        }
+
+        return TryGetProfileAvatarPath(userDataPath, profile, out avatarPath);
+    }
+
+    internal static bool TryGetProfileAvatarPath(string userDataPath, string profile, out string avatarPath)
+    {
+        avatarPath = string.Empty;
+        if (string.IsNullOrWhiteSpace(userDataPath) || !Directory.Exists(userDataPath))
+        {
+            return false;
+        }
+
+        var normalizedProfile = string.IsNullOrWhiteSpace(profile) ? "Default" : profile.Trim();
+        var profileDirectory = Path.Combine(userDataPath, normalizedProfile);
+        if (!Directory.Exists(profileDirectory))
+        {
+            return false;
+        }
+
+        try
+        {
+            var localStatePath = Path.Combine(userDataPath, "Local State");
+            if (File.Exists(localStatePath))
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(localStatePath));
+                if (TryGetProfileAvatarFileName(document.RootElement, normalizedProfile, out var avatarFileName))
+                {
+                    var candidatePath = Path.Combine(profileDirectory, Path.GetFileName(avatarFileName));
+                    if (File.Exists(candidatePath))
+                    {
+                        avatarPath = candidatePath;
+                        return true;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Fall back to the local profile folder scan below.
+        }
+
+        return TryFindProfileAvatarFile(profileDirectory, out avatarPath);
     }
 
     private static IEnumerable<string> GetCandidateExecutablePaths(BrowserCookieSource browser)
@@ -214,5 +333,69 @@ internal static class ChromiumBrowserLocator
                 yield return value;
             }
         }
+    }
+
+    private static bool TryGetProfileAvatarFileName(JsonElement root, string profile, out string avatarFileName)
+    {
+        avatarFileName = string.Empty;
+        if (!root.TryGetProperty("profile", out var profileElement)
+            || profileElement.ValueKind != JsonValueKind.Object
+            || !profileElement.TryGetProperty("info_cache", out var infoCacheElement)
+            || infoCacheElement.ValueKind != JsonValueKind.Object
+            || !infoCacheElement.TryGetProperty(profile, out var profileEntry)
+            || profileEntry.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        avatarFileName = GetJsonString(profileEntry, "gaia_picture_file_name");
+        return !string.IsNullOrWhiteSpace(avatarFileName);
+    }
+
+    private static bool TryFindProfileAvatarFile(string profileDirectory, out string avatarPath)
+    {
+        avatarPath = string.Empty;
+        if (!Directory.Exists(profileDirectory))
+        {
+            return false;
+        }
+
+        var candidate = Directory.EnumerateFiles(profileDirectory, "*Profile Picture*")
+            .OrderBy(GetProfileAvatarPriority)
+            .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return false;
+        }
+
+        avatarPath = candidate;
+        return true;
+    }
+
+    private static int GetProfileAvatarPriority(string path)
+    {
+        return Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".png" => 0,
+            ".jpg" => 1,
+            ".jpeg" => 2,
+            ".webp" => 3,
+            ".gif" => 4,
+            ".bmp" => 5,
+            ".ico" => 6,
+            _ => 10
+        };
+    }
+
+    private static string GetJsonString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property)
+            || property.ValueKind != JsonValueKind.String)
+        {
+            return string.Empty;
+        }
+
+        return property.GetString()?.Trim() ?? string.Empty;
     }
 }

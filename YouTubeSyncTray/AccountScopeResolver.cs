@@ -8,15 +8,18 @@ internal sealed class AccountScopeResolver
     private readonly YoutubeSyncPaths _paths;
     private readonly BrowserAccountDiscoveryService _browserAccountDiscovery;
     private readonly YouTubeAccountDiscoveryService _youTubeAccountDiscovery;
+    private readonly KnownLibraryScopeStore _knownLibraryScopeStore;
 
     public AccountScopeResolver(
         YoutubeSyncPaths paths,
         BrowserAccountDiscoveryService browserAccountDiscovery,
-        YouTubeAccountDiscoveryService youTubeAccountDiscovery)
+        YouTubeAccountDiscoveryService youTubeAccountDiscovery,
+        KnownLibraryScopeStore knownLibraryScopeStore)
     {
         _paths = paths;
         _browserAccountDiscovery = browserAccountDiscovery;
         _youTubeAccountDiscovery = youTubeAccountDiscovery;
+        _knownLibraryScopeStore = knownLibraryScopeStore;
     }
 
     public ResolvedAccountScope Resolve(AppSettings settings)
@@ -28,6 +31,8 @@ internal sealed class AccountScopeResolver
             settings,
             browserAccount?.AuthUserIndex,
             allowNetwork: false);
+        var browserAccountKey = browserAccount?.AccountKey ?? settings.SelectedBrowserAccountKey ?? string.Empty;
+        var youTubeAccountKey = youTubeAccount?.AccountKey ?? settings.SelectedYouTubeAccountKey ?? string.Empty;
         var preferredFolderName = BuildFolderName(browserAccount, youTubeAccount, settings);
         var folderName = ResolveExistingFolderName(
             _paths.DownloadsPath,
@@ -46,13 +51,31 @@ internal sealed class AccountScopeResolver
         MaybeMigrateLegacyRootDownloads(downloadsPath);
         MaybeMigrateBrowserFallbackScope(browserAccount, youTubeAccount, settings, downloadsPath, thumbnailCachePath, archivePath);
 
-        return new ResolvedAccountScope(
+        var scope = new ResolvedAccountScope(
+            KnownLibraryScopeStore.BuildScopeKey(browserAccountKey, youTubeAccountKey, folderName),
             browserAccount,
             youTubeAccount,
+            browserAccountKey,
+            GetBrowserLabel(browserAccount, settings) ?? string.Empty,
+            browserAccount?.Email ?? string.Empty,
+            browserAccount?.Profile ?? settings.BrowserProfile,
+            browserAccount?.AuthUserIndex,
+            youTubeAccountKey,
+            FirstNonEmpty(
+                youTubeAccount?.DisplayName,
+                TryParseYouTubeSelectionLabel(settings.SelectedYouTubeAccountKey))
+            ?? string.Empty,
+            FirstNonEmpty(
+                youTubeAccount?.Handle,
+                TryParseYouTubeHandle(settings.SelectedYouTubeAccountKey))
+            ?? string.Empty,
+            youTubeAccount?.AuthUserIndex,
             folderName,
             downloadsPath,
             thumbnailCachePath,
             archivePath);
+        _knownLibraryScopeStore.Register(scope);
+        return scope;
     }
 
     internal static string BuildFolderName(
@@ -298,6 +321,19 @@ internal sealed class AccountScopeResolver
         };
     }
 
+    private static string? TryParseYouTubeHandle(string? accountKey)
+    {
+        if (string.IsNullOrWhiteSpace(accountKey))
+        {
+            return null;
+        }
+
+        var parts = accountKey.Split('|', StringSplitOptions.TrimEntries);
+        return parts.Length >= 3 && string.Equals(parts[1], "handle", StringComparison.Ordinal)
+            ? parts[2]
+            : null;
+    }
+
     private static string GetFolderHash(string identityKey) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identityKey)))[..8];
 
@@ -388,10 +424,23 @@ internal sealed class AccountScopeResolver
     }
 
     internal readonly record struct ResolvedAccountScope(
+        string ScopeKey,
         BrowserAccountOption? BrowserAccount,
         YouTubeAccountOption? YouTubeAccount,
+        string BrowserAccountKey,
+        string BrowserDisplayName,
+        string BrowserEmail,
+        string BrowserProfile,
+        int? BrowserAuthUserIndex,
+        string YouTubeAccountKey,
+        string YouTubeDisplayName,
+        string YouTubeHandle,
+        int? YouTubeAuthUserIndex,
         string FolderName,
         string DownloadsPath,
         string ThumbnailCachePath,
-        string ArchivePath);
+        string ArchivePath)
+    {
+        public bool HasYouTubeScope => !string.IsNullOrWhiteSpace(YouTubeAccountKey);
+    }
 }

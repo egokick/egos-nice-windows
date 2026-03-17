@@ -1,5 +1,8 @@
 ﻿using System.Diagnostics;
 using System.Net;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics;
@@ -18,6 +21,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
 
     private readonly YoutubeSyncPaths _paths;
     private readonly ThumbnailCacheService _thumbnailCacheService;
+    private readonly LibraryCatalogStore _libraryCatalogStore;
     private readonly LibraryVideoStateStore _videoStateStore;
     private readonly LibraryBrowserState _state;
     private readonly Func<AppSettings> _getSettings;
@@ -25,9 +29,11 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private readonly BrowserAccountDiscoveryService _accountDiscovery;
     private readonly YouTubeAccountDiscoveryService _youTubeAccountDiscovery;
     private readonly AccountScopeResolver _accountScopeResolver;
+    private readonly KnownLibraryScopeStore _knownLibraryScopeStore;
     private readonly Func<Task<LibraryCommandResponse>> _requestSyncAsync;
     private readonly Func<IReadOnlyList<string>, bool, Task<LibraryCommandResponse>> _requestRemoveAsync;
     private readonly Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> _requestRestoreAsync;
+    private readonly Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> _requestRedownloadAsync;
     private readonly Func<Task<LibraryCommandResponse>> _requestOpenDownloadsFolderAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectBrowserAccountAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectYouTubeAccountAsync;
@@ -38,6 +44,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
     private readonly SemaphoreSlim _startGate = new(1, 1);
     private readonly object _videoCacheGate = new();
+    private readonly string _assetVersion;
 
     private WebApplication? _app;
     private string? _baseAddress;
@@ -47,6 +54,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     public LibraryWebServer(
         YoutubeSyncPaths paths,
         ThumbnailCacheService thumbnailCacheService,
+        LibraryCatalogStore libraryCatalogStore,
         LibraryVideoStateStore videoStateStore,
         LibraryBrowserState state,
         Func<AppSettings> getSettings,
@@ -54,9 +62,11 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         BrowserAccountDiscoveryService accountDiscovery,
         YouTubeAccountDiscoveryService youTubeAccountDiscovery,
         AccountScopeResolver accountScopeResolver,
+        KnownLibraryScopeStore knownLibraryScopeStore,
         Func<Task<LibraryCommandResponse>> requestSyncAsync,
         Func<IReadOnlyList<string>, bool, Task<LibraryCommandResponse>> requestRemoveAsync,
         Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> requestRestoreAsync,
+        Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> requestRedownloadAsync,
         Func<Task<LibraryCommandResponse>> requestOpenDownloadsFolderAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectBrowserAccountAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectYouTubeAccountAsync,
@@ -67,6 +77,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     {
         _paths = paths;
         _thumbnailCacheService = thumbnailCacheService;
+        _libraryCatalogStore = libraryCatalogStore;
         _videoStateStore = videoStateStore;
         _state = state;
         _getSettings = getSettings;
@@ -74,9 +85,11 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         _accountDiscovery = accountDiscovery;
         _youTubeAccountDiscovery = youTubeAccountDiscovery;
         _accountScopeResolver = accountScopeResolver;
+        _knownLibraryScopeStore = knownLibraryScopeStore;
         _requestSyncAsync = requestSyncAsync;
         _requestRemoveAsync = requestRemoveAsync;
         _requestRestoreAsync = requestRestoreAsync;
+        _requestRedownloadAsync = requestRedownloadAsync;
         _requestOpenDownloadsFolderAsync = requestOpenDownloadsFolderAsync;
         _requestSelectBrowserAccountAsync = requestSelectBrowserAccountAsync;
         _requestSelectYouTubeAccountAsync = requestSelectYouTubeAccountAsync;
@@ -84,6 +97,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         _requestRefreshSettingsSummaryAsync = requestRefreshSettingsSummaryAsync;
         _requestSaveSettingsAsync = requestSaveSettingsAsync;
         _requestOpenSettingsAsync = requestOpenSettingsAsync;
+        _assetVersion = BuildAssetVersion();
     }
 
     public async Task<string> EnsureStartedAsync(CancellationToken cancellationToken)
@@ -123,7 +137,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                 var app = builder.Build();
                 app.Use(async (context, next) =>
                 {
-                    if (ShouldDisableCaching(context.Request.Path))
+                    if (ShouldApplyNoStoreHeaders(context.Request.Path))
                     {
                         ApplyNoStoreHeaders(context.Response.Headers);
                     }
@@ -218,14 +232,45 @@ internal sealed class LibraryWebServer : IAsyncDisposable
 
     private void MapRoutes(WebApplication app, string webUiPath, PhoneAccessProbe phoneAccessProbe)
     {
-        app.MapGet("/", () => Results.File(Path.Combine(webUiPath, "index.html"), "text/html; charset=utf-8"));
-        app.MapGet("/styles.css", () => Results.File(Path.Combine(webUiPath, "styles.css"), "text/css; charset=utf-8"));
-        app.MapGet("/app.js", () => Results.File(Path.Combine(webUiPath, "app.js"), "application/javascript; charset=utf-8"));
-        app.MapGet("/favicon.ico", () => Results.File(FaviconBytes, "image/x-icon"));
+        app.MapGet("/", (HttpContext context) => GetTemplatedShellAsset(
+            context,
+            Path.Combine(webUiPath, "index.html"),
+            "text/html; charset=utf-8"));
+        app.MapGet("/styles.css", (HttpContext context) => GetShellAsset(
+            context,
+            Path.Combine(webUiPath, "styles.css"),
+            "text/css; charset=utf-8"));
+        app.MapGet("/app.js", (HttpContext context) => GetShellAsset(
+            context,
+            Path.Combine(webUiPath, "app.js"),
+            "application/javascript; charset=utf-8"));
+        app.MapGet("/sw.js", (HttpContext context) => GetTemplatedShellAsset(
+            context,
+            Path.Combine(webUiPath, "sw.js"),
+            "application/javascript; charset=utf-8"));
+        app.MapGet("/favicon.ico", (HttpContext context) => GetGeneratedAsset(
+            context,
+            FaviconBytes,
+            "image/x-icon",
+            "favicon.ico"));
 
         app.MapGet("/api/network-info", (HttpContext context) => Results.Json(
             phoneAccessProbe.GetSnapshot(IsLocalRequest(context)),
             _jsonOptions));
+        app.MapGet("/api/qr-code", (string? value) =>
+        {
+            var svg = QrCodeSvgRenderer.CreateSvg(value);
+            return string.IsNullOrWhiteSpace(svg)
+                ? Results.BadRequest()
+                : Results.Text(svg, "image/svg+xml; charset=utf-8");
+        });
+        app.MapGet("/api/bootstrap", (HttpContext context) =>
+        {
+            ApplyBootstrapCacheHeaders(context.Response.Headers);
+            return Results.Json(
+                BuildBootstrapDto(IsLocalRequest(context)),
+                _jsonOptions);
+        });
         app.MapGet("/api/status", (HttpContext context) => Results.Json(
             BuildStatusDto(IsLocalRequest(context)),
             _jsonOptions));
@@ -235,6 +280,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         app.MapGet("/api/videos/{videoId}/captions", GetVideoCaptions);
         app.MapGet("/api/videos/{videoId}/captions/{trackKey}/file", GetVideoCaptionFileAsync);
         app.MapGet("/api/videos/{videoId}/stream", GetVideoStreamAsync);
+        app.MapGet("/api/browser-accounts/{browser}/{profile}/avatar", GetBrowserAccountAvatar);
         app.MapPost("/api/hotspot/start", (HttpContext context) =>
         {
             if (!IsLocalRequest(context))
@@ -270,6 +316,11 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                 request.MarkHidden)));
         app.MapPost("/api/restore", async (RestoreVideosRequest request) => ToHttpResult(
             await _requestRestoreAsync(request.VideoIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray())));
+        app.MapPost("/api/redownload", async (RestoreVideosRequest request) => ToHttpResult(
+            await _requestRedownloadAsync(request.VideoIds
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray())));
@@ -324,6 +375,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             snapshot.LibraryVersion,
             snapshot.ConfiguredDownloadCount,
             snapshot.WatchLaterTotalCount,
+            snapshot.WatchLaterTotalUpdatedAtUtc,
             snapshot.SyncScopeDownloadedCount,
             snapshot.SyncScopeTargetCount,
             snapshot.SyncScopeFailedCount,
@@ -344,7 +396,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                     account.Email,
                     account.BrowserName,
                     account.Profile,
-                    account.AvatarUrl,
+                    ResolveBrowserAccountAvatarUrl(account, canOpenDownloadsFolder),
                     account.AuthUserIndex))
                 .ToList(),
             isRefreshingYouTubeAccounts,
@@ -362,12 +414,47 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                 .ToList());
     }
 
+    private BootstrapDto BuildBootstrapDto(bool canOpenDownloadsFolder)
+    {
+        var status = BuildStatusDto(canOpenDownloadsFolder);
+        var selectedScope = _accountScopeResolver.Resolve(_getSettings());
+        return new BootstrapDto(
+            status,
+            BuildVideoDtos(),
+            _knownLibraryScopeStore.LoadScopes()
+                .Select(scope => new KnownLibraryScopeDto(
+                    scope.ScopeKey,
+                    scope.FolderName,
+                    scope.BrowserAccountKey,
+                    scope.BrowserDisplayName,
+                    scope.BrowserEmail,
+                    scope.BrowserProfile,
+                    scope.YouTubeAccountKey,
+                    scope.YouTubeDisplayName,
+                    scope.YouTubeHandle,
+                    scope.DownloadedVideoCount,
+                    scope.LastSeenAtUtc,
+                    scope.LastSuccessfulSyncAtUtc,
+                    scope.IsAvailableOnDisk))
+                .ToList(),
+            new SelectedScopeDto(
+                selectedScope.ScopeKey,
+                selectedScope.FolderName,
+                selectedScope.BrowserAccountKey,
+                selectedScope.YouTubeAccountKey,
+                selectedScope.DownloadsPath,
+                selectedScope.ThumbnailCachePath,
+                selectedScope.ArchivePath),
+            DateTimeOffset.UtcNow);
+    }
+
     private IReadOnlyList<LibraryVideoDto> BuildVideoDtos()
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
-        var items = LoadVideoItems(accountScope.DownloadsPath);
+        var items = LoadVideoItems(accountScope);
         var videoStates = _videoStateStore.Load(accountScope.FolderName);
         _state.SetVideoIds(items.Select(item => item.VideoId).ToList());
+        _knownLibraryScopeStore.UpdateScopeInventory(accountScope, items.Count);
 
         return items
             .Select(item =>
@@ -389,10 +476,10 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             .ToList();
     }
 
-    private async Task<IResult> GetThumbnailAsync(string videoId, CancellationToken cancellationToken)
+    private async Task<IResult> GetThumbnailAsync(HttpContext context, string videoId, CancellationToken cancellationToken)
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
-        var item = FindVideoItem(accountScope.DownloadsPath, videoId);
+        var item = FindVideoItem(accountScope, videoId);
         if (item is null)
         {
             return Results.NotFound();
@@ -404,26 +491,30 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             return Results.NotFound();
         }
 
-        return Results.File(thumbPath, "image/jpeg");
+        return BuildCacheableFileResult(context, thumbPath, "image/jpeg");
     }
 
-    private Task<IResult> GetVideoStreamAsync(string videoId)
+    private Task<IResult> GetVideoStreamAsync(HttpContext context, string videoId)
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
-        var item = FindVideoItem(accountScope.DownloadsPath, videoId);
+        var item = FindVideoItem(accountScope, videoId);
         if (item is null)
         {
             return Task.FromResult<IResult>(Results.NotFound());
         }
 
         var contentType = GetVideoContentType(item.VideoPath);
-        return Task.FromResult<IResult>(Results.File(item.VideoPath, contentType, enableRangeProcessing: true));
+        return Task.FromResult(BuildCacheableFileResult(
+            context,
+            item.VideoPath,
+            contentType,
+            enableRangeProcessing: true));
     }
 
     private IResult GetVideoCaptions(string videoId)
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
-        var item = FindVideoItem(accountScope.DownloadsPath, videoId);
+        var item = FindVideoItem(accountScope, videoId);
         if (item is null)
         {
             return Results.NotFound();
@@ -440,10 +531,14 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             _jsonOptions);
     }
 
-    private async Task<IResult> GetVideoCaptionFileAsync(string videoId, string trackKey, CancellationToken cancellationToken)
+    private async Task<IResult> GetVideoCaptionFileAsync(
+        HttpContext context,
+        string videoId,
+        string trackKey,
+        CancellationToken cancellationToken)
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
-        var item = FindVideoItem(accountScope.DownloadsPath, videoId);
+        var item = FindVideoItem(accountScope, videoId);
         if (item is null)
         {
             return Results.NotFound();
@@ -462,25 +557,49 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             content = CaptionFormatConverter.ConvertSrtToWebVtt(content);
         }
 
-        return Results.Text(content, "text/vtt; charset=utf-8");
+        return BuildCacheableTextResult(
+            context,
+            content,
+            "text/vtt; charset=utf-8",
+            track.SourcePath);
     }
 
-    private IReadOnlyList<VideoItem> LoadVideoItems(string downloadsPath)
+    private IResult GetBrowserAccountAvatar(HttpContext context, string browser, string profile)
     {
-        var items = VideoItem.LoadFromDownloads(downloadsPath, _state.GetWatchLaterOrderSnapshot());
-        UpdateVideoCache(downloadsPath, items);
+        if (!IsLocalRequest(context))
+        {
+            return Results.NotFound();
+        }
+
+        if (!Enum.TryParse<BrowserCookieSource>(browser, ignoreCase: true, out var browserSource)
+            || !ChromiumBrowserLocator.TryGetProfileAvatarPath(browserSource, profile, out var avatarPath)
+            || !File.Exists(avatarPath))
+        {
+            return Results.NotFound();
+        }
+
+        return BuildCacheableFileResult(context, avatarPath, GetImageContentType(avatarPath));
+    }
+
+    private IReadOnlyList<VideoItem> LoadVideoItems(AccountScopeResolver.ResolvedAccountScope accountScope)
+    {
+        var items = _libraryCatalogStore.LoadOrScan(
+            accountScope.FolderName,
+            accountScope.DownloadsPath,
+            _state.GetWatchLaterOrderSnapshot());
+        UpdateVideoCache(accountScope.DownloadsPath, items);
         return items;
     }
 
-    private VideoItem? FindVideoItem(string downloadsPath, string videoId)
+    private VideoItem? FindVideoItem(AccountScopeResolver.ResolvedAccountScope accountScope, string videoId)
     {
-        if (TryGetCachedVideoItem(downloadsPath, videoId, out var cachedItem)
+        if (TryGetCachedVideoItem(accountScope.DownloadsPath, videoId, out var cachedItem)
             && File.Exists(cachedItem.VideoPath))
         {
             return cachedItem;
         }
 
-        return LoadVideoItems(downloadsPath)
+        return LoadVideoItems(accountScope)
             .FirstOrDefault(candidate => string.Equals(candidate.VideoId, videoId, StringComparison.Ordinal));
     }
 
@@ -537,6 +656,35 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         }
     }
 
+    private static string ResolveBrowserAccountAvatarUrl(BrowserAccountOption account, bool allowLocalFallback)
+    {
+        if (!string.IsNullOrWhiteSpace(account.AvatarUrl))
+        {
+            return account.AvatarUrl;
+        }
+
+        if (!allowLocalFallback
+            || !ChromiumBrowserLocator.TryGetProfileAvatarPath(account.Browser, account.Profile, out var avatarPath)
+            || !File.Exists(avatarPath))
+        {
+            return string.Empty;
+        }
+
+        return $"/api/browser-accounts/{Uri.EscapeDataString(account.Browser.ToString())}/{Uri.EscapeDataString(account.Profile)}/avatar?v={GetFileRevision(avatarPath)}";
+    }
+
+    private static long GetFileRevision(string path)
+    {
+        try
+        {
+            return new FileInfo(path).LastWriteTimeUtc.Ticks;
+        }
+        catch
+        {
+            return DateTime.UtcNow.Ticks;
+        }
+    }
+
     private static string GetVideoContentType(string path)
     {
         return Path.GetExtension(path).ToLowerInvariant() switch
@@ -546,6 +694,21 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             ".m4v" => "video/x-m4v",
             ".mov" => "video/quicktime",
             ".mkv" => "video/x-matroska",
+            _ => "application/octet-stream"
+        };
+    }
+
+    private static string GetImageContentType(string path)
+    {
+        return Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".png" => "image/png",
+            ".jpg" => "image/jpeg",
+            ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".bmp" => "image/bmp",
+            ".ico" => "image/x-icon",
             _ => "application/octet-stream"
         };
     }
@@ -604,17 +767,201 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         ];
     }
 
-    private static bool ShouldDisableCaching(PathString path) =>
-        path == "/"
-        || path == "/styles.css"
-        || path == "/app.js"
-        || path.StartsWithSegments("/api");
+    private static bool ShouldApplyNoStoreHeaders(PathString path) =>
+        path == "/api/status"
+        || path == "/api/settings"
+        || path.StartsWithSegments("/api/settings/")
+        || path == "/api/sync"
+        || path == "/api/remove"
+        || path == "/api/restore"
+        || path == "/api/redownload"
+        || path == "/api/browser-account/select"
+        || path == "/api/youtube-account/select"
+        || path == "/api/downloads/open"
+        || path == "/api/hotspot/start"
+        || path == "/api/hotspot/stop";
 
     private static void ApplyNoStoreHeaders(IHeaderDictionary headers)
     {
         headers["Cache-Control"] = "no-store, no-cache, max-age=0, must-revalidate";
         headers["Pragma"] = "no-cache";
         headers["Expires"] = "0";
+    }
+
+    private static void ApplyBootstrapCacheHeaders(IHeaderDictionary headers)
+    {
+        headers["Cache-Control"] = "private, max-age=0, must-revalidate";
+    }
+
+    private IResult GetShellAsset(HttpContext context, string path, string contentType)
+    {
+        return BuildCacheableFileResult(context, path, contentType, immutable: true);
+    }
+
+    private IResult GetTemplatedShellAsset(HttpContext context, string path, string contentType)
+    {
+        if (!File.Exists(path))
+        {
+            return Results.NotFound();
+        }
+
+        var content = ReplaceAssetTokens(File.ReadAllText(path));
+        var isIndex = string.Equals(Path.GetFileName(path), "index.html", StringComparison.OrdinalIgnoreCase);
+        return BuildCacheableTextResult(
+            context,
+            content,
+            contentType,
+            path,
+            immutable: !isIndex,
+            cacheControl: isIndex ? "public, max-age=0, must-revalidate" : null);
+    }
+
+    private IResult GetGeneratedAsset(HttpContext context, byte[] content, string contentType, string assetName)
+    {
+        var lastModifiedUtc = Assembly.GetExecutingAssembly().Location is { Length: > 0 } assemblyPath && File.Exists(assemblyPath)
+            ? File.GetLastWriteTimeUtc(assemblyPath)
+            : DateTime.UtcNow;
+        var etag = BuildContentEtag(content);
+        if (IsNotModified(context.Request, etag, lastModifiedUtc))
+        {
+            ApplyCacheHeaders(context.Response.Headers, "public, max-age=31536000, immutable", lastModifiedUtc, etag);
+            return Results.StatusCode(StatusCodes.Status304NotModified);
+        }
+
+        ApplyCacheHeaders(context.Response.Headers, "public, max-age=31536000, immutable", lastModifiedUtc, etag);
+        context.Response.Headers["Content-Disposition"] = $"inline; filename=\"{assetName}\"";
+        return Results.File(content, contentType);
+    }
+
+    private IResult BuildCacheableFileResult(
+        HttpContext context,
+        string path,
+        string contentType,
+        bool immutable = false,
+        bool enableRangeProcessing = false)
+    {
+        if (!File.Exists(path))
+        {
+            return Results.NotFound();
+        }
+
+        var info = new FileInfo(path);
+        var etag = BuildFileEtag(info);
+        var cacheControl = immutable
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=86400";
+        if (!context.Request.Headers.ContainsKey("Range") && IsNotModified(context.Request, etag, info.LastWriteTimeUtc))
+        {
+            ApplyCacheHeaders(context.Response.Headers, cacheControl, info.LastWriteTimeUtc, etag);
+            return Results.StatusCode(StatusCodes.Status304NotModified);
+        }
+
+        ApplyCacheHeaders(context.Response.Headers, cacheControl, info.LastWriteTimeUtc, etag);
+        return Results.File(path, contentType, enableRangeProcessing: enableRangeProcessing);
+    }
+
+    private IResult BuildCacheableTextResult(
+        HttpContext context,
+        string content,
+        string contentType,
+        string sourcePath,
+        bool immutable = false,
+        string? cacheControl = null)
+    {
+        var bytes = Encoding.UTF8.GetBytes(content);
+        var lastModifiedUtc = File.Exists(sourcePath) ? File.GetLastWriteTimeUtc(sourcePath) : DateTime.UtcNow;
+        var etag = BuildContentEtag(bytes);
+        cacheControl ??= immutable
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=86400";
+        if (IsNotModified(context.Request, etag, lastModifiedUtc))
+        {
+            ApplyCacheHeaders(context.Response.Headers, cacheControl, lastModifiedUtc, etag);
+            return Results.StatusCode(StatusCodes.Status304NotModified);
+        }
+
+        ApplyCacheHeaders(context.Response.Headers, cacheControl, lastModifiedUtc, etag);
+        return Results.Text(content, contentType);
+    }
+
+    private string ReplaceAssetTokens(string content)
+    {
+        return content.Replace("__APP_VERSION__", _assetVersion, StringComparison.Ordinal);
+    }
+
+    private static string BuildAssetVersion()
+    {
+        var seed = new StringBuilder(Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "1.0.0");
+        try
+        {
+            var assemblyPath = Assembly.GetExecutingAssembly().Location;
+            if (!string.IsNullOrWhiteSpace(assemblyPath) && File.Exists(assemblyPath))
+            {
+                var assemblyInfo = new FileInfo(assemblyPath);
+                seed.Append('|').Append(assemblyInfo.Length).Append('|').Append(assemblyInfo.LastWriteTimeUtc.Ticks);
+            }
+
+            var webUiPath = ResolveWebUiPath();
+            foreach (var assetName in new[] { "index.html", "app.js", "styles.css", "sw.js" })
+            {
+                var assetPath = Path.Combine(webUiPath, assetName);
+                if (!File.Exists(assetPath))
+                {
+                    continue;
+                }
+
+                var info = new FileInfo(assetPath);
+                seed.Append('|').Append(assetName).Append('|').Append(info.Length).Append('|').Append(info.LastWriteTimeUtc.Ticks);
+            }
+        }
+        catch
+        {
+            // If asset discovery fails, fall back to the assembly version string.
+        }
+
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(seed.ToString()));
+        return Convert.ToHexString(hash[..8]).ToLowerInvariant();
+    }
+
+    private static void ApplyCacheHeaders(
+        IHeaderDictionary headers,
+        string cacheControl,
+        DateTimeOffset lastModifiedUtc,
+        string etag)
+    {
+        headers["Cache-Control"] = cacheControl;
+        headers["ETag"] = etag;
+        headers["Last-Modified"] = lastModifiedUtc.ToUniversalTime().ToString("R");
+    }
+
+    private static bool IsNotModified(HttpRequest request, string etag, DateTimeOffset lastModifiedUtc)
+    {
+        var ifNoneMatch = request.Headers.IfNoneMatch.ToString();
+        if (!string.IsNullOrWhiteSpace(ifNoneMatch))
+        {
+            var values = ifNoneMatch.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (values.Any(value => value == "*" || string.Equals(value, etag, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+        }
+
+        if (DateTimeOffset.TryParse(request.Headers.IfModifiedSince.ToString(), out var ifModifiedSince))
+        {
+            return lastModifiedUtc <= ifModifiedSince;
+        }
+
+        return false;
+    }
+
+    private static string BuildFileEtag(FileInfo info)
+    {
+        return $"\"{info.Length:x}-{info.LastWriteTimeUtc.Ticks:x}\"";
+    }
+
+    private static string BuildContentEtag(byte[] content)
+    {
+        return "\"" + Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant() + "\"";
     }
 
     private string BuildApiErrorMessage(Exception? exception)
@@ -717,6 +1064,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         long LibraryVersion,
         int ConfiguredDownloadCount,
         int? WatchLaterTotalCount,
+        DateTimeOffset? WatchLaterTotalUpdatedAtUtc,
         int? SyncScopeDownloadedCount,
         int? SyncScopeTargetCount,
         int? SyncScopeFailedCount,
@@ -734,6 +1082,37 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         string SelectedYouTubeAccountKey,
         string SelectedYouTubeAccountLabel,
         IReadOnlyList<YouTubeAccountDto> AvailableYouTubeAccounts);
+
+    private sealed record KnownLibraryScopeDto(
+        string ScopeKey,
+        string FolderName,
+        string BrowserAccountKey,
+        string BrowserDisplayName,
+        string BrowserEmail,
+        string BrowserProfile,
+        string YouTubeAccountKey,
+        string YouTubeDisplayName,
+        string YouTubeHandle,
+        int DownloadedVideoCount,
+        DateTimeOffset LastSeenAtUtc,
+        DateTimeOffset? LastSuccessfulSyncAtUtc,
+        bool IsAvailableOnDisk);
+
+    private sealed record SelectedScopeDto(
+        string ScopeKey,
+        string FolderName,
+        string BrowserAccountKey,
+        string YouTubeAccountKey,
+        string DownloadsPath,
+        string ThumbnailCachePath,
+        string ArchivePath);
+
+    private sealed record BootstrapDto(
+        BrowserLibraryStatusDto Status,
+        IReadOnlyList<LibraryVideoDto> Videos,
+        IReadOnlyList<KnownLibraryScopeDto> KnownScopes,
+        SelectedScopeDto SelectedScope,
+        DateTimeOffset SnapshotCapturedAtUtc);
 
     internal sealed record BrowserOptionDto(
         string Value,

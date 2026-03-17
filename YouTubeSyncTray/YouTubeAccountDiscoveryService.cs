@@ -19,14 +19,16 @@ internal sealed class YouTubeAccountDiscoveryService
 
     private readonly YoutubeSyncPaths _paths;
     private readonly CookieExportMetadataStore _metadataStore;
+    private readonly KnownLibraryScopeStore? _knownLibraryScopeStore;
     private readonly object _cacheGate = new();
 
     private CacheEntry? _cache;
 
-    public YouTubeAccountDiscoveryService(YoutubeSyncPaths paths)
+    public YouTubeAccountDiscoveryService(YoutubeSyncPaths paths, KnownLibraryScopeStore? knownLibraryScopeStore = null)
     {
         _paths = paths;
         _metadataStore = new CookieExportMetadataStore(paths);
+        _knownLibraryScopeStore = knownLibraryScopeStore;
     }
 
     public IReadOnlyList<YouTubeAccountOption> DiscoverAccounts(
@@ -35,9 +37,18 @@ internal sealed class YouTubeAccountDiscoveryService
         bool allowNetwork = true)
     {
         settings.Normalize();
+        var persistedAccounts = LoadPersistedAccounts(
+            settings.BrowserCookies,
+            settings.BrowserProfile,
+            browserAuthUserIndex);
+        var scopeAccounts = LoadScopeAccounts(settings.SelectedBrowserAccountKey, browserAuthUserIndex ?? 0);
         if (!TryGetCacheKey(settings, browserAuthUserIndex, out var cacheKey))
         {
-            return [];
+            return MergeAccounts(
+                [],
+                persistedAccounts,
+                scopeAccounts,
+                settings.SelectedYouTubeAccountKey);
         }
 
         lock (_cacheGate)
@@ -50,32 +61,45 @@ internal sealed class YouTubeAccountDiscoveryService
             }
         }
 
-        var persistedAccounts = LoadPersistedAccounts(cacheKey);
         if (!allowNetwork)
         {
-            if (persistedAccounts is not null)
+            var mergedAccounts = MergeAccounts(
+                [],
+                persistedAccounts,
+                scopeAccounts,
+                settings.SelectedYouTubeAccountKey);
+            if (mergedAccounts.Count > 0)
             {
-                UpdateCache(cacheKey, persistedAccounts, SuccessCacheLifetime);
-                return persistedAccounts;
+                UpdateCache(cacheKey, mergedAccounts, SuccessCacheLifetime);
             }
 
-            return [];
+            return mergedAccounts;
         }
 
         try
         {
             var accounts = FetchAccounts(cacheKey);
-            UpdateCache(cacheKey, accounts, SuccessCacheLifetime);
-            SavePersistedAccounts(cacheKey, accounts);
-            return accounts;
+            var mergedAccounts = MergeAccounts(
+                accounts,
+                persistedAccounts,
+                scopeAccounts,
+                settings.SelectedYouTubeAccountKey);
+            UpdateCache(cacheKey, mergedAccounts, SuccessCacheLifetime);
+            SavePersistedAccounts(cacheKey, mergedAccounts);
+            return mergedAccounts;
         }
         catch (Exception ex)
         {
             TrayLog.Write(_paths, $"YouTube account discovery failed: {ex.Message}");
-            if (persistedAccounts is not null)
+            var mergedAccounts = MergeAccounts(
+                [],
+                persistedAccounts,
+                scopeAccounts,
+                settings.SelectedYouTubeAccountKey);
+            if (mergedAccounts.Count > 0)
             {
-                UpdateCache(cacheKey, persistedAccounts, SuccessCacheLifetime);
-                return persistedAccounts;
+                UpdateCache(cacheKey, mergedAccounts, SuccessCacheLifetime);
+                return mergedAccounts;
             }
 
             UpdateCache(cacheKey, [], FailureCacheLifetime);
@@ -571,40 +595,45 @@ internal sealed class YouTubeAccountDiscoveryService
         }
     }
 
-    private IReadOnlyList<YouTubeAccountOption>? LoadPersistedAccounts(CacheKey cacheKey)
+    private IReadOnlyList<YouTubeAccountOption> LoadPersistedAccounts(
+        BrowserCookieSource browser,
+        string profile,
+        int? browserAuthUserIndex)
     {
-        try
+        foreach (var path in GetPersistentCachePaths(browser, profile, browserAuthUserIndex))
         {
-            if (!File.Exists(GetPersistentCachePath()))
+            try
             {
-                return null;
-            }
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
 
-            var persisted = JsonSerializer.Deserialize<PersistedCache>(File.ReadAllText(GetPersistentCachePath()));
-            if (persisted is null)
+                var persisted = JsonSerializer.Deserialize<PersistedCache>(File.ReadAllText(path));
+                if (persisted is null || !MatchesPersistedCache(persisted, browser, profile, browserAuthUserIndex))
+                {
+                    continue;
+                }
+
+                return persisted.Accounts?
+                    .Where(account => !string.IsNullOrWhiteSpace(account.AccountKey))
+                    .ToList()
+                    ?? [];
+            }
+            catch
             {
-                return null;
             }
-
-            if (!MatchesPersistedCache(persisted, cacheKey)
-                && !MatchesPersistedCacheFallback(persisted, cacheKey))
-            {
-                return null;
-            }
-
-            return persisted.Accounts ?? [];
         }
-        catch
-        {
-            return null;
-        }
+
+        return [];
     }
 
     private void SavePersistedAccounts(CacheKey cacheKey, IReadOnlyList<YouTubeAccountOption> accounts)
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(GetPersistentCachePath())!);
+            var path = GetPersistentCachePath(cacheKey.Browser, cacheKey.Profile, cacheKey.PreferredAuthUserIndex);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var persisted = new PersistedCache(
                 cacheKey.Browser,
                 cacheKey.Profile,
@@ -614,7 +643,7 @@ internal sealed class YouTubeAccountDiscoveryService
                 cacheKey.PreferredAuthUserIndex,
                 DateTimeOffset.UtcNow,
                 accounts.ToArray());
-            File.WriteAllText(GetPersistentCachePath(), JsonSerializer.Serialize(persisted));
+            File.WriteAllText(path, JsonSerializer.Serialize(persisted));
         }
         catch
         {
@@ -622,25 +651,146 @@ internal sealed class YouTubeAccountDiscoveryService
         }
     }
 
-    private string GetPersistentCachePath() =>
-        Path.Combine(_paths.RootPath, "youtube-account-discovery-cache.json");
-
-    private static bool MatchesPersistedCache(PersistedCache persistedCache, CacheKey cacheKey)
+    private IReadOnlyList<YouTubeAccountOption> LoadScopeAccounts(string? browserAccountKey, int fallbackAuthUserIndex)
     {
-        return persistedCache.Browser == cacheKey.Browser
-            && string.Equals(persistedCache.Profile, cacheKey.Profile, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(persistedCache.CookiesPath, cacheKey.CookiesPath, StringComparison.OrdinalIgnoreCase)
-            && persistedCache.CookiesLength == cacheKey.Length
-            && persistedCache.CookiesLastWriteTimeUtcTicks == cacheKey.LastWriteTimeUtcTicks
-            && persistedCache.PreferredAuthUserIndex == cacheKey.PreferredAuthUserIndex;
+        if (_knownLibraryScopeStore is null || string.IsNullOrWhiteSpace(browserAccountKey))
+        {
+            return [];
+        }
+
+        return _knownLibraryScopeStore
+            .GetScopesForBrowserAccount(browserAccountKey)
+            .Where(scope => scope.IsAvailableOnDisk && !string.IsNullOrWhiteSpace(scope.YouTubeAccountKey))
+            .GroupBy(scope => scope.YouTubeAccountKey, StringComparer.Ordinal)
+            .Select(group =>
+            {
+                var scope = group
+                    .OrderByDescending(item => item.LastSuccessfulSyncAtUtc ?? DateTimeOffset.MinValue)
+                    .ThenByDescending(item => item.LastSeenAtUtc)
+                    .First();
+                return KnownLibraryScopeStore.CreateYouTubeAccountOption(scope, fallbackAuthUserIndex);
+            })
+            .OrderByDescending(account => account.IsSelected)
+            .ThenBy(account => account.Label, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
-    private static bool MatchesPersistedCacheFallback(PersistedCache persistedCache, CacheKey cacheKey)
+    private static IReadOnlyList<YouTubeAccountOption> MergeAccounts(
+        IReadOnlyList<YouTubeAccountOption> liveAccounts,
+        IReadOnlyList<YouTubeAccountOption> persistedAccounts,
+        IReadOnlyList<YouTubeAccountOption> scopeAccounts,
+        string? explicitSelectedAccountKey)
     {
-        return persistedCache.Browser == cacheKey.Browser
-            && string.Equals(persistedCache.Profile, cacheKey.Profile, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(persistedCache.CookiesPath, cacheKey.CookiesPath, StringComparison.OrdinalIgnoreCase)
-            && persistedCache.PreferredAuthUserIndex == cacheKey.PreferredAuthUserIndex;
+        var orderedKeys = new List<string>();
+        var mergedAccounts = new Dictionary<string, YouTubeAccountOption>(StringComparer.Ordinal);
+        foreach (var source in new[] { liveAccounts, persistedAccounts, scopeAccounts })
+        {
+            foreach (var account in source)
+            {
+                if (string.IsNullOrWhiteSpace(account.AccountKey))
+                {
+                    continue;
+                }
+
+                if (!mergedAccounts.TryGetValue(account.AccountKey, out var existing))
+                {
+                    mergedAccounts[account.AccountKey] = account;
+                    orderedKeys.Add(account.AccountKey);
+                    continue;
+                }
+
+                mergedAccounts[account.AccountKey] = MergeAccount(existing, account);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(explicitSelectedAccountKey)
+            && mergedAccounts.TryGetValue(explicitSelectedAccountKey.Trim(), out var selectedAccount))
+        {
+            mergedAccounts[explicitSelectedAccountKey.Trim()] = selectedAccount with { IsSelected = true };
+        }
+
+        return orderedKeys
+            .Distinct(StringComparer.Ordinal)
+            .Select(accountKey => mergedAccounts[accountKey])
+            .ToList();
+    }
+
+    private static YouTubeAccountOption MergeAccount(YouTubeAccountOption left, YouTubeAccountOption right)
+    {
+        return left with
+        {
+            DisplayName = FirstNonEmpty(left.DisplayName, right.DisplayName),
+            Handle = FirstNonEmpty(left.Handle, right.Handle),
+            Byline = FirstNonEmpty(left.Byline, right.Byline),
+            AvatarUrl = FirstNonEmpty(left.AvatarUrl, right.AvatarUrl),
+            PageId = FirstNonEmpty(left.PageId, right.PageId),
+            SignInUrl = FirstNonEmpty(left.SignInUrl, right.SignInUrl),
+            DatasyncId = FirstNonEmpty(left.DatasyncId, right.DatasyncId),
+            AuthUserIndex = left.AuthUserIndex != 0 || right.AuthUserIndex == 0 ? left.AuthUserIndex : right.AuthUserIndex,
+            IsSelected = left.IsSelected || right.IsSelected
+        };
+    }
+
+    private string GetPersistentCachePath(
+        BrowserCookieSource browser,
+        string profile,
+        int? preferredAuthUserIndex)
+    {
+        var safeProfile = SanitizeCacheSegment(profile);
+        var authUserSegment = preferredAuthUserIndex?.ToString() ?? "any";
+        return Path.Combine(
+            _paths.RootPath,
+            "youtube-account-discovery-cache",
+            $"{browser.ToString().ToLowerInvariant()}-{safeProfile}-auth-{authUserSegment}.json");
+    }
+
+    private IEnumerable<string> GetPersistentCachePaths(
+        BrowserCookieSource browser,
+        string profile,
+        int? preferredAuthUserIndex)
+    {
+        yield return GetPersistentCachePath(browser, profile, preferredAuthUserIndex);
+        yield return Path.Combine(_paths.RootPath, "youtube-account-discovery-cache.json");
+    }
+
+    private static bool MatchesPersistedCache(
+        PersistedCache persistedCache,
+        BrowserCookieSource browser,
+        string profile,
+        int? preferredAuthUserIndex)
+    {
+        return persistedCache.Browser == browser
+            && string.Equals(persistedCache.Profile, profile, StringComparison.OrdinalIgnoreCase)
+            && persistedCache.PreferredAuthUserIndex == preferredAuthUserIndex;
+    }
+
+    private static string SanitizeCacheSegment(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "default";
+        }
+
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value.Trim())
+        {
+            builder.Append(char.IsLetterOrDigit(character) ? char.ToLowerInvariant(character) : '-');
+        }
+
+        return builder.ToString().Trim('-');
+    }
+
+    private static string FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value.Trim();
+            }
+        }
+
+        return string.Empty;
     }
 
     private static string GetText(JsonElement element, string propertyName)
@@ -805,7 +955,7 @@ internal readonly record struct YouTubeAccountOption(
 
             return parts.Count == 0
                 ? "YouTube account"
-                : string.Join(" · ", parts);
+                : string.Join(" / ", parts);
         }
     }
 }

@@ -1,29 +1,40 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace YouTubeSyncTray;
 
 internal sealed class SyncService
 {
+    private const string HighestQualityFormatSelector = "bv*+ba/b";
+
     private readonly YoutubeSyncPaths _paths;
     private readonly ChromiumCookieExporter _chromiumCookieExporter;
     private readonly BrowserAccountDiscoveryService _accountDiscovery;
     private readonly YouTubeAccountDiscoveryService _youTubeAccountDiscovery;
     private readonly AccountScopeResolver _accountScopeResolver;
     private readonly CookieExportMetadataStore _cookieExportMetadataStore;
+    private readonly KnownLibraryScopeStore _knownLibraryScopeStore;
+    private readonly LibraryCatalogStore _libraryCatalogStore;
     private readonly IBrowserLoginPrompt? _browserLoginPrompt;
     private bool _freshCookieRetryAttempted;
     private AuthConfig? _refreshedAuth;
     private string? _lastFreshCookieRetryStatus;
 
-    public SyncService(YoutubeSyncPaths paths, IBrowserLoginPrompt? browserLoginPrompt = null)
+    public SyncService(
+        YoutubeSyncPaths paths,
+        IBrowserLoginPrompt? browserLoginPrompt = null,
+        KnownLibraryScopeStore? knownLibraryScopeStore = null,
+        LibraryCatalogStore? libraryCatalogStore = null)
     {
         _paths = paths;
         _chromiumCookieExporter = new ChromiumCookieExporter(paths);
-        _accountDiscovery = new BrowserAccountDiscoveryService();
-        _youTubeAccountDiscovery = new YouTubeAccountDiscoveryService(paths);
-        _accountScopeResolver = new AccountScopeResolver(paths, _accountDiscovery, _youTubeAccountDiscovery);
+        _knownLibraryScopeStore = knownLibraryScopeStore ?? new KnownLibraryScopeStore(paths);
+        _libraryCatalogStore = libraryCatalogStore ?? new LibraryCatalogStore(paths);
+        _accountDiscovery = new BrowserAccountDiscoveryService(_knownLibraryScopeStore);
+        _youTubeAccountDiscovery = new YouTubeAccountDiscoveryService(paths, _knownLibraryScopeStore);
+        _accountScopeResolver = new AccountScopeResolver(paths, _accountDiscovery, _youTubeAccountDiscovery, _knownLibraryScopeStore);
         _cookieExportMetadataStore = new CookieExportMetadataStore(paths);
         _browserLoginPrompt = browserLoginPrompt;
     }
@@ -142,9 +153,11 @@ internal sealed class SyncService
             watchLaterOrderProgress?.Report([.. targetIds.AsEnumerable().Reverse()]);
         }
         TrayLog.Write(_paths, $"Target id count: {targetIds.Count}");
-        var existingIdsBefore = VideoItem.LoadFromDownloads(accountScope.DownloadsPath)
+        var existingItemsBefore = _libraryCatalogStore.LoadOrScan(accountScope.FolderName, accountScope.DownloadsPath);
+        var existingIdsBefore = existingItemsBefore
             .Select(item => item.VideoId)
             .ToHashSet(StringComparer.Ordinal);
+        _knownLibraryScopeStore.UpdateScopeInventory(accountScope, existingIdsBefore.Count);
         TrayLog.Write(_paths, $"Existing on-disk video count before sync: {existingIdsBefore.Count}");
         var missingTargetIds = targetIds
             .Where(id => !existingIdsBefore.Contains(id))
@@ -169,8 +182,7 @@ internal sealed class SyncService
         {
             args.Append(" --embed-subs");
         }
-        args.Append(" --format-sort \"res:1080,+size,+br,+fps\"");
-        args.Append(" --format \"b[language^=en][ext=mp4][height<=1080]/b[language^=en][height<=1080]/95/96/18/b[ext=mp4][height<=1080]/b[height<=1080]/b[ext=mp4]/b\"");
+        args.Append(BuildHighestQualityFormatArguments());
         args.Append($" \"{watchLaterUrl}\"");
 
         var result = await RunYtDlpWithRetryAsync(settings, auth, args.ToString(), cancellationToken, progress);
@@ -194,9 +206,11 @@ internal sealed class SyncService
             }
         }
 
-        var existingIdsAfter = VideoItem.LoadFromDownloads(accountScope.DownloadsPath)
+        var existingItemsAfter = _libraryCatalogStore.Refresh(accountScope.FolderName, accountScope.DownloadsPath);
+        var existingIdsAfter = existingItemsAfter
             .Select(item => item.VideoId)
             .ToHashSet(StringComparer.Ordinal);
+        _knownLibraryScopeStore.UpdateScopeInventory(accountScope, existingIdsAfter.Count, DateTimeOffset.UtcNow);
         var downloadedIds = targetIds
             .Where(id => existingIdsAfter.Contains(id) && !existingIdsBefore.Contains(id))
             .ToList();
@@ -215,6 +229,139 @@ internal sealed class SyncService
             MissingAfterSyncCount: stillMissingCount,
             WatchLaterTotalCount: watchLaterTotalCount,
             NonFatalIssue: nonFatalIssue);
+    }
+
+    public async Task<RedownloadSummary> RedownloadVideosAsync(
+        AppSettings settings,
+        IReadOnlyList<string> videoIds,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        settings.Normalize();
+        var normalizedIds = videoIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (normalizedIds.Count == 0)
+        {
+            return new RedownloadSummary(0, 0, 0, null);
+        }
+
+        TrayLog.Write(_paths, $"RedownloadVideosAsync started for {normalizedIds.Count} video(s).");
+        var auth = await EnsureAuthAsync(settings, cancellationToken);
+        auth = await PrepareManagedChromiumAuthAsync(settings, auth, progress, cancellationToken);
+        var accountScope = _accountScopeResolver.Resolve(settings);
+        Directory.CreateDirectory(accountScope.DownloadsPath);
+
+        var existingItemsBefore = _libraryCatalogStore.LoadOrScan(accountScope.FolderName, accountScope.DownloadsPath);
+        var existingItemsById = existingItemsBefore
+            .GroupBy(item => item.VideoId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var backupRoot = Path.Combine(_paths.TempPath, "redownload-backups", Guid.NewGuid().ToString("N"));
+        List<RedownloadBackup> backups = [];
+
+        try
+        {
+            progress?.Report($"Preparing {normalizedIds.Count} video(s) for redownload...");
+            backups = BackupExistingVideoBundles(
+                normalizedIds
+                    .Where(existingItemsById.ContainsKey)
+                    .Select(id => existingItemsById[id]),
+                backupRoot);
+            RemoveArchiveEntries(accountScope.ArchivePath, normalizedIds);
+
+            var args = new StringBuilder();
+            args.Append(" --extractor-args \"youtube:lang=en\"");
+            args.Append(" --progress --newline");
+            args.Append(" --ignore-errors --no-abort-on-error --retries 10 --fragment-retries 10 --file-access-retries 10");
+            args.Append(" --retry-sleep http:exp=1:20 --retry-sleep fragment:exp=1:20");
+            args.Append(" --sleep-requests 1 --sleep-interval 2 --max-sleep-interval 8 --concurrent-fragments 4");
+            args.Append($" --download-archive \"{accountScope.ArchivePath}\"");
+            args.Append($" --paths home:\"{accountScope.DownloadsPath}\" --paths temp:\"{accountScope.DownloadsPath}\"");
+            args.Append(" --output \"%(title).200B [%(id)s].%(ext)s\"");
+            args.Append(" --windows-filenames --continue --part --no-overwrites --no-mtime --write-info-json --write-thumbnail");
+            args.Append(" --write-subs --write-auto-subs --sub-langs \"en.*,en,-live_chat\" --convert-subs srt");
+            if (!string.IsNullOrWhiteSpace(_paths.FfmpegRootPath))
+            {
+                args.Append(" --embed-subs");
+            }
+
+            args.Append(BuildHighestQualityFormatArguments());
+            foreach (var videoId in normalizedIds)
+            {
+                args.Append($" \"{BuildVideoUrl(videoId)}\"");
+            }
+
+            progress?.Report($"Redownloading {normalizedIds.Count} video(s) at best quality...");
+            var result = await RunYtDlpWithRetryAsync(settings, auth, args.ToString(), cancellationToken, progress);
+            string? nonFatalIssue = null;
+            if (result.ExitCode != 0)
+            {
+                var effectiveAuth = _refreshedAuth ?? auth;
+                if (LooksLikeAuthFailure(result))
+                {
+                    throw new InvalidOperationException(BuildYtDlpFailureMessage(
+                        "yt-dlp redownload failed.",
+                        effectiveAuth,
+                        result));
+                }
+
+                nonFatalIssue = SummarizeNonFatalSyncIssue(result);
+                if (!string.IsNullOrWhiteSpace(nonFatalIssue))
+                {
+                    TrayLog.Write(_paths, $"yt-dlp reported non-fatal redownload issues: {nonFatalIssue}");
+                }
+            }
+
+            var itemsAfterDownload = _libraryCatalogStore.Refresh(accountScope.FolderName, accountScope.DownloadsPath);
+            PreservePlaylistIndexesForRedownloadedVideos(existingItemsById, itemsAfterDownload);
+
+            var itemsAfterMetadataRepair = _libraryCatalogStore.Refresh(accountScope.FolderName, accountScope.DownloadsPath);
+            var presentAfterDownload = itemsAfterMetadataRepair
+                .Select(item => item.VideoId)
+                .ToHashSet(StringComparer.Ordinal);
+            var downloadedIds = normalizedIds
+                .Where(presentAfterDownload.Contains)
+                .ToList();
+            var failedIds = normalizedIds
+                .Where(id => !presentAfterDownload.Contains(id))
+                .ToList();
+
+            if (failedIds.Count > 0)
+            {
+                var failedIdSet = failedIds.ToHashSet(StringComparer.Ordinal);
+                RestoreBackups(backups.Where(backup => failedIdSet.Contains(backup.VideoId)));
+                var itemsAfterRestore = _libraryCatalogStore.Refresh(accountScope.FolderName, accountScope.DownloadsPath);
+                var restoredIds = itemsAfterRestore
+                    .Select(item => item.VideoId)
+                    .Where(failedIdSet.Contains)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+                EnsureArchiveEntries(accountScope.ArchivePath, restoredIds);
+                _knownLibraryScopeStore.UpdateScopeInventory(accountScope, itemsAfterRestore.Count, DateTimeOffset.UtcNow);
+            }
+            else
+            {
+                _knownLibraryScopeStore.UpdateScopeInventory(accountScope, itemsAfterMetadataRepair.Count, DateTimeOffset.UtcNow);
+            }
+
+            TrayLog.Write(_paths, $"Redownload finished. Requested: {normalizedIds.Count}, downloaded: {downloadedIds.Count}, failed: {failedIds.Count}");
+            return new RedownloadSummary(
+                RequestedCount: normalizedIds.Count,
+                RedownloadedCount: downloadedIds.Count,
+                FailedCount: failedIds.Count,
+                NonFatalIssue: nonFatalIssue);
+        }
+        catch
+        {
+            RestoreMissingBackups(accountScope, backups);
+            throw;
+        }
+        finally
+        {
+            TryDeleteDirectory(backupRoot);
+        }
     }
 
     private async Task<AuthConfig> PrepareManagedChromiumAuthAsync(
@@ -282,6 +429,12 @@ internal sealed class SyncService
         }
 
         return builder.ToString();
+    }
+
+    internal static string BuildHighestQualityFormatArguments()
+    {
+        // Reset any earlier/custom sort so yt-dlp can choose the best available streams.
+        return $" --format-sort-reset --format \"{HighestQualityFormatSelector}\"";
     }
 
     private string? GetFfmpegLocation()
@@ -703,15 +856,227 @@ internal sealed class SyncService
         return YouTubeWatchLaterUrl.Build(selectedBrowserAuthUserIndex);
     }
 
-    private int RepairArchiveEntriesForMissingVideos(string archivePath, IEnumerable<string> missingVideoIds)
+    private static string BuildVideoUrl(string videoId) =>
+        $"https://www.youtube.com/watch?v={Uri.EscapeDataString(videoId)}";
+
+    private static List<RedownloadBackup> BackupExistingVideoBundles(
+        IEnumerable<VideoItem> items,
+        string backupRoot)
+    {
+        var backups = new List<RedownloadBackup>();
+        foreach (var item in items)
+        {
+            var sourcePaths = GetBundleFilePaths(item);
+            if (sourcePaths.Count == 0)
+            {
+                continue;
+            }
+
+            var itemBackupRoot = Path.Combine(backupRoot, item.VideoId);
+            Directory.CreateDirectory(itemBackupRoot);
+            var backedUpFiles = new List<RedownloadBackupFile>();
+            foreach (var sourcePath in sourcePaths)
+            {
+                var destinationPath = Path.Combine(itemBackupRoot, Path.GetFileName(sourcePath));
+                var suffix = 1;
+                while (File.Exists(destinationPath))
+                {
+                    destinationPath = Path.Combine(itemBackupRoot, $"{suffix++}_{Path.GetFileName(sourcePath)}");
+                }
+
+                File.Move(sourcePath, destinationPath);
+                backedUpFiles.Add(new RedownloadBackupFile(sourcePath, destinationPath));
+            }
+
+            backups.Add(new RedownloadBackup(item.VideoId, backedUpFiles));
+        }
+
+        return backups;
+    }
+
+    private void RestoreMissingBackups(
+        AccountScopeResolver.ResolvedAccountScope accountScope,
+        IReadOnlyList<RedownloadBackup> backups)
+    {
+        if (backups.Count == 0)
+        {
+            return;
+        }
+
+        var currentItems = _libraryCatalogStore.Refresh(accountScope.FolderName, accountScope.DownloadsPath);
+        var currentVideoIds = currentItems
+            .Select(item => item.VideoId)
+            .ToHashSet(StringComparer.Ordinal);
+        var backupsToRestore = backups
+            .Where(backup => !currentVideoIds.Contains(backup.VideoId))
+            .ToList();
+        if (backupsToRestore.Count == 0)
+        {
+            return;
+        }
+
+        RestoreBackups(backupsToRestore);
+        var restoredItems = _libraryCatalogStore.Refresh(accountScope.FolderName, accountScope.DownloadsPath);
+        var restoredIds = restoredItems
+            .Select(item => item.VideoId)
+            .Where(videoId => backupsToRestore.Any(backup => string.Equals(backup.VideoId, videoId, StringComparison.Ordinal)))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        EnsureArchiveEntries(accountScope.ArchivePath, restoredIds);
+        _knownLibraryScopeStore.UpdateScopeInventory(accountScope, restoredItems.Count, DateTimeOffset.UtcNow);
+    }
+
+    private static void RestoreBackups(IEnumerable<RedownloadBackup> backups)
+    {
+        foreach (var backup in backups)
+        {
+            foreach (var file in backup.Files)
+            {
+                if (!File.Exists(file.BackupPath))
+                {
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(file.SourcePath)!);
+                if (File.Exists(file.SourcePath))
+                {
+                    File.Delete(file.SourcePath);
+                }
+
+                File.Move(file.BackupPath, file.SourcePath);
+            }
+        }
+    }
+
+    private static IReadOnlyList<string> GetBundleFilePaths(VideoItem item)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddIfExists(paths, item.VideoPath);
+        AddIfExists(paths, item.InfoPath);
+        AddIfExists(paths, item.ThumbnailPath);
+        foreach (var captionTrack in item.CaptionTracks)
+        {
+            AddIfExists(paths, captionTrack.SourcePath);
+        }
+
+        var basePath = ResolveBundleBasePath(item);
+        var directory = Path.GetDirectoryName(basePath);
+        var baseFileName = Path.GetFileName(basePath);
+        if (!string.IsNullOrWhiteSpace(directory)
+            && !string.IsNullOrWhiteSpace(baseFileName)
+            && Directory.Exists(directory))
+        {
+            foreach (var path in Directory.GetFiles(directory, baseFileName + ".*", SearchOption.TopDirectoryOnly))
+            {
+                AddIfExists(paths, path);
+            }
+        }
+
+        return paths.ToList();
+    }
+
+    private static string ResolveBundleBasePath(VideoItem item)
+    {
+        if (!string.IsNullOrWhiteSpace(item.InfoPath)
+            && item.InfoPath.EndsWith(".info.json", StringComparison.OrdinalIgnoreCase))
+        {
+            return item.InfoPath[..^".info.json".Length];
+        }
+
+        if (!string.IsNullOrWhiteSpace(item.VideoPath))
+        {
+            return Path.Combine(
+                Path.GetDirectoryName(item.VideoPath) ?? string.Empty,
+                Path.GetFileNameWithoutExtension(item.VideoPath));
+        }
+
+        if (!string.IsNullOrWhiteSpace(item.ThumbnailPath))
+        {
+            return Path.Combine(
+                Path.GetDirectoryName(item.ThumbnailPath) ?? string.Empty,
+                Path.GetFileNameWithoutExtension(item.ThumbnailPath));
+        }
+
+        return string.Empty;
+    }
+
+    private static void AddIfExists(ISet<string> paths, string? path)
+    {
+        if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+        {
+            paths.Add(path);
+        }
+    }
+
+    private static void PreservePlaylistIndexesForRedownloadedVideos(
+        IReadOnlyDictionary<string, VideoItem> previousItemsById,
+        IReadOnlyList<VideoItem> currentItems)
+    {
+        foreach (var item in currentItems)
+        {
+            if (!previousItemsById.TryGetValue(item.VideoId, out var previousItem)
+                || previousItem.PlaylistIndex <= 0
+                || string.IsNullOrWhiteSpace(item.InfoPath)
+                || !File.Exists(item.InfoPath))
+            {
+                continue;
+            }
+
+            TryWritePlaylistIndex(item.InfoPath, previousItem.PlaylistIndex);
+        }
+    }
+
+    private static void TryWritePlaylistIndex(string infoPath, int playlistIndex)
+    {
+        try
+        {
+            var node = JsonNode.Parse(File.ReadAllText(infoPath)) as JsonObject;
+            if (node is null)
+            {
+                return;
+            }
+
+            node["playlist_index"] = playlistIndex;
+            File.WriteAllText(infoPath, node.ToJsonString(new JsonSerializerOptions
+            {
+                WriteIndented = true
+            }));
+        }
+        catch
+        {
+            // Keep the fresh download even if the cosmetic playlist index metadata could not be preserved.
+        }
+    }
+
+    private static void TryDeleteDirectory(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(path, recursive: true);
+        }
+        catch
+        {
+            // Best-effort cleanup for temporary backup folders.
+        }
+    }
+
+    private static int RemoveArchiveEntries(string archivePath, IEnumerable<string> videoIds)
     {
         if (!File.Exists(archivePath))
         {
             return 0;
         }
 
-        var missingSet = missingVideoIds.ToHashSet(StringComparer.Ordinal);
-        if (missingSet.Count == 0)
+        var ids = videoIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .ToHashSet(StringComparer.Ordinal);
+        if (ids.Count == 0)
         {
             return 0;
         }
@@ -724,7 +1089,7 @@ internal sealed class SyncService
             if (trimmed.StartsWith("youtube ", StringComparison.Ordinal))
             {
                 var id = trimmed["youtube ".Length..];
-                if (missingSet.Contains(id))
+                if (ids.Contains(id))
                 {
                     removed++;
                     continue;
@@ -737,6 +1102,54 @@ internal sealed class SyncService
         if (removed > 0)
         {
             File.WriteAllLines(archivePath, keptLines);
+        }
+
+        return removed;
+    }
+
+    private static void EnsureArchiveEntries(string archivePath, IEnumerable<string> videoIds)
+    {
+        var ids = videoIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (ids.Count == 0)
+        {
+            return;
+        }
+
+        var existingIds = File.Exists(archivePath)
+            ? File.ReadAllLines(archivePath)
+                .Select(line => line.Trim())
+                .Where(line => line.StartsWith("youtube ", StringComparison.Ordinal))
+                .Select(line => line["youtube ".Length..])
+                .ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
+        var linesToAdd = ids
+            .Where(id => !existingIds.Contains(id))
+            .Select(id => "youtube " + id)
+            .ToList();
+        if (linesToAdd.Count == 0)
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(archivePath)!);
+        if (File.Exists(archivePath) && new FileInfo(archivePath).Length > 0)
+        {
+            File.AppendAllLines(archivePath, linesToAdd);
+            return;
+        }
+
+        File.WriteAllLines(archivePath, linesToAdd);
+    }
+
+    private int RepairArchiveEntriesForMissingVideos(string archivePath, IEnumerable<string> missingVideoIds)
+    {
+        var removed = RemoveArchiveEntries(archivePath, missingVideoIds);
+        if (removed > 0)
+        {
             TrayLog.Write(_paths, $"Removed {removed} stale archive entr{(removed == 1 ? "y" : "ies")}.");
         }
 
@@ -766,4 +1179,14 @@ internal sealed class SyncService
         int MissingAfterSyncCount,
         int? WatchLaterTotalCount,
         string? NonFatalIssue);
+
+    internal readonly record struct RedownloadSummary(
+        int RequestedCount,
+        int RedownloadedCount,
+        int FailedCount,
+        string? NonFatalIssue);
+
+    private readonly record struct RedownloadBackupFile(string SourcePath, string BackupPath);
+
+    private readonly record struct RedownloadBackup(string VideoId, IReadOnlyList<RedownloadBackupFile> Files);
 }

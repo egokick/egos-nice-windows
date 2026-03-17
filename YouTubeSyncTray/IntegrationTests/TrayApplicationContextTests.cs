@@ -30,6 +30,34 @@ public sealed class TrayApplicationContextTests
         Assert.Contains("Automatic sync is paused until you click Sync Now again.", status);
     }
 
+    [Fact]
+    public void BuildRedownloadStatus_ReportsFailuresAndRestoreNotice()
+    {
+        var summary = new SyncService.RedownloadSummary(
+            RequestedCount: 3,
+            RedownloadedCount: 2,
+            FailedCount: 1,
+            NonFatalIssue: null);
+
+        var status = TrayApplicationContext.BuildRedownloadStatus(summary);
+
+        Assert.Equal("Redownloaded 2 video(s) at best quality; 1 failed and the previous download(s) were restored when available.", status);
+    }
+
+    [Fact]
+    public void BuildRedownloadStatus_AppendsNonFatalIssue()
+    {
+        var summary = new SyncService.RedownloadSummary(
+            RequestedCount: 1,
+            RedownloadedCount: 1,
+            FailedCount: 0,
+            NonFatalIssue: "Some videos were skipped because YouTube only exposed DRM-protected or unavailable formats.");
+
+        var status = TrayApplicationContext.BuildRedownloadStatus(summary);
+
+        Assert.Equal("Redownloaded 1 video(s) at best quality; Some videos were skipped because YouTube only exposed DRM-protected or unavailable formats.", status);
+    }
+
     private static SyncService.SyncSummary CreateSummary(
         int targetCount,
         int downloadedCount,

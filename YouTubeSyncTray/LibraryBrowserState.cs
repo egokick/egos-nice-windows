@@ -22,6 +22,7 @@ internal sealed class LibraryBrowserState
     private string _syncAuthMessage = "Authentication has not been verified yet for the selected account.";
     private int _videoCount;
     private int? _watchLaterTotalCount;
+    private DateTimeOffset? _watchLaterTotalUpdatedAtUtc;
     private long _libraryVersion = 1;
     private DateTimeOffset _updatedAtUtc;
 
@@ -112,6 +113,9 @@ internal sealed class LibraryBrowserState
         {
             _watchLaterTotalCount = watchLaterTotalCount.HasValue
                 ? Math.Max(watchLaterTotalCount.Value, 0)
+                : null;
+            _watchLaterTotalUpdatedAtUtc = watchLaterTotalCount.HasValue
+                ? DateTimeOffset.UtcNow
                 : null;
             _updatedAtUtc = DateTimeOffset.UtcNow;
         }
@@ -238,6 +242,7 @@ internal sealed class LibraryBrowserState
                 _libraryVersion,
                 settings.DownloadCount,
                 _watchLaterTotalCount,
+                _watchLaterTotalUpdatedAtUtc,
                 syncScope.DownloadedCount,
                 syncScope.TargetCount,
                 syncScope.FailedCount,
@@ -257,6 +262,7 @@ internal sealed class LibraryBrowserState
         long LibraryVersion,
         int ConfiguredDownloadCount,
         int? WatchLaterTotalCount,
+        DateTimeOffset? WatchLaterTotalUpdatedAtUtc,
         int? SyncScopeDownloadedCount,
         int? SyncScopeTargetCount,
         int? SyncScopeFailedCount,

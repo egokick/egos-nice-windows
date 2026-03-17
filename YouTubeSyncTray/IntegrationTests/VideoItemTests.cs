@@ -73,6 +73,31 @@ public sealed class VideoItemTests
     }
 
     [Fact]
+    public void LoadFromDownloads_FallsBackToRawVideoFile_WhenInfoJsonIsMissing()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var basePath = Path.Combine(root, "007 - Missing Sidecar Clip [raw123]");
+            File.WriteAllText(basePath + ".mp4", "video");
+            File.WriteAllText(basePath + ".jpg", "thumb");
+
+            var item = Assert.Single(VideoItem.LoadFromDownloads(root));
+            Assert.Equal("raw123", item.VideoId);
+            Assert.Equal("Missing Sidecar Clip", item.Title);
+            Assert.Equal(basePath + ".mp4", item.VideoPath);
+            Assert.Equal(basePath + ".jpg", item.ThumbnailPath);
+            Assert.Equal("007", item.DisplayIndex);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadFromDownloads_DiscoversCaptionTracks_AndPrefersVttWhenAvailable()
     {
         var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));

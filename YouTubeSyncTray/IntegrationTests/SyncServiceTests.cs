@@ -4,6 +4,17 @@ namespace YouTubeSyncTray.IntegrationTests;
 
 public sealed class SyncServiceTests
 {
+    [Fact]
+    public void BuildHighestQualityFormatArguments_PrefersBestAvailableStreams_WithoutResolutionCap()
+    {
+        var arguments = SyncService.BuildHighestQualityFormatArguments();
+
+        Assert.Contains("--format-sort-reset", arguments, StringComparison.Ordinal);
+        Assert.Contains("bv*+ba/b", arguments, StringComparison.Ordinal);
+        Assert.DoesNotContain("1080", arguments, StringComparison.Ordinal);
+        Assert.DoesNotContain("height<=", arguments, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("ERROR: Sign in to confirm you're not a bot")]
     [InlineData("ERROR: Please sign in to continue")]

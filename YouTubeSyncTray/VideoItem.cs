@@ -6,7 +6,8 @@ namespace YouTubeSyncTray;
 
 internal sealed class VideoItem
 {
-    private static readonly Regex IdRegex = new(@"\[(?<id>[A-Za-z0-9_-]{6,})\]\.[^.]+$", RegexOptions.Compiled);
+    private static readonly Regex IdRegex = new(@"\[(?<id>[A-Za-z0-9_-]{6,})\](?:\.[^.]+)?$", RegexOptions.Compiled);
+    private static readonly Regex PlaylistIndexRegex = new(@"^(?<index>\d{1,6})\s*-\s*", RegexOptions.Compiled);
     private static readonly string[] VideoExtensions =
     [
         ".mp4",
@@ -48,10 +49,12 @@ internal sealed class VideoItem
         }
 
         var items = new List<VideoItem>();
+        var usedVideoPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var infoPath in Directory.GetFiles(downloadsPath, "*.info.json", SearchOption.TopDirectoryOnly))
         {
             try
             {
+                var basePath = infoPath[..^".info.json".Length];
                 using var document = JsonDocument.Parse(File.ReadAllText(infoPath));
                 var root = document.RootElement;
                 var title = root.TryGetProperty("title", out var titleProperty) ? titleProperty.GetString() : null;
@@ -67,7 +70,7 @@ internal sealed class VideoItem
                     continue;
                 }
 
-                var thumbPath = ResolveThumbnailPath(infoPath);
+                var thumbPath = ResolveThumbnailPath(basePath);
 
                 if (string.IsNullOrWhiteSpace(videoId))
                 {
@@ -87,15 +90,37 @@ internal sealed class VideoItem
                     VideoPath = videoPath,
                     InfoPath = infoPath,
                     ThumbnailPath = thumbPath,
-                    CaptionTracks = ResolveCaptionTracks(infoPath),
+                    CaptionTracks = ResolveCaptionTracks(basePath),
                     PlaylistIndex = playlistIndex
                 });
+                usedVideoPaths.Add(videoPath);
             }
             catch
             {
             }
         }
 
+        foreach (var videoPath in Directory.GetFiles(downloadsPath, "*", SearchOption.TopDirectoryOnly))
+        {
+            if (!IsVideoFile(videoPath) || usedVideoPaths.Contains(videoPath))
+            {
+                continue;
+            }
+
+            var fallbackItem = BuildFallbackItem(videoPath);
+            if (fallbackItem is not null)
+            {
+                items.Add(fallbackItem);
+            }
+        }
+
+        return SortForLibrary(items, watchLaterOrderByVideoId);
+    }
+
+    public static IReadOnlyList<VideoItem> SortForLibrary(
+        IEnumerable<VideoItem> items,
+        IReadOnlyDictionary<string, int>? watchLaterOrderByVideoId = null)
+    {
         watchLaterOrderByVideoId ??= new Dictionary<string, int>(StringComparer.Ordinal);
 
         return items
@@ -107,6 +132,47 @@ internal sealed class VideoItem
             .ThenByDescending(item => item.PlaylistIndex == 0 ? int.MinValue : item.PlaylistIndex)
             .ThenBy(item => Path.GetFileName(item.VideoPath), StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private static VideoItem? BuildFallbackItem(string videoPath)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(videoPath);
+            var fileName = Path.GetFileName(videoPath);
+            var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(videoPath);
+            if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(fileNameWithoutExtension))
+            {
+                return null;
+            }
+
+            var basePath = Path.Combine(directory, fileNameWithoutExtension);
+            var videoId = TryParseVideoId(fileName) ?? fileNameWithoutExtension;
+            if (string.IsNullOrWhiteSpace(videoId))
+            {
+                return null;
+            }
+
+            var playlistIndex = TryParsePlaylistIndex(fileNameWithoutExtension);
+            var title = BuildFallbackTitle(fileNameWithoutExtension, videoId);
+            var infoPath = File.Exists(basePath + ".info.json") ? basePath + ".info.json" : string.Empty;
+
+            return new VideoItem
+            {
+                VideoId = videoId,
+                Title = title,
+                UploaderName = string.Empty,
+                VideoPath = videoPath,
+                InfoPath = infoPath,
+                ThumbnailPath = ResolveThumbnailPath(basePath),
+                CaptionTracks = ResolveCaptionTracks(basePath),
+                PlaylistIndex = playlistIndex
+            };
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string? ResolveVideoPath(string infoPath, string? extensionFromInfo)
@@ -133,9 +199,8 @@ internal sealed class VideoItem
         return null;
     }
 
-    private static string ResolveThumbnailPath(string infoPath)
+    private static string ResolveThumbnailPath(string basePath)
     {
-        var basePath = infoPath[..^".info.json".Length];
         foreach (var extension in ThumbnailExtensions)
         {
             var candidate = basePath + extension;
@@ -148,10 +213,9 @@ internal sealed class VideoItem
         return basePath + ".webp";
     }
 
-    private static IReadOnlyList<VideoCaptionTrack> ResolveCaptionTracks(string infoPath)
+    private static IReadOnlyList<VideoCaptionTrack> ResolveCaptionTracks(string basePath)
     {
-        var basePath = infoPath[..^".info.json".Length];
-        var directory = Path.GetDirectoryName(infoPath);
+        var directory = Path.GetDirectoryName(basePath);
         var baseFileName = Path.GetFileName(basePath);
         if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(baseFileName))
         {
@@ -344,6 +408,38 @@ internal sealed class VideoItem
     {
         var match = IdRegex.Match(fileName);
         return match.Success ? match.Groups["id"].Value : null;
+    }
+
+    private static int TryParsePlaylistIndex(string fileNameWithoutExtension)
+    {
+        var match = PlaylistIndexRegex.Match(fileNameWithoutExtension);
+        return match.Success && int.TryParse(match.Groups["index"].Value, out var playlistIndex)
+            ? playlistIndex
+            : 0;
+    }
+
+    private static string BuildFallbackTitle(string fileNameWithoutExtension, string videoId)
+    {
+        var normalizedTitle = PlaylistIndexRegex.Replace(fileNameWithoutExtension, string.Empty);
+        if (!string.IsNullOrWhiteSpace(videoId))
+        {
+            normalizedTitle = Regex.Replace(
+                normalizedTitle,
+                @"\s*\[" + Regex.Escape(videoId) + @"\]\s*$",
+                string.Empty,
+                RegexOptions.IgnoreCase);
+        }
+
+        normalizedTitle = normalizedTitle.Trim();
+        return string.IsNullOrWhiteSpace(normalizedTitle)
+            ? fileNameWithoutExtension
+            : normalizedTitle;
+    }
+
+    private static bool IsVideoFile(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return VideoExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase);
     }
 
     private static string ReadUploaderName(JsonElement root)

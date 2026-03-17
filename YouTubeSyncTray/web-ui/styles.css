@@ -859,6 +859,32 @@ select.settings-input {
   word-break: break-all;
 }
 
+.phone-access-qr {
+  display: flex;
+  justify-content: center;
+}
+
+.phone-access-qr-card {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  min-width: min(100%, 260px);
+  padding: 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--line) 72%, var(--text) 8%);
+  background: color-mix(in srgb, var(--surface-alt) 80%, transparent);
+  text-align: center;
+}
+
+.phone-access-qr-image {
+  width: min(220px, 100%);
+  aspect-ratio: 1;
+  padding: 10px;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(32, 24, 21, 0.08);
+}
+
 .phone-access-list {
   display: grid;
   gap: 10px;

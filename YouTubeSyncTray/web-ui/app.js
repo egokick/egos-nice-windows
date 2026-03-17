@@ -13,7 +13,11 @@ const state = {
   currentVideoTitle: "",
   downloadedVideoCount: 0,
   isBusy: false,
+  isUsingCachedSnapshot: false,
+  knownScopes: [],
   libraryVersion: -1,
+  lastBootstrapCapturedAt: "",
+  lastStatusPayload: null,
   lastVideoRefreshAt: 0,
   offlineNotified: false,
   refreshTimer: null,
@@ -53,6 +57,8 @@ const state = {
   isRefreshingYouTubeAccounts: false,
   youtubeAccountSelectionInFlight: false,
   selectedYouTubeAccountKey: "",
+  selectedScope: null,
+  snapshotRestored: false,
   videos: new Map(),
 };
 
@@ -79,6 +85,9 @@ const elements = {
   phoneAccessClients: document.getElementById("phoneAccessClients"),
   phoneAccessControlHint: document.getElementById("phoneAccessControlHint"),
   phoneAccessInstruction: document.getElementById("phoneAccessInstruction"),
+  phoneAccessQrImage: document.getElementById("phoneAccessQrImage"),
+  phoneAccessQrHint: document.getElementById("phoneAccessQrHint"),
+  phoneAccessQrPanel: document.getElementById("phoneAccessQrPanel"),
   phoneAccessRecommendedUrl: document.getElementById("phoneAccessRecommendedUrl"),
   phoneAccessRefreshButton: document.getElementById("phoneAccessRefreshButton"),
   phoneAccessSsid: document.getElementById("phoneAccessSsid"),
@@ -90,6 +99,7 @@ const elements = {
   playerPanel: document.getElementById("playerPanel"),
   playerPlaceholder: document.getElementById("playerPlaceholder"),
   playerTitle: document.getElementById("playerTitle"),
+  redownloadSelectedButton: document.getElementById("redownloadSelectedButton"),
   refreshSummary: document.getElementById("refreshSummary"),
   removeSelectedButton: document.getElementById("removeSelectedButton"),
   searchInput: document.getElementById("searchInput"),
@@ -102,7 +112,6 @@ const elements = {
   settingsDownloadCount: document.getElementById("settingsDownloadCount"),
   settingsPanel: document.getElementById("settingsPanel"),
   settingsProfile: document.getElementById("settingsProfile"),
-  settingsRefreshButton: document.getElementById("settingsRefreshButton"),
   settingsSaveButton: document.getElementById("settingsSaveButton"),
   settingsSummary: document.getElementById("settingsSummary"),
   statusText: document.getElementById("statusText"),
@@ -119,7 +128,16 @@ const elements = {
 
 document.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
-  await refreshStatus(true);
+  await registerServiceWorker();
+  await restoreBootstrapSnapshot();
+  try {
+    await refreshBootstrap(true);
+  } catch {
+    if (!state.snapshotRestored) {
+      await refreshStatus(true);
+    }
+  }
+
   state.refreshTimer = window.setInterval(() => {
     void refreshStatus(false);
   }, 1500);
@@ -133,6 +151,99 @@ window.addEventListener("unhandledrejection", (event) => {
       : "The browser UI hit an unexpected error.";
   showToast(message, true);
 });
+
+const SNAPSHOT_DB_NAME = "youtube-sync-library";
+const SNAPSHOT_STORE_NAME = "snapshots";
+const BOOTSTRAP_SNAPSHOT_KEY = "bootstrap";
+let snapshotDbPromise = null;
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) {
+    return;
+  }
+
+  const hostname = window.location.hostname.toLowerCase();
+  if (!(hostname === "localhost" || hostname.endsWith(".localhost"))) {
+    return;
+  }
+
+  const appVersion = document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "1";
+  try {
+    await navigator.serviceWorker.register(`/sw.js?v=${encodeURIComponent(appVersion)}`);
+  } catch {
+    // Shell caching is a progressive enhancement. The library still works without it.
+  }
+}
+
+function openSnapshotDb() {
+  if (snapshotDbPromise !== null) {
+    return snapshotDbPromise;
+  }
+
+  snapshotDbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(SNAPSHOT_DB_NAME, 1);
+    request.onerror = () => reject(request.error);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(SNAPSHOT_STORE_NAME)) {
+        database.createObjectStore(SNAPSHOT_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+  });
+
+  return snapshotDbPromise;
+}
+
+async function loadBootstrapSnapshot() {
+  try {
+    const database = await openSnapshotDb();
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction(SNAPSHOT_STORE_NAME, "readonly");
+      const store = transaction.objectStore(SNAPSHOT_STORE_NAME);
+      const request = store.get(BOOTSTRAP_SNAPSHOT_KEY);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result || null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function saveBootstrapSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return;
+  }
+
+  try {
+    const database = await openSnapshotDb();
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(SNAPSHOT_STORE_NAME, "readwrite");
+      const store = transaction.objectStore(SNAPSHOT_STORE_NAME);
+      const request = store.put(snapshot, BOOTSTRAP_SNAPSHOT_KEY);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve();
+    });
+  } catch {
+    // Snapshot persistence is best-effort. The live UI can continue without it.
+  }
+}
+
+async function restoreBootstrapSnapshot() {
+  const snapshot = await loadBootstrapSnapshot();
+  if (!snapshot) {
+    return;
+  }
+
+  applyBootstrapResponse(snapshot, { fromCache: true });
+  state.snapshotRestored = true;
+}
+
+async function refreshBootstrap(forceVideoRefresh) {
+  const bootstrap = await fetchJson("/api/bootstrap", { cache: "default" });
+  applyBootstrapResponse(bootstrap, { forceVideoRefresh, fromCache: false });
+  await saveBootstrapSnapshot(bootstrap);
+}
 
 function wireEvents() {
   elements.browserAccountButton.addEventListener("click", () => {
@@ -249,10 +360,6 @@ function wireEvents() {
     setSettingsOpen(false);
   });
 
-  elements.settingsRefreshButton.addEventListener("click", async () => {
-    await refreshSettingsSummary();
-  });
-
   elements.settingsSaveButton.addEventListener("click", async () => {
     await saveSettings();
   });
@@ -272,6 +379,16 @@ function wireEvents() {
   elements.clearSelectionButton.addEventListener("click", () => {
     clearSelectedVideos();
     updateSelectionUi();
+  });
+
+  elements.redownloadSelectedButton.addEventListener("click", async () => {
+    const ids = [...state.selectedIds];
+    if (ids.length === 0) {
+      showToast("Select one or more videos first.", true);
+      return;
+    }
+
+    await redownloadSelectedVideos(ids);
   });
 
   elements.removeSelectedButton.addEventListener("click", async () => {
@@ -432,10 +549,6 @@ async function loadSettingsPanel(forceReload) {
     state.settingsLoading = false;
     updateSettingsControls();
   }
-
-  if (state.settingsOpen && state.settingsLoaded && response?.shouldAutoRefreshSummary) {
-    await refreshSettingsSummary();
-  }
 }
 
 function applySettingsResponse(response) {
@@ -447,7 +560,7 @@ function applySettingsResponse(response) {
     ? response.browserProfile
     : "Default";
   state.settingsCanRefreshTotal = Boolean(response.canRefreshTotal);
-  elements.settingsSummary.textContent = response.summaryMessage || "Refresh Total inspects Watch Later using the settings below.";
+  elements.settingsSummary.textContent = response.summaryMessage || "";
 }
 
 function applySettingsSummaryResponse(response) {
@@ -464,7 +577,7 @@ function applySettingsSummaryResponse(response) {
   }
 
   state.settingsCanRefreshTotal = Boolean(response.canRefreshTotal);
-  elements.settingsSummary.textContent = response.summaryMessage || "Refresh complete.";
+  elements.settingsSummary.textContent = response.summaryMessage || "";
 }
 
 function renderSettingsBrowserOptions(options, selectedValue) {
@@ -496,13 +609,7 @@ function updateSettingsControls() {
   elements.settingsDownloadCount.disabled = isWorking;
   elements.settingsBrowser.disabled = isWorking;
   elements.settingsProfile.disabled = isWorking;
-  elements.settingsRefreshButton.disabled = isWorking || !state.settingsCanRefreshTotal || state.isBusy;
   elements.settingsSaveButton.disabled = isWorking;
-  elements.settingsRefreshButton.textContent = state.settingsLoading
-    ? "Loading..."
-    : state.settingsRefreshing
-      ? "Refreshing..."
-      : "Refresh Total";
   elements.settingsSaveButton.textContent = state.settingsSaving ? "Saving..." : "Save Settings";
   updatePhoneAccessControls();
 }
@@ -540,7 +647,7 @@ async function saveSettings() {
   try {
     const response = await post("/api/settings/save", buildSettingsPayload());
     state.settingsLoaded = false;
-    await refreshStatus(true);
+    await refreshBootstrap(true);
     await loadSettingsPanel(true);
     showToast(response.message || "Settings saved.", false);
   } catch (error) {
@@ -603,8 +710,10 @@ function renderPhoneAccess(info) {
     : "Windows did not report a hotspot client limit.";
   elements.phoneAccessInstruction.textContent = info.instruction || "Connect the phone to the same network as this laptop.";
   elements.phoneAccessControlHint.classList.toggle("hidden", canControlHotspot);
-  elements.phoneAccessRecommendedUrl.textContent = info.recommendedUrl || window.location.href;
-  elements.phoneAccessRecommendedUrl.href = info.recommendedUrl || window.location.href;
+  const recommendedUrl = info.recommendedUrl || window.location.href;
+  elements.phoneAccessRecommendedUrl.textContent = recommendedUrl;
+  elements.phoneAccessRecommendedUrl.href = recommendedUrl;
+  renderPhoneAccessQr(recommendedUrl, hotspotState);
   if (!state.hotspotActionInFlight) {
     elements.phoneAccessStatus.textContent = buildPhoneAccessStatus(info);
   }
@@ -651,8 +760,38 @@ function renderPhoneAccessError(message, previousInfo) {
   elements.phoneAccessControlHint.classList.add("hidden");
   elements.phoneAccessRecommendedUrl.textContent = window.location.href;
   elements.phoneAccessRecommendedUrl.href = window.location.href;
+  elements.phoneAccessQrPanel.classList.add("hidden");
+  elements.phoneAccessQrImage.removeAttribute("src");
+  elements.phoneAccessQrImage.dataset.value = "";
+  elements.phoneAccessQrHint.textContent = "Connect the phone to the same network, then scan this code to open the local page.";
   elements.phoneAccessStatus.textContent = message;
   elements.phoneAccessCandidates.innerHTML = "<li>The laptop network details could not be loaded.</li>";
+}
+
+function renderPhoneAccessQr(recommendedUrl, hotspotState) {
+  const shouldShowQr =
+    typeof recommendedUrl === "string" &&
+    recommendedUrl.trim() !== "";
+
+  elements.phoneAccessQrPanel.classList.toggle("hidden", !shouldShowQr);
+  if (!shouldShowQr) {
+    elements.phoneAccessQrImage.removeAttribute("src");
+    elements.phoneAccessQrImage.dataset.value = "";
+    elements.phoneAccessQrHint.textContent = "Connect the phone to the same network, then scan this code to open the local page.";
+    return;
+  }
+
+  elements.phoneAccessQrHint.textContent = String(hotspotState || "").toLowerCase() === "on"
+    ? "Connect the phone to the hotspot SSID above, then scan this code to open the local page."
+    : "Connect the phone to the same Wi-Fi as this laptop, then scan this code to open the local page.";
+
+  if (elements.phoneAccessQrImage.dataset.value === recommendedUrl) {
+    return;
+  }
+
+  elements.phoneAccessQrImage.dataset.value = recommendedUrl;
+  elements.phoneAccessQrImage.src = `/api/qr-code?value=${encodeURIComponent(recommendedUrl)}`;
+  elements.phoneAccessQrImage.alt = `QR code for ${recommendedUrl}`;
 }
 
 function buildPhoneAccessStatus(info) {
@@ -726,11 +865,81 @@ async function requestHotspot(action) {
   }
 }
 
+function applyBootstrapResponse(bootstrap, options = {}) {
+  if (!bootstrap || typeof bootstrap !== "object") {
+    return;
+  }
+
+  state.knownScopes = Array.isArray(bootstrap.knownScopes) ? bootstrap.knownScopes : state.knownScopes;
+  state.selectedScope = bootstrap.selectedScope && typeof bootstrap.selectedScope === "object"
+    ? bootstrap.selectedScope
+    : state.selectedScope;
+  state.lastBootstrapCapturedAt = typeof bootstrap.snapshotCapturedAtUtc === "string"
+    ? bootstrap.snapshotCapturedAtUtc
+    : state.lastBootstrapCapturedAt;
+
+  if (bootstrap.status && typeof bootstrap.status === "object") {
+    updateStatus(bootstrap.status, { fromCache: Boolean(options.fromCache) });
+  }
+
+  if (Array.isArray(bootstrap.videos)) {
+    applyVideosResponse(bootstrap.videos, {
+      fromCache: Boolean(options.fromCache),
+      snapshotCapturedAtUtc: state.lastBootstrapCapturedAt,
+    });
+  }
+}
+
+function applyVideosResponse(videos, options = {}) {
+  const normalizedVideos = Array.isArray(videos) ? videos : [];
+  state.lastVideoRefreshAt = Date.now();
+  state.downloadedVideoCount = normalizedVideos.length;
+  reconcileVideos(normalizedVideos);
+  applyFilters();
+  updateSelectionUi();
+  updateEmptyState();
+
+  if (options.fromCache) {
+    const staleAt = formatSnapshotTimestamp(options.snapshotCapturedAtUtc);
+    elements.refreshSummary.textContent = staleAt === ""
+      ? "Showing cached library snapshot."
+      : `Showing cached library snapshot from ${staleAt}`;
+    return;
+  }
+
+  elements.refreshSummary.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
+}
+
+async function persistRuntimeBootstrapSnapshot() {
+  if (!state.lastStatusPayload) {
+    return;
+  }
+
+  await saveBootstrapSnapshot({
+    status: state.lastStatusPayload,
+    videos: [...state.videos.values()],
+    knownScopes: state.knownScopes,
+    selectedScope: state.selectedScope,
+    snapshotCapturedAtUtc: new Date().toISOString(),
+  });
+}
+
+function formatSnapshotTimestamp(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return "";
+  }
+
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime())
+    ? ""
+    : timestamp.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 async function refreshStatus(forceVideoRefresh) {
   try {
     const status = await fetchJson("/api/status");
     state.offlineNotified = false;
-    updateStatus(status);
+    updateStatus(status, { fromCache: false });
 
     if (state.settingsOpen && Date.now() - state.lastPhoneAccessRefreshAt >= 5000) {
       void refreshPhoneAccess(false);
@@ -745,12 +954,17 @@ async function refreshStatus(forceVideoRefresh) {
       state.libraryVersion = status.libraryVersion;
       await refreshVideos();
     }
+
+    await persistRuntimeBootstrapSnapshot();
   } catch (error) {
     const message = error instanceof Error ? error.message : trayUnavailableMessage();
     state.isBusy = false;
+    state.isUsingCachedSnapshot = true;
     elements.monitorPill.dataset.state = "offline";
-    elements.monitorPill.textContent = "Offline";
-    elements.statusText.textContent = message;
+    elements.monitorPill.textContent = state.videos.size > 0 || state.snapshotRestored ? "Stale" : "Offline";
+    elements.statusText.textContent = state.videos.size > 0 || state.snapshotRestored
+      ? `${message} Showing the last known library snapshot.`
+      : message;
     setMonitorOpen(true);
     updateSettingsControls();
     if (!state.offlineNotified) {
@@ -762,13 +976,7 @@ async function refreshStatus(forceVideoRefresh) {
 
 async function refreshVideos() {
   const videos = await fetchJson("/api/videos");
-  state.lastVideoRefreshAt = Date.now();
-  state.downloadedVideoCount = Array.isArray(videos) ? videos.length : 0;
-  reconcileVideos(videos);
-  applyFilters();
-  updateSelectionUi();
-  updateEmptyState();
-  elements.refreshSummary.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
+  applyVideosResponse(videos, { fromCache: false });
 }
 
 function clearSelectedVideos(videoIds = null) {
@@ -958,6 +1166,28 @@ function applyLocalVideoRestore(videoIds) {
   applyFilters();
   updateSelectionUi();
   updateEmptyState();
+}
+
+async function redownloadSelectedVideos(videoIds) {
+  const normalizedIds = [...new Set((Array.isArray(videoIds) ? videoIds : [])
+    .filter((videoId) => typeof videoId === "string" && videoId.trim() !== "")
+    .map((videoId) => videoId.trim()))];
+  if (normalizedIds.length === 0) {
+    showToast("Select one or more videos first.", true);
+    return false;
+  }
+
+  try {
+    const response = await post("/api/redownload", { videoIds: normalizedIds });
+    clearSelectedVideos(normalizedIds);
+    updateSelectionUi();
+    showToast(response?.message || "Redownload started.", false);
+    await refreshStatus(false);
+    return true;
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "The request failed.", true);
+    return false;
+  }
 }
 
 function reconcileVideos(videos) {
@@ -1417,7 +1647,7 @@ function applyFilters() {
 }
 
 function getRemoveSelectedButtonLabel() {
-  return state.showWatchedOnly ? "Unhide Selected" : "Hide Selected";
+  return state.showWatchedOnly ? "Mark Unwatched" : "Mark Watched";
 }
 
 function getWatchedVideosButtonLabel() {
@@ -1448,6 +1678,7 @@ function updateSelectionUi() {
       ? buildLibrarySummary()
       : `${selectedCount} selected across ${visibleCount} visible videos`;
 
+  elements.redownloadSelectedButton.disabled = selectedCount === 0 || state.isBusy;
   elements.removeSelectedButton.disabled = selectedCount === 0;
   elements.removeSelectedButton.textContent = getRemoveSelectedButtonLabel();
   elements.watchedVideosButton.textContent = getWatchedVideosButtonLabel();
@@ -1507,9 +1738,11 @@ function buildSyncScopeSummaryLine(configuredDownloadCount) {
   return text;
 }
 
-function updateStatus(status) {
+function updateStatus(status, options = {}) {
   const previousSelectionKey = `${state.selectedBrowserAccountKey}|${state.selectedYouTubeAccountKey}`;
   const previousBrowserAccountKey = state.selectedBrowserAccountKey;
+  state.lastStatusPayload = JSON.parse(JSON.stringify(status));
+  state.isUsingCachedSnapshot = Boolean(options.fromCache);
   state.isBusy = Boolean(status.isBusy);
   state.isRefreshingYouTubeAccounts = Boolean(status.isRefreshingYouTubeAccounts);
   state.syncAuthState = normalizeSyncAuthState(status.syncAuthState);
@@ -1519,6 +1752,9 @@ function updateStatus(status) {
   state.downloadedVideoCount = Number.isInteger(status.videoCount)
     ? status.videoCount
     : state.downloadedVideoCount;
+  state.libraryVersion = Number.isInteger(status.libraryVersion)
+    ? status.libraryVersion
+    : state.libraryVersion;
   state.configuredDownloadCount = Number.isInteger(status.configuredDownloadCount)
     ? status.configuredDownloadCount
     : null;
@@ -1534,9 +1770,19 @@ function updateStatus(status) {
   state.watchLaterTotalCount = Number.isInteger(status.watchLaterTotalCount)
     ? status.watchLaterTotalCount
     : null;
-  elements.monitorPill.dataset.state = status.isBusy ? "busy" : "ready";
-  elements.monitorPill.textContent = status.isBusy ? "Busy" : "Ready";
-  elements.statusText.textContent = status.status;
+  elements.monitorPill.dataset.state = status.isBusy
+    ? "busy"
+    : state.isUsingCachedSnapshot
+      ? "offline"
+      : "ready";
+  elements.monitorPill.textContent = status.isBusy
+    ? "Busy"
+    : state.isUsingCachedSnapshot
+      ? "Stale"
+      : "Ready";
+  elements.statusText.textContent = state.isUsingCachedSnapshot
+    ? `${status.status} Showing cached library snapshot.`
+    : status.status;
   elements.openDownloadsButton.classList.toggle("hidden", !status.canOpenDownloadsFolder);
   elements.openDownloadsButton.disabled = !status.canOpenDownloadsFolder;
   renderBrowserAccountPicker(
@@ -1565,6 +1811,7 @@ function updateStatus(status) {
   updateSyncButtonState(state.isBusy);
   elements.settingsButton.disabled = false;
   elements.clearSelectionButton.disabled = state.isBusy && state.selectedIds.size === 0;
+  elements.redownloadSelectedButton.disabled = state.selectedIds.size === 0 || state.isBusy;
   elements.removeSelectedButton.disabled = state.selectedIds.size === 0;
   elements.removeSelectedButton.textContent = getRemoveSelectedButtonLabel();
   if (state.settingsOpen && state.isBusy && !state.settingsLoading && !state.settingsRefreshing && !state.settingsSaving) {
@@ -1630,7 +1877,7 @@ async function selectBrowserAccount(accountKey) {
   try {
     const response = await post("/api/browser-account/select", { accountKey });
     showToast(response.message || "Switched browser account.", false);
-    await refreshStatus(true);
+    await refreshBootstrap(true);
   } catch (error) {
     state.selectedBrowserAccountKey = previousAccountKey;
     showToast(error instanceof Error ? error.message : "Could not switch browser accounts.", true);
@@ -1658,7 +1905,7 @@ async function selectYouTubeAccount(accountKey) {
   try {
     const response = await post("/api/youtube-account/select", { accountKey });
     showToast(response.message || "Switched YouTube account.", false);
-    await refreshStatus(true);
+    await refreshBootstrap(true);
   } catch (error) {
     state.selectedYouTubeAccountKey = previousAccountKey;
     showToast(error instanceof Error ? error.message : "Could not switch YouTube accounts.", true);
@@ -2134,14 +2381,21 @@ async function runCommand(url, payload, successMessage) {
   }
 }
 
-async function fetchJson(url) {
+async function fetchJson(url, options = {}) {
   let response;
   try {
-    response = await fetch(url, {
-      cache: "no-store",
+    const requestOptions = {
       headers: {
         "Accept": "application/json",
       },
+      ...options,
+    };
+    if (!("cache" in requestOptions)) {
+      requestOptions.cache = "no-store";
+    }
+
+    response = await fetch(url, {
+      ...requestOptions,
     });
   } catch {
     throw new Error(trayUnavailableMessage());
@@ -2186,7 +2440,7 @@ function showToast(message, isError) {
 }
 
 function trayUnavailableMessage() {
-  return "Cannot reach the YouTube Sync tray app. If it was restarted, reopen Library from the tray menu or refresh this page.";
+  return "Cannot reach the YouTube Sync tray app. Showing the last saved library snapshot until the tray app is back.";
 }
 
 async function readErrorMessage(response) {

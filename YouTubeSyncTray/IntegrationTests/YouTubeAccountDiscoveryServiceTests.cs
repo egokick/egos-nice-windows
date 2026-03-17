@@ -356,4 +356,71 @@ public sealed class YouTubeAccountDiscoveryServiceTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [Fact]
+    public void DiscoverAccounts_CachedOnlyUsesKnownLocalScopes_WhenCookieExportIsMissing()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var paths = new YoutubeSyncPaths
+            {
+                RootPath = root,
+                BrowserProfilesPath = Path.Combine(root, "browser-profiles"),
+                DownloadsPath = Path.Combine(root, "downloads"),
+                YtDlpPath = Path.Combine(root, "yt-dlp.exe"),
+                CookiesPath = Path.Combine(root, "youtube-cookies.txt"),
+                CookiesMetadataPath = Path.Combine(root, "youtube-cookies.metadata.json"),
+                ArchivePath = Path.Combine(root, "watch-later.archive.txt"),
+                TempPath = Path.Combine(root, "temp"),
+                LogsPath = Path.Combine(root, "logs"),
+                ThumbnailCachePath = Path.Combine(root, "thumb-cache")
+            };
+
+            var store = new KnownLibraryScopeStore(paths);
+            var browserAccountKey = "Chrome|Default|foo@example.com";
+            var scope = new AccountScopeResolver.ResolvedAccountScope(
+                ScopeKey: KnownLibraryScopeStore.BuildScopeKey(browserAccountKey, "yt|page|101659640671648366543", "offline-scope"),
+                BrowserAccount: null,
+                YouTubeAccount: null,
+                BrowserAccountKey: browserAccountKey,
+                BrowserDisplayName: "Foo",
+                BrowserEmail: "foo@example.com",
+                BrowserProfile: "Default",
+                BrowserAuthUserIndex: 0,
+                YouTubeAccountKey: "yt|page|101659640671648366543",
+                YouTubeDisplayName: "egokick",
+                YouTubeHandle: "@egokick",
+                YouTubeAuthUserIndex: 0,
+                FolderName: "offline-scope",
+                DownloadsPath: Path.Combine(paths.DownloadsPath, "offline-scope"),
+                ThumbnailCachePath: Path.Combine(paths.ThumbnailCachePath, "offline-scope"),
+                ArchivePath: Path.Combine(root, "archives", "offline-scope.watch-later.archive.txt"));
+
+            Directory.CreateDirectory(scope.DownloadsPath);
+            store.Register(scope);
+            store.UpdateScopeInventory(scope, downloadedVideoCount: 3, lastSuccessfulSyncAtUtc: DateTimeOffset.UtcNow);
+
+            var service = new YouTubeAccountDiscoveryService(paths, store);
+            var settings = new AppSettings
+            {
+                BrowserCookies = BrowserCookieSource.Chrome,
+                BrowserProfile = "Default",
+                SelectedBrowserAccountKey = browserAccountKey
+            };
+
+            var accounts = service.DiscoverAccounts(settings, browserAuthUserIndex: 0, allowNetwork: false);
+            var account = Assert.Single(accounts);
+
+            Assert.Equal(scope.YouTubeAccountKey, account.AccountKey);
+            Assert.Equal("egokick", account.DisplayName);
+            Assert.Contains("Saved locally", account.Byline, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }

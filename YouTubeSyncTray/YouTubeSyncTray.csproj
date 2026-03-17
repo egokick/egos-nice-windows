@@ -12,6 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.7.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Remove="AuthTool\**\*.cs;IntegrationTests\**\*.cs" />
     <EmbeddedResource Remove="AuthTool\**\*;IntegrationTests\**\*" />
     <None Remove="AuthTool\**\*;IntegrationTests\**\*" />

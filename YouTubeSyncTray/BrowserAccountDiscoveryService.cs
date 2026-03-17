@@ -5,6 +5,13 @@ namespace YouTubeSyncTray;
 
 internal sealed class BrowserAccountDiscoveryService
 {
+    private readonly KnownLibraryScopeStore? _knownLibraryScopeStore;
+
+    public BrowserAccountDiscoveryService(KnownLibraryScopeStore? knownLibraryScopeStore = null)
+    {
+        _knownLibraryScopeStore = knownLibraryScopeStore;
+    }
+
     public IReadOnlyList<BrowserAccountOption> DiscoverAccounts(AppSettings settings)
     {
         settings.Normalize();
@@ -18,9 +25,22 @@ internal sealed class BrowserAccountDiscoveryService
             }
         }
 
+        if (_knownLibraryScopeStore is not null)
+        {
+            foreach (var scope in _knownLibraryScopeStore.LoadScopes())
+            {
+                if (string.IsNullOrWhiteSpace(scope.BrowserAccountKey))
+                {
+                    continue;
+                }
+
+                options.Add(KnownLibraryScopeStore.CreateBrowserAccountOption(scope));
+            }
+        }
+
         return options
             .GroupBy(option => option.AccountKey, StringComparer.Ordinal)
-            .Select(group => group.First())
+            .Select(SelectPreferredOption)
             .OrderBy(option => option.Browser != settings.BrowserCookies)
             .ThenBy(option => !string.Equals(option.Profile, settings.BrowserProfile, StringComparison.OrdinalIgnoreCase))
             .ThenBy(option => option.AuthUserIndex)
@@ -52,6 +72,8 @@ internal sealed class BrowserAccountDiscoveryService
             {
                 return explicitSelection;
             }
+
+            return BuildFallbackSelectedAccount(explicitAccountKey);
         }
 
         var preferredAccount = accounts.FirstOrDefault(option =>
@@ -154,6 +176,37 @@ internal sealed class BrowserAccountDiscoveryService
         }
     }
 
+    internal static BrowserAccountOption? BuildFallbackSelectedAccount(string? accountKey)
+    {
+        if (string.IsNullOrWhiteSpace(accountKey))
+        {
+            return null;
+        }
+
+        var normalizedAccountKey = accountKey.Trim();
+        var parts = normalizedAccountKey.Split('|', 3, StringSplitOptions.TrimEntries);
+        if (parts.Length < 2 || !Enum.TryParse(parts[0], ignoreCase: true, out BrowserCookieSource browser))
+        {
+            return null;
+        }
+
+        var profile = parts[1];
+        var identity = parts.Length == 3 ? parts[2] : string.Empty;
+        var email = identity.Contains('@', StringComparison.Ordinal) ? identity : string.Empty;
+        var displayName = string.IsNullOrWhiteSpace(identity) ? "Saved browser account" : identity;
+
+        return new BrowserAccountOption(
+            normalizedAccountKey,
+            browser,
+            ChromiumBrowserLocator.GetDisplayName(browser),
+            string.IsNullOrWhiteSpace(profile) ? "Default" : profile,
+            0,
+            identity,
+            email,
+            displayName,
+            string.Empty);
+    }
+
     internal static IReadOnlyList<BrowserAccountIdentity> ParseListAccountsBinaryData(string? encoded)
     {
         if (string.IsNullOrWhiteSpace(encoded))
@@ -199,9 +252,17 @@ internal sealed class BrowserAccountDiscoveryService
     private static IEnumerable<(BrowserCookieSource Browser, string Profile)> GetCandidateProfiles(AppSettings settings)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var browser in ChromiumBrowserLocator.GetInstalledBrowsers())
+        var browsers = ChromiumBrowserLocator.GetInstalledBrowsers();
+        if (browsers.Count == 0)
         {
-            foreach (var profile in new[] { settings.BrowserProfile, "Default" })
+            browsers = ChromiumBrowserLocator.GetManagedBrowsers();
+        }
+
+        foreach (var browser in browsers)
+        {
+            foreach (var profile in new[] { settings.BrowserProfile }
+                         .Concat(ChromiumBrowserLocator.EnumerateProfiles(browser))
+                         .Concat(["Default"]))
             {
                 if (string.IsNullOrWhiteSpace(profile))
                 {
@@ -216,6 +277,15 @@ internal sealed class BrowserAccountDiscoveryService
                 }
             }
         }
+    }
+
+    private static BrowserAccountOption SelectPreferredOption(IGrouping<string, BrowserAccountOption> group)
+    {
+        return group
+            .OrderByDescending(option => !string.IsNullOrWhiteSpace(option.Email))
+            .ThenByDescending(option => !string.IsNullOrWhiteSpace(option.DisplayName))
+            .ThenBy(option => option.AuthUserIndex)
+            .First();
     }
 
     private static List<AccountInfoEntry> ParseAccountInfo(JsonElement root)
