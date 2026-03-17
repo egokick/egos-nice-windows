@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Net;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics;
@@ -11,7 +12,8 @@ namespace YouTubeSyncTray;
 
 internal sealed class LibraryWebServer : IAsyncDisposable
 {
-    private const int PreferredPort = 48173;
+    private const int PrimaryPort = 80;
+    private const int LegacyPort = 48173;
     private static readonly byte[] FaviconBytes = TrayIconFactory.CreatePlayIconBytes();
 
     private readonly YoutubeSyncPaths _paths;
@@ -25,12 +27,18 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private readonly Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> _requestRemoveAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectBrowserAccountAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectYouTubeAccountAsync;
+    private readonly Func<Task<SettingsResponse>> _requestGetSettingsAsync;
+    private readonly Func<SettingsRequest, Task<SettingsSummaryResponse>> _requestRefreshSettingsSummaryAsync;
+    private readonly Func<SettingsRequest, Task<LibraryCommandResponse>> _requestSaveSettingsAsync;
     private readonly Func<Task<LibraryCommandResponse>> _requestOpenSettingsAsync;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
     private readonly SemaphoreSlim _startGate = new(1, 1);
+    private readonly object _videoCacheGate = new();
 
     private WebApplication? _app;
     private string? _baseAddress;
+    private string _cachedVideoDownloadsPath = string.Empty;
+    private Dictionary<string, VideoItem> _cachedVideoItemsById = new(StringComparer.Ordinal);
 
     public LibraryWebServer(
         YoutubeSyncPaths paths,
@@ -44,6 +52,9 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> requestRemoveAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectBrowserAccountAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectYouTubeAccountAsync,
+        Func<Task<SettingsResponse>> requestGetSettingsAsync,
+        Func<SettingsRequest, Task<SettingsSummaryResponse>> requestRefreshSettingsSummaryAsync,
+        Func<SettingsRequest, Task<LibraryCommandResponse>> requestSaveSettingsAsync,
         Func<Task<LibraryCommandResponse>> requestOpenSettingsAsync)
     {
         _paths = paths;
@@ -57,6 +68,9 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         _requestRemoveAsync = requestRemoveAsync;
         _requestSelectBrowserAccountAsync = requestSelectBrowserAccountAsync;
         _requestSelectYouTubeAccountAsync = requestSelectYouTubeAccountAsync;
+        _requestGetSettingsAsync = requestGetSettingsAsync;
+        _requestRefreshSettingsSummaryAsync = requestRefreshSettingsSummaryAsync;
+        _requestSaveSettingsAsync = requestSaveSettingsAsync;
         _requestOpenSettingsAsync = requestOpenSettingsAsync;
     }
 
@@ -76,70 +90,79 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             }
 
             var webUiPath = ResolveWebUiPath();
-            var port = PreferredPort;
-            var baseAddress = $"http://127.0.0.1:{port}";
+            Exception? lastAddressInUse = null;
 
-            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+            foreach (var plan in GetBindingPlans())
             {
-                Args = [],
-                ContentRootPath = AppContext.BaseDirectory
-            });
-            builder.WebHost.UseUrls(baseAddress);
-            builder.Services.Configure<JsonOptions>(options =>
-            {
-                options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-            });
+                var openAddress = BuildHttpUrl("127.0.0.1", plan.PrimaryPort);
+                var phoneAccessProbe = new PhoneAccessProbe(plan.PrimaryPort);
 
-            var app = builder.Build();
-            app.Use(async (context, next) =>
-            {
-                if (ShouldDisableCaching(context.Request.Path))
+                var builder = WebApplication.CreateBuilder(new WebApplicationOptions
                 {
-                    ApplyNoStoreHeaders(context.Response.Headers);
-                }
-
-                await next();
-            });
-            app.UseExceptionHandler(errorApp =>
-            {
-                errorApp.Run(async context =>
+                    Args = [],
+                    ContentRootPath = AppContext.BaseDirectory
+                });
+                builder.WebHost.UseUrls(plan.ListenAddresses);
+                builder.Services.Configure<JsonOptions>(options =>
                 {
-                    var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
-                    var message = BuildApiErrorMessage(exception);
-                    if (context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase))
+                    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+                });
+
+                var app = builder.Build();
+                app.Use(async (context, next) =>
+                {
+                    if (ShouldDisableCaching(context.Request.Path))
                     {
-                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        context.Response.ContentType = "application/json; charset=utf-8";
-                        await JsonSerializer.SerializeAsync(
-                            context.Response.Body,
-                            new LibraryCommandResponse(false, message),
-                            _jsonOptions,
-                            context.RequestAborted);
-                        return;
+                        ApplyNoStoreHeaders(context.Response.Headers);
                     }
 
-                    context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                    context.Response.ContentType = "text/plain; charset=utf-8";
-                    await context.Response.WriteAsync(message, context.RequestAborted);
+                    await next();
                 });
-            });
-            MapRoutes(app, webUiPath);
-            try
-            {
-                await app.StartAsync(cancellationToken);
-            }
-            catch (IOException ex) when (IsAddressInUse(ex))
-            {
-                await app.DisposeAsync();
-                throw new InvalidOperationException(
-                    $"The browser library could not start on {baseAddress}/ because that localhost port is already in use. Close the process using port {port} or restart the tray app.",
-                    ex);
+                app.UseExceptionHandler(errorApp =>
+                {
+                    errorApp.Run(async context =>
+                    {
+                        var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
+                        var message = BuildApiErrorMessage(exception);
+                        if (context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                            context.Response.ContentType = "application/json; charset=utf-8";
+                            await JsonSerializer.SerializeAsync(
+                                context.Response.Body,
+                                new LibraryCommandResponse(false, message),
+                                _jsonOptions,
+                                context.RequestAborted);
+                            return;
+                        }
+
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        context.Response.ContentType = "text/plain; charset=utf-8";
+                        await context.Response.WriteAsync(message, context.RequestAborted);
+                    });
+                });
+                MapRoutes(app, webUiPath, phoneAccessProbe);
+                try
+                {
+                    await app.StartAsync(cancellationToken);
+                }
+                catch (IOException ex) when (IsAddressInUse(ex))
+                {
+                    lastAddressInUse = ex;
+                    TrayLog.Write(_paths, $"Could not bind browser library to {string.Join(", ", plan.ListenAddresses)}; trying the next port plan.");
+                    await app.DisposeAsync();
+                    continue;
+                }
+
+                _app = app;
+                _baseAddress = openAddress + "/";
+                TrayLog.Write(_paths, $"Library web server started on {_baseAddress} and is listening on {string.Join(", ", plan.ListenAddresses)}.");
+                return _baseAddress;
             }
 
-            _app = app;
-            _baseAddress = baseAddress + "/";
-            TrayLog.Write(_paths, $"Library web server started on {_baseAddress}");
-            return _baseAddress;
+            throw new InvalidOperationException(
+                $"The browser library could not start on any supported port plan ({PrimaryPort} and/or {LegacyPort}). Close the process using one of those ports or restart the tray app.",
+                lastAddressInUse);
         }
         finally
         {
@@ -181,17 +204,49 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         await _app.DisposeAsync();
     }
 
-    private void MapRoutes(WebApplication app, string webUiPath)
+    private void MapRoutes(WebApplication app, string webUiPath, PhoneAccessProbe phoneAccessProbe)
     {
         app.MapGet("/", () => Results.File(Path.Combine(webUiPath, "index.html"), "text/html; charset=utf-8"));
         app.MapGet("/styles.css", () => Results.File(Path.Combine(webUiPath, "styles.css"), "text/css; charset=utf-8"));
         app.MapGet("/app.js", () => Results.File(Path.Combine(webUiPath, "app.js"), "application/javascript; charset=utf-8"));
         app.MapGet("/favicon.ico", () => Results.File(FaviconBytes, "image/x-icon"));
 
+        app.MapGet("/api/network-info", (HttpContext context) => Results.Json(
+            phoneAccessProbe.GetSnapshot(IsLocalRequest(context)),
+            _jsonOptions));
         app.MapGet("/api/status", () => Results.Json(BuildStatusDto(), _jsonOptions));
+        app.MapGet("/api/settings", async () => Results.Json(await _requestGetSettingsAsync(), _jsonOptions));
         app.MapGet("/api/videos", () => Results.Json(BuildVideoDtos(), _jsonOptions));
         app.MapGet("/api/videos/{videoId}/thumbnail", GetThumbnailAsync);
+        app.MapGet("/api/videos/{videoId}/captions", GetVideoCaptions);
+        app.MapGet("/api/videos/{videoId}/captions/{trackKey}/file", GetVideoCaptionFileAsync);
         app.MapGet("/api/videos/{videoId}/stream", GetVideoStreamAsync);
+        app.MapPost("/api/hotspot/start", (HttpContext context) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            var result = phoneAccessProbe.SetHotspotEnabled(enable: true, canControlHotspot: true);
+            return Results.Json(
+                result,
+                _jsonOptions,
+                statusCode: result.Success ? StatusCodes.Status200OK : StatusCodes.Status409Conflict);
+        });
+        app.MapPost("/api/hotspot/stop", (HttpContext context) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            var result = phoneAccessProbe.SetHotspotEnabled(enable: false, canControlHotspot: true);
+            return Results.Json(
+                result,
+                _jsonOptions,
+                statusCode: result.Success ? StatusCodes.Status200OK : StatusCodes.Status409Conflict);
+        });
         app.MapPost("/api/sync", async () => ToHttpResult(await _requestSyncAsync()));
         app.MapPost("/api/remove", async (RemoveVideosRequest request) => ToHttpResult(
             await _requestRemoveAsync(request.VideoIds
@@ -202,6 +257,11 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             await _requestSelectBrowserAccountAsync(request.AccountKey ?? string.Empty)));
         app.MapPost("/api/youtube-account/select", async (SelectAccountRequest request) => ToHttpResult(
             await _requestSelectYouTubeAccountAsync(request.AccountKey ?? string.Empty)));
+        app.MapPost("/api/settings/summary", async (SettingsRequest request) => Results.Json(
+            await _requestRefreshSettingsSummaryAsync(request),
+            _jsonOptions));
+        app.MapPost("/api/settings/save", async (SettingsRequest request) => ToHttpResult(
+            await _requestSaveSettingsAsync(request)));
         app.MapPost("/api/settings/open", async () => ToHttpResult(await _requestOpenSettingsAsync()));
     }
 
@@ -261,7 +321,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private IReadOnlyList<LibraryVideoDto> BuildVideoDtos()
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
-        var items = VideoItem.LoadFromDownloads(accountScope.DownloadsPath);
+        var items = LoadVideoItems(accountScope.DownloadsPath);
         _state.SetVideoCount(items.Count);
 
         return items
@@ -271,15 +331,15 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                 item.UploaderName,
                 item.DisplayIndex,
                 $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/thumbnail?v={GetThumbnailRevision(item)}",
-                $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/stream"))
+                $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/stream",
+                $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/captions"))
             .ToList();
     }
 
     private async Task<IResult> GetThumbnailAsync(string videoId, CancellationToken cancellationToken)
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
-        var item = VideoItem.LoadFromDownloads(accountScope.DownloadsPath)
-            .FirstOrDefault(candidate => string.Equals(candidate.VideoId, videoId, StringComparison.Ordinal));
+        var item = FindVideoItem(accountScope.DownloadsPath, videoId);
         if (item is null)
         {
             return Results.NotFound();
@@ -297,8 +357,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private Task<IResult> GetVideoStreamAsync(string videoId)
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
-        var item = VideoItem.LoadFromDownloads(accountScope.DownloadsPath)
-            .FirstOrDefault(candidate => string.Equals(candidate.VideoId, videoId, StringComparison.Ordinal));
+        var item = FindVideoItem(accountScope.DownloadsPath, videoId);
         if (item is null)
         {
             return Task.FromResult<IResult>(Results.NotFound());
@@ -306,6 +365,98 @@ internal sealed class LibraryWebServer : IAsyncDisposable
 
         var contentType = GetVideoContentType(item.VideoPath);
         return Task.FromResult<IResult>(Results.File(item.VideoPath, contentType, enableRangeProcessing: true));
+    }
+
+    private IResult GetVideoCaptions(string videoId)
+    {
+        var accountScope = _accountScopeResolver.Resolve(_getSettings());
+        var item = FindVideoItem(accountScope.DownloadsPath, videoId);
+        if (item is null)
+        {
+            return Results.NotFound();
+        }
+
+        return Results.Json(
+            item.CaptionTracks
+                .Select(track => new CaptionTrackDto(
+                    track.TrackKey,
+                    track.Label,
+                    track.LanguageCode,
+                    $"/api/videos/{Uri.EscapeDataString(videoId)}/captions/{Uri.EscapeDataString(track.TrackKey)}/file"))
+                .ToList(),
+            _jsonOptions);
+    }
+
+    private async Task<IResult> GetVideoCaptionFileAsync(string videoId, string trackKey, CancellationToken cancellationToken)
+    {
+        var accountScope = _accountScopeResolver.Resolve(_getSettings());
+        var item = FindVideoItem(accountScope.DownloadsPath, videoId);
+        if (item is null)
+        {
+            return Results.NotFound();
+        }
+
+        var track = item.CaptionTracks.FirstOrDefault(candidate =>
+            string.Equals(candidate.TrackKey, trackKey, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(track.TrackKey) || !File.Exists(track.SourcePath))
+        {
+            return Results.NotFound();
+        }
+
+        var content = await File.ReadAllTextAsync(track.SourcePath, cancellationToken);
+        if (string.Equals(track.Format, "srt", StringComparison.OrdinalIgnoreCase))
+        {
+            content = CaptionFormatConverter.ConvertSrtToWebVtt(content);
+        }
+
+        return Results.Text(content, "text/vtt; charset=utf-8");
+    }
+
+    private IReadOnlyList<VideoItem> LoadVideoItems(string downloadsPath)
+    {
+        var items = VideoItem.LoadFromDownloads(downloadsPath);
+        UpdateVideoCache(downloadsPath, items);
+        return items;
+    }
+
+    private VideoItem? FindVideoItem(string downloadsPath, string videoId)
+    {
+        if (TryGetCachedVideoItem(downloadsPath, videoId, out var cachedItem)
+            && File.Exists(cachedItem.VideoPath))
+        {
+            return cachedItem;
+        }
+
+        return LoadVideoItems(downloadsPath)
+            .FirstOrDefault(candidate => string.Equals(candidate.VideoId, videoId, StringComparison.Ordinal));
+    }
+
+    private bool TryGetCachedVideoItem(string downloadsPath, string videoId, out VideoItem item)
+    {
+        lock (_videoCacheGate)
+        {
+            if (string.Equals(_cachedVideoDownloadsPath, downloadsPath, StringComparison.OrdinalIgnoreCase)
+                && _cachedVideoItemsById.TryGetValue(videoId, out var cachedItem)
+                && cachedItem is not null)
+            {
+                item = cachedItem;
+                return true;
+            }
+        }
+
+        item = null!;
+        return false;
+    }
+
+    private void UpdateVideoCache(string downloadsPath, IReadOnlyList<VideoItem> items)
+    {
+        lock (_videoCacheGate)
+        {
+            _cachedVideoDownloadsPath = downloadsPath;
+            _cachedVideoItemsById = items
+                .GroupBy(item => item.VideoId, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        }
     }
 
     private static IResult ToHttpResult(LibraryCommandResponse response)
@@ -350,6 +501,54 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     {
         return exception.Message.Contains("address already in use", StringComparison.OrdinalIgnoreCase)
             || exception.Message.Contains("Only one usage of each socket address", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private IResult BuildForbiddenResult()
+    {
+        return Results.Json(
+            new LibraryCommandResponse(false, "Hotspot control is only available from the laptop running YouTube Sync."),
+            _jsonOptions,
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    private static bool IsLocalRequest(HttpContext context)
+    {
+        var remoteAddress = context.Connection.RemoteIpAddress;
+        if (remoteAddress is null)
+        {
+            return false;
+        }
+
+        if (IPAddress.IsLoopback(remoteAddress))
+        {
+            return true;
+        }
+
+        var localAddress = context.Connection.LocalIpAddress;
+        return localAddress is not null && remoteAddress.Equals(localAddress);
+    }
+
+    private static string BuildHttpUrl(string host, int port)
+    {
+        return port == 80
+            ? $"http://{host}"
+            : $"http://{host}:{port}";
+    }
+
+    private static IReadOnlyList<BindingPlan> GetBindingPlans()
+    {
+        return
+        [
+            new BindingPlan(
+                PrimaryPort,
+                [BuildHttpUrl("0.0.0.0", PrimaryPort), BuildHttpUrl("0.0.0.0", LegacyPort)]),
+            new BindingPlan(
+                PrimaryPort,
+                [BuildHttpUrl("0.0.0.0", PrimaryPort)]),
+            new BindingPlan(
+                LegacyPort,
+                [BuildHttpUrl("0.0.0.0", LegacyPort)])
+        ];
     }
 
     private static bool ShouldDisableCaching(PathString path) =>
@@ -406,13 +605,29 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         public string? AccountKey { get; set; }
     }
 
+    internal sealed class SettingsRequest
+    {
+        public int DownloadCount { get; set; }
+
+        public string? BrowserCookies { get; set; }
+
+        public string? BrowserProfile { get; set; }
+    }
+
     private sealed record LibraryVideoDto(
         string VideoId,
         string Title,
         string UploaderName,
         string DisplayIndex,
         string ThumbnailUrl,
-        string StreamUrl);
+        string StreamUrl,
+        string CaptionsUrl);
+
+    private sealed record CaptionTrackDto(
+        string TrackKey,
+        string Label,
+        string LanguageCode,
+        string TrackUrl);
 
     private sealed record BrowserAccountDto(
         string AccountKey,
@@ -450,5 +665,30 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         string SelectedYouTubeAccountKey,
         string SelectedYouTubeAccountLabel,
         IReadOnlyList<YouTubeAccountDto> AvailableYouTubeAccounts);
+
+    internal sealed record BrowserOptionDto(
+        string Value,
+        string Label);
+
+    internal sealed record SettingsResponse(
+        int DownloadCount,
+        string BrowserCookies,
+        string BrowserProfile,
+        IReadOnlyList<BrowserOptionDto> AvailableBrowsers,
+        bool CanRefreshTotal,
+        bool ShouldAutoRefreshSummary,
+        string SummaryMessage);
+
+    internal sealed record SettingsSummaryResponse(
+        bool CanRefreshTotal,
+        string SummaryMessage,
+        int? WatchLaterTotalCount,
+        int DownloadCount,
+        string BrowserCookies,
+        string BrowserProfile);
+
+    private sealed record BindingPlan(
+        int PrimaryPort,
+        string[] ListenAddresses);
 }
 

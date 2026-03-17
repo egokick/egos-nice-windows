@@ -3,16 +3,34 @@ const state = {
   browserAccounts: [],
   browserAccountOptionsKey: "",
   browserAccountSelectionInFlight: false,
+  captionTrackPreference: null,
+  captionTrackPreferenceLanguageCode: "",
+  captionTrackRequests: new Map(),
+  captionTracksByVideoId: new Map(),
   cards: new Map(),
   currentVideoId: null,
+  currentCaptionTracks: [],
   currentVideoTitle: "",
+  isBusy: false,
   libraryVersion: -1,
   lastVideoRefreshAt: 0,
   offlineNotified: false,
   refreshTimer: null,
   searchMatcher: null,
+  settingsCanRefreshTotal: false,
+  settingsLoaded: false,
+  settingsLoading: false,
+  settingsOpen: false,
+  settingsRefreshing: false,
+  settingsSaving: false,
   searchTerm: "",
   configuredDownloadCount: null,
+  hotspotAction: "",
+  hotspotActionInFlight: false,
+  lastPhoneAccessRefreshAt: 0,
+  phoneAccessInfo: null,
+  phoneAccessLoaded: false,
+  phoneAccessLoading: false,
   selectedBrowserAccountKey: "",
   selectedIds: new Set(),
   syncButtonAnimationFrame: 0,
@@ -33,6 +51,9 @@ const elements = {
   browserAccountList: document.getElementById("browserAccountList"),
   browserAccountMenu: document.getElementById("browserAccountMenu"),
   browserAccountPicker: document.getElementById("browserAccountPicker"),
+  captionPicker: document.getElementById("captionPicker"),
+  captionSelect: document.getElementById("captionSelect"),
+  captionStatus: document.getElementById("captionStatus"),
   clearSelectionButton: document.getElementById("clearSelectionButton"),
   emptyState: document.getElementById("emptyState"),
   libraryGrid: document.getElementById("libraryGrid"),
@@ -40,6 +61,18 @@ const elements = {
   monitorPanel: document.getElementById("monitorPanel"),
   monitorPill: document.getElementById("monitorPill"),
   monitorToggle: document.getElementById("monitorToggle"),
+  phoneAccessCandidates: document.getElementById("phoneAccessCandidates"),
+  phoneAccessClients: document.getElementById("phoneAccessClients"),
+  phoneAccessControlHint: document.getElementById("phoneAccessControlHint"),
+  phoneAccessInstruction: document.getElementById("phoneAccessInstruction"),
+  phoneAccessRecommendedUrl: document.getElementById("phoneAccessRecommendedUrl"),
+  phoneAccessRefreshButton: document.getElementById("phoneAccessRefreshButton"),
+  phoneAccessSsid: document.getElementById("phoneAccessSsid"),
+  phoneAccessStartButton: document.getElementById("phoneAccessStartButton"),
+  phoneAccessState: document.getElementById("phoneAccessState"),
+  phoneAccessStatus: document.getElementById("phoneAccessStatus"),
+  phoneAccessStopButton: document.getElementById("phoneAccessStopButton"),
+  phoneAccessWifi: document.getElementById("phoneAccessWifi"),
   playerPanel: document.getElementById("playerPanel"),
   playerPlaceholder: document.getElementById("playerPlaceholder"),
   playerTitle: document.getElementById("playerTitle"),
@@ -50,6 +83,14 @@ const elements = {
   searchToggle: document.getElementById("searchToggle"),
   selectionSummary: document.getElementById("selectionSummary"),
   settingsButton: document.getElementById("settingsButton"),
+  settingsBrowser: document.getElementById("settingsBrowser"),
+  settingsClose: document.getElementById("settingsClose"),
+  settingsDownloadCount: document.getElementById("settingsDownloadCount"),
+  settingsPanel: document.getElementById("settingsPanel"),
+  settingsProfile: document.getElementById("settingsProfile"),
+  settingsRefreshButton: document.getElementById("settingsRefreshButton"),
+  settingsSaveButton: document.getElementById("settingsSaveButton"),
+  settingsSummary: document.getElementById("settingsSummary"),
   statusText: document.getElementById("statusText"),
   syncButton: document.getElementById("syncButton"),
   toast: document.getElementById("toast"),
@@ -181,7 +222,31 @@ function wireEvents() {
   });
 
   elements.settingsButton.addEventListener("click", async () => {
-    await runCommand("/api/settings/open", null, "Settings opened.");
+    await toggleSettingsPanel();
+  });
+
+  elements.settingsClose.addEventListener("click", () => {
+    setSettingsOpen(false);
+  });
+
+  elements.settingsRefreshButton.addEventListener("click", async () => {
+    await refreshSettingsSummary();
+  });
+
+  elements.settingsSaveButton.addEventListener("click", async () => {
+    await saveSettings();
+  });
+
+  elements.phoneAccessRefreshButton.addEventListener("click", async () => {
+    await refreshPhoneAccess(true);
+  });
+
+  elements.phoneAccessStartButton.addEventListener("click", async () => {
+    await requestHotspot("start");
+  });
+
+  elements.phoneAccessStopButton.addEventListener("click", async () => {
+    await requestHotspot("stop");
   });
 
   elements.clearSelectionButton.addEventListener("click", () => {
@@ -248,6 +313,15 @@ function wireEvents() {
     showToast("This video could not be played in the browser.", true);
   });
 
+  elements.captionSelect.addEventListener("change", () => {
+    const selectedTrackKey = elements.captionSelect.value || "";
+    state.captionTrackPreference = selectedTrackKey;
+    state.captionTrackPreferenceLanguageCode = selectedTrackKey === ""
+      ? ""
+      : state.currentCaptionTracks.find((track) => track.trackKey === selectedTrackKey)?.languageCode || "";
+    applyCaptionSelection(selectedTrackKey);
+  });
+
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       if (!elements.browserAccountList.classList.contains("hidden")) {
@@ -262,6 +336,10 @@ function wireEvents() {
         setMonitorOpen(false);
       }
 
+      if (!elements.settingsPanel.classList.contains("hidden")) {
+        setSettingsOpen(false);
+      }
+
       if (elements.searchPanel.classList.contains("is-open") && elements.searchInput.value.trim() === "") {
         setSearchOpen(false);
       }
@@ -269,11 +347,362 @@ function wireEvents() {
   });
 }
 
+async function toggleSettingsPanel() {
+  if (state.settingsOpen) {
+    setSettingsOpen(false);
+    return;
+  }
+
+  await openSettingsPanel();
+}
+
+async function openSettingsPanel() {
+  setBrowserAccountMenuOpen(false);
+  setYouTubeAccountMenuOpen(false);
+  setSettingsOpen(true);
+  await Promise.all([
+    loadSettingsPanel(true),
+    refreshPhoneAccess(true),
+  ]);
+}
+
+function setSettingsOpen(isOpen) {
+  state.settingsOpen = isOpen;
+  elements.settingsPanel.classList.toggle("hidden", !isOpen);
+  elements.settingsPanel.setAttribute("aria-hidden", String(!isOpen));
+  elements.settingsButton.setAttribute("aria-expanded", String(isOpen));
+}
+
+async function loadSettingsPanel(forceReload) {
+  if (state.settingsLoading) {
+    return;
+  }
+
+  if (!forceReload && state.settingsLoaded) {
+    updateSettingsControls();
+    return;
+  }
+
+  state.settingsLoading = true;
+  elements.settingsSummary.textContent = "Loading settings...";
+  updateSettingsControls();
+  let response = null;
+
+  try {
+    response = await fetchJson("/api/settings");
+    applySettingsResponse(response);
+    state.settingsLoaded = true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not load settings.";
+    elements.settingsSummary.textContent = message;
+    showToast(message, true);
+  } finally {
+    state.settingsLoading = false;
+    updateSettingsControls();
+  }
+
+  if (state.settingsOpen && state.settingsLoaded && response?.shouldAutoRefreshSummary) {
+    await refreshSettingsSummary();
+  }
+}
+
+function applySettingsResponse(response) {
+  renderSettingsBrowserOptions(response.availableBrowsers, response.browserCookies);
+  elements.settingsDownloadCount.value = Number.isInteger(response.downloadCount)
+    ? String(response.downloadCount)
+    : "150";
+  elements.settingsProfile.value = typeof response.browserProfile === "string" && response.browserProfile.trim() !== ""
+    ? response.browserProfile
+    : "Default";
+  state.settingsCanRefreshTotal = Boolean(response.canRefreshTotal);
+  elements.settingsSummary.textContent = response.summaryMessage || "Refresh Total inspects Watch Later using the settings below.";
+}
+
+function applySettingsSummaryResponse(response) {
+  if (Number.isInteger(response.downloadCount)) {
+    elements.settingsDownloadCount.value = String(response.downloadCount);
+  }
+
+  if (typeof response.browserCookies === "string" && response.browserCookies !== "") {
+    elements.settingsBrowser.value = response.browserCookies;
+  }
+
+  if (typeof response.browserProfile === "string" && response.browserProfile.trim() !== "") {
+    elements.settingsProfile.value = response.browserProfile;
+  }
+
+  state.settingsCanRefreshTotal = Boolean(response.canRefreshTotal);
+  elements.settingsSummary.textContent = response.summaryMessage || "Refresh complete.";
+}
+
+function renderSettingsBrowserOptions(options, selectedValue) {
+  elements.settingsBrowser.replaceChildren();
+  for (const option of Array.isArray(options) ? options : []) {
+    const element = document.createElement("option");
+    element.value = option.value || "";
+    element.textContent = option.label || option.value || "Browser";
+    element.selected = element.value === selectedValue;
+    elements.settingsBrowser.append(element);
+  }
+
+  if (elements.settingsBrowser.options.length > 0 && elements.settingsBrowser.value === "") {
+    elements.settingsBrowser.selectedIndex = 0;
+  }
+}
+
+function buildSettingsPayload() {
+  const parsedDownloadCount = Number.parseInt(elements.settingsDownloadCount.value, 10);
+  return {
+    downloadCount: Number.isInteger(parsedDownloadCount) ? parsedDownloadCount : 1,
+    browserCookies: elements.settingsBrowser.value || "",
+    browserProfile: elements.settingsProfile.value.trim() || "Default",
+  };
+}
+
+function updateSettingsControls() {
+  const isWorking = state.settingsLoading || state.settingsRefreshing || state.settingsSaving;
+  elements.settingsDownloadCount.disabled = isWorking;
+  elements.settingsBrowser.disabled = isWorking;
+  elements.settingsProfile.disabled = isWorking;
+  elements.settingsRefreshButton.disabled = isWorking || !state.settingsCanRefreshTotal || state.isBusy;
+  elements.settingsSaveButton.disabled = isWorking;
+  elements.settingsRefreshButton.textContent = state.settingsLoading
+    ? "Loading..."
+    : state.settingsRefreshing
+      ? "Refreshing..."
+      : "Refresh Total";
+  elements.settingsSaveButton.textContent = state.settingsSaving ? "Saving..." : "Save Settings";
+  updatePhoneAccessControls();
+}
+
+async function refreshSettingsSummary() {
+  if (state.settingsLoading || state.settingsRefreshing || !state.settingsOpen) {
+    return;
+  }
+
+  state.settingsRefreshing = true;
+  elements.settingsSummary.textContent = "Refreshing Watch Later total...";
+  updateSettingsControls();
+
+  try {
+    const response = await post("/api/settings/summary", buildSettingsPayload());
+    applySettingsSummaryResponse(response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not refresh Watch Later total.";
+    elements.settingsSummary.textContent = message;
+    showToast(message, true);
+  } finally {
+    state.settingsRefreshing = false;
+    updateSettingsControls();
+  }
+}
+
+async function saveSettings() {
+  if (state.settingsLoading || state.settingsSaving || !state.settingsOpen) {
+    return;
+  }
+
+  state.settingsSaving = true;
+  updateSettingsControls();
+
+  try {
+    const response = await post("/api/settings/save", buildSettingsPayload());
+    state.settingsLoaded = false;
+    await refreshStatus(true);
+    await loadSettingsPanel(true);
+    showToast(response.message || "Settings saved.", false);
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "Could not save settings.", true);
+  } finally {
+    state.settingsSaving = false;
+    updateSettingsControls();
+  }
+}
+
+async function refreshPhoneAccess(forceReload) {
+  if ((!state.settingsOpen && !forceReload) || state.phoneAccessLoading || state.hotspotActionInFlight) {
+    return;
+  }
+
+  if (!forceReload && state.phoneAccessLoaded && Date.now() - state.lastPhoneAccessRefreshAt < 5000) {
+    return;
+  }
+
+  state.phoneAccessLoading = true;
+  if (!state.phoneAccessLoaded) {
+    elements.phoneAccessStatus.textContent = "Checking laptop network access...";
+  }
+  updatePhoneAccessControls();
+
+  try {
+    const info = await fetchJson("/api/network-info");
+    state.phoneAccessInfo = info;
+    state.phoneAccessLoaded = true;
+    state.lastPhoneAccessRefreshAt = Date.now();
+    renderPhoneAccess(info);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not load phone access details.";
+    renderPhoneAccessError(message, state.phoneAccessInfo);
+  } finally {
+    state.phoneAccessLoading = false;
+    updatePhoneAccessControls();
+  }
+}
+
+function renderPhoneAccess(info) {
+  state.phoneAccessInfo = info;
+  const canControlHotspot = Boolean(info.canControlHotspot);
+
+  const hotspotState = typeof info.hotspotState === "string" ? info.hotspotState : "Unknown";
+  const stateClass = hotspotState.toLowerCase() === "on"
+    ? "phone-access-pill is-on"
+    : hotspotState.toLowerCase() === "off"
+      ? "phone-access-pill is-off"
+      : hotspotState.toLowerCase() === "intransition"
+        ? "phone-access-pill is-transition"
+        : "phone-access-pill";
+
+  elements.phoneAccessState.className = stateClass;
+  elements.phoneAccessState.textContent = hotspotState;
+  elements.phoneAccessSsid.textContent = info.hotspotSsid || "Not detected";
+  elements.phoneAccessWifi.textContent = info.currentWifiName || "No active Wi-Fi profile";
+  elements.phoneAccessClients.textContent = Number.isInteger(info.maxClients)
+    ? `Windows hotspot allows up to ${info.maxClients} clients.`
+    : "Windows did not report a hotspot client limit.";
+  elements.phoneAccessInstruction.textContent = info.instruction || "Connect the phone to the same network as this laptop.";
+  elements.phoneAccessControlHint.classList.toggle("hidden", canControlHotspot);
+  elements.phoneAccessRecommendedUrl.textContent = info.recommendedUrl || window.location.href;
+  elements.phoneAccessRecommendedUrl.href = info.recommendedUrl || window.location.href;
+  if (!state.hotspotActionInFlight) {
+    elements.phoneAccessStatus.textContent = buildPhoneAccessStatus(info);
+  }
+
+  elements.phoneAccessCandidates.replaceChildren();
+  const candidates = Array.isArray(info.candidateUrls) ? info.candidateUrls : [];
+  if (candidates.length === 0) {
+    const empty = document.createElement("li");
+    empty.textContent = "No private LAN addresses are available on this laptop right now.";
+    elements.phoneAccessCandidates.append(empty);
+  } else {
+    for (const candidate of candidates) {
+      const item = document.createElement("li");
+
+      const url = document.createElement("div");
+      url.className = "phone-access-candidate-url";
+      url.textContent = candidate.url;
+
+      const meta = document.createElement("div");
+      meta.className = "phone-access-candidate-meta";
+      meta.textContent = `${candidate.interfaceName} (${candidate.interfaceType}) - ${candidate.address}`;
+
+      item.append(url, meta);
+      elements.phoneAccessCandidates.append(item);
+    }
+  }
+}
+
+function renderPhoneAccessError(message, previousInfo) {
+  if (previousInfo) {
+    renderPhoneAccess(previousInfo);
+    elements.phoneAccessStatus.textContent = `${message} Showing the last known hotspot details.`;
+    return;
+  }
+
+  state.phoneAccessLoaded = false;
+  state.phoneAccessInfo = null;
+  elements.phoneAccessState.className = "phone-access-pill is-error";
+  elements.phoneAccessState.textContent = "Unavailable";
+  elements.phoneAccessSsid.textContent = "Unavailable";
+  elements.phoneAccessWifi.textContent = "Unavailable";
+  elements.phoneAccessClients.textContent = "";
+  elements.phoneAccessInstruction.textContent = message;
+  elements.phoneAccessControlHint.classList.add("hidden");
+  elements.phoneAccessRecommendedUrl.textContent = window.location.href;
+  elements.phoneAccessRecommendedUrl.href = window.location.href;
+  elements.phoneAccessStatus.textContent = message;
+  elements.phoneAccessCandidates.innerHTML = "<li>The laptop network details could not be loaded.</li>";
+}
+
+function buildPhoneAccessStatus(info) {
+  if (!info.canControlHotspot) {
+    return "Hotspot control is only available on the laptop running YouTube Sync. Clients can still use the SSID and phone URL shown here.";
+  }
+
+  const hotspotState = String(info.hotspotState || "Unknown").toLowerCase();
+  if (hotspotState === "on") {
+    return `Hotspot is on${info.hotspotSsid ? ` as '${info.hotspotSsid}'` : ""}. Phones can open ${info.recommendedUrl}.`;
+  }
+
+  if (hotspotState === "off") {
+    return "Hotspot is off. Start it here when you want the laptop to broadcast its own SSID.";
+  }
+
+  if (hotspotState === "intransition") {
+    return "Windows is still changing hotspot state. Wait a few seconds for the final SSID and phone URL.";
+  }
+
+  return "Phone access details are available, but Windows did not report a stable hotspot state.";
+}
+
+function updatePhoneAccessControls() {
+  const canControlHotspot = Boolean(state.phoneAccessInfo?.canControlHotspot);
+  const hotspotState = String(state.phoneAccessInfo?.hotspotState || "Unknown").toLowerCase();
+  const isBusy = state.phoneAccessLoading || state.hotspotActionInFlight;
+  elements.phoneAccessRefreshButton.disabled = isBusy;
+  elements.phoneAccessStartButton.classList.toggle("hidden", !canControlHotspot);
+  elements.phoneAccessStopButton.classList.toggle("hidden", !canControlHotspot);
+  elements.phoneAccessStartButton.disabled = !canControlHotspot || isBusy || hotspotState === "on" || hotspotState === "intransition";
+  elements.phoneAccessStopButton.disabled = !canControlHotspot || isBusy || hotspotState === "off" || hotspotState === "unknown" || hotspotState === "intransition";
+  elements.phoneAccessRefreshButton.textContent = state.phoneAccessLoading ? "Refreshing..." : "Refresh Access";
+  elements.phoneAccessStartButton.textContent =
+    state.hotspotActionInFlight && state.hotspotAction === "start" ? "Starting..." : "Start Hotspot";
+  elements.phoneAccessStopButton.textContent =
+    state.hotspotActionInFlight && state.hotspotAction === "stop" ? "Stopping..." : "Stop Hotspot";
+}
+
+async function requestHotspot(action) {
+  if (state.hotspotActionInFlight || !state.settingsOpen) {
+    return;
+  }
+
+  state.hotspotActionInFlight = true;
+  state.hotspotAction = action;
+  elements.phoneAccessStatus.textContent = action === "start"
+    ? "Starting Windows Mobile Hotspot..."
+    : "Stopping Windows Mobile Hotspot...";
+  updatePhoneAccessControls();
+
+  try {
+    const response = await post(`/api/hotspot/${action}`);
+    if (response.snapshot) {
+      state.phoneAccessLoaded = true;
+      state.lastPhoneAccessRefreshAt = Date.now();
+      renderPhoneAccess(response.snapshot);
+    }
+
+    elements.phoneAccessStatus.textContent = response.message || "Hotspot state updated.";
+    showToast(response.message || "Hotspot state updated.", false);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Hotspot control failed.";
+    elements.phoneAccessStatus.textContent = message;
+    showToast(message, true);
+    await refreshPhoneAccess(true);
+  } finally {
+    state.hotspotActionInFlight = false;
+    state.hotspotAction = "";
+    updatePhoneAccessControls();
+  }
+}
+
 async function refreshStatus(forceVideoRefresh) {
   try {
     const status = await fetchJson("/api/status");
     state.offlineNotified = false;
     updateStatus(status);
+
+    if (state.settingsOpen && Date.now() - state.lastPhoneAccessRefreshAt >= 5000) {
+      void refreshPhoneAccess(false);
+    }
 
     const shouldRefreshVideos =
       forceVideoRefresh ||
@@ -286,10 +715,12 @@ async function refreshStatus(forceVideoRefresh) {
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : trayUnavailableMessage();
+    state.isBusy = false;
     elements.monitorPill.dataset.state = "offline";
     elements.monitorPill.textContent = "Offline";
     elements.statusText.textContent = message;
     setMonitorOpen(true);
+    updateSettingsControls();
     if (!state.offlineNotified) {
       showToast(message, true);
       state.offlineNotified = true;
@@ -316,6 +747,8 @@ function reconcileVideos(videos) {
       continue;
     }
 
+    state.captionTrackRequests.delete(videoId);
+    state.captionTracksByVideoId.delete(videoId);
     state.cards.delete(videoId);
     state.selectedIds.delete(videoId);
     card.remove();
@@ -352,14 +785,14 @@ function createCard(video) {
       <button class="thumb-button" type="button" aria-label="">
         <img class="thumbnail placeholder" alt="">
       </button>
-      <div class="thumb-overlay">
-        <span class="index-pill"></span>
-      </div>
       <input class="video-selector" type="checkbox" aria-label="Select video">
     </div>
     <div class="card-body">
       <h2 class="video-title"></h2>
-      <p class="video-uploader hidden"></p>
+      <div class="video-meta">
+        <p class="video-uploader hidden"></p>
+        <span class="index-pill"></span>
+      </div>
     </div>
   `;
 
@@ -439,10 +872,13 @@ async function playVideo(videoId) {
   elements.videoPlayer.classList.remove("hidden");
 
   if (elements.videoPlayer.dataset.videoId !== video.videoId) {
+    clearManagedCaptionTracks();
     elements.videoPlayer.dataset.videoId = video.videoId;
     elements.videoPlayer.src = video.streamUrl;
     elements.videoPlayer.load();
   }
+
+  void refreshCaptionsForCurrentVideo(video.videoId);
 
   try {
     await elements.videoPlayer.play();
@@ -464,14 +900,228 @@ function syncPlayerMetadata(video) {
 
 function clearPlayer() {
   state.currentVideoId = null;
+  state.currentCaptionTracks = [];
   state.currentVideoTitle = "";
   elements.playerTitle.textContent = "Select a video";
   elements.playerPlaceholder.classList.remove("hidden");
   elements.videoPlayer.classList.add("hidden");
   elements.videoPlayer.pause();
+  clearManagedCaptionTracks();
+  resetCaptionUi();
   elements.videoPlayer.removeAttribute("src");
   elements.videoPlayer.load();
   delete elements.videoPlayer.dataset.videoId;
+}
+
+async function refreshCaptionsForCurrentVideo(videoId) {
+  const video = state.videos.get(videoId);
+  if (!video || state.currentVideoId !== videoId) {
+    return;
+  }
+
+  if (state.captionTracksByVideoId.has(videoId)) {
+    renderCaptionOptions(state.captionTracksByVideoId.get(videoId));
+    return;
+  }
+
+  renderCaptionLoadingState();
+
+  try {
+    const tracks = await ensureCaptionTracks(video);
+    if (state.currentVideoId !== videoId) {
+      return;
+    }
+
+    renderCaptionOptions(tracks);
+  } catch {
+    if (state.currentVideoId !== videoId) {
+      return;
+    }
+
+    renderCaptionUnavailable("Could not load captions for this video.");
+  }
+}
+
+async function ensureCaptionTracks(video) {
+  if (!video) {
+    return [];
+  }
+
+  if (state.captionTracksByVideoId.has(video.videoId)) {
+    return state.captionTracksByVideoId.get(video.videoId);
+  }
+
+  if (state.captionTrackRequests.has(video.videoId)) {
+    return await state.captionTrackRequests.get(video.videoId);
+  }
+
+  const request = fetchJson(video.captionsUrl || `/api/videos/${encodeURIComponent(video.videoId)}/captions`)
+    .then((tracks) => {
+      const normalizedTracks = Array.isArray(tracks) ? tracks : [];
+      state.captionTracksByVideoId.set(video.videoId, normalizedTracks);
+      return normalizedTracks;
+    })
+    .finally(() => {
+      state.captionTrackRequests.delete(video.videoId);
+    });
+
+  state.captionTrackRequests.set(video.videoId, request);
+  return await request;
+}
+
+function renderCaptionLoadingState() {
+  if (!state.currentVideoId) {
+    resetCaptionUi();
+    return;
+  }
+
+  state.currentCaptionTracks = [];
+  elements.captionPicker.classList.remove("hidden");
+  elements.captionStatus.classList.add("hidden");
+
+  const loadingOption = document.createElement("option");
+  loadingOption.value = "";
+  loadingOption.textContent = "Loading captions...";
+  elements.captionSelect.replaceChildren(loadingOption);
+  elements.captionSelect.disabled = true;
+}
+
+function renderCaptionOptions(tracks) {
+  const captionTracks = Array.isArray(tracks) ? tracks : [];
+  state.currentCaptionTracks = captionTracks;
+
+  if (!state.currentVideoId) {
+    resetCaptionUi();
+    return;
+  }
+
+  if (captionTracks.length === 0) {
+    clearManagedCaptionTracks();
+    renderCaptionUnavailable("No downloaded captions for this video.");
+    return;
+  }
+
+  const selectedTrackKey = resolvePreferredCaptionTrackKey(captionTracks);
+  const options = document.createDocumentFragment();
+
+  const offOption = document.createElement("option");
+  offOption.value = "";
+  offOption.textContent = "Off";
+  options.append(offOption);
+
+  for (const track of captionTracks) {
+    const option = document.createElement("option");
+    option.value = track.trackKey;
+    option.textContent = track.label || track.trackKey;
+    options.append(option);
+  }
+
+  elements.captionPicker.classList.remove("hidden");
+  elements.captionStatus.classList.add("hidden");
+  elements.captionSelect.replaceChildren(options);
+  elements.captionSelect.disabled = false;
+  elements.captionSelect.value = selectedTrackKey;
+  syncPlayerCaptionTracks(captionTracks, selectedTrackKey);
+}
+
+function renderCaptionUnavailable(message) {
+  elements.captionPicker.classList.add("hidden");
+  if (message) {
+    elements.captionStatus.classList.remove("hidden");
+    elements.captionStatus.textContent = message;
+  } else {
+    elements.captionStatus.classList.add("hidden");
+    elements.captionStatus.textContent = "";
+  }
+}
+
+function resetCaptionUi() {
+  elements.captionPicker.classList.add("hidden");
+  elements.captionStatus.classList.add("hidden");
+  elements.captionStatus.textContent = "";
+  elements.captionSelect.replaceChildren();
+  elements.captionSelect.disabled = true;
+}
+
+function resolvePreferredCaptionTrackKey(tracks) {
+  if (state.captionTrackPreference === "") {
+    return "";
+  }
+
+  if (typeof state.captionTrackPreference === "string" && state.captionTrackPreference) {
+    const exactTrack = tracks.find((track) => track.trackKey === state.captionTrackPreference);
+    if (exactTrack) {
+      return exactTrack.trackKey;
+    }
+
+    if (state.captionTrackPreferenceLanguageCode !== "") {
+      const languageTrack = tracks.find((track) => track.languageCode === state.captionTrackPreferenceLanguageCode);
+      if (languageTrack) {
+        return languageTrack.trackKey;
+      }
+    }
+  }
+
+  return pickDefaultCaptionTrack(tracks);
+}
+
+function pickDefaultCaptionTrack(tracks) {
+  return tracks.find((track) => track.trackKey === "en")?.trackKey
+    || tracks.find((track) => track.trackKey.endsWith("-orig"))?.trackKey
+    || tracks.find((track) => track.languageCode === "en")?.trackKey
+    || tracks[0]?.trackKey
+    || "";
+}
+
+function syncPlayerCaptionTracks(tracks, selectedTrackKey) {
+  clearManagedCaptionTracks();
+
+  for (const track of tracks) {
+    const trackElement = document.createElement("track");
+    trackElement.kind = "captions";
+    trackElement.label = track.label || track.trackKey;
+    trackElement.srclang = track.languageCode || "en";
+    trackElement.src = track.trackUrl;
+    trackElement.default = track.trackKey === selectedTrackKey;
+    trackElement.dataset.managedCaption = "true";
+    trackElement.dataset.trackKey = track.trackKey;
+    elements.videoPlayer.append(trackElement);
+  }
+
+  window.requestAnimationFrame(() => {
+    if (state.currentVideoId !== elements.videoPlayer.dataset.videoId) {
+      return;
+    }
+
+    setActiveCaptionTrack(selectedTrackKey);
+  });
+}
+
+function clearManagedCaptionTracks() {
+  for (const trackElement of elements.videoPlayer.querySelectorAll("track[data-managed-caption='true']")) {
+    try {
+      trackElement.track.mode = "disabled";
+    } catch {
+      // Ignore browser track cleanup issues while replacing caption elements.
+    }
+
+    trackElement.remove();
+  }
+}
+
+function applyCaptionSelection(selectedTrackKey) {
+  setActiveCaptionTrack(selectedTrackKey);
+}
+
+function setActiveCaptionTrack(selectedTrackKey) {
+  for (const trackElement of elements.videoPlayer.querySelectorAll("track[data-managed-caption='true']")) {
+    const shouldShow = selectedTrackKey !== "" && trackElement.dataset.trackKey === selectedTrackKey;
+    try {
+      trackElement.track.mode = shouldShow ? "showing" : "disabled";
+    } catch {
+      // Some browsers populate HTMLTrackElement.track asynchronously; the next render will retry.
+    }
+  }
 }
 
 function applyFilters() {
@@ -541,6 +1191,8 @@ function buildLibrarySummary(downloadedCount) {
 }
 
 function updateStatus(status) {
+  const previousSelectionKey = `${state.selectedBrowserAccountKey}|${state.selectedYouTubeAccountKey}`;
+  state.isBusy = Boolean(status.isBusy);
   state.configuredDownloadCount = Number.isInteger(status.downloadCount)
     ? status.downloadCount
     : null;
@@ -558,13 +1210,26 @@ function updateStatus(status) {
     Array.isArray(status.availableYouTubeAccounts) ? status.availableYouTubeAccounts : [],
     status.selectedYouTubeAccountKey || "",
   );
+  const nextSelectionKey = `${state.selectedBrowserAccountKey}|${state.selectedYouTubeAccountKey}`;
+  if (previousSelectionKey !== nextSelectionKey) {
+    state.captionTrackRequests.clear();
+    state.captionTracksByVideoId.clear();
+    state.currentCaptionTracks = [];
+    clearManagedCaptionTracks();
+    resetCaptionUi();
+  }
 
-  elements.syncButton.disabled = status.isBusy;
-  updateSyncButtonState(status.isBusy);
+  elements.syncButton.disabled = state.isBusy;
+  updateSyncButtonState(state.isBusy);
   elements.settingsButton.disabled = false;
-  elements.clearSelectionButton.disabled = status.isBusy && state.selectedIds.size === 0;
+  elements.clearSelectionButton.disabled = state.isBusy && state.selectedIds.size === 0;
   elements.removeSelectedButton.disabled = state.selectedIds.size === 0;
-  elements.removeSelectedButton.textContent = status.isBusy ? "Queue Remove Selected" : "Remove Selected";
+  elements.removeSelectedButton.textContent = state.isBusy ? "Queue Remove Selected" : "Remove Selected";
+  if (state.settingsOpen && state.isBusy && !state.settingsLoading && !state.settingsRefreshing && !state.settingsSaving) {
+    elements.settingsSummary.textContent =
+      "The app is busy. You can still change settings now; refresh the Watch Later total after the current operation finishes.";
+  }
+  updateSettingsControls();
   updateSelectionUi();
   renderActivityFeed(status.recentMessages || []);
 }
@@ -820,14 +1485,22 @@ function buildBrowserAccountSecondaryText(account, primaryText) {
 function renderYouTubeAccountPicker(accounts, selectedAccountKey) {
   state.youtubeAccounts = Array.isArray(accounts) ? accounts : [];
   if (state.youtubeAccounts.length === 0) {
-    state.youtubeAccountButtonKey = "";
     state.youtubeAccountOptionsKey = "";
-    state.selectedYouTubeAccountKey = "";
+    state.selectedYouTubeAccountKey = selectedAccountKey || "";
+    elements.youtubeAccountList.replaceChildren();
+    setYouTubeAccountMenuOpen(false);
+    if (state.selectedBrowserAccountKey !== "") {
+      state.youtubeAccountButtonKey = "__pending__";
+      elements.youtubeAccountPicker.classList.remove("hidden");
+      renderPendingYouTubeAccountButton();
+      elements.youtubeAccountButton.disabled = true;
+      return;
+    }
+
+    state.youtubeAccountButtonKey = "";
     elements.youtubeAccountPicker.classList.add("hidden");
     elements.youtubeAccountButton.replaceChildren();
     elements.youtubeAccountButton.disabled = true;
-    elements.youtubeAccountList.replaceChildren();
-    setYouTubeAccountMenuOpen(false);
     return;
   }
 
@@ -880,8 +1553,32 @@ function renderYouTubeAccountPicker(accounts, selectedAccountKey) {
 
 function renderYouTubeAccountButton(account) {
   elements.youtubeAccountButton.title = account.label || "YouTube account";
+  elements.youtubeAccountButton.setAttribute("aria-label", account.label || "YouTube account");
 
   const content = createYouTubeAccountContent(account);
+  content.classList.add("is-button");
+
+  const chevron = document.createElement("span");
+  chevron.className = "account-menu-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "▾";
+
+  elements.youtubeAccountButton.replaceChildren(content, chevron);
+}
+
+function renderPendingYouTubeAccountButton() {
+  const pendingAccount = {
+    label: "Refreshing YouTube accounts",
+    displayName: "Refreshing YouTube accounts...",
+    handle: "",
+    byline: "The selected browser account is loading.",
+    avatarUrl: "",
+  };
+
+  elements.youtubeAccountButton.title = pendingAccount.label;
+  elements.youtubeAccountButton.setAttribute("aria-label", pendingAccount.label);
+
+  const content = createYouTubeAccountContent(pendingAccount);
   content.classList.add("is-button");
 
   const chevron = document.createElement("span");

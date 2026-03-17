@@ -18,7 +18,14 @@
           <p class="player-label">Now Playing</p>
           <h2 id="playerTitle">Select a video</h2>
         </div>
+        <div id="captionPicker" class="caption-picker hidden">
+          <label class="caption-label" for="captionSelect">Captions</label>
+          <select id="captionSelect" class="caption-select" disabled>
+            <option value="">Off</option>
+          </select>
+        </div>
       </div>
+      <p id="captionStatus" class="caption-status hidden"></p>
       <div id="playerPlaceholder" class="player-placeholder">
         <p class="player-placeholder-title">Pick a video from the grid</p>
         <p class="player-placeholder-text">The thumbnail opens it here without leaving the browser.</p>
@@ -78,8 +85,101 @@
         <button id="syncButton" class="primary-button" type="button">Sync Now</button>
         <button id="clearSelectionButton" class="ghost-button" type="button">Clear Selection</button>
         <button id="removeSelectedButton" class="danger-button" type="button" disabled>Remove Selected</button>
-        <button id="settingsButton" class="secondary-button" type="button">Settings</button>
+        <button
+          id="settingsButton"
+          class="secondary-button"
+          type="button"
+          aria-expanded="false"
+          aria-controls="settingsPanel">Settings</button>
       </div>
+    </section>
+
+    <section id="settingsPanel" class="settings-panel hidden" aria-hidden="true">
+      <div class="settings-header">
+        <div>
+          <p class="settings-kicker">Library Options</p>
+          <h2>Settings</h2>
+        </div>
+        <button id="settingsClose" class="monitor-close" type="button" aria-label="Close settings">x</button>
+      </div>
+
+      <div class="settings-grid">
+        <label class="settings-field" for="settingsDownloadCount">
+          <span>Download Count</span>
+          <input
+            id="settingsDownloadCount"
+            class="settings-input"
+            type="number"
+            min="1"
+            max="5000"
+            inputmode="numeric">
+        </label>
+        <label class="settings-field" for="settingsBrowser">
+          <span>Browser</span>
+          <select id="settingsBrowser" class="settings-input"></select>
+        </label>
+        <label class="settings-field settings-field-wide" for="settingsProfile">
+          <span>Profile</span>
+          <input
+            id="settingsProfile"
+            class="settings-input"
+            type="text"
+            placeholder="Default"
+            spellcheck="false">
+        </label>
+      </div>
+
+      <p class="settings-note">
+        If fresh cookies are needed, the app may open a managed Chrome or Edge window on this laptop and continue after you sign in there.
+      </p>
+      <p id="settingsSummary" class="settings-summary">Loading settings...</p>
+
+      <div class="settings-actions">
+        <button id="settingsRefreshButton" class="ghost-button" type="button">Refresh Total</button>
+        <button id="settingsSaveButton" class="secondary-button" type="button">Save Settings</button>
+      </div>
+
+      <section class="phone-access-panel" aria-live="polite">
+        <div class="phone-access-header">
+          <div>
+            <p class="settings-kicker">Phone Access</p>
+            <h3>Hotspot And Share Link</h3>
+          </div>
+          <span id="phoneAccessState" class="phone-access-pill">Checking...</span>
+        </div>
+
+        <div class="phone-access-grid">
+          <div class="phone-access-card">
+            <span class="phone-access-label">Hotspot SSID</span>
+            <strong id="phoneAccessSsid" class="phone-access-value">Loading...</strong>
+            <span id="phoneAccessClients" class="phone-access-meta"></span>
+          </div>
+          <div class="phone-access-card">
+            <span class="phone-access-label">Current Wi-Fi</span>
+            <strong id="phoneAccessWifi" class="phone-access-value">Loading...</strong>
+            <span class="phone-access-meta">Use hotspot for plane mode, or current Wi-Fi for an immediate same-network test.</span>
+          </div>
+        </div>
+
+        <div class="phone-access-url">
+          <span class="phone-access-label">Phone URL</span>
+          <a id="phoneAccessRecommendedUrl" class="phone-access-link" href="/" target="_blank" rel="noreferrer">Loading...</a>
+        </div>
+
+        <p id="phoneAccessInstruction" class="settings-note">Loading phone access details...</p>
+        <p id="phoneAccessStatus" class="settings-summary">Checking laptop network access...</p>
+        <p id="phoneAccessControlHint" class="settings-note hidden">Hotspot controls are only available on the laptop running YouTube Sync.</p>
+
+        <ul id="phoneAccessCandidates" class="phone-access-list">
+          <li>Loading network addresses...</li>
+        </ul>
+
+        <div class="settings-actions phone-access-actions">
+          <button id="phoneAccessRefreshButton" class="ghost-button" type="button">Refresh Access</button>
+          <button id="phoneAccessStartButton" class="secondary-button" type="button">Start Hotspot</button>
+          <button id="phoneAccessStopButton" class="ghost-button" type="button">Stop Hotspot</button>
+        </div>
+      </section>
     </section>
 
     <main>

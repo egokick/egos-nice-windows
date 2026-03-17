@@ -18,18 +18,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _syncNowMenuItem;
     private readonly object _pendingRemovalGate = new();
     private readonly object _watchLaterTotalRefreshGate = new();
+    private readonly object _youTubeAccountRefreshGate = new();
+    private readonly object _trackedTaskGate = new();
     private readonly CancellationTokenSource _shutdownCts = new();
     private AppSettings _settings;
     private bool _isBusy;
     private bool _isShuttingDown;
     private HashSet<string> _pendingRemovalIds = new(StringComparer.Ordinal);
+    private HashSet<Task> _trackedTasks = [];
     private HashSet<string> _watchLaterTotalRefreshSelectionsInFlight = new(StringComparer.Ordinal);
+    private HashSet<string> _youTubeAccountRefreshSelectionsInFlight = new(StringComparer.Ordinal);
+    private Task? _shutdownTask;
 
     public TrayApplicationContext()
     {
         _paths = YoutubeSyncPaths.Discover();
         _settings = SettingsStore.Load();
-        _syncService = new SyncService(_paths, new WinFormsBrowserLoginPrompt(() => Form.ActiveForm));
+        _syncService = new SyncService(_paths);
         _removalService = new YoutubeRemovalService(_paths);
         _thumbnailCacheService = new ThumbnailCacheService(_paths);
         _uiDispatcher = new UiThreadDispatcher();
@@ -49,6 +54,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
             QueueRemoveFromBrowserAsync,
             QueueSelectBrowserAccountFromBrowserAsync,
             QueueSelectYouTubeAccountFromBrowserAsync,
+            GetSettingsFromBrowserAsync,
+            QueueRefreshSettingsSummaryFromBrowserAsync,
+            QueueSaveSettingsFromBrowserAsync,
             QueueOpenSettingsFromBrowserAsync);
 
         _startupMenuItem = new ToolStripMenuItem("Run at Windows startup") { CheckOnClick = true };
@@ -90,10 +98,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.ContextMenuStrip.Items.Add(exitMenuItem);
 
         RefreshMenu();
-        _ = InitializeAsync();
+        TrackShutdownTask(InitializeAsync());
     }
 
     protected override void ExitThreadCore()
+    {
+        _shutdownTask ??= ShutdownAsync();
+    }
+
+    private async Task ShutdownAsync()
     {
         if (_isShuttingDown)
         {
@@ -101,14 +114,48 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _isShuttingDown = true;
-        _shutdownCts.Cancel();
-        CloseOpenForms();
-        _notifyIcon.Visible = false;
-        _notifyIcon.Dispose();
-        _libraryWebServer.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        _uiDispatcher.Dispose();
-        _shutdownCts.Dispose();
-        base.ExitThreadCore();
+
+        try
+        {
+            _shutdownCts.Cancel();
+            CloseOpenForms();
+            _notifyIcon.Visible = false;
+            await WaitForTrackedTasksAsync(TimeSpan.FromSeconds(8));
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write(_paths, $"Shutdown encountered an error: {ex}");
+        }
+        finally
+        {
+            try
+            {
+                _notifyIcon.Dispose();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                await _libraryWebServer.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                TrayLog.Write(_paths, $"Library web server shutdown failed: {ex}");
+            }
+
+            try
+            {
+                _uiDispatcher.Dispose();
+            }
+            catch
+            {
+            }
+
+            _shutdownCts.Dispose();
+            base.ExitThreadCore();
+        }
     }
 
     private async Task InitializeAsync()
@@ -124,6 +171,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             else
             {
                 SetBusy(false, BuildAutomaticSyncPausedStatus());
+                QueueYouTubeAccountRefresh();
             }
         }
         catch (Exception ex)
@@ -146,6 +194,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             await _libraryWebServer.EnsureStartedAsync(_shutdownCts.Token);
             _libraryWebServer.OpenInBrowser();
             QueueWatchLaterTotalRefresh();
+            QueueYouTubeAccountRefresh();
         }
         catch (Exception ex)
         {
@@ -224,12 +273,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settings.BrowserProfile = form.BrowserProfile;
         SettingsStore.Save(_settings);
         RefreshLibraryForCurrentSelection(clearWatchLaterTotalCount: shouldClearWatchLaterTotalCount);
+        QueueYouTubeAccountRefresh();
         ShowInfoBalloon(
-            _isBusy
-                ? $"Settings saved. The current operation will finish first; the next sync will use up to {_settings.DownloadCount} videos on {_settings.BrowserCookies}:{_settings.BrowserProfile}."
-                : _settings.AutoSyncArmed
-                    ? $"Sync scope is set to up to the most recent {_settings.DownloadCount} videos using {_settings.BrowserCookies}:{_settings.BrowserProfile}."
-                    : $"Sync scope is set to up to the most recent {_settings.DownloadCount} videos using {_settings.BrowserCookies}:{_settings.BrowserProfile}. Automatic sync stays paused until you click Sync Now.");
+            BuildSettingsSavedMessage());
         RefreshMenu();
     }
 
@@ -255,7 +301,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                         : null
             };
             settings.Normalize();
-            var total = await _syncService.GetWatchLaterTotalAsync(settings, _shutdownCts.Token);
+            var total = await TrackShutdownTask(_syncService.GetWatchLaterTotalAsync(settings, _shutdownCts.Token));
             if (form.IsDisposed || _shutdownCts.IsCancellationRequested)
             {
                 return;
@@ -280,6 +326,167 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 form.SetBusy(false, $"Could not refresh Watch Later total: {ex.Message}");
             }
         }
+    }
+
+    private Task<LibraryWebServer.SettingsResponse> GetSettingsFromBrowserAsync()
+    {
+        return _uiDispatcher.InvokeAsync(() => Task.FromResult(BuildSettingsResponse()));
+    }
+
+    private Task<LibraryWebServer.SettingsSummaryResponse> QueueRefreshSettingsSummaryFromBrowserAsync(
+        LibraryWebServer.SettingsRequest request)
+    {
+        return _uiDispatcher.InvokeAsync(async () =>
+        {
+            var settings = CreateDraftSettings(request);
+            if (_isBusy)
+            {
+                return new LibraryWebServer.SettingsSummaryResponse(
+                    CanRefreshTotal: false,
+                    SummaryMessage: "The app is busy. You can still change settings now; refresh the Watch Later total after the current operation finishes.",
+                    WatchLaterTotalCount: null,
+                    DownloadCount: settings.DownloadCount,
+                    BrowserCookies: settings.BrowserCookies.ToString(),
+                    BrowserProfile: settings.BrowserProfile);
+            }
+
+            var total = await TrackShutdownTask(_syncService.GetWatchLaterTotalAsync(settings, _shutdownCts.Token));
+            if (MatchesLibrarySelection(settings, _settings))
+            {
+                SetWatchLaterTotalCount(total);
+            }
+
+            return BuildSettingsSummaryResponse(settings, total);
+        });
+    }
+
+    private Task<LibraryWebServer.LibraryCommandResponse> QueueSaveSettingsFromBrowserAsync(
+        LibraryWebServer.SettingsRequest request)
+    {
+        return _uiDispatcher.InvokeAsync(() =>
+        {
+            var settings = CreateDraftSettings(request);
+            var shouldClearWatchLaterTotalCount =
+                _settings.BrowserCookies != settings.BrowserCookies
+                || !string.Equals(_settings.BrowserProfile, settings.BrowserProfile, StringComparison.Ordinal);
+            _settings.DownloadCount = settings.DownloadCount;
+            if (shouldClearWatchLaterTotalCount)
+            {
+                _settings.SelectedAccountKey = null;
+                _settings.SelectedBrowserAccountKey = null;
+                _settings.SelectedYouTubeAccountKey = null;
+            }
+
+            _settings.BrowserCookies = settings.BrowserCookies;
+            _settings.BrowserProfile = settings.BrowserProfile;
+            SettingsStore.Save(_settings);
+            RefreshLibraryForCurrentSelection(clearWatchLaterTotalCount: shouldClearWatchLaterTotalCount);
+            QueueYouTubeAccountRefresh();
+            RefreshMenu();
+            return Task.FromResult(new LibraryWebServer.LibraryCommandResponse(true, BuildSettingsSavedMessage()));
+        });
+    }
+
+    private LibraryWebServer.SettingsResponse BuildSettingsResponse()
+    {
+        return new LibraryWebServer.SettingsResponse(
+            DownloadCount: _settings.DownloadCount,
+            BrowserCookies: _settings.BrowserCookies.ToString(),
+            BrowserProfile: _settings.BrowserProfile,
+            AvailableBrowsers: GetSettingsBrowserOptions()
+                .Select(browser => new LibraryWebServer.BrowserOptionDto(
+                    browser.ToString(),
+                    ChromiumBrowserLocator.GetDisplayName(browser)))
+                .ToList(),
+            CanRefreshTotal: !_isBusy,
+            ShouldAutoRefreshSummary: !_isBusy && _settings.AutoSyncArmed,
+            SummaryMessage: BuildSettingsPanelMessage());
+    }
+
+    private LibraryWebServer.SettingsSummaryResponse BuildSettingsSummaryResponse(AppSettings settings, int total)
+    {
+        return new LibraryWebServer.SettingsSummaryResponse(
+            CanRefreshTotal: !_isBusy,
+            SummaryMessage: BuildSettingsSummaryMessage(settings, total),
+            WatchLaterTotalCount: total,
+            DownloadCount: settings.DownloadCount,
+            BrowserCookies: settings.BrowserCookies.ToString(),
+            BrowserProfile: settings.BrowserProfile);
+    }
+
+    private AppSettings CreateDraftSettings(LibraryWebServer.SettingsRequest request)
+    {
+        if (!TryParseBrowserCookieSource(request.BrowserCookies, out var browserCookies))
+        {
+            throw new InvalidOperationException("That browser is no longer available.");
+        }
+
+        var browserProfile = string.IsNullOrWhiteSpace(request.BrowserProfile) ? "Default" : request.BrowserProfile.Trim();
+        var matchesCurrentBrowser =
+            browserCookies == _settings.BrowserCookies
+            && string.Equals(browserProfile, _settings.BrowserProfile, StringComparison.OrdinalIgnoreCase);
+        var settings = new AppSettings
+        {
+            DownloadCount = request.DownloadCount,
+            BrowserCookies = browserCookies,
+            BrowserProfile = browserProfile,
+            SelectedBrowserAccountKey = matchesCurrentBrowser ? _settings.SelectedBrowserAccountKey : null,
+            SelectedYouTubeAccountKey = matchesCurrentBrowser ? _settings.SelectedYouTubeAccountKey : null
+        };
+        settings.Normalize();
+        return settings;
+    }
+
+    private string BuildSettingsPanelMessage()
+    {
+        if (_isBusy)
+        {
+            return "The app is busy. You can still change settings now; refresh the Watch Later total after the current operation finishes.";
+        }
+
+        if (!_settings.AutoSyncArmed)
+        {
+            return "Automatic sync is paused. Click Sync Now to check again, or Refresh Total to inspect Watch Later without starting a sync.";
+        }
+
+        return "Refresh Total inspects Watch Later using the settings below.";
+    }
+
+    private string BuildSettingsSavedMessage()
+    {
+        return _isBusy
+            ? $"Settings saved. The current operation will finish first; the next sync will use up to {_settings.DownloadCount} videos on {_settings.BrowserCookies}:{_settings.BrowserProfile}."
+            : _settings.AutoSyncArmed
+                ? $"Sync scope is set to up to the most recent {_settings.DownloadCount} videos using {_settings.BrowserCookies}:{_settings.BrowserProfile}."
+                : $"Sync scope is set to up to the most recent {_settings.DownloadCount} videos using {_settings.BrowserCookies}:{_settings.BrowserProfile}. Automatic sync stays paused until you click Sync Now.";
+    }
+
+    private static string BuildSettingsSummaryMessage(AppSettings settings, int total)
+    {
+        return $"Sync scope: up to the most recent {settings.DownloadCount} videos out of {total} currently in Watch Later using {settings.BrowserCookies}:{settings.BrowserProfile}.";
+    }
+
+    private static IReadOnlyList<BrowserCookieSource> GetSettingsBrowserOptions()
+    {
+        var browserOptions = ChromiumBrowserLocator.GetInstalledBrowsers();
+        if (browserOptions.Count == 0)
+        {
+            browserOptions = ChromiumBrowserLocator.GetManagedBrowsers();
+        }
+
+        return browserOptions;
+    }
+
+    private static bool TryParseBrowserCookieSource(string? value, out BrowserCookieSource browserCookies)
+    {
+        if (Enum.TryParse(value, ignoreCase: true, out browserCookies)
+            && GetSettingsBrowserOptions().Contains(browserCookies))
+        {
+            return true;
+        }
+
+        browserCookies = default;
+        return false;
     }
 
     private async Task RunSyncAsync(bool showSuccessBalloon, bool initiatedManually = false)
@@ -312,11 +519,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     SetWatchLaterTotalCount(total);
                 }
             });
-            var summary = await _syncService.SyncRecentAsync(
+            var summary = await TrackShutdownTask(_syncService.SyncRecentAsync(
                 syncSettings,
                 progress,
                 _shutdownCts.Token,
-                watchLaterTotalProgress);
+                watchLaterTotalProgress));
             var selectionChanged = TryPersistPromptSelectedBrowser(startingSettings, syncSettings);
             var automaticSyncPaused = PauseAutomaticSyncIfSatisfied(summary);
             RefreshLibraryForCurrentSelection(clearWatchLaterTotalCount: selectionChanged, queueWatchLaterTotalRefresh: !automaticSyncPaused);
@@ -328,6 +535,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             var status = BuildSyncStatus(summary, automaticSyncPaused);
             TrayLog.Write(_paths, $"RunSyncAsync completed. Status: {status}");
             SetBusy(false, status);
+            QueueYouTubeAccountRefresh();
             if (showSuccessBalloon)
             {
                 ShowInfoBalloon(status);
@@ -343,6 +551,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             TrayLog.Write(_paths, $"RunSyncAsync failed: {ex}");
             SetBusy(false, $"Sync failed: {Truncate(ex.Message)}");
+            QueueYouTubeAccountRefresh();
             ShowErrorBalloon(ex.Message);
             StartQueuedRemovalIfIdle();
         }
@@ -360,7 +569,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             var removalSettings = _settings.CreateSnapshot();
             SetBusy(true, "Removing selected videos from Watch Later...");
             var progress = new Progress<string>(message => _libraryState.ReportProgress(TruncateProgress(message)));
-            await _removalService.RemoveFromWatchLaterAsync(removalSettings, selectedIds, progress, _shutdownCts.Token);
+            await TrackShutdownTask(_removalService.RemoveFromWatchLaterAsync(removalSettings, selectedIds, progress, _shutdownCts.Token));
             RefreshLibraryForCurrentSelection(clearWatchLaterTotalCount: true);
             SetBusy(false, $"{GetCurrentVideoCount()} downloaded videos");
             QueueWatchLaterTotalRefresh();
@@ -626,6 +835,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             NormalizeSelectedYouTubeAccountForCurrentBrowser();
             SettingsStore.Save(_settings);
             RefreshLibraryForCurrentSelection(clearWatchLaterTotalCount: true);
+            QueueYouTubeAccountRefresh();
 
             var message = _isBusy
                 ? $"Saved {selectedAccount.DisplayName} on {selectedAccount.BrowserName} ({selectedAccount.Profile}). The current sync will finish first, and the next sync will use this account."
@@ -667,22 +877,29 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         var selectedBrowserAccount = _accountDiscovery.ResolveSelectedAccount(_settings);
         var youTubeAccounts = _youTubeAccountDiscovery.DiscoverAccounts(_settings, selectedBrowserAccount?.AuthUserIndex);
+        NormalizeSelectedYouTubeAccountForCurrentBrowser(youTubeAccounts);
+    }
+
+    private bool NormalizeSelectedYouTubeAccountForCurrentBrowser(IReadOnlyList<YouTubeAccountOption> youTubeAccounts)
+    {
         if (youTubeAccounts.Count == 0)
         {
+            var hadSelection = !string.IsNullOrWhiteSpace(_settings.SelectedYouTubeAccountKey);
             _settings.SelectedYouTubeAccountKey = null;
-            return;
+            return hadSelection;
         }
 
         if (!string.IsNullOrWhiteSpace(_settings.SelectedYouTubeAccountKey)
             && youTubeAccounts.Any(option => string.Equals(option.AccountKey, _settings.SelectedYouTubeAccountKey, StringComparison.Ordinal)))
         {
-            return;
+            return false;
         }
 
         var selectedYouTubeAccount = youTubeAccounts.FirstOrDefault(option => option.IsSelected);
         _settings.SelectedYouTubeAccountKey = string.IsNullOrWhiteSpace(selectedYouTubeAccount.AccountKey)
             ? youTubeAccounts[0].AccountKey
             : selectedYouTubeAccount.AccountKey;
+        return true;
     }
 
     private int GetCurrentVideoCount()
@@ -768,11 +985,31 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _ = RefreshWatchLaterTotalInBackgroundAsync(settings, selectionKey);
     }
 
+    private void QueueYouTubeAccountRefresh()
+    {
+        if (_shutdownCts.IsCancellationRequested || _isBusy)
+        {
+            return;
+        }
+
+        var settings = _settings.CreateSnapshot();
+        var selectionKey = GetYouTubeAccountRefreshKey(settings);
+        lock (_youTubeAccountRefreshGate)
+        {
+            if (!_youTubeAccountRefreshSelectionsInFlight.Add(selectionKey))
+            {
+                return;
+            }
+        }
+
+        _ = RefreshYouTubeAccountsInBackgroundAsync(settings, selectionKey);
+    }
+
     private async Task RefreshWatchLaterTotalInBackgroundAsync(AppSettings settings, string selectionKey)
     {
         try
         {
-            var total = await _syncService.GetWatchLaterTotalAsync(settings, _shutdownCts.Token);
+            var total = await TrackShutdownTask(_syncService.GetWatchLaterTotalAsync(settings, _shutdownCts.Token));
             if (MatchesLibrarySelection(settings, _settings))
             {
                 SetWatchLaterTotalCount(total);
@@ -794,6 +1031,55 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private async Task RefreshYouTubeAccountsInBackgroundAsync(AppSettings settings, string selectionKey)
+    {
+        try
+        {
+            var selectedBrowserAccount = _accountDiscovery.ResolveSelectedAccount(settings);
+            var youTubeAccounts = await Task.Run(
+                () => _youTubeAccountDiscovery.DiscoverAccounts(
+                    settings,
+                    selectedBrowserAccount?.AuthUserIndex,
+                    allowNetwork: true),
+                _shutdownCts.Token);
+
+            if (youTubeAccounts.Count == 0)
+            {
+                return;
+            }
+
+            await _uiDispatcher.InvokeAsync(async () =>
+            {
+                if (!MatchesBrowserSelection(settings, _settings))
+                {
+                    return;
+                }
+
+                if (NormalizeSelectedYouTubeAccountForCurrentBrowser(youTubeAccounts))
+                {
+                    SettingsStore.Save(_settings);
+                    RefreshLibraryForCurrentSelection(clearWatchLaterTotalCount: true, queueWatchLaterTotalRefresh: false);
+                }
+
+                await Task.CompletedTask;
+            });
+        }
+        catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write(_paths, $"Background YouTube account refresh failed: {ex.Message}");
+        }
+        finally
+        {
+            lock (_youTubeAccountRefreshGate)
+            {
+                _youTubeAccountRefreshSelectionsInFlight.Remove(selectionKey);
+            }
+        }
+    }
+
     private static string GetLibrarySelectionKey(AppSettings settings)
     {
         return string.Join(
@@ -802,6 +1088,100 @@ internal sealed class TrayApplicationContext : ApplicationContext
             settings.BrowserProfile,
             settings.SelectedBrowserAccountKey ?? string.Empty,
             settings.SelectedYouTubeAccountKey ?? string.Empty);
+    }
+
+    private static string GetYouTubeAccountRefreshKey(AppSettings settings)
+    {
+        return string.Join(
+            "|",
+            settings.BrowserCookies,
+            settings.BrowserProfile,
+            settings.SelectedBrowserAccountKey ?? string.Empty);
+    }
+
+    private static bool MatchesBrowserSelection(AppSettings left, AppSettings right)
+    {
+        return left.BrowserCookies == right.BrowserCookies
+            && string.Equals(left.BrowserProfile, right.BrowserProfile, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.SelectedBrowserAccountKey, right.SelectedBrowserAccountKey, StringComparison.Ordinal);
+    }
+
+    private Task TrackShutdownTask(Task task)
+    {
+        if (task.IsCompleted)
+        {
+            return task;
+        }
+
+        lock (_trackedTaskGate)
+        {
+            _trackedTasks.Add(task);
+        }
+
+        _ = task.ContinueWith(
+            completedTask =>
+            {
+                lock (_trackedTaskGate)
+                {
+                    _trackedTasks.Remove(completedTask);
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        return task;
+    }
+
+    private Task<T> TrackShutdownTask<T>(Task<T> task)
+    {
+        TrackShutdownTask((Task)task);
+        return task;
+    }
+
+    private async Task WaitForTrackedTasksAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            Task[] trackedTasks;
+            lock (_trackedTaskGate)
+            {
+                trackedTasks = _trackedTasks
+                    .Where(task => !task.IsCompleted)
+                    .ToArray();
+            }
+
+            if (trackedTasks.Length == 0)
+            {
+                return;
+            }
+
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                TrayLog.Write(_paths, $"Shutdown timed out while waiting for {trackedTasks.Length} tracked task(s).");
+                return;
+            }
+
+            var waitForAllTask = Task.WhenAll(trackedTasks);
+            var delayTask = Task.Delay(remaining);
+            var completedTask = await Task.WhenAny(waitForAllTask, delayTask);
+            if (completedTask == delayTask)
+            {
+                TrayLog.Write(_paths, $"Shutdown timed out while waiting for {trackedTasks.Length} tracked task(s).");
+                return;
+            }
+
+            try
+            {
+                await waitForAllTask;
+            }
+            catch
+            {
+                // Ignore task failures during shutdown; the goal is to let cancellation cleanup finish.
+            }
+        }
     }
 
     private static void CloseOpenForms()
