@@ -9,6 +9,7 @@ internal sealed class LibraryBrowserState
     private bool _isBusy;
     private string _status;
     private int _videoCount;
+    private int? _watchLaterTotalCount;
     private long _libraryVersion = 1;
     private DateTimeOffset _updatedAtUtc;
 
@@ -67,6 +68,17 @@ internal sealed class LibraryBrowserState
         }
     }
 
+    public void SetWatchLaterTotalCount(int? watchLaterTotalCount)
+    {
+        lock (_syncRoot)
+        {
+            _watchLaterTotalCount = watchLaterTotalCount.HasValue
+                ? Math.Max(watchLaterTotalCount.Value, 0)
+                : null;
+            _updatedAtUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
     public void MarkLibraryChanged(int? videoCount = null)
     {
         lock (_syncRoot)
@@ -93,6 +105,7 @@ internal sealed class LibraryBrowserState
                 _videoCount,
                 _libraryVersion,
                 settings.DownloadCount,
+                _watchLaterTotalCount,
                 ChromiumBrowserLocator.GetDisplayName(settings.BrowserCookies),
                 settings.BrowserProfile,
                 _recentMessages.ToArray(),
@@ -106,6 +119,7 @@ internal sealed class LibraryBrowserState
         int VideoCount,
         long LibraryVersion,
         int DownloadCount,
+        int? WatchLaterTotalCount,
         string BrowserName,
         string BrowserProfile,
         IReadOnlyList<string> RecentMessages,

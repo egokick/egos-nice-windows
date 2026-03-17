@@ -84,6 +84,7 @@ public sealed class SyncServiceIntegrationTests
                 DownloadsPath = Path.Combine(integrationRoot, "downloads"),
                 YtDlpPath = Path.Combine(bundledRoot, "yt-dlp.exe"),
                 CookiesPath = Path.Combine(integrationRoot, "youtube-cookies.txt"),
+                CookiesMetadataPath = Path.Combine(integrationRoot, "youtube-cookies.metadata.json"),
                 ArchivePath = Path.Combine(integrationRoot, "watch-later.archive.txt"),
                 TempPath = Path.Combine(integrationRoot, "temp"),
                 LogsPath = Path.Combine(integrationRoot, "logs"),

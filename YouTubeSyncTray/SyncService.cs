@@ -8,6 +8,10 @@ internal sealed class SyncService
 {
     private readonly YoutubeSyncPaths _paths;
     private readonly ChromiumCookieExporter _chromiumCookieExporter;
+    private readonly BrowserAccountDiscoveryService _accountDiscovery;
+    private readonly YouTubeAccountDiscoveryService _youTubeAccountDiscovery;
+    private readonly AccountScopeResolver _accountScopeResolver;
+    private readonly CookieExportMetadataStore _cookieExportMetadataStore;
     private readonly IBrowserLoginPrompt? _browserLoginPrompt;
     private bool _freshCookieRetryAttempted;
     private AuthConfig? _refreshedAuth;
@@ -17,6 +21,10 @@ internal sealed class SyncService
     {
         _paths = paths;
         _chromiumCookieExporter = new ChromiumCookieExporter(paths);
+        _accountDiscovery = new BrowserAccountDiscoveryService();
+        _youTubeAccountDiscovery = new YouTubeAccountDiscoveryService(paths);
+        _accountScopeResolver = new AccountScopeResolver(paths, _accountDiscovery, _youTubeAccountDiscovery);
+        _cookieExportMetadataStore = new CookieExportMetadataStore(paths);
         _browserLoginPrompt = browserLoginPrompt;
     }
 
@@ -33,20 +41,32 @@ internal sealed class SyncService
 
     public async Task<int> GetWatchLaterTotalAsync(AppSettings settings, CancellationToken cancellationToken)
     {
+        settings.Normalize();
         var auth = await EnsureAuthAsync(settings, cancellationToken);
         auth = await PrepareManagedChromiumAuthAsync(settings, auth, progress: null, cancellationToken);
+        return await GetWatchLaterTotalAsync(settings, auth, cancellationToken);
+    }
 
+    private async Task<int> GetWatchLaterTotalAsync(
+        AppSettings settings,
+        AuthConfig auth,
+        CancellationToken cancellationToken)
+    {
+        settings.Normalize();
+
+        var watchLaterUrl = BuildWatchLaterUrl(settings);
         var result = await RunYtDlpWithRetryAsync(
             settings,
             auth,
-            "--flat-playlist --dump-single-json \"https://www.youtube.com/playlist?list=WL\"",
+            $"--flat-playlist --dump-single-json \"{watchLaterUrl}\"",
             cancellationToken);
 
         if (result.ExitCode != 0)
         {
+            var effectiveAuth = _refreshedAuth ?? auth;
             throw new InvalidOperationException(BuildYtDlpFailureMessage(
                 "Could not fetch Watch Later total.",
-                auth,
+                effectiveAuth,
                 result));
         }
 
@@ -68,23 +88,44 @@ internal sealed class SyncService
         throw new InvalidOperationException("Playlist count was not present in yt-dlp output.");
     }
 
-    public async Task<SyncSummary> SyncRecentAsync(AppSettings settings, IProgress<string>? progress, CancellationToken cancellationToken)
+    public async Task<SyncSummary> SyncRecentAsync(
+        AppSettings settings,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken,
+        IProgress<int>? watchLaterTotalProgress = null)
     {
+        settings.Normalize();
         TrayLog.Write(_paths, $"SyncRecentAsync started. Requested count: {settings.DownloadCount}");
         var auth = await EnsureAuthAsync(settings, cancellationToken);
         auth = await PrepareManagedChromiumAuthAsync(settings, auth, progress, cancellationToken);
+        var accountScope = _accountScopeResolver.Resolve(settings);
         var clampedCount = Math.Clamp(settings.DownloadCount, 1, 5000);
+        var watchLaterUrl = BuildWatchLaterUrl(settings);
         progress?.Report("Inspecting the current Watch Later items...");
-        var targetIds = await GetTargetWatchLaterIdsAsync(clampedCount, cancellationToken, auth);
+        int? watchLaterTotalCount = null;
+        try
+        {
+            watchLaterTotalCount = await GetWatchLaterTotalAsync(settings, auth, cancellationToken);
+            if (watchLaterTotalCount.HasValue)
+            {
+                watchLaterTotalProgress?.Report(watchLaterTotalCount.Value);
+            }
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write(_paths, $"Could not refresh Watch Later total during sync: {ex.Message}");
+        }
+
+        var targetIds = await GetTargetWatchLaterIdsAsync(settings, clampedCount, cancellationToken, auth);
         TrayLog.Write(_paths, $"Target id count: {targetIds.Count}");
-        var existingIdsBefore = VideoItem.LoadFromDownloads(_paths.DownloadsPath)
+        var existingIdsBefore = VideoItem.LoadFromDownloads(accountScope.DownloadsPath)
             .Select(item => item.VideoId)
             .ToHashSet(StringComparer.Ordinal);
         TrayLog.Write(_paths, $"Existing on-disk video count before sync: {existingIdsBefore.Count}");
         var missingTargetIds = targetIds
             .Where(id => !existingIdsBefore.Contains(id))
             .ToList();
-        var repairedArchiveCount = RepairArchiveEntriesForMissingVideos(missingTargetIds);
+        var repairedArchiveCount = RepairArchiveEntriesForMissingVideos(accountScope.ArchivePath, missingTargetIds);
         TrayLog.Write(_paths, $"Missing target count before sync: {missingTargetIds.Count}. Archive entries repaired: {repairedArchiveCount}");
         progress?.Report($"{missingTargetIds.Count} of {targetIds.Count} Watch Later videos are not on disk. Starting yt-dlp...");
 
@@ -95,8 +136,8 @@ internal sealed class SyncService
         args.Append(" --retry-sleep http:exp=1:20 --retry-sleep fragment:exp=1:20");
         args.Append(" --sleep-requests 1 --sleep-interval 2 --max-sleep-interval 8 --concurrent-fragments 4");
         args.Append($" --playlist-items 1:{clampedCount}");
-        args.Append($" --download-archive \"{_paths.ArchivePath}\"");
-        args.Append($" --paths home:\"{_paths.DownloadsPath}\" --paths temp:\"{_paths.DownloadsPath}\"");
+        args.Append($" --download-archive \"{accountScope.ArchivePath}\"");
+        args.Append($" --paths home:\"{accountScope.DownloadsPath}\" --paths temp:\"{accountScope.DownloadsPath}\"");
         args.Append(" --output \"%(playlist_index)03d - %(title).200B [%(id)s].%(ext)s\"");
         args.Append(" --windows-filenames --continue --part --no-overwrites --no-mtime --write-info-json --write-thumbnail");
         args.Append(" --write-subs --write-auto-subs --sub-langs \"en.*,en,-live_chat\" --convert-subs srt");
@@ -106,19 +147,30 @@ internal sealed class SyncService
         }
         args.Append(" --format-sort \"res:1080,+size,+br,+fps\"");
         args.Append(" --format \"b[language^=en][ext=mp4][height<=1080]/b[language^=en][height<=1080]/95/96/18/b[ext=mp4][height<=1080]/b[height<=1080]/b[ext=mp4]/b\"");
-        args.Append(" \"https://www.youtube.com/playlist?list=WL\"");
+        args.Append($" \"{watchLaterUrl}\"");
 
         var result = await RunYtDlpWithRetryAsync(settings, auth, args.ToString(), cancellationToken, progress);
         TrayLog.Write(_paths, $"yt-dlp sync exit code: {result.ExitCode}");
+        string? nonFatalIssue = null;
         if (result.ExitCode != 0)
         {
-            throw new InvalidOperationException(BuildYtDlpFailureMessage(
-                "yt-dlp sync failed.",
-                auth,
-                result));
+            var effectiveAuth = _refreshedAuth ?? auth;
+            if (LooksLikeAuthFailure(result))
+            {
+                throw new InvalidOperationException(BuildYtDlpFailureMessage(
+                    "yt-dlp sync failed.",
+                    effectiveAuth,
+                    result));
+            }
+
+            nonFatalIssue = SummarizeNonFatalSyncIssue(result);
+            if (!string.IsNullOrWhiteSpace(nonFatalIssue))
+            {
+                TrayLog.Write(_paths, $"yt-dlp reported non-fatal item errors: {nonFatalIssue}");
+            }
         }
 
-        var existingIdsAfter = VideoItem.LoadFromDownloads(_paths.DownloadsPath)
+        var existingIdsAfter = VideoItem.LoadFromDownloads(accountScope.DownloadsPath)
             .Select(item => item.VideoId)
             .ToHashSet(StringComparer.Ordinal);
         var downloadedIds = targetIds
@@ -136,7 +188,9 @@ internal sealed class SyncService
             DownloadedCount: downloadedIds.Count,
             AlreadyPresentCount: presentIds.Count - downloadedIds.Count,
             ArchiveRepairedCount: repairedArchiveCount,
-            MissingAfterSyncCount: stillMissingCount);
+            MissingAfterSyncCount: stillMissingCount,
+            WatchLaterTotalCount: watchLaterTotalCount,
+            NonFatalIssue: nonFatalIssue);
     }
 
     private async Task<AuthConfig> PrepareManagedChromiumAuthAsync(
@@ -150,19 +204,19 @@ internal sealed class SyncService
             return auth;
         }
 
-        if (HasSavedCookieFile())
+        if (HasSavedCookieFile(auth))
         {
-            _refreshedAuth = AuthConfig.ForCookieFile(_paths.CookiesPath);
+            _refreshedAuth = AuthConfig.ForCookieFile(_paths.CookiesPath, auth.Browser, auth.Profile);
             progress?.Report($"Using the saved {DescribeBrowser(auth.Browser)} cookie export.");
             TrayLog.Write(_paths, $"Using saved cookies file {_paths.CookiesPath} for {auth.Browser}:{auth.Profile}.");
-            return auth;
+            return _refreshedAuth.Value;
         }
 
         progress?.Report($"No saved {DescribeBrowser(auth.Browser)} cookies were found. Opening the managed browser sign-in flow...");
-        var refreshedAuth = await TryRefreshCookiesAsync(settings, auth, cancellationToken, progress);
+        var refreshedAuth = await TryRefreshCookiesAsync(settings, cancellationToken, progress);
         if (refreshedAuth.HasValue)
         {
-            return auth;
+            return refreshedAuth.Value;
         }
 
         throw new InvalidOperationException(
@@ -170,7 +224,7 @@ internal sealed class SyncService
             $"Managed {DescribeBrowser(auth.Browser)} sign-in did not complete, so YouTube access could not be prepared.");
     }
 
-    private string BuildCommonArgs(AuthConfig auth)
+    private string BuildCommonArgs(AuthConfig auth, AppSettings settings)
     {
         var builder = new StringBuilder();
         builder.Append("--js-runtimes node --remote-components ejs:github");
@@ -186,6 +240,21 @@ internal sealed class SyncService
         if (!string.IsNullOrWhiteSpace(ffmpegLocation))
         {
             builder.Append($" --ffmpeg-location \"{ffmpegLocation}\"");
+        }
+
+        var selectedBrowserAuthUserIndex = _accountDiscovery.ResolveSelectedAuthUserIndex(settings);
+        var selectedYouTubeAccount = _youTubeAccountDiscovery.ResolveSelectedAccount(settings, selectedBrowserAuthUserIndex);
+        if (selectedYouTubeAccount.HasValue)
+        {
+            builder.Append($" --add-header \"X-Goog-AuthUser: {selectedYouTubeAccount.Value.AuthUserIndex}\"");
+            if (!string.IsNullOrWhiteSpace(selectedYouTubeAccount.Value.PageId))
+            {
+                builder.Append($" --add-header \"X-Goog-PageId: {selectedYouTubeAccount.Value.PageId}\"");
+            }
+        }
+        else
+        {
+            builder.Append($" --add-header \"X-Goog-AuthUser: {selectedBrowserAuthUserIndex}\"");
         }
 
         return builder.ToString();
@@ -230,10 +299,10 @@ internal sealed class SyncService
         CancellationToken cancellationToken,
         IProgress<string>? progress = null)
     {
-        auth = _refreshedAuth ?? auth;
+        auth = auth.Mode == AuthMode.CookieFile ? auth : _refreshedAuth ?? auth;
         var result = await RunProcessAsync(
             _paths.YtDlpPath,
-            $"{BuildCommonArgs(auth)} {arguments}",
+            $"{BuildCommonArgs(auth, settings)} {arguments}",
             _paths.RootPath,
             cancellationToken,
             progress);
@@ -243,7 +312,7 @@ internal sealed class SyncService
             return result;
         }
 
-        var refreshedAuth = await TryRefreshCookiesAsync(settings, auth, cancellationToken, progress);
+        var refreshedAuth = await TryRefreshCookiesAsync(settings, cancellationToken, progress);
         if (refreshedAuth is null)
         {
             return result;
@@ -252,7 +321,7 @@ internal sealed class SyncService
         progress?.Report("Authentication failed; retrying with freshly exported cookies...");
         return await RunProcessAsync(
             _paths.YtDlpPath,
-            $"{BuildCommonArgs(refreshedAuth.Value)} {arguments}",
+            $"{BuildCommonArgs(refreshedAuth.Value, settings)} {arguments}",
             _paths.RootPath,
             cancellationToken,
             progress);
@@ -260,7 +329,6 @@ internal sealed class SyncService
 
     private async Task<AuthConfig?> TryRefreshCookiesAsync(
         AppSettings settings,
-        AuthConfig auth,
         CancellationToken cancellationToken,
         IProgress<string>? progress)
     {
@@ -269,7 +337,8 @@ internal sealed class SyncService
             return null;
         }
 
-        if (auth.Mode != AuthMode.Browser)
+        settings.Normalize();
+        if (!ChromiumBrowserLocator.SupportsManagedProfile(settings.BrowserCookies))
         {
             return null;
         }
@@ -307,7 +376,7 @@ internal sealed class SyncService
 
             TrayLog.Write(_paths, $"Fresh cookie export succeeded. Cookies path: {exportResult.CookiesPath}; cookies={exportResult.CookieCount}");
             _lastFreshCookieRetryStatus = $"Fresh cookie export succeeded and produced {exportResult.CookiesPath}.";
-            _refreshedAuth = AuthConfig.ForCookieFile(exportResult.CookiesPath);
+            _refreshedAuth = AuthConfig.ForCookieFile(exportResult.CookiesPath, selectedBrowser.Value, settings.BrowserProfile);
             return _refreshedAuth;
         }
         catch (Exception ex)
@@ -393,8 +462,38 @@ internal sealed class SyncService
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
-        await process.WaitForExitAsync(cancellationToken);
+        using var cancellationRegistration = cancellationToken.Register(() => TryStopProcess(process));
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        finally
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                TryStopProcess(process);
+            }
+        }
+
         return new ProcessResult(process.ExitCode, stdOut.ToString(), stdErr.ToString());
+    }
+
+    private static void TryStopProcess(Process process)
+    {
+        try
+        {
+            if (process.HasExited)
+            {
+                return;
+            }
+
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit(5000);
+        }
+        catch
+        {
+            // Best-effort cleanup during cancellation/shutdown.
+        }
     }
 
     private readonly record struct ProcessResult(int ExitCode, string StdOut, string StdErr)
@@ -415,19 +514,20 @@ internal sealed class SyncService
         var details = new List<string> { prefix };
         details.Add($"Authentication source: {DescribeAuth(auth)}");
 
-        if (LooksLikeAuthFailure(result))
+        var isAuthFailure = LooksLikeAuthFailure(result);
+        if (isAuthFailure)
         {
             details.Add(
                 "YouTube rejected the Watch Later request. This usually means the selected browser profile is not signed into YouTube or the browser cookies could not be read by yt-dlp.");
         }
 
-        if (auth.Mode == AuthMode.Browser && auth.Browser is BrowserCookieSource.Chrome or BrowserCookieSource.Edge)
+        if (isAuthFailure && auth.Browser is BrowserCookieSource.Chrome or BrowserCookieSource.Edge)
         {
             details.Add(
                 "Chrome and Edge on Windows no longer expose the live default profile reliably. When needed, the app opens an app-managed browser profile and exports fresh cookies from that session.");
         }
 
-        if (!string.IsNullOrWhiteSpace(_lastFreshCookieRetryStatus))
+        if (isAuthFailure && !string.IsNullOrWhiteSpace(_lastFreshCookieRetryStatus))
         {
             details.Add(_lastFreshCookieRetryStatus);
         }
@@ -440,18 +540,49 @@ internal sealed class SyncService
     {
         return auth.Mode switch
         {
+            AuthMode.CookieFile when !string.IsNullOrWhiteSpace(auth.Profile)
+                => $"cookies file at {auth.CookiesPath} refreshed from {DescribeBrowser(auth.Browser)} profile '{auth.Profile}'",
             AuthMode.CookieFile => $"cookies file at {auth.CookiesPath}",
             _ => $"browser cookies from {DescribeBrowser(auth.Browser)} profile '{auth.Profile}'"
         };
     }
 
-    private static bool LooksLikeAuthFailure(ProcessResult result)
+    private static string? SummarizeNonFatalSyncIssue(ProcessResult result)
     {
         var combined = result.CombinedOutput;
+        if (combined.Contains("drm protected", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Some videos were skipped because YouTube only exposed DRM-protected or unavailable formats.";
+        }
+
+        if (combined.Contains("Did not get any data blocks", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("fragment not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Some videos were skipped because YouTube did not return playable media for every item.";
+        }
+
+        return "yt-dlp reported item-level errors, but the successfully downloaded videos were kept.";
+    }
+
+    private static bool LooksLikeAuthFailure(ProcessResult result) =>
+        LooksLikeAuthFailureOutput(result.CombinedOutput);
+
+    internal static bool LooksLikeAuthFailureOutput(string combined)
+    {
+        if (string.IsNullOrWhiteSpace(combined))
+        {
+            return false;
+        }
+
         return combined.Contains("playlist does not exist", StringComparison.OrdinalIgnoreCase)
             || combined.Contains("This playlist does not exist", StringComparison.OrdinalIgnoreCase)
             || combined.Contains("Private video", StringComparison.OrdinalIgnoreCase)
             || combined.Contains("Sign in", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("Please sign in", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("confirm you're not a bot", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("This video may be inappropriate", StringComparison.OrdinalIgnoreCase)
             || combined.Contains("requested content is not available", StringComparison.OrdinalIgnoreCase)
             || combined.Contains("cookies", StringComparison.OrdinalIgnoreCase)
             || combined.Contains("cookie database", StringComparison.OrdinalIgnoreCase)
@@ -465,12 +596,14 @@ internal sealed class SyncService
         auth.Mode == AuthMode.Browser
         && (auth.Browser == BrowserCookieSource.Chrome || auth.Browser == BrowserCookieSource.Edge);
 
-    private bool HasSavedCookieFile()
+    private bool HasSavedCookieFile(AuthConfig auth)
     {
         try
         {
             var info = new FileInfo(_paths.CookiesPath);
-            return info.Exists && info.Length > 0;
+            return info.Exists
+                && info.Length > 0
+                && _cookieExportMetadataStore.Matches(auth.Browser, auth.Profile);
         }
         catch
         {
@@ -478,24 +611,32 @@ internal sealed class SyncService
         }
     }
 
-    private async Task<List<string>> GetTargetWatchLaterIdsAsync(int downloadCount, CancellationToken cancellationToken, AuthConfig auth)
+    private async Task<List<string>> GetTargetWatchLaterIdsAsync(
+        AppSettings settings,
+        int downloadCount,
+        CancellationToken cancellationToken,
+        AuthConfig auth)
     {
+        var watchLaterUrl = BuildWatchLaterUrl(settings);
         var result = await RunYtDlpWithRetryAsync(
             new AppSettings
             {
                 DownloadCount = downloadCount,
                 BrowserCookies = auth.Browser,
-                BrowserProfile = auth.Profile
+                BrowserProfile = auth.Profile,
+                SelectedBrowserAccountKey = settings.SelectedBrowserAccountKey,
+                SelectedYouTubeAccountKey = settings.SelectedYouTubeAccountKey
             },
             auth,
-            $"--flat-playlist --playlist-items 1:{downloadCount} --print \"%(id)s\" \"https://www.youtube.com/playlist?list=WL\"",
+            $"--flat-playlist --playlist-items 1:{downloadCount} --print \"%(id)s\" \"{watchLaterUrl}\"",
             cancellationToken);
 
         if (result.ExitCode != 0)
         {
+            var effectiveAuth = _refreshedAuth ?? auth;
             throw new InvalidOperationException(BuildYtDlpFailureMessage(
                 "Could not inspect the current Watch Later items before syncing.",
-                auth,
+                effectiveAuth,
                 result));
         }
 
@@ -508,9 +649,21 @@ internal sealed class SyncService
         return ids;
     }
 
-    private int RepairArchiveEntriesForMissingVideos(IEnumerable<string> missingVideoIds)
+    private string BuildWatchLaterUrl(AppSettings settings)
     {
-        if (!File.Exists(_paths.ArchivePath))
+        var selectedBrowserAuthUserIndex = _accountDiscovery.ResolveSelectedAuthUserIndex(settings);
+        var selectedYouTubeAccount = _youTubeAccountDiscovery.ResolveSelectedAccount(settings, selectedBrowserAuthUserIndex);
+        if (selectedYouTubeAccount.HasValue)
+        {
+            return YouTubeWatchLaterUrl.Build(selectedYouTubeAccount.Value.AuthUserIndex, selectedYouTubeAccount.Value.PageId);
+        }
+
+        return YouTubeWatchLaterUrl.Build(selectedBrowserAuthUserIndex);
+    }
+
+    private int RepairArchiveEntriesForMissingVideos(string archivePath, IEnumerable<string> missingVideoIds)
+    {
+        if (!File.Exists(archivePath))
         {
             return 0;
         }
@@ -523,7 +676,7 @@ internal sealed class SyncService
 
         var removed = 0;
         var keptLines = new List<string>();
-        foreach (var line in File.ReadAllLines(_paths.ArchivePath))
+        foreach (var line in File.ReadAllLines(archivePath))
         {
             var trimmed = line.Trim();
             if (trimmed.StartsWith("youtube ", StringComparison.Ordinal))
@@ -541,7 +694,7 @@ internal sealed class SyncService
 
         if (removed > 0)
         {
-            File.WriteAllLines(_paths.ArchivePath, keptLines);
+            File.WriteAllLines(archivePath, keptLines);
             TrayLog.Write(_paths, $"Removed {removed} stale archive entr{(removed == 1 ? "y" : "ies")}.");
         }
 
@@ -559,8 +712,8 @@ internal sealed class SyncService
         public static AuthConfig ForBrowser(BrowserCookieSource browser, string profile) =>
             new(AuthMode.Browser, browser, profile, string.Empty);
 
-        public static AuthConfig ForCookieFile(string cookiesPath) =>
-            new(AuthMode.CookieFile, BrowserCookieSource.Chrome, string.Empty, cookiesPath);
+        public static AuthConfig ForCookieFile(string cookiesPath, BrowserCookieSource browser = BrowserCookieSource.Chrome, string profile = "") =>
+            new(AuthMode.CookieFile, browser, profile, cookiesPath);
     }
     internal readonly record struct SyncSummary(
         int RequestedCount,
@@ -568,5 +721,7 @@ internal sealed class SyncService
         int DownloadedCount,
         int AlreadyPresentCount,
         int ArchiveRepairedCount,
-        int MissingAfterSyncCount);
+        int MissingAfterSyncCount,
+        int? WatchLaterTotalCount,
+        string? NonFatalIssue);
 }

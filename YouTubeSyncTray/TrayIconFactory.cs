@@ -1,4 +1,4 @@
-using System.Drawing.Drawing2D;
+﻿using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
 namespace YouTubeSyncTray;
@@ -7,7 +7,21 @@ internal static class TrayIconFactory
 {
     public static Icon CreatePlayIcon()
     {
-        using var bitmap = new Bitmap(32, 32);
+        using var bitmap = CreatePlayBitmap();
+        return CreateIcon(bitmap);
+    }
+
+    public static byte[] CreatePlayIconBytes()
+    {
+        using var icon = CreatePlayIcon();
+        using var stream = new MemoryStream();
+        icon.Save(stream);
+        return stream.ToArray();
+    }
+
+    private static Bitmap CreatePlayBitmap()
+    {
+        var bitmap = new Bitmap(32, 32);
         using var graphics = Graphics.FromImage(bitmap);
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         graphics.Clear(Color.Transparent);
@@ -21,7 +35,7 @@ internal static class TrayIconFactory
             new Point(23, 16)
         ]);
 
-        return CreateIcon(bitmap);
+        return bitmap;
     }
 
     private static Icon CreateIcon(Bitmap bitmap)
@@ -41,3 +55,4 @@ internal static class TrayIconFactory
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
 }
+

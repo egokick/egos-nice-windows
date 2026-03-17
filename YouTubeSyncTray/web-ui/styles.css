@@ -167,6 +167,212 @@ button {
   justify-content: flex-end;
 }
 
+.account-picker {
+  display: grid;
+  gap: 4px;
+  min-width: min(260px, 28vw);
+}
+
+.account-picker-compact {
+  min-width: auto;
+  justify-items: end;
+}
+
+.account-picker-label {
+  color: var(--text-soft);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.account-select {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 42px 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--input-bg);
+  outline: none;
+}
+
+.account-select:focus {
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 4px var(--focus-ring);
+}
+
+.account-menu {
+  position: relative;
+}
+
+.account-menu-compact {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.account-menu-button {
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  color: var(--text);
+  background: var(--input-bg);
+  outline: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+}
+
+.account-menu-button-compact {
+  width: 48px;
+  min-width: 48px;
+  min-height: 48px;
+  padding: 5px;
+  justify-content: center;
+  gap: 0;
+}
+
+.account-menu.is-open .account-menu-button,
+.account-menu-button:focus-visible,
+.account-menu-option:focus-visible {
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 4px var(--focus-ring);
+}
+
+.account-menu-button:disabled {
+  opacity: 0.72;
+  cursor: default;
+}
+
+.account-menu-list {
+  position: absolute;
+  inset: calc(100% + 8px) 0 auto;
+  z-index: 40;
+  display: grid;
+  gap: 6px;
+  max-height: min(320px, 60vh);
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.account-menu-list-wide {
+  inset: calc(100% + 8px) 0 auto auto;
+  inline-size: min(340px, calc(100vw - 24px));
+}
+
+.account-menu-option {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.account-menu-option:hover {
+  background: var(--surface-muted);
+}
+
+.account-menu-option.is-selected {
+  border-color: var(--focus-line);
+  background: var(--accent-soft);
+}
+
+.account-choice-content {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+
+.account-choice-text {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.account-choice-primary,
+.account-choice-secondary {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-choice-primary {
+  font-weight: 700;
+}
+
+.account-choice-secondary {
+  color: var(--text-soft);
+  font-size: 0.76rem;
+}
+
+.account-menu-chevron {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: 0.9rem;
+  transition: transform 140ms ease;
+}
+
+.account-menu.is-open .account-menu-chevron {
+  transform: rotate(180deg);
+}
+
+.account-avatar {
+  inline-size: 32px;
+  block-size: 32px;
+  flex: 0 0 32px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--surface-muted) 0%, var(--chip-bg) 100%);
+}
+
+.account-avatar-compact {
+  inline-size: 36px;
+  block-size: 36px;
+  flex: 0 0 36px;
+}
+
+.account-avatar-image,
+.account-avatar-fallback {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+.account-avatar-image {
+  display: block;
+  object-fit: cover;
+}
+
+.account-avatar-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.account-avatar:not(.is-fallback) .account-avatar-fallback {
+  display: none;
+}
+
+.account-avatar.is-fallback .account-avatar-image {
+  display: none;
+}
+
 .primary-button,
 .secondary-button,
 .ghost-button,
@@ -203,6 +409,10 @@ button {
 .ghost-button:hover,
 .danger-button:hover {
   transform: translateY(-1px);
+}
+
+#syncButton {
+  min-inline-size: 112px;
 }
 
 .primary-button:disabled,
@@ -525,8 +735,9 @@ button {
 
 .video-selector {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: 0;
+  right: 0;
+  z-index: 1;
   inline-size: 22px;
   block-size: 22px;
   margin: 0;
@@ -668,6 +879,14 @@ button {
     flex-wrap: wrap;
   }
 
+  .account-picker {
+    min-width: 100%;
+  }
+
+  .account-picker-compact {
+    min-width: auto;
+  }
+
   .toolbar-leading,
   .search-panel.is-open,
   .search-field,
@@ -701,5 +920,15 @@ button {
 
   .monitor-toggle-label {
     display: none;
+  }
+
+  .account-select {
+    max-width: none;
+  }
+
+  .account-menu-list {
+    position: static;
+    inset: auto;
+    margin-top: 8px;
   }
 }

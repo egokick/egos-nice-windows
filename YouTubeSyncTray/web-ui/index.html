@@ -1,9 +1,13 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>YouTube Sync Library</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -43,8 +47,35 @@
       </div>
 
       <div class="toolbar-actions">
+        <div id="browserAccountPicker" class="account-picker account-picker-compact hidden">
+          <span class="account-picker-label">Browser account</span>
+          <div id="browserAccountMenu" class="account-menu account-menu-compact">
+            <button
+              id="browserAccountButton"
+              class="account-menu-button account-menu-button-compact"
+              type="button"
+              aria-haspopup="listbox"
+              aria-expanded="false"
+              aria-controls="browserAccountList"
+              aria-label="Choose browser account"></button>
+            <div id="browserAccountList" class="account-menu-list account-menu-list-wide hidden" role="listbox" aria-label="Choose browser account"></div>
+          </div>
+        </div>
+        <div id="youtubeAccountPicker" class="account-picker hidden">
+          <span class="account-picker-label">YouTube account</span>
+          <div id="youtubeAccountMenu" class="account-menu">
+            <button
+              id="youtubeAccountButton"
+              class="account-menu-button"
+              type="button"
+              aria-haspopup="listbox"
+              aria-expanded="false"
+              aria-controls="youtubeAccountList"
+              aria-label="Choose YouTube account"></button>
+            <div id="youtubeAccountList" class="account-menu-list hidden" role="listbox" aria-label="Choose YouTube account"></div>
+          </div>
+        </div>
         <button id="syncButton" class="primary-button" type="button">Sync Now</button>
-        <button id="selectVisibleButton" class="ghost-button" type="button">Select Visible</button>
         <button id="clearSelectionButton" class="ghost-button" type="button">Clear Selection</button>
         <button id="removeSelectedButton" class="danger-button" type="button" disabled>Remove Selected</button>
         <button id="settingsButton" class="secondary-button" type="button">Settings</button>
@@ -89,3 +120,4 @@
   <script src="/app.js" defer></script>
 </body>
 </html>
+

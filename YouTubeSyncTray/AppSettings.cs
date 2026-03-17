@@ -12,19 +12,50 @@ internal enum BrowserCookieSource
 
 internal sealed class AppSettings
 {
-    public int DownloadCount { get; set; } = 100;
+    public int DownloadCount { get; set; } = 150;
+    public bool AutoSyncArmed { get; set; } = true;
     public BrowserCookieSource BrowserCookies { get; set; } =
         ChromiumBrowserLocator.GetPreferredBrowserOrFallback(BrowserCookieSource.Chrome);
     public string BrowserProfile { get; set; } = "Default";
+    public string? SelectedBrowserAccountKey { get; set; }
+    public string? SelectedYouTubeAccountKey { get; set; }
+    public string? SelectedAccountKey { get; set; }
 
     public void Normalize()
     {
         DownloadCount = Math.Clamp(DownloadCount, 1, 5000);
         BrowserProfile = string.IsNullOrWhiteSpace(BrowserProfile) ? "Default" : BrowserProfile.Trim();
+        SelectedBrowserAccountKey = string.IsNullOrWhiteSpace(SelectedBrowserAccountKey) ? null : SelectedBrowserAccountKey.Trim();
+        SelectedYouTubeAccountKey = string.IsNullOrWhiteSpace(SelectedYouTubeAccountKey) ? null : SelectedYouTubeAccountKey.Trim();
+        SelectedAccountKey = string.IsNullOrWhiteSpace(SelectedAccountKey) ? null : SelectedAccountKey.Trim();
+        if (SelectedBrowserAccountKey is null && SelectedAccountKey is not null && !SelectedAccountKey.StartsWith("yt|", StringComparison.Ordinal))
+        {
+            SelectedBrowserAccountKey = SelectedAccountKey;
+        }
+
+        if (SelectedYouTubeAccountKey is null && SelectedAccountKey is not null && SelectedAccountKey.StartsWith("yt|", StringComparison.Ordinal))
+        {
+            SelectedYouTubeAccountKey = SelectedAccountKey;
+        }
+
         if (!ChromiumBrowserLocator.SupportsManagedProfile(BrowserCookies))
         {
             BrowserCookies = ChromiumBrowserLocator.GetPreferredBrowserOrFallback(BrowserCookieSource.Chrome);
         }
+    }
+
+    public AppSettings CreateSnapshot()
+    {
+        Normalize();
+        return new AppSettings
+        {
+            DownloadCount = DownloadCount,
+            AutoSyncArmed = AutoSyncArmed,
+            BrowserCookies = BrowserCookies,
+            BrowserProfile = BrowserProfile,
+            SelectedBrowserAccountKey = SelectedBrowserAccountKey,
+            SelectedYouTubeAccountKey = SelectedYouTubeAccountKey
+        };
     }
 }
 

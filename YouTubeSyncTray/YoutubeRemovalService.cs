@@ -4,13 +4,15 @@ namespace YouTubeSyncTray;
 
 internal sealed class YoutubeRemovalService
 {
-    private const string WatchLaterUrl = "https://www.youtube.com/playlist?list=WL";
-
     private readonly ChromiumManagedBrowser _managedBrowser;
+    private readonly BrowserAccountDiscoveryService _accountDiscovery;
+    private readonly YouTubeAccountDiscoveryService _youTubeAccountDiscovery;
 
     public YoutubeRemovalService(YoutubeSyncPaths paths)
     {
         _managedBrowser = new ChromiumManagedBrowser(paths);
+        _accountDiscovery = new BrowserAccountDiscoveryService();
+        _youTubeAccountDiscovery = new YouTubeAccountDiscoveryService(paths);
     }
 
     public async Task RemoveFromWatchLaterAsync(
@@ -41,13 +43,18 @@ internal sealed class YoutubeRemovalService
         }
 
         progress?.Report($"Opening managed {ChromiumBrowserLocator.GetDisplayName(settings.BrowserCookies)} to remove {ids.Length} video(s) from Watch Later...");
+        var selectedBrowserAuthUserIndex = _accountDiscovery.ResolveSelectedAuthUserIndex(settings);
+        var selectedYouTubeAccount = _youTubeAccountDiscovery.ResolveSelectedAccount(settings, selectedBrowserAuthUserIndex);
+        var watchLaterUrl = selectedYouTubeAccount.HasValue
+            ? YouTubeWatchLaterUrl.Build(selectedYouTubeAccount.Value.AuthUserIndex, selectedYouTubeAccount.Value.PageId)
+            : YouTubeWatchLaterUrl.Build(selectedBrowserAuthUserIndex);
         var result = await _managedBrowser.RunWithAuthenticatedSessionAsync(
             settings.BrowserCookies,
             settings.BrowserProfile,
             progress,
             async (session, token) =>
             {
-                await session.NavigateAsync(WatchLaterUrl, token);
+                await session.NavigateAsync(watchLaterUrl, token);
                 await Task.Delay(TimeSpan.FromSeconds(4), token);
                 return await session.EvaluateValueAsync<RemovalResult>(BuildRemovalScript(ids), token);
             },

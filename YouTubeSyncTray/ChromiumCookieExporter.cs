@@ -28,11 +28,13 @@ internal sealed class ChromiumCookieExporter
     ];
     private readonly YoutubeSyncPaths _paths;
     private readonly ChromiumManagedBrowser _managedBrowser;
+    private readonly CookieExportMetadataStore _metadataStore;
 
     public ChromiumCookieExporter(YoutubeSyncPaths paths)
     {
         _paths = paths;
         _managedBrowser = new ChromiumManagedBrowser(paths);
+        _metadataStore = new CookieExportMetadataStore(paths);
     }
 
     public bool Supports(BrowserCookieSource browser) => _managedBrowser.Supports(browser);
@@ -71,6 +73,7 @@ internal sealed class ChromiumCookieExporter
 
                 EnsureAuthCookies(filtered);
                 await WriteCookieFileAsync(filtered, token);
+                _metadataStore.Save(browser, profile);
                 return new CookieExportResult(_paths.CookiesPath, filtered.Count);
             },
             cancellationToken);

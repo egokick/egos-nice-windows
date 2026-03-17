@@ -45,3 +45,4 @@ YouTubeSyncTray/youtube-sync/legacy-__pycache__
 YouTubeSyncTray/youtube-sync/legacy-bulk-remove-watch-later.py
 YouTubeSyncTray/youtube-sync/yt-dlp.exe
 YouTubeSyncTray/youtube-sync/legacy-sync-watch-later.ps1
+.tmp

@@ -1,4 +1,8 @@
 const state = {
+  browserAccountButtonKey: "",
+  browserAccounts: [],
+  browserAccountOptionsKey: "",
+  browserAccountSelectionInFlight: false,
   cards: new Map(),
   currentVideoId: null,
   currentVideoTitle: "",
@@ -6,14 +10,29 @@ const state = {
   lastVideoRefreshAt: 0,
   offlineNotified: false,
   refreshTimer: null,
+  searchMatcher: null,
   searchTerm: "",
+  configuredDownloadCount: null,
+  selectedBrowserAccountKey: "",
   selectedIds: new Set(),
+  syncButtonAnimationFrame: 0,
+  syncButtonAnimationTimer: null,
   toastTimer: null,
+  watchLaterTotalCount: null,
+  youtubeAccounts: [],
+  youtubeAccountButtonKey: "",
+  youtubeAccountOptionsKey: "",
+  youtubeAccountSelectionInFlight: false,
+  selectedYouTubeAccountKey: "",
   videos: new Map(),
 };
 
 const elements = {
   activityFeed: document.getElementById("activityFeed"),
+  browserAccountButton: document.getElementById("browserAccountButton"),
+  browserAccountList: document.getElementById("browserAccountList"),
+  browserAccountMenu: document.getElementById("browserAccountMenu"),
+  browserAccountPicker: document.getElementById("browserAccountPicker"),
   clearSelectionButton: document.getElementById("clearSelectionButton"),
   emptyState: document.getElementById("emptyState"),
   libraryGrid: document.getElementById("libraryGrid"),
@@ -29,13 +48,16 @@ const elements = {
   searchInput: document.getElementById("searchInput"),
   searchPanel: document.getElementById("searchPanel"),
   searchToggle: document.getElementById("searchToggle"),
-  selectVisibleButton: document.getElementById("selectVisibleButton"),
   selectionSummary: document.getElementById("selectionSummary"),
   settingsButton: document.getElementById("settingsButton"),
   statusText: document.getElementById("statusText"),
   syncButton: document.getElementById("syncButton"),
   toast: document.getElementById("toast"),
   videoPlayer: document.getElementById("videoPlayer"),
+  youtubeAccountButton: document.getElementById("youtubeAccountButton"),
+  youtubeAccountList: document.getElementById("youtubeAccountList"),
+  youtubeAccountMenu: document.getElementById("youtubeAccountMenu"),
+  youtubeAccountPicker: document.getElementById("youtubeAccountPicker"),
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -56,26 +78,110 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 function wireEvents() {
+  elements.browserAccountButton.addEventListener("click", () => {
+    if (elements.browserAccountButton.disabled) {
+      return;
+    }
+
+    setYouTubeAccountMenuOpen(false);
+    setBrowserAccountMenuOpen(elements.browserAccountList.classList.contains("hidden"));
+  });
+
+  elements.browserAccountButton.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown") {
+      return;
+    }
+
+    event.preventDefault();
+    setYouTubeAccountMenuOpen(false);
+    setBrowserAccountMenuOpen(true);
+    focusSelectedBrowserAccountOption();
+  });
+
+  elements.browserAccountList.addEventListener("click", async (event) => {
+    const option = event.target instanceof Element
+      ? event.target.closest(".account-menu-option")
+      : null;
+    if (!(option instanceof HTMLButtonElement) || option.disabled) {
+      return;
+    }
+
+    await selectBrowserAccount(option.dataset.accountKey || "");
+  });
+
+  elements.browserAccountList.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+
+    event.preventDefault();
+    setBrowserAccountMenuOpen(false);
+    elements.browserAccountButton.focus();
+  });
+
+  elements.youtubeAccountButton.addEventListener("click", () => {
+    if (elements.youtubeAccountButton.disabled) {
+      return;
+    }
+
+    setBrowserAccountMenuOpen(false);
+    setYouTubeAccountMenuOpen(elements.youtubeAccountList.classList.contains("hidden"));
+  });
+
+  elements.youtubeAccountButton.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown") {
+      return;
+    }
+
+    event.preventDefault();
+    setBrowserAccountMenuOpen(false);
+    setYouTubeAccountMenuOpen(true);
+    focusSelectedYouTubeAccountOption();
+  });
+
+  elements.youtubeAccountList.addEventListener("click", async (event) => {
+    const option = event.target instanceof Element
+      ? event.target.closest(".account-menu-option")
+      : null;
+    if (!(option instanceof HTMLButtonElement) || option.disabled) {
+      return;
+    }
+
+    await selectYouTubeAccount(option.dataset.accountKey || "");
+  });
+
+  elements.youtubeAccountList.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+
+    event.preventDefault();
+    setYouTubeAccountMenuOpen(false);
+    elements.youtubeAccountButton.focus();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Node)) {
+      return;
+    }
+
+    if (!elements.browserAccountList.classList.contains("hidden")
+      && !elements.browserAccountMenu.contains(event.target)) {
+      setBrowserAccountMenuOpen(false);
+    }
+
+    if (!elements.youtubeAccountList.classList.contains("hidden")
+      && !elements.youtubeAccountMenu.contains(event.target)) {
+      setYouTubeAccountMenuOpen(false);
+    }
+  });
+
   elements.syncButton.addEventListener("click", async () => {
     await runCommand("/api/sync", null, "Sync requested.");
   });
 
   elements.settingsButton.addEventListener("click", async () => {
     await runCommand("/api/settings/open", null, "Settings opened.");
-  });
-
-  elements.selectVisibleButton.addEventListener("click", () => {
-    for (const [videoId, card] of state.cards) {
-      if (card.classList.contains("is-hidden")) {
-        continue;
-      }
-
-      state.selectedIds.add(videoId);
-      card.querySelector(".video-selector").checked = true;
-      card.classList.add("selected");
-    }
-
-    updateSelectionUi();
   });
 
   elements.clearSelectionButton.addEventListener("click", () => {
@@ -107,6 +213,7 @@ function wireEvents() {
 
   elements.searchInput.addEventListener("input", () => {
     state.searchTerm = elements.searchInput.value.trim().toLowerCase();
+    state.searchMatcher = buildSearchMatcher(state.searchTerm);
     applyFilters();
     updateSelectionUi();
   });
@@ -116,6 +223,7 @@ function wireEvents() {
     if (isOpen && elements.searchInput.value.trim() !== "") {
       elements.searchInput.value = "";
       state.searchTerm = "";
+      state.searchMatcher = null;
       applyFilters();
       updateSelectionUi();
     }
@@ -142,6 +250,14 @@ function wireEvents() {
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      if (!elements.browserAccountList.classList.contains("hidden")) {
+        setBrowserAccountMenuOpen(false);
+      }
+
+      if (!elements.youtubeAccountList.classList.contains("hidden")) {
+        setYouTubeAccountMenuOpen(false);
+      }
+
       if (!elements.monitorPanel.classList.contains("hidden")) {
         setMonitorOpen(false);
       }
@@ -238,8 +354,8 @@ function createCard(video) {
       </button>
       <div class="thumb-overlay">
         <span class="index-pill"></span>
-        <input class="video-selector" type="checkbox" aria-label="Select video">
       </div>
+      <input class="video-selector" type="checkbox" aria-label="Select video">
     </div>
     <div class="card-body">
       <h2 class="video-title"></h2>
@@ -361,7 +477,7 @@ function clearPlayer() {
 function applyFilters() {
   let visibleCount = 0;
   for (const card of state.cards.values()) {
-    const matches = !state.searchTerm || card.dataset.search.includes(state.searchTerm);
+    const matches = !state.searchMatcher || state.searchMatcher(card.dataset.search);
     card.classList.toggle("is-hidden", !matches);
     if (matches) {
       visibleCount += 1;
@@ -373,30 +489,502 @@ function applyFilters() {
   }
 }
 
+function buildSearchMatcher(searchTerm) {
+  if (!searchTerm) {
+    return null;
+  }
+
+  if (!searchTerm.includes("*")) {
+    return (haystack) => haystack.includes(searchTerm);
+  }
+
+  const escaped = searchTerm.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = escaped.replace(/\*/g, ".*");
+  const regex = new RegExp(pattern, "i");
+  return (haystack) => regex.test(haystack);
+}
+
 function updateSelectionUi() {
   const selectedCount = state.selectedIds.size;
   const visibleCount = [...state.cards.values()].filter((card) => !card.classList.contains("is-hidden")).length;
-  const totalCount = state.cards.size;
+  const downloadedCount = state.cards.size;
 
   elements.selectionSummary.textContent =
     selectedCount === 0
-      ? `${visibleCount} visible of ${totalCount} downloaded videos`
+      ? buildLibrarySummary(downloadedCount)
       : `${selectedCount} selected across ${visibleCount} visible videos`;
 
   elements.removeSelectedButton.disabled = selectedCount === 0;
 }
 
+function buildLibrarySummary(downloadedCount) {
+  const configuredDownloadCount = Number.isInteger(state.configuredDownloadCount)
+    ? Math.max(state.configuredDownloadCount, 0)
+    : null;
+  const watchLaterTotalCount = Number.isInteger(state.watchLaterTotalCount)
+    ? Math.max(state.watchLaterTotalCount, 0)
+    : null;
+
+  if (configuredDownloadCount !== null && watchLaterTotalCount !== null) {
+    return `${downloadedCount} downloaded on disk, ${configuredDownloadCount} configured to download, ${watchLaterTotalCount} total in playlist`;
+  }
+
+  if (configuredDownloadCount !== null) {
+    return `${downloadedCount} downloaded on disk, ${configuredDownloadCount} configured to download`;
+  }
+
+  if (watchLaterTotalCount !== null) {
+    return `${downloadedCount} downloaded on disk, ${watchLaterTotalCount} total in playlist`;
+  }
+
+  return `${downloadedCount} downloaded videos`;
+}
+
 function updateStatus(status) {
+  state.configuredDownloadCount = Number.isInteger(status.downloadCount)
+    ? status.downloadCount
+    : null;
+  state.watchLaterTotalCount = Number.isInteger(status.watchLaterTotalCount)
+    ? status.watchLaterTotalCount
+    : null;
   elements.monitorPill.dataset.state = status.isBusy ? "busy" : "ready";
   elements.monitorPill.textContent = status.isBusy ? "Busy" : "Ready";
   elements.statusText.textContent = status.status;
+  renderBrowserAccountPicker(
+    Array.isArray(status.availableBrowserAccounts) ? status.availableBrowserAccounts : [],
+    status.selectedBrowserAccountKey || "",
+  );
+  renderYouTubeAccountPicker(
+    Array.isArray(status.availableYouTubeAccounts) ? status.availableYouTubeAccounts : [],
+    status.selectedYouTubeAccountKey || "",
+  );
 
   elements.syncButton.disabled = status.isBusy;
-  elements.settingsButton.disabled = status.isBusy;
-  elements.selectVisibleButton.disabled = status.isBusy;
+  updateSyncButtonState(status.isBusy);
+  elements.settingsButton.disabled = false;
   elements.clearSelectionButton.disabled = status.isBusy && state.selectedIds.size === 0;
-  elements.removeSelectedButton.disabled = status.isBusy || state.selectedIds.size === 0;
+  elements.removeSelectedButton.disabled = state.selectedIds.size === 0;
+  elements.removeSelectedButton.textContent = status.isBusy ? "Queue Remove Selected" : "Remove Selected";
+  updateSelectionUi();
   renderActivityFeed(status.recentMessages || []);
+}
+
+function updateSyncButtonState(isBusy) {
+  if (!isBusy) {
+    if (state.syncButtonAnimationTimer !== null) {
+      window.clearInterval(state.syncButtonAnimationTimer);
+      state.syncButtonAnimationTimer = null;
+    }
+
+    state.syncButtonAnimationFrame = 0;
+    elements.syncButton.textContent = "Sync Now";
+    return;
+  }
+
+  const frames = ["Syncing.", "Syncing..", "Syncing..."];
+  elements.syncButton.textContent = frames[state.syncButtonAnimationFrame % frames.length];
+
+  if (state.syncButtonAnimationTimer !== null) {
+    return;
+  }
+
+  state.syncButtonAnimationTimer = window.setInterval(() => {
+    state.syncButtonAnimationFrame = (state.syncButtonAnimationFrame + 1) % frames.length;
+    elements.syncButton.textContent = frames[state.syncButtonAnimationFrame];
+  }, 500);
+}
+
+async function selectBrowserAccount(accountKey) {
+  if (
+    state.browserAccountSelectionInFlight ||
+    accountKey === "" ||
+    accountKey === state.selectedBrowserAccountKey
+  ) {
+    return;
+  }
+
+  const previousAccountKey = state.selectedBrowserAccountKey;
+  state.browserAccountSelectionInFlight = true;
+  setBrowserAccountMenuOpen(false);
+  setYouTubeAccountMenuOpen(false);
+  renderBrowserAccountPicker(state.browserAccounts, previousAccountKey);
+
+  try {
+    const response = await post("/api/browser-account/select", { accountKey });
+    showToast(response.message || "Switched browser account.", false);
+    await refreshStatus(true);
+  } catch (error) {
+    state.selectedBrowserAccountKey = previousAccountKey;
+    showToast(error instanceof Error ? error.message : "Could not switch browser accounts.", true);
+    await refreshStatus(false);
+  } finally {
+    state.browserAccountSelectionInFlight = false;
+    renderBrowserAccountPicker(state.browserAccounts, state.selectedBrowserAccountKey);
+  }
+}
+
+async function selectYouTubeAccount(accountKey) {
+  if (
+    state.youtubeAccountSelectionInFlight ||
+    accountKey === "" ||
+    accountKey === state.selectedYouTubeAccountKey
+  ) {
+    return;
+  }
+
+  const previousAccountKey = state.selectedYouTubeAccountKey;
+  state.youtubeAccountSelectionInFlight = true;
+  setYouTubeAccountMenuOpen(false);
+  renderYouTubeAccountPicker(state.youtubeAccounts, previousAccountKey);
+
+  try {
+    const response = await post("/api/youtube-account/select", { accountKey });
+    showToast(response.message || "Switched YouTube account.", false);
+    await refreshStatus(true);
+  } catch (error) {
+    state.selectedYouTubeAccountKey = previousAccountKey;
+    showToast(error instanceof Error ? error.message : "Could not switch YouTube accounts.", true);
+    await refreshStatus(false);
+  } finally {
+    state.youtubeAccountSelectionInFlight = false;
+    renderYouTubeAccountPicker(state.youtubeAccounts, state.selectedYouTubeAccountKey);
+  }
+}
+
+function setBrowserAccountMenuOpen(isOpen) {
+  const shouldOpen =
+    isOpen &&
+    !elements.browserAccountButton.disabled &&
+    !elements.browserAccountPicker.classList.contains("hidden");
+  elements.browserAccountMenu.classList.toggle("is-open", shouldOpen);
+  elements.browserAccountList.classList.toggle("hidden", !shouldOpen);
+  elements.browserAccountButton.setAttribute("aria-expanded", String(shouldOpen));
+}
+
+function focusSelectedBrowserAccountOption() {
+  const selectedOption =
+    elements.browserAccountList.querySelector(".account-menu-option.is-selected")
+    || elements.browserAccountList.querySelector(".account-menu-option");
+  if (selectedOption instanceof HTMLElement) {
+    selectedOption.focus();
+  }
+}
+
+function setYouTubeAccountMenuOpen(isOpen) {
+  const shouldOpen =
+    isOpen &&
+    !elements.youtubeAccountButton.disabled &&
+    !elements.youtubeAccountPicker.classList.contains("hidden");
+  elements.youtubeAccountMenu.classList.toggle("is-open", shouldOpen);
+  elements.youtubeAccountList.classList.toggle("hidden", !shouldOpen);
+  elements.youtubeAccountButton.setAttribute("aria-expanded", String(shouldOpen));
+}
+
+function focusSelectedYouTubeAccountOption() {
+  const selectedOption =
+    elements.youtubeAccountList.querySelector(".account-menu-option.is-selected")
+    || elements.youtubeAccountList.querySelector(".account-menu-option");
+  if (selectedOption instanceof HTMLElement) {
+    selectedOption.focus();
+  }
+}
+
+function renderBrowserAccountPicker(accounts, selectedAccountKey) {
+  state.browserAccounts = Array.isArray(accounts) ? accounts : [];
+  if (state.browserAccounts.length === 0) {
+    state.browserAccountButtonKey = "";
+    state.browserAccountOptionsKey = "";
+    state.selectedBrowserAccountKey = "";
+    elements.browserAccountPicker.classList.add("hidden");
+    elements.browserAccountButton.replaceChildren();
+    elements.browserAccountButton.disabled = true;
+    elements.browserAccountList.replaceChildren();
+    setBrowserAccountMenuOpen(false);
+    return;
+  }
+
+  elements.browserAccountPicker.classList.remove("hidden");
+  const selectedKey = selectedAccountKey || state.browserAccounts[0].accountKey;
+  const selectedAccount = state.browserAccounts.find((account) => account.accountKey === selectedKey)
+    || state.browserAccounts[0];
+  const accountOptionsKey = state.browserAccounts
+    .map((account) => `${account.accountKey}|${account.label}|${account.avatarUrl || ""}`)
+    .join("||");
+
+  if (state.browserAccountOptionsKey !== accountOptionsKey) {
+    const fragment = document.createDocumentFragment();
+    for (const account of state.browserAccounts) {
+      fragment.append(createBrowserAccountOption(account));
+    }
+
+    elements.browserAccountList.replaceChildren(fragment);
+    state.browserAccountOptionsKey = accountOptionsKey;
+  }
+
+  const buttonKey = `${selectedAccount.accountKey}|${selectedAccount.label}|${selectedAccount.avatarUrl || ""}`;
+  if (state.browserAccountButtonKey !== buttonKey) {
+    renderBrowserAccountButton(selectedAccount);
+    state.browserAccountButtonKey = buttonKey;
+  }
+
+  elements.browserAccountButton.disabled =
+    state.browserAccountSelectionInFlight ||
+    state.youtubeAccountSelectionInFlight ||
+    state.browserAccounts.length === 1;
+  state.selectedBrowserAccountKey = selectedAccount.accountKey;
+
+  for (const option of elements.browserAccountList.querySelectorAll(".account-menu-option")) {
+    if (!(option instanceof HTMLButtonElement)) {
+      continue;
+    }
+
+    const isSelected = option.dataset.accountKey === selectedAccount.accountKey;
+    option.classList.toggle("is-selected", isSelected);
+    option.disabled = state.browserAccountSelectionInFlight || state.youtubeAccountSelectionInFlight;
+    option.setAttribute("aria-selected", String(isSelected));
+    option.tabIndex = isSelected ? 0 : -1;
+  }
+
+  if (elements.browserAccountButton.disabled) {
+    setBrowserAccountMenuOpen(false);
+  }
+}
+
+function renderBrowserAccountButton(account) {
+  const label = account.label || "Browser account";
+  elements.browserAccountButton.title = label;
+  elements.browserAccountButton.setAttribute("aria-label", label);
+
+  const avatar = createAccountAvatar(
+    account.avatarUrl,
+    account.displayName || account.email || account.label || account.browserName,
+  );
+  avatar.classList.add("account-avatar-compact");
+
+  elements.browserAccountButton.replaceChildren(avatar);
+}
+
+function createBrowserAccountOption(account) {
+  const option = document.createElement("button");
+  option.type = "button";
+  option.className = "account-menu-option";
+  option.dataset.accountKey = account.accountKey;
+  option.role = "option";
+  option.title = account.label || "Browser account";
+  option.append(createBrowserAccountContent(account));
+  return option;
+}
+
+function createBrowserAccountContent(account) {
+  const content = document.createElement("span");
+  content.className = "account-choice-content";
+  content.append(createAccountAvatar(
+    account.avatarUrl,
+    account.displayName || account.email || account.label || account.browserName,
+  ));
+
+  const text = document.createElement("span");
+  text.className = "account-choice-text";
+
+  const primary = document.createElement("span");
+  primary.className = "account-choice-primary";
+  primary.textContent = account.displayName || account.email || account.label || "Browser account";
+  text.append(primary);
+
+  const secondaryText = buildBrowserAccountSecondaryText(account, primary.textContent);
+  if (secondaryText !== "") {
+    const secondary = document.createElement("span");
+    secondary.className = "account-choice-secondary";
+    secondary.textContent = secondaryText;
+    text.append(secondary);
+  }
+
+  content.append(text);
+  return content;
+}
+
+function buildBrowserAccountSecondaryText(account, primaryText) {
+  const parts = [];
+  if (account.email && account.email !== primaryText) {
+    parts.push(account.email);
+  }
+
+  const browserProfile = [account.browserName, account.profile].filter(Boolean).join(" / ");
+  if (browserProfile !== "") {
+    parts.push(browserProfile);
+  }
+
+  return parts.join(" / ");
+}
+
+function renderYouTubeAccountPicker(accounts, selectedAccountKey) {
+  state.youtubeAccounts = Array.isArray(accounts) ? accounts : [];
+  if (state.youtubeAccounts.length === 0) {
+    state.youtubeAccountButtonKey = "";
+    state.youtubeAccountOptionsKey = "";
+    state.selectedYouTubeAccountKey = "";
+    elements.youtubeAccountPicker.classList.add("hidden");
+    elements.youtubeAccountButton.replaceChildren();
+    elements.youtubeAccountButton.disabled = true;
+    elements.youtubeAccountList.replaceChildren();
+    setYouTubeAccountMenuOpen(false);
+    return;
+  }
+
+  elements.youtubeAccountPicker.classList.remove("hidden");
+  const selectedKey = selectedAccountKey || state.youtubeAccounts[0].accountKey;
+  const selectedAccount = state.youtubeAccounts.find((account) => account.accountKey === selectedKey)
+    || state.youtubeAccounts[0];
+  const accountOptionsKey = state.youtubeAccounts
+    .map((account) => `${account.accountKey}|${account.label}|${account.avatarUrl || ""}`)
+    .join("||");
+
+  if (state.youtubeAccountOptionsKey !== accountOptionsKey) {
+    const fragment = document.createDocumentFragment();
+    for (const account of state.youtubeAccounts) {
+      fragment.append(createYouTubeAccountOption(account));
+    }
+
+    elements.youtubeAccountList.replaceChildren(fragment);
+    state.youtubeAccountOptionsKey = accountOptionsKey;
+  }
+
+  const buttonKey = `${selectedAccount.accountKey}|${selectedAccount.label}|${selectedAccount.avatarUrl || ""}`;
+  if (state.youtubeAccountButtonKey !== buttonKey) {
+    renderYouTubeAccountButton(selectedAccount);
+    state.youtubeAccountButtonKey = buttonKey;
+  }
+
+  elements.youtubeAccountButton.disabled =
+    state.browserAccountSelectionInFlight ||
+    state.youtubeAccountSelectionInFlight ||
+    state.youtubeAccounts.length === 1;
+  state.selectedYouTubeAccountKey = selectedAccount.accountKey;
+
+  for (const option of elements.youtubeAccountList.querySelectorAll(".account-menu-option")) {
+    if (!(option instanceof HTMLButtonElement)) {
+      continue;
+    }
+
+    const isSelected = option.dataset.accountKey === selectedAccount.accountKey;
+    option.classList.toggle("is-selected", isSelected);
+    option.disabled = state.browserAccountSelectionInFlight || state.youtubeAccountSelectionInFlight;
+    option.setAttribute("aria-selected", String(isSelected));
+    option.tabIndex = isSelected ? 0 : -1;
+  }
+
+  if (elements.youtubeAccountButton.disabled) {
+    setYouTubeAccountMenuOpen(false);
+  }
+}
+
+function renderYouTubeAccountButton(account) {
+  elements.youtubeAccountButton.title = account.label || "YouTube account";
+
+  const content = createYouTubeAccountContent(account);
+  content.classList.add("is-button");
+
+  const chevron = document.createElement("span");
+  chevron.className = "account-menu-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "▾";
+
+  elements.youtubeAccountButton.replaceChildren(content, chevron);
+}
+
+function createYouTubeAccountOption(account) {
+  const option = document.createElement("button");
+  option.type = "button";
+  option.className = "account-menu-option";
+  option.dataset.accountKey = account.accountKey;
+  option.role = "option";
+  option.title = account.label || "YouTube account";
+  option.append(createYouTubeAccountContent(account));
+  return option;
+}
+
+function createYouTubeAccountContent(account) {
+  const content = document.createElement("span");
+  content.className = "account-choice-content";
+  content.append(createAccountAvatar(account.avatarUrl, account.displayName || account.handle || account.label));
+
+  const text = document.createElement("span");
+  text.className = "account-choice-text";
+
+  const primary = document.createElement("span");
+  primary.className = "account-choice-primary";
+  primary.textContent = account.displayName || account.handle || account.label || "YouTube account";
+  text.append(primary);
+
+  const secondaryText = buildYouTubeAccountSecondaryText(account, primary.textContent);
+  if (secondaryText !== "") {
+    const secondary = document.createElement("span");
+    secondary.className = "account-choice-secondary";
+    secondary.textContent = secondaryText;
+    text.append(secondary);
+  }
+
+  content.append(text);
+  return content;
+}
+
+function buildYouTubeAccountSecondaryText(account, primaryText) {
+  const parts = [];
+  if (account.handle && account.handle !== primaryText) {
+    parts.push(account.handle);
+  }
+
+  if (account.byline) {
+    parts.push(account.byline);
+  }
+
+  return parts.join(" / ");
+}
+
+function createAccountAvatar(avatarUrl, label) {
+  const avatar = document.createElement("span");
+  avatar.className = "account-avatar is-fallback";
+
+  const image = document.createElement("img");
+  image.className = "account-avatar-image";
+  image.alt = "";
+  image.decoding = "async";
+  image.loading = "eager";
+  image.referrerPolicy = "no-referrer";
+
+  const fallback = document.createElement("span");
+  fallback.className = "account-avatar-fallback";
+  fallback.textContent = getAccountInitial(label);
+
+  if (avatarUrl) {
+    const showImage = () => {
+      avatar.classList.remove("is-fallback");
+    };
+
+    const showFallback = () => {
+      avatar.classList.add("is-fallback");
+      image.removeAttribute("src");
+    };
+
+    image.addEventListener("load", showImage, { once: true });
+    image.addEventListener("error", showFallback, { once: true });
+    image.src = avatarUrl;
+    if (image.complete) {
+      if (image.naturalWidth > 0) {
+        showImage();
+      } else {
+        showFallback();
+      }
+    }
+  }
+
+  avatar.append(image, fallback);
+  return avatar;
+}
+
+function getAccountInitial(label) {
+  const match = (label || "Y").trim().match(/[A-Za-z0-9]/);
+  return match ? match[0].toUpperCase() : "Y";
 }
 
 function setSearchOpen(isOpen) {

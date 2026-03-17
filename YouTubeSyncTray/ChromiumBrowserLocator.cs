@@ -112,6 +112,45 @@ internal static class ChromiumBrowserLocator
             _ => browser.ToString()
         };
 
+    public static bool TryGetProfilePreferencesPath(BrowserCookieSource browser, string profile, out string preferencesPath)
+    {
+        preferencesPath = string.Empty;
+        if (!TryGetUserDataPath(browser, out var userDataPath))
+        {
+            return false;
+        }
+
+        var normalizedProfile = string.IsNullOrWhiteSpace(profile) ? "Default" : profile.Trim();
+        var candidate = Path.Combine(userDataPath, normalizedProfile, "Preferences");
+        if (!File.Exists(candidate))
+        {
+            return false;
+        }
+
+        preferencesPath = candidate;
+        return true;
+    }
+
+    public static bool TryGetUserDataPath(BrowserCookieSource browser, out string userDataPath)
+    {
+        userDataPath = browser switch
+        {
+            BrowserCookieSource.Chrome => Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Google",
+                "Chrome",
+                "User Data"),
+            BrowserCookieSource.Edge => Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft",
+                "Edge",
+                "User Data"),
+            _ => string.Empty
+        };
+
+        return userDataPath.Length > 0 && Directory.Exists(userDataPath);
+    }
+
     private static IEnumerable<string> GetCandidateExecutablePaths(BrowserCookieSource browser)
     {
         foreach (var registeredPath in GetRegisteredExecutablePaths(browser))

@@ -7,6 +7,7 @@ internal sealed class YoutubeSyncPaths
     public required string DownloadsPath { get; init; }
     public required string YtDlpPath { get; init; }
     public required string CookiesPath { get; init; }
+    public required string CookiesMetadataPath { get; init; }
     public required string ArchivePath { get; init; }
     public required string TempPath { get; init; }
     public required string LogsPath { get; init; }
@@ -39,6 +40,7 @@ internal sealed class YoutubeSyncPaths
             DownloadsPath = downloadsRoot,
             YtDlpPath = Path.Combine(assetRoot, "yt-dlp.exe"),
             CookiesPath = Path.Combine(root, "youtube-cookies.txt"),
+            CookiesMetadataPath = Path.Combine(root, "youtube-cookies.metadata.json"),
             ArchivePath = Path.Combine(root, "watch-later.archive.txt"),
             TempPath = Path.Combine(root, "temp"),
             LogsPath = Path.Combine(root, "logs"),

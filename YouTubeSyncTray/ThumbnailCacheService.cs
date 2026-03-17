@@ -12,9 +12,13 @@ internal sealed class ThumbnailCacheService
         _paths = paths;
     }
 
-    public async Task<string?> EnsureThumbnailAsync(VideoItem item, CancellationToken cancellationToken)
+    public async Task<string?> EnsureThumbnailAsync(
+        VideoItem item,
+        string thumbnailCachePath,
+        CancellationToken cancellationToken)
     {
-        var cachePath = Path.Combine(_paths.ThumbnailCachePath, $"{item.VideoId}.jpg");
+        Directory.CreateDirectory(thumbnailCachePath);
+        var cachePath = Path.Combine(thumbnailCachePath, $"{item.VideoId}.jpg");
         var sourcePath = File.Exists(item.ThumbnailPath) ? item.ThumbnailPath : item.VideoPath;
         if (File.Exists(cachePath) && File.Exists(sourcePath))
         {
@@ -62,12 +66,42 @@ internal sealed class ThumbnailCacheService
                 return null;
             }
 
-            await process.WaitForExitAsync(cancellationToken);
+            using var cancellationRegistration = cancellationToken.Register(() => TryStopProcess(process));
+            try
+            {
+                await process.WaitForExitAsync(cancellationToken);
+            }
+            finally
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    TryStopProcess(process);
+                }
+            }
+
             return process.ExitCode == 0 && File.Exists(cachePath) ? cachePath : null;
         }
         finally
         {
             _gate.Release();
+        }
+    }
+
+    private static void TryStopProcess(Process process)
+    {
+        try
+        {
+            if (process.HasExited)
+            {
+                return;
+            }
+
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit(5000);
+        }
+        catch
+        {
+            // Best-effort cleanup during cancellation/shutdown.
         }
     }
 }

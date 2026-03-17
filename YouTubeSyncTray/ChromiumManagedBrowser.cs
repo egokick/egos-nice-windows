@@ -61,7 +61,18 @@ internal sealed class ChromiumManagedBrowser
             debugPort: null,
             enableRemoteDebugging: false);
 
-        await process.WaitForExitAsync(cancellationToken);
+        using var cancellationRegistration = cancellationToken.Register(() => TryStopBrowser(process));
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        finally
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                TryStopBrowser(process);
+            }
+        }
     }
 
     public async Task<TResult> RunWithAuthenticatedSessionAsync<TResult>(
@@ -89,6 +100,7 @@ internal sealed class ChromiumManagedBrowser
             profile,
             debugPort,
             enableRemoteDebugging: true);
+        using var cancellationRegistration = cancellationToken.Register(() => TryStopBrowser(process));
 
         try
         {

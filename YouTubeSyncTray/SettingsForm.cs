@@ -27,14 +27,14 @@ internal sealed class SettingsForm : Form
             AutoSize = true,
             Font = new Font("Segoe UI", 10f, FontStyle.Bold),
             Location = new Point(18, 18),
-            Text = "Automatic download scope"
+            Text = "Download scope"
         };
 
         var prefixLabel = new Label
         {
             AutoSize = true,
             Location = new Point(20, 60),
-            Text = "Download the most recent"
+            Text = "Download up to the most recent"
         };
 
         _downloadCountUpDown = new NumericUpDown
@@ -182,7 +182,7 @@ internal sealed class SettingsForm : Form
 
     public void SetPlaylistSummary(int downloadCount, int totalCount)
     {
-        _summaryLabel.Text = $"This app will automatically sync the most recent {downloadCount} videos out of {totalCount} currently in Watch Later using {BrowserCookies}:{BrowserProfile}.";
+        _summaryLabel.Text = $"Sync scope: up to the most recent {downloadCount} videos out of {totalCount} currently in Watch Later using {BrowserCookies}:{BrowserProfile}.";
     }
 
     public void SetBusy(bool isBusy, string message)
