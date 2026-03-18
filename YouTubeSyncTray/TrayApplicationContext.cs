@@ -197,7 +197,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 clearWatchLaterTotalCount: false,
                 clearWatchLaterOrder: false,
                 resetSyncAuthState: false,
-                queueWatchLaterTotalRefresh: false);
+                queueWatchLaterTotalRefresh: false,
+                queueWatchLaterOrderRefresh: true);
             SetBusy(false, BuildBrowseReadyStatus());
         }
         catch (Exception ex)
@@ -295,7 +296,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RefreshLibraryForCurrentSelection(
             clearWatchLaterTotalCount: shouldClearWatchLaterTotalCount,
             clearWatchLaterOrder: shouldClearWatchLaterTotalCount,
-            resetSyncAuthState: shouldClearWatchLaterTotalCount);
+            resetSyncAuthState: shouldClearWatchLaterTotalCount,
+            queueWatchLaterOrderRefresh: true);
         ShowInfoBalloon(
             BuildSettingsSavedMessage());
         RefreshMenu();
@@ -425,7 +427,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             RefreshLibraryForCurrentSelection(
                 clearWatchLaterTotalCount: shouldClearWatchLaterTotalCount,
                 clearWatchLaterOrder: shouldClearWatchLaterTotalCount,
-                resetSyncAuthState: shouldClearWatchLaterTotalCount);
+                resetSyncAuthState: shouldClearWatchLaterTotalCount,
+                queueWatchLaterOrderRefresh: true);
             RefreshMenu();
             return Task.FromResult(new LibraryWebServer.LibraryCommandResponse(true, BuildSettingsSavedMessage()));
         });
@@ -1096,7 +1099,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
             RefreshLibraryForCurrentSelection(
                 clearWatchLaterTotalCount: true,
                 clearWatchLaterOrder: true,
-                resetSyncAuthState: true);
+                resetSyncAuthState: true,
+                queueWatchLaterOrderRefresh: false,
+                refreshCurrentVideoIds: false);
             SetSyncAuthMissing("Authentication has not been checked for this library yet. Click Sync Now to reconnect if needed.");
 
             var message = _isBusy
@@ -1148,7 +1153,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 clearWatchLaterTotalCount: true,
                 clearWatchLaterOrder: true,
                 resetSyncAuthState: true,
-                queueWatchLaterTotalRefresh: false);
+                queueWatchLaterTotalRefresh: false,
+                queueWatchLaterOrderRefresh: false,
+                refreshCurrentVideoIds: false);
             SetSyncAuthMissing("Authentication has not been checked for this YouTube account yet. Click Sync Now to reconnect if needed.");
 
             var message = _isBusy
@@ -1296,7 +1303,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         bool clearWatchLaterTotalCount = false,
         bool clearWatchLaterOrder = false,
         bool resetSyncAuthState = false,
-        bool queueWatchLaterTotalRefresh = false)
+        bool queueWatchLaterTotalRefresh = false,
+        bool queueWatchLaterOrderRefresh = false,
+        bool refreshCurrentVideoIds = true)
     {
         if (clearWatchLaterTotalCount)
         {
@@ -1318,10 +1327,22 @@ internal sealed class TrayApplicationContext : ApplicationContext
             SetSyncAuthMissing();
         }
 
-        _libraryState.MarkLibraryChanged(GetCurrentVideoIds());
+        if (refreshCurrentVideoIds)
+        {
+            _libraryState.MarkLibraryChanged(GetCurrentVideoIds());
+        }
+        else
+        {
+            _libraryState.MarkLibraryChanged();
+        }
         if (queueWatchLaterTotalRefresh)
         {
             QueueWatchLaterTotalRefresh();
+        }
+
+        if (queueWatchLaterOrderRefresh)
+        {
+            QueueWatchLaterOrderRefresh();
         }
     }
 

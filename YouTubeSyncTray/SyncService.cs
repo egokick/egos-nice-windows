@@ -146,11 +146,9 @@ internal sealed class SyncService
 
         var targetIds = await GetTargetWatchLaterIdsAsync(settings, clampedCount, cancellationToken, auth);
         syncTargetProgress?.Report(targetIds);
-        if (watchLaterTotalCount.HasValue
-            && targetIds.Count > 0
-            && targetIds.Count >= watchLaterTotalCount.Value)
+        if (targetIds.Count > 0)
         {
-            watchLaterOrderProgress?.Report([.. targetIds.AsEnumerable().Reverse()]);
+            watchLaterOrderProgress?.Report(BuildMostRecentFirstWatchLaterIds(targetIds));
         }
         TrayLog.Write(_paths, $"Target id count: {targetIds.Count}");
         var existingItemsBefore = _libraryCatalogStore.LoadOrScan(accountScope.FolderName, accountScope.DownloadsPath);
@@ -837,11 +835,39 @@ internal sealed class SyncService
             .ToList();
         if (newestFirst)
         {
-            ids.Reverse();
+            ids = [.. BuildMostRecentFirstWatchLaterIds(ids)];
         }
 
         TrayLog.Write(_paths, $"GetWatchLaterIdsAsync returned {ids.Count} ids.");
         return ids;
+    }
+
+    internal static IReadOnlyList<string> BuildMostRecentFirstWatchLaterIds(IReadOnlyList<string> ytDlpOrderedIds)
+    {
+        if (ytDlpOrderedIds.Count == 0)
+        {
+            return [];
+        }
+
+        var orderedIds = new List<string>(ytDlpOrderedIds.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var videoId in ytDlpOrderedIds)
+        {
+            if (string.IsNullOrWhiteSpace(videoId))
+            {
+                continue;
+            }
+
+            var normalizedVideoId = videoId.Trim();
+            if (!seen.Add(normalizedVideoId))
+            {
+                continue;
+            }
+
+            orderedIds.Add(normalizedVideoId);
+        }
+
+        return orderedIds;
     }
 
     private string BuildWatchLaterUrl(AppSettings settings)

@@ -39,6 +39,18 @@ internal sealed class VideoItem
     public int PlaylistIndex { get; init; }
     public string DisplayIndex => PlaylistIndex > 0 ? PlaylistIndex.ToString("000") : "---";
 
+    public string GetDisplayIndex(IReadOnlyDictionary<string, int>? watchLaterOrderByVideoId = null)
+    {
+        if (watchLaterOrderByVideoId is not null
+            && watchLaterOrderByVideoId.TryGetValue(VideoId, out var currentOrder)
+            && currentOrder > 0)
+        {
+            return currentOrder.ToString("000");
+        }
+
+        return DisplayIndex;
+    }
+
     public static IReadOnlyList<VideoItem> LoadFromDownloads(
         string downloadsPath,
         IReadOnlyDictionary<string, int>? watchLaterOrderByVideoId = null)
@@ -128,8 +140,8 @@ internal sealed class VideoItem
             .ThenBy(item => watchLaterOrderByVideoId.TryGetValue(item.VideoId, out var currentPlaylistIndex)
                 ? currentPlaylistIndex
                 : int.MaxValue)
-            // yt-dlp's stored Watch Later playlist_index is oldest-first, so higher values are newer additions.
-            .ThenByDescending(item => item.PlaylistIndex == 0 ? int.MinValue : item.PlaylistIndex)
+            // yt-dlp's Watch Later playlist_index starts at the most recently added item.
+            .ThenBy(item => item.PlaylistIndex == 0 ? int.MaxValue : item.PlaylistIndex)
             .ThenBy(item => Path.GetFileName(item.VideoPath), StringComparer.OrdinalIgnoreCase)
             .ToList();
     }

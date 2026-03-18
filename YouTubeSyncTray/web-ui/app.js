@@ -1899,13 +1899,14 @@ async function selectYouTubeAccount(accountKey) {
 
   const previousAccountKey = state.selectedYouTubeAccountKey;
   state.youtubeAccountSelectionInFlight = true;
+  state.selectedYouTubeAccountKey = accountKey;
   setYouTubeAccountMenuOpen(false);
-  renderYouTubeAccountPicker(state.youtubeAccounts, previousAccountKey);
+  renderYouTubeAccountPicker(state.youtubeAccounts, accountKey);
 
   try {
     const response = await post("/api/youtube-account/select", { accountKey });
     showToast(response.message || "Switched YouTube account.", false);
-    await refreshBootstrap(true);
+    await refreshStatus(true);
   } catch (error) {
     state.selectedYouTubeAccountKey = previousAccountKey;
     showToast(error instanceof Error ? error.message : "Could not switch YouTube accounts.", true);
@@ -2145,9 +2146,8 @@ function renderYouTubeAccountPicker(accounts, selectedAccountKey, options = {}) 
     state.youtubeAccountButtonKey = buttonKey;
   }
 
-  elements.youtubeAccountButton.disabled =
-    state.browserAccountSelectionInFlight ||
-    state.youtubeAccountSelectionInFlight;
+  // Keep the YouTube account picker usable whenever there are accounts to choose from.
+  elements.youtubeAccountButton.disabled = false;
   state.selectedYouTubeAccountKey = selectedAccount.accountKey;
   rememberSelectedYouTubeAccountForBrowser(browserAccountKey, selectedAccount.accountKey);
 
@@ -2158,13 +2158,9 @@ function renderYouTubeAccountPicker(accounts, selectedAccountKey, options = {}) 
 
     const isSelected = option.dataset.accountKey === selectedAccount.accountKey;
     option.classList.toggle("is-selected", isSelected);
-    option.disabled = state.browserAccountSelectionInFlight || state.youtubeAccountSelectionInFlight;
+    option.disabled = false;
     option.setAttribute("aria-selected", String(isSelected));
     option.tabIndex = isSelected ? 0 : -1;
-  }
-
-  if (elements.youtubeAccountButton.disabled) {
-    setYouTubeAccountMenuOpen(false);
   }
 }
 

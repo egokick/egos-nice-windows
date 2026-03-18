@@ -451,6 +451,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private IReadOnlyList<LibraryVideoDto> BuildVideoDtos()
     {
         var accountScope = _accountScopeResolver.Resolve(_getSettings());
+        var watchLaterOrder = _state.GetWatchLaterOrderSnapshot();
         var items = LoadVideoItems(accountScope);
         var videoStates = _videoStateStore.Load(accountScope.FolderName);
         _state.SetVideoIds(items.Select(item => item.VideoId).ToList());
@@ -466,7 +467,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                     item.VideoId,
                     item.Title,
                     item.UploaderName,
-                    item.DisplayIndex,
+                    item.GetDisplayIndex(watchLaterOrder),
                     $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/thumbnail?v={GetThumbnailRevision(item)}",
                     $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/stream",
                     $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/captions",

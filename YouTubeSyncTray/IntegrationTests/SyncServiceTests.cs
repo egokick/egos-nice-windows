@@ -42,4 +42,18 @@ public sealed class SyncServiceTests
 
         Assert.False(SyncService.LooksLikeAuthFailureOutput(output));
     }
+
+    [Fact]
+    public void BuildMostRecentFirstWatchLaterIds_PreservesYtDlpWatchLaterOrder()
+    {
+        var orderedIds = SyncService.BuildMostRecentFirstWatchLaterIds(
+            ["newer02", "newer01", "older02", "older01"]);
+
+        Assert.Collection(
+            orderedIds,
+            first => Assert.Equal("newer02", first),
+            second => Assert.Equal("newer01", second),
+            third => Assert.Equal("older02", third),
+            fourth => Assert.Equal("older01", fourth));
+    }
 }
