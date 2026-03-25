@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -36,6 +37,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ScheduleSliderControl _darkSliderControl;
     private readonly ToolStripControlHost _lightSliderHost;
     private readonly ToolStripControlHost _darkSliderHost;
+    private readonly ToolStripSeparator _brightnessSeparatorMenuItem;
+    private readonly BrightnessSliderControl _brightnessSliderControl;
+    private readonly ToolStripControlHost _brightnessSliderHost;
     private readonly Icon _lightIcon;
     private readonly Icon _darkIcon;
     private readonly System.Windows.Forms.Timer _scheduleTimer;
@@ -72,6 +76,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _darkSliderHost = CreateSliderHost(_darkSliderControl);
 
         _timedSeparatorMenuItem = new ToolStripSeparator();
+        _brightnessSeparatorMenuItem = new ToolStripSeparator();
+
+        _brightnessSliderControl = new BrightnessSliderControl();
+        _brightnessSliderControl.BrightnessChanged += (_, _) => UpdateBrightness(_brightnessSliderControl.Brightness);
+        _brightnessSliderHost = CreateSliderHost(_brightnessSliderControl);
 
         var exitMenuItem = new ToolStripMenuItem("Exit");
         exitMenuItem.Click += (_, _) => ExitThread();
@@ -84,13 +93,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = new ContextMenuStrip()
         };
 
-        _notifyIcon.ContextMenuStrip.Opening += (_, _) => RefreshMenuText();
+        _notifyIcon.ContextMenuStrip.Opening += (_, _) => RefreshMenuText(refreshBrightness: true);
         _notifyIcon.ContextMenuStrip.Items.Add(_toggleMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_startupMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_timedModeMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_timedSeparatorMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_lightSliderHost);
         _notifyIcon.ContextMenuStrip.Items.Add(_darkSliderHost);
+        _notifyIcon.ContextMenuStrip.Items.Add(_brightnessSeparatorMenuItem);
+        _notifyIcon.ContextMenuStrip.Items.Add(_brightnessSliderHost);
         _notifyIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         _notifyIcon.ContextMenuStrip.Items.Add(exitMenuItem);
         _notifyIcon.MouseClick += NotifyIconOnMouseClick;
@@ -103,6 +114,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _scheduleTimer.Start();
 
         ApplyTimedThemeIfEnabled(showBalloon: false);
+        RefreshBrightnessControl();
         RefreshMenuText();
     }
 
@@ -216,7 +228,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RefreshMenuText();
     }
 
-    private void RefreshMenuText()
+    private void RefreshMenuText(bool refreshBrightness = false)
     {
         var isLightMode = ThemeService.IsLightModeEnabled();
         _toggleMenuItem.Text = isLightMode ? "Switch to dark mode" : "Switch to light mode";
@@ -239,6 +251,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _timedSeparatorMenuItem.Visible = showTimedControls;
         _lightSliderHost.Visible = showTimedControls;
         _darkSliderHost.Visible = showTimedControls;
+
+        if (refreshBrightness)
+        {
+            RefreshBrightnessControl();
+        }
     }
 
     private void ShowInfoBalloon(string message)
@@ -276,6 +293,41 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void RefreshBrightnessControl()
+    {
+        if (_brightnessSliderControl.IsInteracting)
+        {
+            return;
+        }
+
+        if (BrightnessService.TryGetCurrentBrightness(out var brightness))
+        {
+            _brightnessSliderControl.SetAvailable(brightness);
+            return;
+        }
+
+        _brightnessSliderControl.SetUnavailable();
+    }
+
+    private void UpdateBrightness(int brightness)
+    {
+        try
+        {
+            if (BrightnessService.TrySetBrightness(brightness))
+            {
+                return;
+            }
+
+            RefreshBrightnessControl();
+            ShowErrorBalloon("Brightness control is unavailable on this display.");
+        }
+        catch (Exception ex)
+        {
+            RefreshBrightnessControl();
+            ShowErrorBalloon($"Brightness update failed: {ex.Message}");
+        }
+    }
+
     private static ToolStripControlHost CreateSliderHost(Control control)
     {
         return new ToolStripControlHost(control)
@@ -285,6 +337,110 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Padding = Padding.Empty,
             Size = control.Size
         };
+    }
+}
+
+internal sealed class BrightnessSliderControl : UserControl
+{
+    private readonly Label _titleLabel;
+    private readonly Label _valueLabel;
+    private readonly TrackBar _trackBar;
+    private bool _isInteracting;
+
+    public BrightnessSliderControl()
+    {
+        Size = new Size(280, 78);
+        Margin = Padding.Empty;
+        Padding = Padding.Empty;
+        BackColor = SystemColors.Control;
+        DoubleBuffered = true;
+
+        _titleLabel = new Label
+        {
+            AutoSize = true,
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            Location = new Point(10, 8),
+            Text = "Brightness"
+        };
+
+        _valueLabel = new Label
+        {
+            AutoSize = true,
+            Location = new Point(184, 10)
+        };
+
+        _trackBar = new TrackBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            TickFrequency = 10,
+            LargeChange = 10,
+            SmallChange = 1,
+            AutoSize = false,
+            Bounds = new Rectangle(10, 30, 260, 36),
+            Value = 50
+        };
+        _trackBar.Scroll += (_, _) =>
+        {
+            UpdateValueLabel();
+            BrightnessChanged?.Invoke(this, EventArgs.Empty);
+        };
+        _trackBar.MouseDown += (_, _) => _isInteracting = true;
+        _trackBar.MouseUp += (_, _) => _isInteracting = false;
+        _trackBar.MouseCaptureChanged += (_, _) =>
+        {
+            if (Control.MouseButtons == MouseButtons.None)
+            {
+                _isInteracting = false;
+            }
+        };
+
+        Controls.Add(_titleLabel);
+        Controls.Add(_valueLabel);
+        Controls.Add(_trackBar);
+
+        UpdateValueLabel();
+    }
+
+    public event EventHandler? BrightnessChanged;
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool IsInteracting => _isInteracting || _trackBar.Capture;
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int Brightness
+    {
+        get => _trackBar.Value;
+        set
+        {
+            var normalized = Math.Clamp(value, 0, 100);
+            if (_trackBar.Value != normalized)
+            {
+                _trackBar.Value = normalized;
+            }
+
+            UpdateValueLabel();
+        }
+    }
+
+    public void SetAvailable(int brightness)
+    {
+        _trackBar.Enabled = true;
+        Brightness = brightness;
+    }
+
+    public void SetUnavailable()
+    {
+        _isInteracting = false;
+        _trackBar.Enabled = false;
+        _valueLabel.Text = "Unavailable";
+    }
+
+    private void UpdateValueLabel()
+    {
+        _valueLabel.Text = _trackBar.Enabled ? $"{_trackBar.Value}%" : "Unavailable";
     }
 }
 
@@ -593,6 +749,214 @@ internal static class SettingsStore
         Directory.CreateDirectory(SettingsDirectory);
         File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, JsonOptions));
     }
+}
+
+internal static class BrightnessService
+{
+    public static bool TryGetCurrentBrightness(out int brightness)
+    {
+        var readings = ReadDdcBrightnessValues();
+        readings.AddRange(ReadWmiBrightnessValues());
+        if (readings.Count == 0)
+        {
+            brightness = 0;
+            return false;
+        }
+
+        brightness = (int)Math.Round(readings.Average());
+        return true;
+    }
+
+    public static bool TrySetBrightness(int brightness)
+    {
+        brightness = Math.Clamp(brightness, 0, 100);
+        var updatedDdc = TrySetDdcBrightness(brightness);
+        var updatedWmi = TrySetWmiBrightness(brightness);
+        return updatedDdc || updatedWmi;
+    }
+
+    private static List<int> ReadDdcBrightnessValues()
+    {
+        var readings = new List<int>();
+
+        try
+        {
+            ForEachPhysicalMonitor(handle =>
+            {
+                if (!GetMonitorBrightness(handle, out var minBrightness, out var currentBrightness, out var maxBrightness)
+                    || maxBrightness <= minBrightness)
+                {
+                    return false;
+                }
+
+                readings.Add(NormalizeBrightness(minBrightness, currentBrightness, maxBrightness));
+                return true;
+            });
+        }
+        catch
+        {
+        }
+
+        return readings;
+    }
+
+    private static bool TrySetDdcBrightness(int brightness)
+    {
+        try
+        {
+            return ForEachPhysicalMonitor(handle =>
+            {
+                if (!GetMonitorBrightness(handle, out var minBrightness, out _, out var maxBrightness)
+                    || maxBrightness <= minBrightness)
+                {
+                    return false;
+                }
+
+                var rawBrightness = ScaleBrightness(brightness, minBrightness, maxBrightness);
+                return SetMonitorBrightness(handle, rawBrightness);
+            });
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static List<int> ReadWmiBrightnessValues()
+    {
+        var readings = new List<int>();
+
+        try
+        {
+            using var brightnessSearcher = new ManagementObjectSearcher(
+                @"root\wmi",
+                "SELECT CurrentBrightness FROM WmiMonitorBrightness WHERE Active = TRUE");
+
+            foreach (ManagementObject brightness in brightnessSearcher.Get())
+            {
+                readings.Add(Math.Clamp(Convert.ToInt32(brightness["CurrentBrightness"]), 0, 100));
+            }
+        }
+        catch
+        {
+        }
+
+        return readings;
+    }
+
+    private static bool TrySetWmiBrightness(int brightness)
+    {
+        try
+        {
+            var updated = false;
+            using var methodsSearcher = new ManagementObjectSearcher(
+                @"root\wmi",
+                "SELECT * FROM WmiMonitorBrightnessMethods WHERE Active = TRUE");
+
+            foreach (ManagementObject method in methodsSearcher.Get())
+            {
+                method.InvokeMethod("WmiSetBrightness", new object[] { 1u, (byte)brightness });
+                updated = true;
+            }
+
+            return updated;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool ForEachPhysicalMonitor(Func<IntPtr, bool> action)
+    {
+        var updated = false;
+        EnumDisplayMonitors(
+            IntPtr.Zero,
+            IntPtr.Zero,
+            (monitorHandle, _, _, _) =>
+            {
+                if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitorHandle, out var physicalMonitorCount)
+                    || physicalMonitorCount == 0)
+                {
+                    return true;
+                }
+
+                var physicalMonitors = new PhysicalMonitor[(int)physicalMonitorCount];
+                if (!GetPhysicalMonitorsFromHMONITOR(monitorHandle, physicalMonitorCount, physicalMonitors))
+                {
+                    return true;
+                }
+
+                try
+                {
+                    foreach (var physicalMonitor in physicalMonitors)
+                    {
+                        updated |= action(physicalMonitor.Handle);
+                    }
+                }
+                finally
+                {
+                    DestroyPhysicalMonitors((uint)physicalMonitors.Length, physicalMonitors);
+                }
+
+                return true;
+            },
+            IntPtr.Zero);
+
+        return updated;
+    }
+
+    private static int NormalizeBrightness(uint minBrightness, uint currentBrightness, uint maxBrightness)
+    {
+        return (int)Math.Round((currentBrightness - minBrightness) * 100d / (maxBrightness - minBrightness));
+    }
+
+    private static uint ScaleBrightness(int brightness, uint minBrightness, uint maxBrightness)
+    {
+        return (uint)Math.Round(minBrightness + ((maxBrightness - minBrightness) * (brightness / 100d)));
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PhysicalMonitor
+    {
+        public IntPtr Handle;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string Description;
+    }
+
+    private delegate bool MonitorEnumProc(IntPtr monitorHandle, IntPtr monitorDc, IntPtr monitorRect, IntPtr data);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(
+        IntPtr hdc,
+        IntPtr lprcClip,
+        MonitorEnumProc lpfnEnum,
+        IntPtr dwData);
+
+    [DllImport("dxva2.dll", SetLastError = true)]
+    private static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr hMonitor, out uint numberOfPhysicalMonitors);
+
+    [DllImport("dxva2.dll", SetLastError = true)]
+    private static extern bool GetPhysicalMonitorsFromHMONITOR(
+        IntPtr hMonitor,
+        uint physicalMonitorArraySize,
+        [Out] PhysicalMonitor[] physicalMonitorArray);
+
+    [DllImport("dxva2.dll", SetLastError = true)]
+    private static extern bool DestroyPhysicalMonitors(
+        uint physicalMonitorArraySize,
+        [In] PhysicalMonitor[] physicalMonitorArray);
+
+    [DllImport("dxva2.dll", SetLastError = true)]
+    private static extern bool GetMonitorBrightness(
+        IntPtr handle,
+        out uint minimumBrightness,
+        out uint currentBrightness,
+        out uint maximumBrightness);
+
+    [DllImport("dxva2.dll", SetLastError = true)]
+    private static extern bool SetMonitorBrightness(IntPtr handle, uint newBrightness);
 }
 
 internal static class ThemeService

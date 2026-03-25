@@ -447,6 +447,26 @@ button {
   min-inline-size: 112px;
 }
 
+#sortOrderButton,
+.toolbar-icon-button {
+  min-inline-size: 42px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#sortOrderButton {
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
+.toolbar-icon-button svg {
+  inline-size: 18px;
+  block-size: 18px;
+  fill: currentColor;
+}
+
 #syncButton[data-auth-state="ready"] {
   background: linear-gradient(135deg, var(--button-auth-ready-start) 0%, var(--button-auth-ready-end) 100%);
 }
@@ -515,11 +535,28 @@ button {
   line-height: 1.5;
 }
 
+.monitor-log-row {
+  margin: -4px 0 0;
+}
+
+.monitor-log-link {
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
 .player-panel {
   display: grid;
   gap: 12px;
   padding: 16px;
   border-radius: var(--radius-lg);
+}
+
+.player-panel.is-active {
+  min-height: calc(100vh - 40px);
+  align-content: start;
 }
 
 .player-header {
@@ -544,12 +581,19 @@ button {
 }
 
 .caption-picker {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   width: fit-content;
   max-width: 100%;
   justify-self: end;
-  justify-items: end;
+  align-items: end;
+}
+
+.caption-control {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
 .caption-label {
@@ -563,7 +607,7 @@ button {
 .caption-select {
   width: auto;
   max-width: 100%;
-  min-width: 0;
+  min-width: 140px;
   min-height: 42px;
   padding: 0 36px 0 14px;
   border-radius: 999px;
@@ -581,6 +625,10 @@ button {
 .caption-select:disabled {
   opacity: 0.68;
   cursor: default;
+}
+
+.caption-language-select {
+  width: clamp(140px, 16vw, 220px);
 }
 
 .caption-status {
@@ -619,7 +667,7 @@ button {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
-  max-height: min(72vh, 760px);
+  max-height: min(84vh, 920px);
   border-radius: 18px;
   background: var(--player-bg);
 }
@@ -1060,6 +1108,24 @@ select.settings-input {
   position: relative;
 }
 
+.thumbnail-progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 4px;
+  background: rgba(10, 9, 8, 0.36);
+  pointer-events: none;
+}
+
+.thumbnail-progress-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: #ff2a24;
+  box-shadow: 0 0 10px rgba(255, 42, 36, 0.45);
+}
+
 .thumbnail {
   display: block;
   width: 100%;
@@ -1346,5 +1412,24 @@ select.settings-input {
     position: static;
     inset: auto;
     margin-top: 8px;
+  }
+
+  .caption-picker {
+    width: 100%;
+    justify-self: stretch;
+    justify-content: stretch;
+  }
+
+  .caption-control {
+    flex: 1 1 100%;
+  }
+
+  .caption-language-select,
+  .caption-select {
+    width: 100%;
+  }
+
+  .player-panel.is-active {
+    min-height: auto;
   }
 }

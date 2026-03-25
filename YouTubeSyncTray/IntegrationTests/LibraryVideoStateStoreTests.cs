@@ -87,6 +87,75 @@ public sealed class LibraryVideoStateStoreTests
         }
     }
 
+    [Fact]
+    public void SavePlaybackProgress_PersistsPlaybackProgress()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var store = new LibraryVideoStateStore(CreatePaths(root));
+
+            var changed = store.SavePlaybackProgress("scope-a", "video-1", 45d, 120d);
+            var state = store.Load("scope-a");
+
+            Assert.True(changed);
+            Assert.True(state.ContainsKey("video-1"));
+            Assert.NotNull(state["video-1"].PlaybackProgress);
+            Assert.True(Math.Abs(state["video-1"].PlaybackProgress!.Value - (45d / 120d)) < 0.000001d);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SavePlaybackProgress_UpdatesWhenSeekingBackwards()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var store = new LibraryVideoStateStore(CreatePaths(root));
+
+            store.SavePlaybackProgress("scope-a", "video-1", 80d, 100d);
+            var changed = store.SavePlaybackProgress("scope-a", "video-1", 10d, 100d);
+            var state = store.Load("scope-a");
+
+            Assert.True(changed);
+            Assert.NotNull(state["video-1"].PlaybackProgress);
+            Assert.True(Math.Abs(state["video-1"].PlaybackProgress!.Value - 0.1d) < 0.000001d);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RestoreVideos_PreservesPlaybackProgress()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var store = new LibraryVideoStateStore(CreatePaths(root));
+            store.MarkVideos("scope-a", ["video-1"], markHidden: false);
+            store.SavePlaybackProgress("scope-a", "video-1", 30d, 100d);
+
+            var restoredCount = store.RestoreVideos("scope-a", ["video-1"]);
+            var state = store.Load("scope-a");
+
+            Assert.Equal(1, restoredCount);
+            Assert.True(state.ContainsKey("video-1"));
+            Assert.False(state["video-1"].IsWatched);
+            Assert.NotNull(state["video-1"].PlaybackProgress);
+            Assert.True(Math.Abs(state["video-1"].PlaybackProgress!.Value - 0.3d) < 0.000001d);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static string CreateRoot()
     {
         var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));

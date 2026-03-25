@@ -23,10 +23,16 @@
       </div>
       <video id="videoPlayer" class="video-player hidden" controls preload="metadata"></video>
       <div id="captionPicker" class="caption-picker hidden">
-        <label class="caption-label" for="captionSelect">Captions</label>
-        <select id="captionSelect" class="caption-select" disabled>
-          <option value="">Off</option>
-        </select>
+        <div id="captionLanguageGroup" class="caption-control hidden">
+          <label class="caption-label" for="captionLanguageSelect">Language</label>
+          <select id="captionLanguageSelect" class="caption-select caption-language-select" disabled></select>
+        </div>
+        <div class="caption-control">
+          <label class="caption-label" for="captionSelect">Captions</label>
+          <select id="captionSelect" class="caption-select" disabled>
+            <option value="">Off</option>
+          </select>
+        </div>
       </div>
       <p id="captionStatus" class="caption-status hidden"></p>
     </section>
@@ -84,17 +90,23 @@
           </div>
         </div>
         <button id="syncButton" class="primary-button" type="button">Sync Now</button>
+        <button id="sortOrderButton" class="secondary-button" type="button" aria-pressed="false" aria-label="Video order: latest first">↓</button>
         <button id="openDownloadsButton" class="ghost-button hidden" type="button">Open Downloads Folder</button>
         <button id="clearSelectionButton" class="ghost-button" type="button">Clear Selection</button>
-        <button id="redownloadSelectedButton" class="secondary-button" type="button" disabled>Redownload Best Quality</button>
-        <button id="removeSelectedButton" class="danger-button" type="button" disabled>Mark Watched</button>
+        <button id="redownloadSelectedButton" class="secondary-button hidden" type="button" disabled>Redownload Best Quality</button>
+        <button id="removeSelectedButton" class="danger-button hidden" type="button" disabled>Mark Watched</button>
         <button id="watchedVideosButton" class="secondary-button" type="button" aria-pressed="false">Watched Videos</button>
         <button
           id="settingsButton"
-          class="secondary-button"
+          class="secondary-button toolbar-icon-button"
           type="button"
           aria-expanded="false"
-          aria-controls="settingsPanel">Settings</button>
+          aria-controls="settingsPanel"
+          aria-label="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M19.14 12.94c.04-.31.06-.62.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.3 7.3 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.49-.42h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.58.23-1.13.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.65 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.62-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.4 1.05.71 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.84a.5.5 0 0 0 .49-.42l.36-2.54c.58-.23 1.13-.54 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z" />
+          </svg>
+        </button>
       </div>
     </section>
 
@@ -216,6 +228,9 @@
       </div>
 
       <p id="statusText" class="status-text">Connecting to the tray app...</p>
+      <p id="monitorLogRow" class="monitor-log-row hidden">
+        <a id="monitorLogLink" class="monitor-log-link" href="#" target="_blank" rel="noreferrer">Open latest sync log</a>
+      </p>
 
       <ul id="activityFeed" class="activity-feed">
         <li>Waiting for activity...</li>

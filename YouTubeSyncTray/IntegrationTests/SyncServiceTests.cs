@@ -56,4 +56,22 @@ public sealed class SyncServiceTests
             third => Assert.Equal("older02", third),
             fourth => Assert.Equal("older01", fourth));
     }
+
+    [Fact]
+    public void DescribeNonFatalSyncIssueOutput_PicksConcreteYtDlpErrorDetail()
+    {
+        const string output = """
+            [download] Got error: HTTP Error 403: Forbidden. Retrying fragment 45 (8/10)...
+            WARNING: This video is drm protected and only images are available for download. use --list-formats to see them
+            ERROR: [youtube] MhXL3Hk9fWk: Requested format is not available. Use --list-formats for a list of available formats
+            ERROR: Did not get any data blocks
+            """;
+
+        var issue = SyncService.DescribeNonFatalSyncIssueOutput(output);
+
+        Assert.Equal("Some videos were skipped because YouTube only exposed DRM-protected or unavailable formats.", issue.Summary);
+        Assert.Equal(
+            "ERROR: [youtube] MhXL3Hk9fWk: Requested format is not available. Use --list-formats for a list of available formats",
+            issue.Detail);
+    }
 }

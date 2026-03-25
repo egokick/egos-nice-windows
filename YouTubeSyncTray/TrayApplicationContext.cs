@@ -5,6 +5,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly YoutubeSyncPaths _paths;
     private readonly KnownLibraryScopeStore _knownLibraryScopeStore;
     private readonly LibraryCatalogStore _libraryCatalogStore;
+    private readonly WatchLaterOrderStore _watchLaterOrderStore;
     private readonly SyncService _syncService;
     private readonly YoutubeRemovalService _removalService;
     private readonly ThumbnailCacheService _thumbnailCacheService;
@@ -40,6 +41,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _paths = YoutubeSyncPaths.Discover();
         _knownLibraryScopeStore = new KnownLibraryScopeStore(_paths);
         _libraryCatalogStore = new LibraryCatalogStore(_paths);
+        _watchLaterOrderStore = new WatchLaterOrderStore(_paths);
         _settings = SettingsStore.Load();
         _syncService = new SyncService(
             _paths,
@@ -71,6 +73,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             QueueRestoreFromBrowserAsync,
             QueueRedownloadFromBrowserAsync,
             QueueOpenDownloadsFolderFromBrowserAsync,
+            QueueOpenLatestSyncLogFromBrowserAsync,
             QueueSelectBrowserAccountFromBrowserAsync,
             QueueSelectYouTubeAccountFromBrowserAsync,
             GetSettingsFromBrowserAsync,
@@ -187,7 +190,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
             var previousYouTubeAccountKey = _settings.SelectedYouTubeAccountKey;
             PersistResolvedBrowserSelection();
             ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: false);
-            if (!string.Equals(previousBrowserAccountKey, _settings.SelectedBrowserAccountKey, StringComparison.Ordinal)
+            var browserAligned = AlignSelectedBrowserAccountForCurrentYouTubeAccount();
+            if (browserAligned)
+            {
+                ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: false);
+            }
+            if (browserAligned
+                || !string.Equals(previousBrowserAccountKey, _settings.SelectedBrowserAccountKey, StringComparison.Ordinal)
                 || !string.Equals(previousYouTubeAccountKey, _settings.SelectedYouTubeAccountKey, StringComparison.Ordinal))
             {
                 SettingsStore.Save(_settings);
@@ -198,7 +207,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 clearWatchLaterOrder: false,
                 resetSyncAuthState: false,
                 queueWatchLaterTotalRefresh: false,
-                queueWatchLaterOrderRefresh: true);
+                queueWatchLaterOrderRefresh: true,
+                restoreCachedWatchLaterOrder: true);
             SetBusy(false, BuildBrowseReadyStatus());
         }
         catch (Exception ex)
@@ -297,7 +307,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             clearWatchLaterTotalCount: shouldClearWatchLaterTotalCount,
             clearWatchLaterOrder: shouldClearWatchLaterTotalCount,
             resetSyncAuthState: shouldClearWatchLaterTotalCount,
-            queueWatchLaterOrderRefresh: true);
+            queueWatchLaterOrderRefresh: true,
+            restoreCachedWatchLaterOrder: true);
         ShowInfoBalloon(
             BuildSettingsSavedMessage());
         RefreshMenu();
@@ -428,7 +439,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 clearWatchLaterTotalCount: shouldClearWatchLaterTotalCount,
                 clearWatchLaterOrder: shouldClearWatchLaterTotalCount,
                 resetSyncAuthState: shouldClearWatchLaterTotalCount,
-                queueWatchLaterOrderRefresh: true);
+                queueWatchLaterOrderRefresh: true,
+                restoreCachedWatchLaterOrder: true);
             RefreshMenu();
             return Task.FromResult(new LibraryWebServer.LibraryCommandResponse(true, BuildSettingsSavedMessage()));
         });
@@ -546,9 +558,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
 
             TrayLog.Write(_paths, $"RunSyncAsync started. showSuccessBalloon={showSuccessBalloon}");
+            if (AlignSelectedBrowserAccountForCurrentYouTubeAccount())
+            {
+                ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: false);
+                SettingsStore.Save(_settings);
+            }
+
             SetBusy(true, $"Syncing up to the most recent {_settings.DownloadCount} videos...");
             var syncSettings = _settings.CreateSnapshot();
             var startingSettings = syncSettings.CreateSnapshot();
+            var syncAccountScope = _accountScopeResolver.Resolve(syncSettings);
             if (showSuccessBalloon)
             {
                 ShowInfoBalloon($"Sync started for up to the most recent {_settings.DownloadCount} Watch Later videos.");
@@ -564,9 +583,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             });
             var watchLaterOrderProgress = new Progress<IReadOnlyList<string>>(orderedVideoIds =>
             {
+                var persistedOrder = _watchLaterOrderStore.MergeTopRange(syncAccountScope.FolderName, orderedVideoIds);
                 if (MatchesLibrarySelection(syncSettings, _settings))
                 {
-                    SetWatchLaterOrder(orderedVideoIds);
+                    SetWatchLaterOrder(persistedOrder);
                     SetSyncAuthReady();
                 }
             });
@@ -589,7 +609,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             RefreshLibraryForCurrentSelection(
                 clearWatchLaterTotalCount: selectionChanged,
                 clearWatchLaterOrder: selectionChanged,
-                queueWatchLaterTotalRefresh: false);
+                queueWatchLaterTotalRefresh: false,
+                restoreCachedWatchLaterOrder: selectionChanged);
             if (summary.WatchLaterTotalCount.HasValue && MatchesLibrarySelection(syncSettings, _settings))
             {
                 SetWatchLaterTotalCount(summary.WatchLaterTotalCount.Value);
@@ -599,6 +620,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             var status = BuildSyncStatus(summary, automaticSyncPaused);
             TrayLog.Write(_paths, $"RunSyncAsync completed. Status: {status}");
             SetBusy(false, status);
+            QueueWatchLaterOrderRefresh();
             if (showSuccessBalloon)
             {
                 ShowInfoBalloon(status);
@@ -818,7 +840,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             parts.Add($"{summary.MissingAfterSyncCount} still missing");
         }
 
-        if (!string.IsNullOrWhiteSpace(summary.NonFatalIssue))
+        if (!string.IsNullOrWhiteSpace(summary.NonFatalIssueDetail))
+        {
+            parts.Add($"yt-dlp detail: {summary.NonFatalIssueDetail.TrimEnd('.')}");
+        }
+        else if (!string.IsNullOrWhiteSpace(summary.NonFatalIssue))
         {
             parts.Add(summary.NonFatalIssue.TrimEnd('.'));
         }
@@ -1078,6 +1104,32 @@ internal sealed class TrayApplicationContext : ApplicationContext
         });
     }
 
+    private Task<LibraryWebServer.LibraryCommandResponse> QueueOpenLatestSyncLogFromBrowserAsync()
+    {
+        return _uiDispatcher.InvokeAsync(() =>
+        {
+            var logPath = Path.Combine(_paths.LogsPath, "latest-sync.log");
+            if (!File.Exists(logPath))
+            {
+                return Task.FromResult(
+                    new LibraryWebServer.LibraryCommandResponse(
+                        false,
+                        "No sync log has been written yet for this tray session."));
+            }
+
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = logPath,
+                UseShellExecute = true
+            });
+
+            return Task.FromResult(
+                new LibraryWebServer.LibraryCommandResponse(
+                    true,
+                    "Opened the latest sync log."));
+        });
+    }
+
     private Task<LibraryWebServer.LibraryCommandResponse> QueueSelectBrowserAccountFromBrowserAsync(string accountKey)
     {
         return _uiDispatcher.InvokeAsync(async () =>
@@ -1100,8 +1152,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 clearWatchLaterTotalCount: true,
                 clearWatchLaterOrder: true,
                 resetSyncAuthState: true,
-                queueWatchLaterOrderRefresh: false,
-                refreshCurrentVideoIds: false);
+                queueWatchLaterOrderRefresh: true,
+                refreshCurrentVideoIds: false,
+                restoreCachedWatchLaterOrder: true);
             SetSyncAuthMissing("Authentication has not been checked for this library yet. Click Sync Now to reconnect if needed.");
 
             var message = _isBusy
@@ -1141,6 +1194,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             _settings.SelectedAccountKey = null;
             _settings.SelectedYouTubeAccountKey = selectedYouTubeAccount.AccountKey;
+            AlignSelectedBrowserAccountForCurrentYouTubeAccount(
+                youTubeAccounts: youTubeAccounts,
+                browserAccounts: _accountDiscovery.DiscoverAccounts(_settings));
             if (!string.IsNullOrWhiteSpace(_settings.SelectedBrowserAccountKey))
             {
                 _knownLibraryScopeStore.RememberSelectedYouTubeAccount(
@@ -1154,8 +1210,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 clearWatchLaterOrder: true,
                 resetSyncAuthState: true,
                 queueWatchLaterTotalRefresh: false,
-                queueWatchLaterOrderRefresh: false,
-                refreshCurrentVideoIds: false);
+                queueWatchLaterOrderRefresh: true,
+                refreshCurrentVideoIds: false,
+                restoreCachedWatchLaterOrder: true);
             SetSyncAuthMissing("Authentication has not been checked for this YouTube account yet. Click Sync Now to reconnect if needed.");
 
             var message = _isBusy
@@ -1219,6 +1276,49 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _settings.SelectedBrowserAccountKey = selectedBrowserAccount.Value.AccountKey;
         }
+    }
+
+    private bool AlignSelectedBrowserAccountForCurrentYouTubeAccount(
+        IReadOnlyList<YouTubeAccountOption>? youTubeAccounts = null,
+        IReadOnlyList<BrowserAccountOption>? browserAccounts = null)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.SelectedYouTubeAccountKey))
+        {
+            return false;
+        }
+
+        browserAccounts ??= _accountDiscovery.DiscoverAccounts(_settings);
+        var currentBrowserAccount = _accountDiscovery.ResolveSelectedAccount(_settings);
+        youTubeAccounts ??= _youTubeAccountDiscovery.DiscoverAccounts(
+            _settings,
+            currentBrowserAccount?.AuthUserIndex,
+            allowNetwork: false);
+
+        var preferredBrowserAccount = YouTubeBrowserSelectionResolver.ResolvePreferredBrowserAccount(
+            _settings.SelectedYouTubeAccountKey,
+            youTubeAccounts,
+            browserAccounts,
+            _knownLibraryScopeStore.LoadScopes(),
+            currentBrowserAccount);
+        if (!preferredBrowserAccount.HasValue
+            || string.IsNullOrWhiteSpace(preferredBrowserAccount.Value.AccountKey))
+        {
+            return false;
+        }
+
+        var nextBrowserAccount = preferredBrowserAccount.Value;
+        if (_settings.BrowserCookies == nextBrowserAccount.Browser
+            && string.Equals(_settings.BrowserProfile, nextBrowserAccount.Profile, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(_settings.SelectedBrowserAccountKey, nextBrowserAccount.AccountKey, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        _settings.SelectedAccountKey = null;
+        _settings.BrowserCookies = nextBrowserAccount.Browser;
+        _settings.BrowserProfile = nextBrowserAccount.Profile;
+        _settings.SelectedBrowserAccountKey = nextBrowserAccount.AccountKey;
+        return true;
     }
 
     private bool ApplyPreferredYouTubeSelectionForCurrentBrowser(bool clearSelectionWhenNoLocalScopeExists)
@@ -1305,7 +1405,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         bool resetSyncAuthState = false,
         bool queueWatchLaterTotalRefresh = false,
         bool queueWatchLaterOrderRefresh = false,
-        bool refreshCurrentVideoIds = true)
+        bool refreshCurrentVideoIds = true,
+        bool restoreCachedWatchLaterOrder = false)
     {
         if (clearWatchLaterTotalCount)
         {
@@ -1320,6 +1421,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (clearWatchLaterTotalCount || clearWatchLaterOrder || resetSyncAuthState)
         {
             ClearSyncTargetIds();
+        }
+
+        if (restoreCachedWatchLaterOrder)
+        {
+            RestoreCachedWatchLaterOrderForCurrentSelection();
         }
 
         if (resetSyncAuthState)
@@ -1343,6 +1449,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (queueWatchLaterOrderRefresh)
         {
             QueueWatchLaterOrderRefresh();
+        }
+    }
+
+    private void RestoreCachedWatchLaterOrderForCurrentSelection()
+    {
+        try
+        {
+            var accountScope = _accountScopeResolver.Resolve(_settings);
+            var orderedVideoIds = _watchLaterOrderStore.Load(accountScope.FolderName);
+            if (orderedVideoIds.Count > 0)
+            {
+                SetWatchLaterOrder(orderedVideoIds);
+            }
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write(_paths, $"Could not restore cached Watch Later order: {ex.Message}");
         }
     }
 
@@ -1546,9 +1669,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             var orderedVideoIds = await TrackShutdownTask(
                 _syncService.GetWatchLaterOrderedIdsAsync(settings, _shutdownCts.Token));
+            var accountScope = _accountScopeResolver.Resolve(settings);
+            var persistedOrder = _watchLaterOrderStore.Save(accountScope.FolderName, orderedVideoIds);
             if (MatchesLibrarySelection(settings, _settings))
             {
-                SetWatchLaterOrder(orderedVideoIds);
+                SetWatchLaterOrder(persistedOrder);
                 SetSyncAuthReady();
             }
         }
@@ -1596,16 +1721,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     return;
                 }
 
-                if (NormalizeSelectedYouTubeAccountForCurrentBrowser(
-                        youTubeAccounts,
-                        clearSelectionWhenNoLocalScopeExists: false))
+                var selectionChanged = NormalizeSelectedYouTubeAccountForCurrentBrowser(
+                    youTubeAccounts,
+                    clearSelectionWhenNoLocalScopeExists: false);
+                var browserAligned = AlignSelectedBrowserAccountForCurrentYouTubeAccount(
+                    youTubeAccounts: youTubeAccounts,
+                    browserAccounts: _accountDiscovery.DiscoverAccounts(_settings));
+                if (browserAligned)
+                {
+                    ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: false);
+                }
+
+                if (selectionChanged || browserAligned)
                 {
                     SettingsStore.Save(_settings);
                     RefreshLibraryForCurrentSelection(
                         clearWatchLaterTotalCount: true,
                         clearWatchLaterOrder: true,
                         resetSyncAuthState: true,
-                        queueWatchLaterTotalRefresh: false);
+                        queueWatchLaterTotalRefresh: false,
+                        queueWatchLaterOrderRefresh: true,
+                        restoreCachedWatchLaterOrder: true);
                 }
 
                 await Task.CompletedTask;

@@ -35,6 +35,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private readonly Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> _requestRestoreAsync;
     private readonly Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> _requestRedownloadAsync;
     private readonly Func<Task<LibraryCommandResponse>> _requestOpenDownloadsFolderAsync;
+    private readonly Func<Task<LibraryCommandResponse>> _requestOpenLatestSyncLogAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectBrowserAccountAsync;
     private readonly Func<string, Task<LibraryCommandResponse>> _requestSelectYouTubeAccountAsync;
     private readonly Func<Task<SettingsResponse>> _requestGetSettingsAsync;
@@ -68,6 +69,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> requestRestoreAsync,
         Func<IReadOnlyList<string>, Task<LibraryCommandResponse>> requestRedownloadAsync,
         Func<Task<LibraryCommandResponse>> requestOpenDownloadsFolderAsync,
+        Func<Task<LibraryCommandResponse>> requestOpenLatestSyncLogAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectBrowserAccountAsync,
         Func<string, Task<LibraryCommandResponse>> requestSelectYouTubeAccountAsync,
         Func<Task<SettingsResponse>> requestGetSettingsAsync,
@@ -91,6 +93,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         _requestRestoreAsync = requestRestoreAsync;
         _requestRedownloadAsync = requestRedownloadAsync;
         _requestOpenDownloadsFolderAsync = requestOpenDownloadsFolderAsync;
+        _requestOpenLatestSyncLogAsync = requestOpenLatestSyncLogAsync;
         _requestSelectBrowserAccountAsync = requestSelectBrowserAccountAsync;
         _requestSelectYouTubeAccountAsync = requestSelectYouTubeAccountAsync;
         _requestGetSettingsAsync = requestGetSettingsAsync;
@@ -280,6 +283,15 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         app.MapGet("/api/videos/{videoId}/captions", GetVideoCaptions);
         app.MapGet("/api/videos/{videoId}/captions/{trackKey}/file", GetVideoCaptionFileAsync);
         app.MapGet("/api/videos/{videoId}/stream", GetVideoStreamAsync);
+        app.MapGet("/api/logs/latest-sync", (HttpContext context) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return Results.NotFound();
+            }
+
+            return GetLatestSyncLog(context);
+        });
         app.MapGet("/api/browser-accounts/{browser}/{profile}/avatar", GetBrowserAccountAvatar);
         app.MapPost("/api/hotspot/start", (HttpContext context) =>
         {
@@ -324,6 +336,26 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray())));
+        app.MapPost("/api/videos/progress", (SaveVideoProgressRequest request) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.VideoId))
+            {
+                return Results.BadRequest(new LibraryCommandResponse(false, "A video id is required."));
+            }
+
+            var accountScope = _accountScopeResolver.Resolve(_getSettings());
+            var changed = _videoStateStore.SavePlaybackProgress(
+                accountScope.FolderName,
+                request.VideoId,
+                request.PlaybackPositionSeconds,
+                request.PlaybackDurationSeconds);
+            if (changed)
+            {
+                _state.MarkLibraryChanged();
+            }
+
+            return Results.Json(new LibraryCommandResponse(true, "Saved video playback progress."), _jsonOptions);
+        });
         app.MapPost("/api/downloads/open", async (HttpContext context) =>
         {
             if (!IsLocalRequest(context))
@@ -332,6 +364,15 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             }
 
             return ToHttpResult(await _requestOpenDownloadsFolderAsync());
+        });
+        app.MapPost("/api/logs/latest-sync/open", async (HttpContext context) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestOpenLatestSyncLogAsync());
         });
         app.MapPost("/api/browser-account/select", async (SelectAccountRequest request) => ToHttpResult(
             await _requestSelectBrowserAccountAsync(request.AccountKey ?? string.Empty)));
@@ -360,6 +401,8 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             settings,
             selectedBrowserAccount?.AuthUserIndex,
             allowNetwork: false);
+        var latestSyncLogPath = Path.Combine(_paths.LogsPath, "latest-sync.log");
+        var hasLatestSyncLog = File.Exists(latestSyncLogPath);
         var visibleYouTubeAccounts = youTubeAccounts.ToList();
         if (selectedYouTubeAccount.HasValue
             && visibleYouTubeAccounts.All(account =>
@@ -386,6 +429,10 @@ internal sealed class LibraryWebServer : IAsyncDisposable
             snapshot.RecentMessages,
             snapshot.UpdatedAtUtc,
             canOpenDownloadsFolder,
+            hasLatestSyncLog,
+            canOpenDownloadsFolder && hasLatestSyncLog,
+            hasLatestSyncLog && canOpenDownloadsFolder ? "/api/logs/latest-sync" : string.Empty,
+            hasLatestSyncLog ? Path.GetFileName(latestSyncLogPath) : string.Empty,
             selectedBrowserAccount?.AccountKey ?? settings.SelectedBrowserAccountKey ?? string.Empty,
             selectedBrowserAccount?.Label ?? string.Empty,
             browserAccounts
@@ -471,6 +518,8 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                     $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/thumbnail?v={GetThumbnailRevision(item)}",
                     $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/stream",
                     $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/captions",
+                    videoState.PlaybackPositionSeconds,
+                    videoState.PlaybackProgress,
                     videoState.IsWatched,
                     videoState.IsHidden);
             })
@@ -580,6 +629,23 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         }
 
         return BuildCacheableFileResult(context, avatarPath, GetImageContentType(avatarPath));
+    }
+
+    private IResult GetLatestSyncLog(HttpContext context)
+    {
+        var logPath = Path.Combine(_paths.LogsPath, "latest-sync.log");
+        if (!File.Exists(logPath))
+        {
+            return Results.NotFound();
+        }
+
+        ApplyNoStoreHeaders(context.Response.Headers);
+        return BuildCacheableTextResult(
+            context,
+            File.ReadAllText(logPath),
+            "text/plain; charset=utf-8",
+            logPath,
+            cacheControl: "no-store, no-cache, max-age=0, must-revalidate");
     }
 
     private IReadOnlyList<VideoItem> LoadVideoItems(AccountScopeResolver.ResolvedAccountScope accountScope)
@@ -1008,6 +1074,15 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         public List<string> VideoIds { get; set; } = [];
     }
 
+    private sealed class SaveVideoProgressRequest
+    {
+        public string? VideoId { get; set; }
+
+        public double PlaybackPositionSeconds { get; set; }
+
+        public double PlaybackDurationSeconds { get; set; }
+    }
+
     private sealed class SelectAccountRequest
     {
         public string? AccountKey { get; set; }
@@ -1030,6 +1105,8 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         string ThumbnailUrl,
         string StreamUrl,
         string CaptionsUrl,
+        double? PlaybackPositionSeconds,
+        double? PlaybackProgress,
         bool IsWatched,
         bool IsHidden);
 
@@ -1076,6 +1153,10 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         IReadOnlyList<string> RecentMessages,
         DateTimeOffset UpdatedAtUtc,
         bool CanOpenDownloadsFolder,
+        bool HasLatestSyncLog,
+        bool CanOpenLatestSyncLog,
+        string LatestSyncLogUrl,
+        string LatestSyncLogName,
         string SelectedBrowserAccountKey,
         string SelectedBrowserAccountLabel,
         IReadOnlyList<BrowserAccountDto> AvailableBrowserAccounts,

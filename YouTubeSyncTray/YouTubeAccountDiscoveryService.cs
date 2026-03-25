@@ -651,21 +651,24 @@ internal sealed class YouTubeAccountDiscoveryService
         }
     }
 
-    private IReadOnlyList<YouTubeAccountOption> LoadScopeAccounts(string? browserAccountKey, int fallbackAuthUserIndex)
+    private IReadOnlyList<YouTubeAccountOption> LoadScopeAccounts(string? currentBrowserAccountKey, int fallbackAuthUserIndex)
     {
-        if (_knownLibraryScopeStore is null || string.IsNullOrWhiteSpace(browserAccountKey))
+        if (_knownLibraryScopeStore is null)
         {
             return [];
         }
 
         return _knownLibraryScopeStore
-            .GetScopesForBrowserAccount(browserAccountKey)
+            .LoadScopes()
             .Where(scope => scope.IsAvailableOnDisk && !string.IsNullOrWhiteSpace(scope.YouTubeAccountKey))
             .GroupBy(scope => scope.YouTubeAccountKey, StringComparer.Ordinal)
             .Select(group =>
             {
                 var scope = group
-                    .OrderByDescending(item => item.LastSuccessfulSyncAtUtc ?? DateTimeOffset.MinValue)
+                    .OrderByDescending(item =>
+                        !string.IsNullOrWhiteSpace(currentBrowserAccountKey)
+                        && string.Equals(item.BrowserAccountKey, currentBrowserAccountKey, StringComparison.Ordinal))
+                    .ThenByDescending(item => item.LastSuccessfulSyncAtUtc ?? DateTimeOffset.MinValue)
                     .ThenByDescending(item => item.LastSeenAtUtc)
                     .First();
                 return KnownLibraryScopeStore.CreateYouTubeAccountOption(scope, fallbackAuthUserIndex);

@@ -186,21 +186,37 @@ internal sealed class SyncService
         var result = await RunYtDlpWithRetryAsync(settings, auth, args.ToString(), cancellationToken, progress);
         TrayLog.Write(_paths, $"yt-dlp sync exit code: {result.ExitCode}");
         string? nonFatalIssue = null;
+        string? nonFatalIssueDetail = null;
+        var effectiveAuth = _refreshedAuth ?? auth;
+        var syncLogPath = WriteLatestSyncLog(
+            settings,
+            effectiveAuth,
+            clampedCount,
+            watchLaterUrl,
+            result,
+            result.ExitCode != 0 && !LooksLikeAuthFailure(result)
+                ? DescribeNonFatalSyncIssue(result)
+                : null);
         if (result.ExitCode != 0)
         {
-            var effectiveAuth = _refreshedAuth ?? auth;
             if (LooksLikeAuthFailure(result))
             {
                 throw new InvalidOperationException(BuildYtDlpFailureMessage(
                     "yt-dlp sync failed.",
                     effectiveAuth,
-                    result));
+                    result,
+                    syncLogPath));
             }
 
-            nonFatalIssue = SummarizeNonFatalSyncIssue(result);
+            var issue = DescribeNonFatalSyncIssue(result);
+            nonFatalIssue = issue.Summary;
+            nonFatalIssueDetail = issue.Detail;
             if (!string.IsNullOrWhiteSpace(nonFatalIssue))
             {
-                TrayLog.Write(_paths, $"yt-dlp reported non-fatal item errors: {nonFatalIssue}");
+                var detailSuffix = string.IsNullOrWhiteSpace(nonFatalIssueDetail)
+                    ? string.Empty
+                    : $" Detail: {nonFatalIssueDetail}";
+                TrayLog.Write(_paths, $"yt-dlp reported non-fatal item errors: {nonFatalIssue}.{detailSuffix}");
             }
         }
 
@@ -226,7 +242,9 @@ internal sealed class SyncService
             ArchiveRepairedCount: repairedArchiveCount,
             MissingAfterSyncCount: stillMissingCount,
             WatchLaterTotalCount: watchLaterTotalCount,
-            NonFatalIssue: nonFatalIssue);
+            NonFatalIssue: nonFatalIssue,
+            NonFatalIssueDetail: nonFatalIssueDetail,
+            LogPath: syncLogPath);
     }
 
     public async Task<RedownloadSummary> RedownloadVideosAsync(
@@ -305,7 +323,7 @@ internal sealed class SyncService
                         result));
                 }
 
-                nonFatalIssue = SummarizeNonFatalSyncIssue(result);
+                nonFatalIssue = DescribeNonFatalSyncIssue(result).Summary;
                 if (!string.IsNullOrWhiteSpace(nonFatalIssue))
                 {
                     TrayLog.Write(_paths, $"yt-dlp reported non-fatal redownload issues: {nonFatalIssue}");
@@ -684,7 +702,7 @@ internal sealed class SyncService
         }
     }
 
-    private string BuildYtDlpFailureMessage(string prefix, AuthConfig auth, ProcessResult result)
+    private string BuildYtDlpFailureMessage(string prefix, AuthConfig auth, ProcessResult result, string? logPath = null)
     {
         var details = new List<string> { prefix };
         details.Add($"Authentication source: {DescribeAuth(auth)}");
@@ -708,6 +726,11 @@ internal sealed class SyncService
         }
 
         details.Add(result.GetTail());
+        if (!string.IsNullOrWhiteSpace(logPath))
+        {
+            details.Add($"Full sync log: {logPath}");
+        }
+
         return string.Join(Environment.NewLine + Environment.NewLine, details);
     }
 
@@ -722,22 +745,198 @@ internal sealed class SyncService
         };
     }
 
-    private static string? SummarizeNonFatalSyncIssue(ProcessResult result)
+    private string WriteLatestSyncLog(
+        AppSettings settings,
+        AuthConfig auth,
+        int requestedCount,
+        string watchLaterUrl,
+        ProcessResult result,
+        NonFatalSyncIssue? issue)
     {
-        var combined = result.CombinedOutput;
-        if (combined.Contains("drm protected", StringComparison.OrdinalIgnoreCase)
-            || combined.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase))
+        try
         {
-            return "Some videos were skipped because YouTube only exposed DRM-protected or unavailable formats.";
+            Directory.CreateDirectory(_paths.LogsPath);
+            var logPath = Path.Combine(_paths.LogsPath, "latest-sync.log");
+            var builder = new StringBuilder();
+            builder.AppendLine($"Time: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}");
+            builder.AppendLine("Operation: Watch Later sync");
+            builder.AppendLine($"Requested count: {requestedCount}");
+            builder.AppendLine($"Browser: {settings.BrowserCookies}:{settings.BrowserProfile}");
+            builder.AppendLine($"Watch Later URL: {watchLaterUrl}");
+            builder.AppendLine($"Authentication source: {DescribeAuth(auth)}");
+            builder.AppendLine($"yt-dlp exit code: {result.ExitCode}");
+            if (LooksLikeAuthFailure(result))
+            {
+                builder.AppendLine("Detected issue type: authentication");
+            }
+            else if (issue.HasValue)
+            {
+                builder.AppendLine($"Detected issue summary: {issue.Value.Summary}");
+                if (!string.IsNullOrWhiteSpace(issue.Value.Detail))
+                {
+                    builder.AppendLine($"Detected issue detail: {issue.Value.Detail}");
+                }
+            }
+
+            builder.AppendLine();
+            builder.AppendLine("STDOUT");
+            builder.AppendLine("------");
+            builder.AppendLine(string.IsNullOrWhiteSpace(result.StdOut) ? "<empty>" : result.StdOut.TrimEnd());
+            builder.AppendLine();
+            builder.AppendLine("STDERR");
+            builder.AppendLine("------");
+            builder.AppendLine(string.IsNullOrWhiteSpace(result.StdErr) ? "<empty>" : result.StdErr.TrimEnd());
+            File.WriteAllText(logPath, builder.ToString());
+            return logPath;
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write(_paths, $"Could not write latest sync log: {ex}");
+            return string.Empty;
+        }
+    }
+
+    private static NonFatalSyncIssue DescribeNonFatalSyncIssue(ProcessResult result) =>
+        DescribeNonFatalSyncIssueOutput(result.CombinedOutput);
+
+    internal static NonFatalSyncIssue DescribeNonFatalSyncIssueOutput(string combinedOutput)
+    {
+        var summary = combinedOutput.Contains("drm protected", StringComparison.OrdinalIgnoreCase)
+            || combinedOutput.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+                ? "Some videos were skipped because YouTube only exposed DRM-protected or unavailable formats."
+                : combinedOutput.Contains("Did not get any data blocks", StringComparison.OrdinalIgnoreCase)
+                    || combinedOutput.Contains("fragment not found", StringComparison.OrdinalIgnoreCase)
+                    || combinedOutput.Contains("HTTP Error", StringComparison.OrdinalIgnoreCase)
+                        ? "Some videos were skipped because YouTube did not return playable media for every item."
+                        : "yt-dlp reported item-level errors, but the successfully downloaded videos were kept.";
+        return new NonFatalSyncIssue(summary, ExtractMostRelevantIssueDetail(combinedOutput));
+    }
+
+    private static string? ExtractMostRelevantIssueDetail(string combinedOutput)
+    {
+        if (string.IsNullOrWhiteSpace(combinedOutput))
+        {
+            return null;
         }
 
-        if (combined.Contains("Did not get any data blocks", StringComparison.OrdinalIgnoreCase)
-            || combined.Contains("fragment not found", StringComparison.OrdinalIgnoreCase))
+        string? bestLine = null;
+        var bestScore = int.MinValue;
+        var lines = combinedOutput
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var index = 0; index < lines.Length; index++)
         {
-            return "Some videos were skipped because YouTube did not return playable media for every item.";
+            var normalized = NormalizeIssueDetailLine(lines[index]);
+            if (string.IsNullOrWhiteSpace(normalized) || !LooksLikeMeaningfulIssueLine(normalized))
+            {
+                continue;
+            }
+
+            var score = ScoreIssueDetailLine(normalized) + index;
+            if (score < bestScore)
+            {
+                continue;
+            }
+
+            bestScore = score;
+            bestLine = normalized;
         }
 
-        return "yt-dlp reported item-level errors, but the successfully downloaded videos were kept.";
+        return string.IsNullOrWhiteSpace(bestLine) ? null : TruncateIssueDetail(bestLine);
+    }
+
+    private static string NormalizeIssueDetailLine(string line)
+    {
+        var normalized = line.Trim();
+        if (normalized.StartsWith("[download] ", StringComparison.Ordinal))
+        {
+            normalized = normalized["[download] ".Length..].Trim();
+        }
+
+        var gotErrorIndex = normalized.IndexOf("Got error:", StringComparison.OrdinalIgnoreCase);
+        if (gotErrorIndex >= 0)
+        {
+            normalized = normalized[(gotErrorIndex + "Got error:".Length)..].Trim();
+        }
+
+        var retryingIndex = normalized.IndexOf("Retrying fragment", StringComparison.OrdinalIgnoreCase);
+        if (retryingIndex > 0)
+        {
+            normalized = normalized[..retryingIndex].TrimEnd('.', ' ');
+        }
+
+        return string.Join(" ", normalized.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    private static bool LooksLikeMeaningfulIssueLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return false;
+        }
+
+        if (line.StartsWith("[download]", StringComparison.OrdinalIgnoreCase)
+            || line.StartsWith("Deleting original file", StringComparison.OrdinalIgnoreCase)
+            || line.StartsWith("Merger", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return line.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase)
+            || line.StartsWith("WARNING:", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("drm protected", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Did not get any data blocks", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("fragment not found", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("HTTP Error", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Private video", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Video unavailable", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("This video is unavailable", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Forbidden", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int ScoreIssueDetailLine(string line)
+    {
+        var score = 0;
+        if (line.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 100;
+        }
+        else if (line.StartsWith("WARNING:", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 70;
+        }
+
+        if (line.Contains("[youtube]", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 35;
+        }
+
+        if (line.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Private video", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Video unavailable", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("This video is unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 45;
+        }
+
+        if (line.Contains("drm protected", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Did not get any data blocks", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("fragment not found", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("HTTP Error", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 25;
+        }
+
+        return score;
+    }
+
+    private static string TruncateIssueDetail(string value)
+    {
+        const int maxLength = 180;
+        return value.Length <= maxLength
+            ? value.TrimEnd('.', ' ')
+            : value[..(maxLength - 3)].TrimEnd() + "...";
     }
 
     private static bool LooksLikeAuthFailure(ProcessResult result) =>
@@ -1204,13 +1403,17 @@ internal sealed class SyncService
         int ArchiveRepairedCount,
         int MissingAfterSyncCount,
         int? WatchLaterTotalCount,
-        string? NonFatalIssue);
+        string? NonFatalIssue,
+        string? NonFatalIssueDetail,
+        string? LogPath);
 
     internal readonly record struct RedownloadSummary(
         int RequestedCount,
         int RedownloadedCount,
         int FailedCount,
         string? NonFatalIssue);
+
+    internal readonly record struct NonFatalSyncIssue(string Summary, string? Detail);
 
     private readonly record struct RedownloadBackupFile(string SourcePath, string BackupPath);
 

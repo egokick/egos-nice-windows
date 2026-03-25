@@ -9,6 +9,7 @@ internal sealed class ChromiumManagedBrowser
     private const string InitialUrl = "https://www.youtube.com/playlist?list=WL";
     private static readonly TimeSpan DebugEndpointTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan SignInTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan DebugEndpointRequestTimeout = TimeSpan.FromSeconds(10);
     private static readonly HashSet<string> AuthCookieNames =
     [
         "SAPISID",
@@ -23,7 +24,7 @@ internal sealed class ChromiumManagedBrowser
     private readonly YoutubeSyncPaths _paths;
     private readonly HttpClient _httpClient = new()
     {
-        Timeout = TimeSpan.FromSeconds(2)
+        Timeout = DebugEndpointRequestTimeout
     };
 
     public ChromiumManagedBrowser(YoutubeSyncPaths paths)

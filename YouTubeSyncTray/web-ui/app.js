@@ -4,7 +4,7 @@ const state = {
   browserAccountOptionsKey: "",
   browserAccountSelectionInFlight: false,
   captionTrackPreference: null,
-  captionTrackPreferenceLanguageCode: "",
+  captionTrackPreferenceLanguageCode: "en",
   captionTrackRequests: new Map(),
   captionTracksByVideoId: new Map(),
   cards: new Map(),
@@ -40,8 +40,10 @@ const state = {
   phoneAccessInfo: null,
   phoneAccessLoaded: false,
   phoneAccessLoading: false,
+  playbackProgressSaveTimer: null,
   selectedBrowserAccountKey: "",
   selectedIds: new Set(),
+  savedPlaybackProgressByVideoId: new Map(),
   syncAuthMessage: "Authentication has not been verified yet for the selected account.",
   syncAuthState: "missing",
   syncButtonAnimationFrame: 0,
@@ -59,7 +61,9 @@ const state = {
   selectedYouTubeAccountKey: "",
   selectedScope: null,
   snapshotRestored: false,
+  sortLatestFirst: true,
   videos: new Map(),
+  videoOrder: [],
 };
 
 const elements = {
@@ -68,6 +72,8 @@ const elements = {
   browserAccountList: document.getElementById("browserAccountList"),
   browserAccountMenu: document.getElementById("browserAccountMenu"),
   browserAccountPicker: document.getElementById("browserAccountPicker"),
+  captionLanguageGroup: document.getElementById("captionLanguageGroup"),
+  captionLanguageSelect: document.getElementById("captionLanguageSelect"),
   captionPicker: document.getElementById("captionPicker"),
   captionSelect: document.getElementById("captionSelect"),
   captionStatus: document.getElementById("captionStatus"),
@@ -77,6 +83,8 @@ const elements = {
   emptyState: document.getElementById("emptyState"),
   libraryGrid: document.getElementById("libraryGrid"),
   monitorClose: document.getElementById("monitorClose"),
+  monitorLogLink: document.getElementById("monitorLogLink"),
+  monitorLogRow: document.getElementById("monitorLogRow"),
   monitorPanel: document.getElementById("monitorPanel"),
   monitorPill: document.getElementById("monitorPill"),
   monitorToggle: document.getElementById("monitorToggle"),
@@ -115,6 +123,7 @@ const elements = {
   settingsSaveButton: document.getElementById("settingsSaveButton"),
   settingsSummary: document.getElementById("settingsSummary"),
   statusText: document.getElementById("statusText"),
+  sortOrderButton: document.getElementById("sortOrderButton"),
   syncButton: document.getElementById("syncButton"),
   toast: document.getElementById("toast"),
   videoPlayer: document.getElementById("videoPlayer"),
@@ -126,8 +135,13 @@ const elements = {
   youtubeAccountRefreshStatus: document.getElementById("youtubeAccountRefreshStatus"),
 };
 
+const captionLanguageNames = typeof Intl !== "undefined" && typeof Intl.DisplayNames === "function"
+  ? new Intl.DisplayNames(["en"], { type: "language" })
+  : null;
+
 document.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
+  updateSortOrderButton();
   await registerServiceWorker();
   await restoreBootstrapSnapshot();
   try {
@@ -150,6 +164,10 @@ window.addEventListener("unhandledrejection", (event) => {
       ? event.reason
       : "The browser UI hit an unexpected error.";
   showToast(message, true);
+});
+
+window.addEventListener("pagehide", () => {
+  flushCurrentPlaybackProgress({ preferBeacon: true });
 });
 
 const SNAPSHOT_DB_NAME = "youtube-sync-library";
@@ -352,6 +370,32 @@ function wireEvents() {
     await runCommand("/api/downloads/open", null, "Opened the downloads folder for the selected account.");
   });
 
+  elements.sortOrderButton.addEventListener("click", () => {
+    state.sortLatestFirst = !state.sortLatestFirst;
+    updateSortOrderButton();
+    renderVideoCardOrder();
+  });
+
+  elements.monitorLogLink.addEventListener("click", async (event) => {
+    const url = elements.monitorLogLink.dataset.logUrl || "";
+    if (url === "") {
+      event.preventDefault();
+      return;
+    }
+
+    if (elements.monitorLogLink.dataset.canOpen !== "true") {
+      return;
+    }
+
+    event.preventDefault();
+    try {
+      const response = await post("/api/logs/latest-sync/open");
+      showToast(response?.message || "Opened the latest sync log.", false);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  });
+
   elements.settingsButton.addEventListener("click", async () => {
     await toggleSettingsPanel();
   });
@@ -454,21 +498,50 @@ function wireEvents() {
   });
 
   elements.videoPlayer.addEventListener("timeupdate", () => {
+    syncCurrentPlaybackProgressUi();
+    schedulePlaybackProgressSave();
     void maybeMarkCurrentVideoWatched(false);
   });
 
+  elements.videoPlayer.addEventListener("seeked", () => {
+    syncCurrentPlaybackProgressUi();
+    if (elements.videoPlayer.paused) {
+      flushCurrentPlaybackProgress({ preferBeacon: false });
+      return;
+    }
+
+    schedulePlaybackProgressSave();
+  });
+
+  elements.videoPlayer.addEventListener("pause", () => {
+    flushCurrentPlaybackProgress({ preferBeacon: false });
+  });
+
   elements.videoPlayer.addEventListener("ended", () => {
+    flushCurrentPlaybackProgress({ preferBeacon: false });
     void maybeMarkCurrentVideoWatched(true);
+  });
+
+  elements.videoPlayer.addEventListener("loadedmetadata", () => {
+    maybeResumeVideoPlayback();
   });
 
   elements.captionSelect.addEventListener("change", () => {
     const selectedTrackKey = elements.captionSelect.value || "";
     state.captionTrackPreference = selectedTrackKey;
-    state.captionTrackPreferenceLanguageCode = selectedTrackKey === ""
-      ? ""
-      : state.currentCaptionTracks.find((track) => track.trackKey === selectedTrackKey)?.languageCode || "";
+    if (selectedTrackKey !== "") {
+      const selectedTrack = state.currentCaptionTracks.find((track) => track.trackKey === selectedTrackKey) || null;
+      state.captionTrackPreferenceLanguageCode = getCaptionTrackLanguageKey(selectedTrack);
+    } else if (!elements.captionLanguageSelect.disabled) {
+      state.captionTrackPreferenceLanguageCode = elements.captionLanguageSelect.value || state.captionTrackPreferenceLanguageCode;
+    }
     syncCaptionSelectWidth();
     applyCaptionSelection(selectedTrackKey);
+  });
+
+  elements.captionLanguageSelect.addEventListener("change", () => {
+    state.captionTrackPreferenceLanguageCode = elements.captionLanguageSelect.value || "en";
+    renderCaptionOptions(state.currentCaptionTracks);
   });
 
   document.addEventListener("keydown", (event) => {
@@ -1192,6 +1265,7 @@ async function redownloadSelectedVideos(videoIds) {
 
 function reconcileVideos(videos) {
   state.videos = new Map(videos.map((video) => [video.videoId, video]));
+  state.videoOrder = videos.map((video) => video.videoId);
   const nextIds = new Set(videos.map((video) => video.videoId));
 
   for (const [videoId, card] of state.cards) {
@@ -1201,6 +1275,7 @@ function reconcileVideos(videos) {
 
     state.captionTrackRequests.delete(videoId);
     state.captionTracksByVideoId.delete(videoId);
+    state.savedPlaybackProgressByVideoId.delete(videoId);
     state.cards.delete(videoId);
     state.selectedIds.delete(videoId);
     card.remove();
@@ -1217,6 +1292,8 @@ function reconcileVideos(videos) {
 
     elements.libraryGrid.append(card);
   }
+
+  renderVideoCardOrder();
 
   if (state.currentVideoId && !state.videos.has(state.currentVideoId)) {
     clearPlayer();
@@ -1237,6 +1314,9 @@ function createCard(video) {
       <button class="thumb-button" type="button" aria-label="">
         <img class="thumbnail placeholder" alt="">
       </button>
+      <div class="thumbnail-progress hidden" aria-hidden="true">
+        <span class="thumbnail-progress-fill"></span>
+      </div>
       <input class="video-selector" type="checkbox" aria-label="Select video">
     </div>
     <div class="card-body">
@@ -1309,6 +1389,180 @@ function updateCard(card, video) {
   image.onload = () => {
     image.classList.remove("placeholder");
   };
+
+  const progress = normalizeVideoPlaybackProgress(video.playbackProgress);
+  const progressBar = card.querySelector(".thumbnail-progress");
+  const progressFill = card.querySelector(".thumbnail-progress-fill");
+  progressBar.classList.toggle("hidden", progress <= 0);
+  progressFill.style.width = `${progress * 100}%`;
+}
+
+function normalizeVideoPlaybackProgress(value) {
+  return Number.isFinite(value)
+    ? Math.max(0, Math.min(value, 1))
+    : 0;
+}
+
+function normalizePlaybackPositionSeconds(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function getCurrentPlaybackProgressSnapshot() {
+  const videoId = elements.videoPlayer.dataset.videoId || state.currentVideoId;
+  if (!videoId) {
+    return null;
+  }
+
+  const durationSeconds = Number.isFinite(elements.videoPlayer.duration) ? elements.videoPlayer.duration : 0;
+  const playbackPositionSeconds = Number.isFinite(elements.videoPlayer.currentTime) ? elements.videoPlayer.currentTime : 0;
+  if (durationSeconds <= 0) {
+    return null;
+  }
+
+  return {
+    videoId,
+    playbackPositionSeconds: normalizePlaybackPositionSeconds(playbackPositionSeconds),
+    playbackDurationSeconds: durationSeconds,
+    playbackProgress: normalizeVideoPlaybackProgress(playbackPositionSeconds / durationSeconds),
+  };
+}
+
+function syncCurrentPlaybackProgressUi() {
+  const snapshot = getCurrentPlaybackProgressSnapshot();
+  if (!snapshot) {
+    return;
+  }
+
+  applyLocalPlaybackProgressSnapshot(snapshot);
+}
+
+function applyLocalPlaybackProgressSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot.videoId !== "string" || snapshot.videoId === "") {
+    return;
+  }
+
+  const video = state.videos.get(snapshot.videoId);
+  if (!video) {
+    return;
+  }
+
+  const nextProgress = normalizeVideoPlaybackProgress(snapshot.playbackProgress);
+  const nextPositionSeconds = normalizePlaybackPositionSeconds(snapshot.playbackPositionSeconds);
+  const currentProgress = normalizeVideoPlaybackProgress(video.playbackProgress);
+  const currentPositionSeconds = normalizePlaybackPositionSeconds(video.playbackPositionSeconds);
+  if (Math.abs(nextProgress - currentProgress) < 0.000001
+    && Math.abs(nextPositionSeconds - currentPositionSeconds) < 0.25)
+  {
+    return;
+  }
+
+  const updatedVideo = {
+    ...video,
+    playbackProgress: nextProgress,
+    playbackPositionSeconds: nextPositionSeconds,
+  };
+  state.videos.set(snapshot.videoId, updatedVideo);
+  const card = state.cards.get(snapshot.videoId);
+  if (card) {
+    updateCard(card, updatedVideo);
+  }
+}
+
+function buildPlaybackProgressKey(snapshot) {
+  return snapshot
+    ? `${snapshot.videoId}|${snapshot.playbackPositionSeconds.toFixed(3)}|${snapshot.playbackDurationSeconds.toFixed(3)}`
+    : "";
+}
+
+function schedulePlaybackProgressSave() {
+  const snapshot = getCurrentPlaybackProgressSnapshot();
+  if (!snapshot) {
+    return;
+  }
+
+  applyLocalPlaybackProgressSnapshot(snapshot);
+  if (state.playbackProgressSaveTimer !== null) {
+    window.clearTimeout(state.playbackProgressSaveTimer);
+  }
+
+  state.playbackProgressSaveTimer = window.setTimeout(() => {
+    state.playbackProgressSaveTimer = null;
+    const latestSnapshot = getCurrentPlaybackProgressSnapshot() || snapshot;
+    void persistPlaybackProgressSnapshot(latestSnapshot);
+  }, 1200);
+}
+
+function flushCurrentPlaybackProgress(options = {}) {
+  if (state.playbackProgressSaveTimer !== null) {
+    window.clearTimeout(state.playbackProgressSaveTimer);
+    state.playbackProgressSaveTimer = null;
+  }
+
+  const snapshot = getCurrentPlaybackProgressSnapshot();
+  if (!snapshot) {
+    return Promise.resolve();
+  }
+
+  applyLocalPlaybackProgressSnapshot(snapshot);
+  return persistPlaybackProgressSnapshot(snapshot, options);
+}
+
+async function persistPlaybackProgressSnapshot(snapshot, options = {}) {
+  if (!snapshot || !snapshot.videoId) {
+    return;
+  }
+
+  const effectiveSnapshot = {
+    ...snapshot,
+    playbackPositionSeconds: normalizePlaybackPositionSeconds(snapshot.playbackPositionSeconds),
+    playbackProgress: normalizeVideoPlaybackProgress(snapshot.playbackProgress),
+  };
+  const nextKey = buildPlaybackProgressKey(effectiveSnapshot);
+  if (state.savedPlaybackProgressByVideoId.get(snapshot.videoId) === nextKey) {
+    return;
+  }
+
+  if (options.preferBeacon && typeof navigator.sendBeacon === "function") {
+    try {
+      const payload = JSON.stringify({
+        videoId: effectiveSnapshot.videoId,
+        playbackPositionSeconds: effectiveSnapshot.playbackPositionSeconds,
+        playbackDurationSeconds: effectiveSnapshot.playbackDurationSeconds,
+      });
+      const sent = navigator.sendBeacon(
+        "/api/videos/progress",
+        new Blob([payload], { type: "application/json" }),
+      );
+      if (sent) {
+        state.savedPlaybackProgressByVideoId.set(snapshot.videoId, nextKey);
+        return;
+      }
+    } catch {
+      // Fall back to fetch below.
+    }
+  }
+
+  try {
+    const response = await fetch("/api/videos/progress", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      keepalive: Boolean(options.preferBeacon),
+      body: JSON.stringify({
+        videoId: effectiveSnapshot.videoId,
+        playbackPositionSeconds: effectiveSnapshot.playbackPositionSeconds,
+        playbackDurationSeconds: effectiveSnapshot.playbackDurationSeconds,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error("Could not save playback progress.");
+    }
+
+    state.savedPlaybackProgressByVideoId.set(snapshot.videoId, nextKey);
+  } catch {
+    // Playback progress persistence is best-effort and should stay silent.
+  }
 }
 
 async function playVideo(videoId) {
@@ -1317,17 +1571,25 @@ async function playVideo(videoId) {
     return;
   }
 
+  if (state.currentVideoId && state.currentVideoId !== video.videoId) {
+    await flushCurrentPlaybackProgress();
+  }
+
   state.currentVideoId = video.videoId;
   state.currentVideoTitle = video.title;
   syncPlayerMetadata(video);
+  setPlayerActive(true);
   elements.playerPlaceholder.classList.add("hidden");
   elements.videoPlayer.classList.remove("hidden");
 
   if (elements.videoPlayer.dataset.videoId !== video.videoId) {
     clearManagedCaptionTracks();
     elements.videoPlayer.dataset.videoId = video.videoId;
+    elements.videoPlayer.dataset.resumePositionSeconds = `${normalizePlaybackPositionSeconds(video.playbackPositionSeconds)}`;
     elements.videoPlayer.src = video.streamUrl;
     elements.videoPlayer.load();
+  } else {
+    maybeResumeVideoPlayback();
   }
 
   void refreshCaptionsForCurrentVideo(video.videoId);
@@ -1350,11 +1612,44 @@ function syncPlayerMetadata(video) {
   state.currentVideoTitle = video.title;
 }
 
+function maybeResumeVideoPlayback() {
+  const videoId = elements.videoPlayer.dataset.videoId || "";
+  const currentVideo = state.videos.get(videoId);
+  const resumePositionSeconds = Math.max(
+    normalizePlaybackPositionSeconds(currentVideo?.playbackPositionSeconds),
+    normalizePlaybackPositionSeconds(Number.parseFloat(elements.videoPlayer.dataset.resumePositionSeconds || "0")),
+  );
+  const durationSeconds = Number.isFinite(elements.videoPlayer.duration) ? elements.videoPlayer.duration : 0;
+  if (resumePositionSeconds <= 0 || durationSeconds <= 0) {
+    return;
+  }
+
+  const maxResumePositionSeconds = durationSeconds > 0.5
+    ? Math.max(durationSeconds - 0.25, 0)
+    : durationSeconds;
+  const targetPositionSeconds = Math.min(resumePositionSeconds, maxResumePositionSeconds);
+  if (!Number.isFinite(targetPositionSeconds) || targetPositionSeconds <= 0) {
+    return;
+  }
+
+  if (Math.abs(elements.videoPlayer.currentTime - targetPositionSeconds) < 0.25) {
+    return;
+  }
+
+  try {
+    elements.videoPlayer.currentTime = targetPositionSeconds;
+  } catch {
+    // Some browsers reject seeks until the stream is ready. A later metadata event will retry.
+  }
+}
+
 function clearPlayer() {
+  flushCurrentPlaybackProgress({ preferBeacon: false });
   state.currentVideoId = null;
   state.currentCaptionTracks = [];
   state.currentVideoTitle = "";
   elements.playerTitle.textContent = "Select a video";
+  setPlayerActive(false);
   elements.playerPlaceholder.classList.remove("hidden");
   elements.videoPlayer.classList.add("hidden");
   elements.videoPlayer.pause();
@@ -1363,6 +1658,7 @@ function clearPlayer() {
   elements.videoPlayer.removeAttribute("src");
   elements.videoPlayer.load();
   delete elements.videoPlayer.dataset.videoId;
+  delete elements.videoPlayer.dataset.resumePositionSeconds;
 }
 
 async function refreshCaptionsForCurrentVideo(videoId) {
@@ -1430,6 +1726,9 @@ function renderCaptionLoadingState() {
   state.currentCaptionTracks = [];
   elements.captionPicker.classList.remove("hidden");
   elements.captionStatus.classList.add("hidden");
+  elements.captionLanguageGroup.classList.add("hidden");
+  elements.captionLanguageSelect.replaceChildren();
+  elements.captionLanguageSelect.disabled = true;
 
   const loadingOption = document.createElement("option");
   loadingOption.value = "";
@@ -1454,15 +1753,29 @@ function renderCaptionOptions(tracks) {
     return;
   }
 
-  const selectedTrackKey = resolvePreferredCaptionTrackKey(captionTracks);
+  const languageOptions = buildCaptionLanguageOptions(captionTracks);
+  const selectedLanguageCode = resolvePreferredCaptionLanguageCode(languageOptions);
+  state.captionTrackPreferenceLanguageCode = selectedLanguageCode;
+
+  const selectedLanguage = languageOptions.find((option) => option.value === selectedLanguageCode) || languageOptions[0];
+  const visibleTracks = selectedLanguage?.tracks || captionTracks;
+  const selectedTrackKey = resolvePreferredCaptionTrackKey(visibleTracks);
   const options = document.createDocumentFragment();
+  const languageSelectOptions = document.createDocumentFragment();
 
   const offOption = document.createElement("option");
   offOption.value = "";
   offOption.textContent = "Off";
   options.append(offOption);
 
-  for (const track of captionTracks) {
+  for (const option of languageOptions) {
+    const languageOption = document.createElement("option");
+    languageOption.value = option.value;
+    languageOption.textContent = option.label;
+    languageSelectOptions.append(languageOption);
+  }
+
+  for (const track of visibleTracks) {
     const option = document.createElement("option");
     option.value = track.trackKey;
     option.textContent = track.label || track.trackKey;
@@ -1471,6 +1784,10 @@ function renderCaptionOptions(tracks) {
 
   elements.captionPicker.classList.remove("hidden");
   elements.captionStatus.classList.add("hidden");
+  elements.captionLanguageSelect.replaceChildren(languageSelectOptions);
+  elements.captionLanguageSelect.disabled = languageOptions.length <= 1;
+  elements.captionLanguageSelect.value = selectedLanguage.value;
+  elements.captionLanguageGroup.classList.toggle("hidden", languageOptions.length <= 1);
   elements.captionSelect.replaceChildren(options);
   elements.captionSelect.disabled = false;
   elements.captionSelect.value = selectedTrackKey;
@@ -1480,6 +1797,9 @@ function renderCaptionOptions(tracks) {
 
 function renderCaptionUnavailable(message) {
   elements.captionPicker.classList.add("hidden");
+  elements.captionLanguageGroup.classList.add("hidden");
+  elements.captionLanguageSelect.replaceChildren();
+  elements.captionLanguageSelect.disabled = true;
   clearCaptionSelectWidth();
   if (message) {
     elements.captionStatus.classList.remove("hidden");
@@ -1492,8 +1812,11 @@ function renderCaptionUnavailable(message) {
 
 function resetCaptionUi() {
   elements.captionPicker.classList.add("hidden");
+  elements.captionLanguageGroup.classList.add("hidden");
   elements.captionStatus.classList.add("hidden");
   elements.captionStatus.textContent = "";
+  elements.captionLanguageSelect.replaceChildren();
+  elements.captionLanguageSelect.disabled = true;
   elements.captionSelect.replaceChildren();
   elements.captionSelect.disabled = true;
   clearCaptionSelectWidth();
@@ -1555,22 +1878,104 @@ function resolvePreferredCaptionTrackKey(tracks) {
     }
 
     if (state.captionTrackPreferenceLanguageCode !== "") {
-      const languageTrack = tracks.find((track) => track.languageCode === state.captionTrackPreferenceLanguageCode);
+      const languageTrack = tracks.find((track) =>
+        getCaptionTrackLanguageKey(track) === state.captionTrackPreferenceLanguageCode);
       if (languageTrack) {
         return languageTrack.trackKey;
       }
     }
   }
 
-  return pickDefaultCaptionTrack(tracks);
+  return "";
 }
 
-function pickDefaultCaptionTrack(tracks) {
-  return tracks.find((track) => track.trackKey === "en")?.trackKey
-    || tracks.find((track) => track.trackKey.endsWith("-orig"))?.trackKey
-    || tracks.find((track) => track.languageCode === "en")?.trackKey
-    || tracks[0]?.trackKey
-    || "";
+function buildCaptionLanguageOptions(tracks) {
+  const optionsByValue = new Map();
+
+  for (const track of tracks) {
+    const value = getCaptionTrackLanguageKey(track);
+    if (!optionsByValue.has(value)) {
+      optionsByValue.set(value, {
+        value,
+        label: getCaptionLanguageLabel(track),
+        tracks: [],
+      });
+    }
+
+    optionsByValue.get(value).tracks.push(track);
+  }
+
+  return Array.from(optionsByValue.values());
+}
+
+function resolvePreferredCaptionLanguageCode(languageOptions) {
+  if (languageOptions.length === 0) {
+    return "";
+  }
+
+  if (state.captionTrackPreferenceLanguageCode !== "") {
+    const preferred = languageOptions.find((option) => option.value === state.captionTrackPreferenceLanguageCode);
+    if (preferred) {
+      return preferred.value;
+    }
+  }
+
+  const englishOption = languageOptions.find((option) => option.value === "en")
+    || languageOptions.find((option) => option.value.startsWith("en-"));
+  if (englishOption) {
+    return englishOption.value;
+  }
+
+  return languageOptions[0].value;
+}
+
+function getCaptionTrackLanguageKey(track) {
+  if (!track) {
+    return "";
+  }
+
+  const normalizedCode = normalizeCaptionLanguageCode(track.languageCode);
+  if (normalizedCode !== "") {
+    return normalizedCode;
+  }
+
+  return typeof track.trackKey === "string" ? track.trackKey.trim().toLowerCase() : "";
+}
+
+function normalizeCaptionLanguageCode(languageCode) {
+  return typeof languageCode === "string" ? languageCode.trim().toLowerCase() : "";
+}
+
+function getCaptionLanguageLabel(track) {
+  if (!track) {
+    return "Unknown";
+  }
+
+  const normalizedCode = normalizeCaptionLanguageCode(track.languageCode);
+  if (normalizedCode !== "") {
+    const canonicalCode = normalizedCode.replace(/_/g, "-");
+    const baseCode = canonicalCode.split("-")[0];
+    for (const candidate of [canonicalCode, baseCode]) {
+      if (candidate === "") {
+        continue;
+      }
+
+      try {
+        const displayName = captionLanguageNames?.of(candidate);
+        if (typeof displayName === "string" && displayName.trim() !== "") {
+          return displayName;
+        }
+      } catch {
+        // Ignore unsupported language tags and fall through to the next label source.
+      }
+    }
+  }
+
+  return track.label || track.trackKey || "Unknown";
+}
+
+function setPlayerActive(isActive) {
+  elements.playerPanel.classList.toggle("is-active", isActive);
 }
 
 function syncPlayerCaptionTracks(tracks, selectedTrackKey) {
@@ -1672,18 +2077,46 @@ function buildSearchMatcher(searchTerm) {
 function updateSelectionUi() {
   const selectedCount = state.selectedIds.size;
   const visibleCount = getVisibleVideoCount();
+  const hasSelection = selectedCount > 0;
 
   elements.selectionSummary.textContent =
     selectedCount === 0
       ? buildLibrarySummary()
       : `${selectedCount} selected across ${visibleCount} visible videos`;
 
-  elements.redownloadSelectedButton.disabled = selectedCount === 0 || state.isBusy;
-  elements.removeSelectedButton.disabled = selectedCount === 0;
+  elements.redownloadSelectedButton.classList.toggle("hidden", !hasSelection);
+  elements.removeSelectedButton.classList.toggle("hidden", !hasSelection);
+  elements.redownloadSelectedButton.disabled = !hasSelection || state.isBusy;
+  elements.removeSelectedButton.disabled = !hasSelection;
   elements.removeSelectedButton.textContent = getRemoveSelectedButtonLabel();
+  updateSortOrderButton();
   elements.watchedVideosButton.textContent = getWatchedVideosButtonLabel();
   elements.watchedVideosButton.classList.toggle("is-active", state.showWatchedOnly);
   elements.watchedVideosButton.setAttribute("aria-pressed", String(state.showWatchedOnly));
+}
+
+function renderVideoCardOrder() {
+  const orderedIds = state.sortLatestFirst
+    ? [...state.videoOrder]
+    : [...state.videoOrder].reverse();
+
+  for (const videoId of orderedIds) {
+    const card = state.cards.get(videoId);
+    if (!card) {
+      continue;
+    }
+
+    elements.libraryGrid.append(card);
+  }
+}
+
+function updateSortOrderButton() {
+  const arrow = state.sortLatestFirst ? "↓" : "↑";
+  const directionLabel = state.sortLatestFirst ? "latest first" : "oldest first";
+  elements.sortOrderButton.setAttribute("aria-pressed", String(!state.sortLatestFirst));
+  elements.sortOrderButton.textContent = arrow;
+  elements.sortOrderButton.title = `Video order: ${directionLabel}`;
+  elements.sortOrderButton.setAttribute("aria-label", `Video order: ${directionLabel}`);
 }
 
 function buildLibrarySummary() {
@@ -1783,6 +2216,7 @@ function updateStatus(status, options = {}) {
   elements.statusText.textContent = state.isUsingCachedSnapshot
     ? `${status.status} Showing cached library snapshot.`
     : status.status;
+  updateMonitorLogLink(status);
   elements.openDownloadsButton.classList.toggle("hidden", !status.canOpenDownloadsFolder);
   elements.openDownloadsButton.disabled = !status.canOpenDownloadsFolder;
   renderBrowserAccountPicker(
@@ -2330,6 +2764,18 @@ function setMonitorOpen(isOpen) {
   elements.monitorPanel.classList.toggle("hidden", !isOpen);
   elements.monitorPanel.setAttribute("aria-hidden", String(!isOpen));
   elements.monitorToggle.setAttribute("aria-expanded", String(isOpen));
+}
+
+function updateMonitorLogLink(status) {
+  const hasLog = Boolean(status.hasLatestSyncLog) && typeof status.latestSyncLogUrl === "string" && status.latestSyncLogUrl !== "";
+  elements.monitorLogRow.classList.toggle("hidden", !hasLog);
+  elements.monitorLogLink.dataset.canOpen = String(Boolean(status.canOpenLatestSyncLog));
+  elements.monitorLogLink.dataset.logUrl = hasLog ? status.latestSyncLogUrl : "";
+  elements.monitorLogLink.href = hasLog ? status.latestSyncLogUrl : "#";
+  elements.monitorLogLink.textContent =
+    typeof status.latestSyncLogName === "string" && status.latestSyncLogName !== ""
+      ? `Open ${status.latestSyncLogName}`
+      : "Open latest sync log";
 }
 
 function renderActivityFeed(messages) {

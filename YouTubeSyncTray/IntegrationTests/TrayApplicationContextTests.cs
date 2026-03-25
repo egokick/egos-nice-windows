@@ -31,6 +31,23 @@ public sealed class TrayApplicationContextTests
     }
 
     [Fact]
+    public void BuildSyncStatus_PrefersConcreteYtDlpDetail_WhenAvailable()
+    {
+        var summary = CreateSummary(
+            targetCount: 66,
+            downloadedCount: 0,
+            alreadyPresentCount: 66,
+            missingAfterSyncCount: 1,
+            nonFatalIssue: "yt-dlp reported item-level errors, but the successfully downloaded videos were kept.",
+            nonFatalIssueDetail: "ERROR: [youtube] abc123: Requested format is not available");
+
+        var status = TrayApplicationContext.BuildSyncStatus(summary);
+
+        Assert.Contains("yt-dlp detail: ERROR: [youtube] abc123: Requested format is not available.", status);
+        Assert.DoesNotContain("yt-dlp reported item-level errors", status, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildRedownloadStatus_ReportsFailuresAndRestoreNotice()
     {
         var summary = new SyncService.RedownloadSummary(
@@ -65,7 +82,8 @@ public sealed class TrayApplicationContextTests
         int missingAfterSyncCount,
         int archiveRepairedCount = 0,
         int? watchLaterTotalCount = null,
-        string? nonFatalIssue = null)
+        string? nonFatalIssue = null,
+        string? nonFatalIssueDetail = null)
     {
         return new SyncService.SyncSummary(
             RequestedCount: targetCount,
@@ -75,6 +93,8 @@ public sealed class TrayApplicationContextTests
             ArchiveRepairedCount: archiveRepairedCount,
             MissingAfterSyncCount: missingAfterSyncCount,
             WatchLaterTotalCount: watchLaterTotalCount,
-            NonFatalIssue: nonFatalIssue);
+            NonFatalIssue: nonFatalIssue,
+            NonFatalIssueDetail: nonFatalIssueDetail,
+            LogPath: null);
     }
 }

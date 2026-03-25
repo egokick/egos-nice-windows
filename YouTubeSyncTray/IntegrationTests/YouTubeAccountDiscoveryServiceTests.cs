@@ -423,4 +423,99 @@ public sealed class YouTubeAccountDiscoveryServiceTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [Fact]
+    public void DiscoverAccounts_CachedOnlyKeepsCrossBrowserLocalYouTubeScopesVisible()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var paths = new YoutubeSyncPaths
+            {
+                RootPath = root,
+                BrowserProfilesPath = Path.Combine(root, "browser-profiles"),
+                DownloadsPath = Path.Combine(root, "downloads"),
+                YtDlpPath = Path.Combine(root, "yt-dlp.exe"),
+                CookiesPath = Path.Combine(root, "youtube-cookies.txt"),
+                CookiesMetadataPath = Path.Combine(root, "youtube-cookies.metadata.json"),
+                ArchivePath = Path.Combine(root, "watch-later.archive.txt"),
+                TempPath = Path.Combine(root, "temp"),
+                LogsPath = Path.Combine(root, "logs"),
+                ThumbnailCachePath = Path.Combine(root, "thumb-cache")
+            };
+
+            var store = new KnownLibraryScopeStore(paths);
+            var edgeScope = new AccountScopeResolver.ResolvedAccountScope(
+                ScopeKey: KnownLibraryScopeStore.BuildScopeKey(
+                    "Edge|Default|edge-account",
+                    "yt|handle|@egokickdoge3550",
+                    "egokick doge [67a24bf6]"),
+                BrowserAccount: null,
+                YouTubeAccount: null,
+                BrowserAccountKey: "Edge|Default|edge-account",
+                BrowserDisplayName: "tomcadesign@gmail.com",
+                BrowserEmail: "tomcadesign@gmail.com",
+                BrowserProfile: "Default",
+                BrowserAuthUserIndex: 0,
+                YouTubeAccountKey: "yt|handle|@egokickdoge3550",
+                YouTubeDisplayName: "egokick doge",
+                YouTubeHandle: "@egokickdoge3550",
+                YouTubeAuthUserIndex: 0,
+                FolderName: "egokick doge [67a24bf6]",
+                DownloadsPath: Path.Combine(paths.DownloadsPath, "egokick doge [67a24bf6]"),
+                ThumbnailCachePath: Path.Combine(paths.ThumbnailCachePath, "egokick doge [67a24bf6]"),
+                ArchivePath: Path.Combine(root, "archives", "egokick doge [67a24bf6].watch-later.archive.txt"));
+            Directory.CreateDirectory(edgeScope.DownloadsPath);
+            store.Register(edgeScope);
+            store.UpdateScopeInventory(edgeScope, downloadedVideoCount: 66, lastSuccessfulSyncAtUtc: DateTimeOffset.UtcNow);
+
+            var chromeScope = new AccountScopeResolver.ResolvedAccountScope(
+                ScopeKey: KnownLibraryScopeStore.BuildScopeKey(
+                    "Chrome|Default|108399420979782935353",
+                    "yt|page|101659640671648366543",
+                    "egokick [b881ee0b]"),
+                BrowserAccount: null,
+                YouTubeAccount: null,
+                BrowserAccountKey: "Chrome|Default|108399420979782935353",
+                BrowserDisplayName: "egokick doge",
+                BrowserEmail: "egokick@gmail.com",
+                BrowserProfile: "Default",
+                BrowserAuthUserIndex: 0,
+                YouTubeAccountKey: "yt|page|101659640671648366543",
+                YouTubeDisplayName: "egokick",
+                YouTubeHandle: "@egokick",
+                YouTubeAuthUserIndex: 0,
+                FolderName: "egokick [b881ee0b]",
+                DownloadsPath: Path.Combine(paths.DownloadsPath, "egokick [b881ee0b]"),
+                ThumbnailCachePath: Path.Combine(paths.ThumbnailCachePath, "egokick [b881ee0b]"),
+                ArchivePath: Path.Combine(root, "archives", "egokick [b881ee0b].watch-later.archive.txt"));
+            Directory.CreateDirectory(chromeScope.DownloadsPath);
+            store.Register(chromeScope);
+            store.UpdateScopeInventory(chromeScope, downloadedVideoCount: 320, lastSuccessfulSyncAtUtc: DateTimeOffset.UtcNow.AddMinutes(-5));
+
+            var service = new YouTubeAccountDiscoveryService(paths, store);
+            var settings = new AppSettings
+            {
+                BrowserCookies = BrowserCookieSource.Chrome,
+                BrowserProfile = "Default",
+                SelectedBrowserAccountKey = "Chrome|Default|108399420979782935353",
+                SelectedYouTubeAccountKey = "yt|handle|@egokickdoge3550"
+            };
+
+            var accounts = service.DiscoverAccounts(settings, browserAuthUserIndex: 0, allowNetwork: false);
+            var selected = service.ResolveSelectedAccount(settings, browserAuthUserIndex: 0, allowNetwork: false);
+
+            Assert.Equal(2, accounts.Count);
+            Assert.Contains(accounts, account => account.AccountKey == "yt|handle|@egokickdoge3550");
+            Assert.Contains(accounts, account => account.AccountKey == "yt|page|101659640671648366543");
+            Assert.True(selected.HasValue);
+            Assert.Equal("yt|handle|@egokickdoge3550", selected.Value.AccountKey);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }
