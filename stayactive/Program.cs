@@ -40,11 +40,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly SynchronizationContext _uiContext;
     private readonly InactivitySliderControl _idleThresholdControl;
     private readonly StickyContextMenuStrip _contextMenu;
+    private static readonly TimeSpan SyntheticInputTolerance = TimeSpan.FromSeconds(2);
 
     private AppSettings _settings;
     private CancellationTokenSource? _runnerCancellation;
     private Task? _runnerTask;
     private bool _isIdleTriggeredActive;
+    private long? _lastSyntheticInputTick;
     private bool _powerAssertionActive;
 
     public TrayApplicationContext()
@@ -154,6 +156,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private void SetActive(bool isActive, bool showBalloon)
     {
         _settings.IsActive = isActive;
+        ResetIdleTriggeredState();
         SettingsStore.Save(_settings);
 
         if (isActive && _settings.DimScreenWhenActiveEnabled)
@@ -202,6 +205,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private void ToggleEnableAfterInactivity()
     {
         _settings.EnableAfterInactivityEnabled = _enableAfterInactivityMenuItem.Checked;
+        ResetIdleTriggeredState();
         SettingsStore.Save(_settings);
         RefreshUi();
         ApplyRunnerState();
@@ -267,7 +271,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void UpdateIdleThreshold(int totalSeconds)
     {
+        if (_settings.EnableAfterInactivitySeconds == totalSeconds)
+        {
+            return;
+        }
+
         _settings.EnableAfterInactivitySeconds = totalSeconds;
+        ResetIdleTriggeredState();
         SettingsStore.Save(_settings);
         RefreshUi();
         ApplyRunnerState();
@@ -324,6 +334,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 if (_isIdleTriggeredActive != effectiveActive && !settings.IsActive)
                 {
                     _isIdleTriggeredActive = effectiveActive;
+                    if (!effectiveActive)
+                    {
+                        _lastSyntheticInputTick = null;
+                    }
+
                     _uiContext.Post(_ => RefreshUi(), null);
                 }
 
@@ -353,6 +368,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 if (settings.JiggleMouseEnabled)
                 {
                     InputSimulator.JiggleMouse();
+                    RecordSyntheticInput();
                 }
 
                 if (settings.TypeTextEnabled)
@@ -387,6 +403,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             cancellationToken.ThrowIfCancellationRequested();
             var character = text[index];
             InputSimulator.TypeCharacter(character);
+            RecordSyntheticInput();
             var delay = TypingProfile.GetDelay(text, index);
             if (delay > TimeSpan.Zero)
             {
@@ -443,11 +460,48 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
     }
 
-    private static bool IsEffectivelyActive(AppSettings settings)
+    private bool IsEffectivelyActive(AppSettings settings)
     {
-        return settings.IsActive
-            || (settings.EnableAfterInactivityEnabled
-                && IdleMonitor.GetInactiveDuration() >= TimeSpan.FromSeconds(settings.EnableAfterInactivitySeconds));
+        if (settings.IsActive)
+        {
+            return true;
+        }
+
+        if (!settings.EnableAfterInactivityEnabled)
+        {
+            return false;
+        }
+
+        if (_isIdleTriggeredActive)
+        {
+            return !HasUserInputSinceLastSyntheticInput();
+        }
+
+        return IdleMonitor.GetInactiveDuration() >= TimeSpan.FromSeconds(settings.EnableAfterInactivitySeconds);
+    }
+
+    private bool HasUserInputSinceLastSyntheticInput()
+    {
+        if (_lastSyntheticInputTick is null)
+        {
+            return false;
+        }
+
+        var elapsedSinceSynthetic = TimeSpan.FromMilliseconds(
+            Math.Max(0, Environment.TickCount64 - _lastSyntheticInputTick.Value));
+        var inactiveDuration = IdleMonitor.GetInactiveDuration();
+        return inactiveDuration + SyntheticInputTolerance < elapsedSinceSynthetic;
+    }
+
+    private void RecordSyntheticInput()
+    {
+        _lastSyntheticInputTick = Environment.TickCount64;
+    }
+
+    private void ResetIdleTriggeredState()
+    {
+        _isIdleTriggeredActive = false;
+        _lastSyntheticInputTick = null;
     }
 }
 
@@ -625,6 +679,8 @@ internal sealed class InactivitySliderControl : UserControl
 
     private readonly Label _valueLabel;
     private readonly TrackBar _trackBar;
+    private readonly System.Windows.Forms.Timer _commitTimer;
+    private int _committedSeconds;
     private bool _isInteracting;
 
     public InactivitySliderControl(int totalSeconds)
@@ -660,9 +716,19 @@ internal sealed class InactivitySliderControl : UserControl
             Bounds = new Rectangle(10, 30, 280, 36),
             Value = SecondsToSliderIndex(totalSeconds)
         };
-        _trackBar.Scroll += (_, _) => _valueLabel.Text = FormatDuration(TotalSeconds);
+        _commitTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 250
+        };
+        _commitTimer.Tick += (_, _) => CommitCurrentValue();
+        _trackBar.Scroll += (_, _) =>
+        {
+            _valueLabel.Text = FormatDuration(TotalSeconds);
+            ScheduleCommit();
+        };
         _trackBar.MouseDown += (_, _) => _isInteracting = true;
         _trackBar.MouseUp += (_, _) => CommitCurrentValue();
+        _trackBar.MouseWheel += (_, _) => ScheduleCommit();
         _trackBar.KeyUp += (_, e) =>
         {
             if (e.KeyCode is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.PageDown or Keys.PageUp)
@@ -670,6 +736,7 @@ internal sealed class InactivitySliderControl : UserControl
                 CommitCurrentValue();
             }
         };
+        _trackBar.Leave += (_, _) => CommitCurrentValue();
         _trackBar.MouseCaptureChanged += (_, _) =>
         {
             if (_isInteracting && Control.MouseButtons == MouseButtons.None)
@@ -682,6 +749,7 @@ internal sealed class InactivitySliderControl : UserControl
         Controls.Add(_valueLabel);
         Controls.Add(_trackBar);
 
+        _committedSeconds = TotalSeconds;
         _valueLabel.Text = FormatDuration(TotalSeconds);
     }
 
@@ -697,12 +765,25 @@ internal sealed class InactivitySliderControl : UserControl
             var normalized = SecondsToSliderIndex(value);
             if (_trackBar.Value == normalized)
             {
+                _committedSeconds = SliderValues[normalized];
+                _valueLabel.Text = FormatDuration(TotalSeconds);
                 return;
             }
 
             _trackBar.Value = normalized;
+            _committedSeconds = TotalSeconds;
             _valueLabel.Text = FormatDuration(TotalSeconds);
         }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _commitTimer.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 
     private static int SecondsToSliderIndex(int totalSeconds)
@@ -753,9 +834,23 @@ internal sealed class InactivitySliderControl : UserControl
 
     private void CommitCurrentValue()
     {
+        _commitTimer.Stop();
         _isInteracting = false;
-        _valueLabel.Text = FormatDuration(TotalSeconds);
+        var totalSeconds = TotalSeconds;
+        _valueLabel.Text = FormatDuration(totalSeconds);
+        if (totalSeconds == _committedSeconds)
+        {
+            return;
+        }
+
+        _committedSeconds = totalSeconds;
         ThresholdCommitted?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void ScheduleCommit()
+    {
+        _commitTimer.Stop();
+        _commitTimer.Start();
     }
 
     private static int[] BuildSliderValues()

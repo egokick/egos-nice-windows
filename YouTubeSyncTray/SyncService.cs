@@ -7,7 +7,7 @@ namespace YouTubeSyncTray;
 
 internal sealed class SyncService
 {
-    private const string HighestQualityFormatSelector = "bv*+ba/b";
+    private const string HighestQualityFormatSelector = "bv*[ext=mp4]+ba[ext=m4a]/bv*[ext=webm]+ba[ext=webm]/b[ext=mp4]/b[ext=webm]/bv*+ba/b";
 
     private readonly YoutubeSyncPaths _paths;
     private readonly ChromiumCookieExporter _chromiumCookieExporter;
@@ -175,11 +175,7 @@ internal sealed class SyncService
         args.Append($" --paths home:\"{accountScope.DownloadsPath}\" --paths temp:\"{accountScope.DownloadsPath}\"");
         args.Append(" --output \"%(playlist_index)03d - %(title).200B [%(id)s].%(ext)s\"");
         args.Append(" --windows-filenames --continue --part --no-overwrites --no-mtime --write-info-json --write-thumbnail");
-        args.Append(" --write-subs --write-auto-subs --sub-langs \"en.*,en,-live_chat\" --convert-subs srt");
-        if (!string.IsNullOrWhiteSpace(_paths.FfmpegRootPath))
-        {
-            args.Append(" --embed-subs");
-        }
+        args.Append(BuildSubtitleDownloadArguments());
         args.Append(BuildHighestQualityFormatArguments());
         args.Append($" \"{watchLaterUrl}\"");
 
@@ -297,11 +293,7 @@ internal sealed class SyncService
             args.Append($" --paths home:\"{accountScope.DownloadsPath}\" --paths temp:\"{accountScope.DownloadsPath}\"");
             args.Append(" --output \"%(title).200B [%(id)s].%(ext)s\"");
             args.Append(" --windows-filenames --continue --part --no-overwrites --no-mtime --write-info-json --write-thumbnail");
-            args.Append(" --write-subs --write-auto-subs --sub-langs \"en.*,en,-live_chat\" --convert-subs srt");
-            if (!string.IsNullOrWhiteSpace(_paths.FfmpegRootPath))
-            {
-                args.Append(" --embed-subs");
-            }
+            args.Append(BuildSubtitleDownloadArguments());
 
             args.Append(BuildHighestQualityFormatArguments());
             foreach (var videoId in normalizedIds)
@@ -451,6 +443,13 @@ internal sealed class SyncService
     {
         // Reset any earlier/custom sort so yt-dlp can choose the best available streams.
         return $" --format-sort-reset --format \"{HighestQualityFormatSelector}\"";
+    }
+
+    internal static string BuildSubtitleDownloadArguments()
+    {
+        // The browser player already loads caption sidecars separately; embedding subtitles
+        // tends to push yt-dlp/ffmpeg toward mkv outputs, which are less reliable in HTML5 playback.
+        return " --write-subs --write-auto-subs --sub-langs \"en.*,en,-live_chat\" --convert-subs srt";
     }
 
     private string? GetFfmpegLocation()

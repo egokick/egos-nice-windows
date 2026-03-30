@@ -9,6 +9,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly SyncService _syncService;
     private readonly YoutubeRemovalService _removalService;
     private readonly ThumbnailCacheService _thumbnailCacheService;
+    private readonly BrowserPlaybackOptimizer _browserPlaybackOptimizer;
     private readonly LibraryVideoStateStore _videoStateStore;
     private readonly UiThreadDispatcher _uiDispatcher;
     private readonly LibraryBrowserState _libraryState;
@@ -50,6 +51,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             libraryCatalogStore: _libraryCatalogStore);
         _removalService = new YoutubeRemovalService(_paths);
         _thumbnailCacheService = new ThumbnailCacheService(_paths);
+        _browserPlaybackOptimizer = new BrowserPlaybackOptimizer(_paths);
         _videoStateStore = new LibraryVideoStateStore(_paths);
         _uiDispatcher = new UiThreadDispatcher();
         _accountDiscovery = new BrowserAccountDiscoveryService(_knownLibraryScopeStore);
@@ -209,6 +211,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 queueWatchLaterTotalRefresh: false,
                 queueWatchLaterOrderRefresh: true,
                 restoreCachedWatchLaterOrder: true);
+            _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
             SetBusy(false, BuildBrowseReadyStatus());
         }
         catch (Exception ex)
@@ -309,6 +312,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             resetSyncAuthState: shouldClearWatchLaterTotalCount,
             queueWatchLaterOrderRefresh: true,
             restoreCachedWatchLaterOrder: true);
+        _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
         ShowInfoBalloon(
             BuildSettingsSavedMessage());
         RefreshMenu();
@@ -441,6 +445,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 resetSyncAuthState: shouldClearWatchLaterTotalCount,
                 queueWatchLaterOrderRefresh: true,
                 restoreCachedWatchLaterOrder: true);
+            _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
             RefreshMenu();
             return Task.FromResult(new LibraryWebServer.LibraryCommandResponse(true, BuildSettingsSavedMessage()));
         });
@@ -604,6 +609,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 watchLaterTotalProgress,
                 watchLaterOrderProgress,
                 syncTargetProgress));
+            await OptimizeLibraryPlaybackAsync(syncSettings, progress);
             var selectionChanged = TryPersistPromptSelectedBrowser(startingSettings, syncSettings);
             var automaticSyncPaused = PauseAutomaticSyncIfSatisfied(summary);
             RefreshLibraryForCurrentSelection(
@@ -671,6 +677,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 normalizedIds,
                 progress,
                 _shutdownCts.Token));
+            await OptimizeLibraryPlaybackAsync(syncSettings, progress);
             var selectionChanged = TryPersistPromptSelectedBrowser(startingSettings, syncSettings);
             RefreshLibraryForCurrentSelection(
                 clearWatchLaterTotalCount: selectionChanged,
@@ -1155,6 +1162,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 queueWatchLaterOrderRefresh: true,
                 refreshCurrentVideoIds: false,
                 restoreCachedWatchLaterOrder: true);
+            _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
             SetSyncAuthMissing("Authentication has not been checked for this library yet. Click Sync Now to reconnect if needed.");
 
             var message = _isBusy
@@ -1213,6 +1221,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 queueWatchLaterOrderRefresh: true,
                 refreshCurrentVideoIds: false,
                 restoreCachedWatchLaterOrder: true);
+            _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
             SetSyncAuthMissing("Authentication has not been checked for this YouTube account yet. Click Sync Now to reconnect if needed.");
 
             var message = _isBusy
@@ -1449,6 +1458,50 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (queueWatchLaterOrderRefresh)
         {
             QueueWatchLaterOrderRefresh();
+        }
+    }
+
+    private async Task<BrowserPlaybackOptimizationSummary> OptimizeLibraryPlaybackAsync(
+        AppSettings settings,
+        IProgress<string>? progress = null)
+    {
+        var accountScope = _accountScopeResolver.Resolve(settings);
+        var summary = await TrackShutdownTask(_browserPlaybackOptimizer.OptimizeLibraryAsync(
+            accountScope.DownloadsPath,
+            progress,
+            _shutdownCts.Token));
+        if (summary.ConvertedCount > 0 || summary.FailedCount > 0)
+        {
+            TrayLog.Write(
+                _paths,
+                $"Browser playback optimization for {accountScope.FolderName}: converted={summary.ConvertedCount}, skipped={summary.SkippedCount}, failed={summary.FailedCount}.");
+        }
+
+        return summary;
+    }
+
+    private async Task OptimizeLibraryPlaybackInBackgroundAsync(AppSettings settings)
+    {
+        try
+        {
+            var summary = await OptimizeLibraryPlaybackAsync(settings);
+            if (summary.ConvertedCount <= 0 || !MatchesLibrarySelection(settings, _settings))
+            {
+                return;
+            }
+
+            await _uiDispatcher.InvokeAsync(() =>
+            {
+                RefreshLibraryForCurrentSelection(queueWatchLaterTotalRefresh: false);
+                return Task.CompletedTask;
+            });
+        }
+        catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write(_paths, $"Background browser playback optimization failed: {ex}");
         }
     }
 

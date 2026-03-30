@@ -10,9 +10,22 @@ public sealed class SyncServiceTests
         var arguments = SyncService.BuildHighestQualityFormatArguments();
 
         Assert.Contains("--format-sort-reset", arguments, StringComparison.Ordinal);
+        Assert.Contains("bv*[ext=mp4]+ba[ext=m4a]", arguments, StringComparison.Ordinal);
+        Assert.Contains("bv*[ext=webm]+ba[ext=webm]", arguments, StringComparison.Ordinal);
         Assert.Contains("bv*+ba/b", arguments, StringComparison.Ordinal);
         Assert.DoesNotContain("1080", arguments, StringComparison.Ordinal);
         Assert.DoesNotContain("height<=", arguments, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildSubtitleDownloadArguments_UsesSidecarCaptionsWithoutEmbeddingThem()
+    {
+        var arguments = SyncService.BuildSubtitleDownloadArguments();
+
+        Assert.Contains("--write-subs", arguments, StringComparison.Ordinal);
+        Assert.Contains("--write-auto-subs", arguments, StringComparison.Ordinal);
+        Assert.Contains("--convert-subs srt", arguments, StringComparison.Ordinal);
+        Assert.DoesNotContain("--embed-subs", arguments, StringComparison.Ordinal);
     }
 
     [Theory]

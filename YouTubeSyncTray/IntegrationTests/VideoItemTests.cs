@@ -98,6 +98,117 @@ public sealed class VideoItemTests
     }
 
     [Fact]
+    public void LoadFromDownloads_IgnoresYtDlpIntermediateVideoArtifacts()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var basePath = Path.Combine(root, "001 - Example Clip [abc123]");
+            File.WriteAllText(basePath + ".webm", "merged");
+            File.WriteAllText(basePath + ".f248.webm", "video-only");
+            File.WriteAllText(basePath + ".temp.mp4", "temp");
+            File.WriteAllText(basePath + ".jpg", "thumb");
+            File.WriteAllText(
+                basePath + ".info.json",
+                JsonSerializer.Serialize(new
+                {
+                    id = "abc123",
+                    title = "Example Clip",
+                    uploader = "Example Creator",
+                    ext = "webm",
+                    playlist_index = 1
+                }));
+
+            var item = Assert.Single(VideoItem.LoadFromDownloads(root));
+            Assert.Equal("abc123", item.VideoId);
+            Assert.Equal(basePath + ".webm", item.VideoPath);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadFromDownloads_IgnoresYtDlpIntermediateArtifacts_WhenFallingBackToRawVideoFiles()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var basePath = Path.Combine(root, "007 - Missing Sidecar Clip [raw123]");
+            File.WriteAllText(basePath + ".mp4", "video");
+            File.WriteAllText(basePath + ".f137.mp4", "video-only");
+            File.WriteAllText(basePath + ".temp.mp4", "temp");
+
+            var item = Assert.Single(VideoItem.LoadFromDownloads(root));
+            Assert.Equal("raw123", item.VideoId);
+            Assert.Equal(basePath + ".mp4", item.VideoPath);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadFromDownloads_PrefersBrowserFriendlySiblingOverMkvMetadataEntry()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var basePath = Path.Combine(root, "001 - Example Clip [abc123]");
+            File.WriteAllText(basePath + ".mkv", "mkv");
+            File.WriteAllText(basePath + ".mp4", "mp4");
+            File.WriteAllText(basePath + ".jpg", "thumb");
+            File.WriteAllText(
+                basePath + ".info.json",
+                JsonSerializer.Serialize(new
+                {
+                    id = "abc123",
+                    title = "Example Clip",
+                    uploader = "Example Creator",
+                    ext = "mkv",
+                    playlist_index = 1
+                }));
+
+            var item = Assert.Single(VideoItem.LoadFromDownloads(root));
+            Assert.Equal(basePath + ".mp4", item.VideoPath);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadFromDownloads_FallbackScan_DeduplicatesSiblingVideoContainers()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var basePath = Path.Combine(root, "007 - Missing Sidecar Clip [raw123]");
+            File.WriteAllText(basePath + ".mkv", "mkv");
+            File.WriteAllText(basePath + ".mp4", "mp4");
+
+            var item = Assert.Single(VideoItem.LoadFromDownloads(root));
+            Assert.Equal("raw123", item.VideoId);
+            Assert.Equal(basePath + ".mp4", item.VideoPath);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadFromDownloads_DiscoversCaptionTracks_AndPrefersVttWhenAvailable()
     {
         var root = Path.Combine(Path.GetTempPath(), "YouTubeSyncTray.Tests", Guid.NewGuid().ToString("N"));
