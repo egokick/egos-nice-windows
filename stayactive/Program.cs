@@ -40,19 +40,24 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly SynchronizationContext _uiContext;
     private readonly InactivitySliderControl _idleThresholdControl;
     private readonly StickyContextMenuStrip _contextMenu;
-    private static readonly TimeSpan SyntheticInputTolerance = TimeSpan.FromSeconds(2);
+    private readonly object _settingsLock = new();
+    private readonly object _idleSessionLock = new();
+    private readonly ActivitySessionController _activityController;
+    private readonly IUserActivityMonitor _userActivityMonitor;
 
     private AppSettings _settings;
+    private CancellationTokenSource? _idleSessionCancellation;
     private CancellationTokenSource? _runnerCancellation;
     private Task? _runnerTask;
-    private bool _isIdleTriggeredActive;
-    private long? _lastSyntheticInputTick;
     private bool _powerAssertionActive;
 
     public TrayApplicationContext()
     {
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = SettingsStore.Load();
+        _activityController = new ActivitySessionController(new SystemIdleMonitor(), new SystemMonitorBrightnessService());
+        _userActivityMonitor = new UserActivityMonitor();
+        _userActivityMonitor.RealUserActivity += (_, _) => _uiContext.Post(_ => HandleRealUserActivity(), null);
         _activeIcon = TrayIconFactory.CreateEyeOpenIcon();
         _inactiveIcon = TrayIconFactory.CreateEyeClosedIcon();
 
@@ -130,6 +135,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _notifyIcon.MouseClick += NotifyIconOnMouseClick;
 
+        RefreshActivityController();
         RefreshUi();
         EnsureStartupPreference();
         ApplyRunnerState();
@@ -138,6 +144,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
     protected override void ExitThreadCore()
     {
         StopRunner();
+        SyncIdleSessionCancellation(idleSessionActive: false);
+        _activityController.Shutdown();
+        _userActivityMonitor.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _activeIcon.Dispose();
@@ -149,21 +158,101 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (e.Button == MouseButtons.Left)
         {
-            SetActive(!_settings.IsActive, showBalloon: true);
+            SetActive(!GetSettingsSnapshot().IsActive, showBalloon: true);
         }
+    }
+
+    private AppSettings GetSettingsSnapshot()
+    {
+        lock (_settingsLock)
+        {
+            return _settings.Clone();
+        }
+    }
+
+    private void UpdateSettings(Action<AppSettings> update)
+    {
+        lock (_settingsLock)
+        {
+            update(_settings);
+            SettingsStore.Save(_settings);
+        }
+    }
+
+    private void SyncIdleSessionCancellation(bool idleSessionActive)
+    {
+        CancellationTokenSource? cancellationToDispose = null;
+
+        lock (_idleSessionLock)
+        {
+            if (idleSessionActive)
+            {
+                if (_idleSessionCancellation is null || _idleSessionCancellation.IsCancellationRequested)
+                {
+                    cancellationToDispose = _idleSessionCancellation;
+                    _idleSessionCancellation = new CancellationTokenSource();
+                }
+            }
+            else if (_idleSessionCancellation is not null)
+            {
+                cancellationToDispose = _idleSessionCancellation;
+                _idleSessionCancellation = null;
+            }
+        }
+
+        if (cancellationToDispose is null)
+        {
+            return;
+        }
+
+        try
+        {
+            cancellationToDispose.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        finally
+        {
+            cancellationToDispose.Dispose();
+        }
+    }
+
+    private CancellationToken GetIdleSessionToken()
+    {
+        lock (_idleSessionLock)
+        {
+            return _idleSessionCancellation?.Token ?? CancellationToken.None;
+        }
+    }
+
+    private CancellationTokenSource? CreateActivityScope(CancellationToken runnerToken, bool idleSessionActive)
+    {
+        if (!idleSessionActive)
+        {
+            return null;
+        }
+
+        var idleSessionToken = GetIdleSessionToken();
+        if (!idleSessionToken.CanBeCanceled)
+        {
+            return null;
+        }
+
+        return CancellationTokenSource.CreateLinkedTokenSource(runnerToken, idleSessionToken);
+    }
+
+    private bool RefreshActivityController()
+    {
+        var changed = _activityController.Refresh(GetSettingsSnapshot());
+        SyncIdleSessionCancellation(_activityController.IdleSessionActive);
+        return changed;
     }
 
     private void SetActive(bool isActive, bool showBalloon)
     {
-        _settings.IsActive = isActive;
-        ResetIdleTriggeredState();
-        SettingsStore.Save(_settings);
-
-        if (isActive && _settings.DimScreenWhenActiveEnabled)
-        {
-            TryDimScreen();
-        }
-
+        UpdateSettings(settings => settings.IsActive = isActive);
+        RefreshActivityController();
         RefreshUi();
         ApplyRunnerState();
 
@@ -175,38 +264,31 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void ToggleJiggleMouse()
     {
-        _settings.JiggleMouseEnabled = _jiggleMouseMenuItem.Checked;
-        SettingsStore.Save(_settings);
+        UpdateSettings(settings => settings.JiggleMouseEnabled = _jiggleMouseMenuItem.Checked);
+        RefreshActivityController();
         RefreshUi();
         ApplyRunnerState();
     }
 
     private void ToggleTypeText()
     {
-        _settings.TypeTextEnabled = _typeTextMenuItem.Checked;
-        SettingsStore.Save(_settings);
+        UpdateSettings(settings => settings.TypeTextEnabled = _typeTextMenuItem.Checked);
+        RefreshActivityController();
         RefreshUi();
         ApplyRunnerState();
     }
 
     private void ToggleDimScreen()
     {
-        _settings.DimScreenWhenActiveEnabled = _dimScreenMenuItem.Checked;
-        SettingsStore.Save(_settings);
-
-        if (IsEffectivelyActive(_settings) && _settings.DimScreenWhenActiveEnabled)
-        {
-            TryDimScreen();
-        }
-
+        UpdateSettings(settings => settings.DimScreenWhenActiveEnabled = _dimScreenMenuItem.Checked);
+        RefreshActivityController();
         RefreshUi();
     }
 
     private void ToggleEnableAfterInactivity()
     {
-        _settings.EnableAfterInactivityEnabled = _enableAfterInactivityMenuItem.Checked;
-        ResetIdleTriggeredState();
-        SettingsStore.Save(_settings);
+        UpdateSettings(settings => settings.EnableAfterInactivityEnabled = _enableAfterInactivityMenuItem.Checked);
+        RefreshActivityController();
         RefreshUi();
         ApplyRunnerState();
     }
@@ -254,39 +336,37 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private void TryDimScreen()
-    {
-        try
-        {
-            if (!BrightnessService.TrySetLowestBrightness())
-            {
-                ShowErrorBalloon("Could not dim the screen on this display.");
-            }
-        }
-        catch (Exception ex)
-        {
-            ShowErrorBalloon($"Screen dim failed: {ex.Message}");
-        }
-    }
-
     private void UpdateIdleThreshold(int totalSeconds)
     {
-        if (_settings.EnableAfterInactivitySeconds == totalSeconds)
+        var settings = GetSettingsSnapshot();
+        if (settings.EnableAfterInactivitySeconds == totalSeconds)
         {
             return;
         }
 
-        _settings.EnableAfterInactivitySeconds = totalSeconds;
-        ResetIdleTriggeredState();
-        SettingsStore.Save(_settings);
+        UpdateSettings(current => current.EnableAfterInactivitySeconds = totalSeconds);
+        RefreshActivityController();
         RefreshUi();
         ApplyRunnerState();
     }
 
+    private void HandleRealUserActivity()
+    {
+        var settings = GetSettingsSnapshot();
+        if (!_activityController.HandleRealUserActivity(settings))
+        {
+            return;
+        }
+
+        SyncIdleSessionCancellation(idleSessionActive: false);
+        RefreshUi();
+    }
+
     private void ApplyRunnerState()
     {
-        var hasWorkEnabled = _settings.JiggleMouseEnabled || _settings.TypeTextEnabled;
-        if (hasWorkEnabled && (_settings.IsActive || _settings.EnableAfterInactivityEnabled))
+        var settings = GetSettingsSnapshot();
+        var hasWorkEnabled = settings.JiggleMouseEnabled || settings.TypeTextEnabled;
+        if (hasWorkEnabled && (settings.IsActive || settings.EnableAfterInactivityEnabled))
         {
             StartRunner();
             return;
@@ -325,23 +405,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            var settings = SettingsStore.Load();
-            _settings = settings;
+            var settings = GetSettingsSnapshot();
 
             try
             {
-                var effectiveActive = IsEffectivelyActive(settings);
-                if (_isIdleTriggeredActive != effectiveActive && !settings.IsActive)
+                if (_activityController.Refresh(settings))
                 {
-                    _isIdleTriggeredActive = effectiveActive;
-                    if (!effectiveActive)
-                    {
-                        _lastSyntheticInputTick = null;
-                    }
-
+                    SyncIdleSessionCancellation(_activityController.IdleSessionActive);
                     _uiContext.Post(_ => RefreshUi(), null);
                 }
+                else
+                {
+                    SyncIdleSessionCancellation(_activityController.IdleSessionActive);
+                }
 
+                var effectiveActive = _activityController.IsEffectivelyActive(settings);
                 if (!effectiveActive)
                 {
                     if (_powerAssertionActive)
@@ -354,21 +432,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     continue;
                 }
 
+                using var activityScope = CreateActivityScope(cancellationToken, _activityController.IdleSessionActive);
+                var activityToken = activityScope?.Token ?? cancellationToken;
+
                 if (!_powerAssertionActive)
                 {
                     PowerAssertion.Enable();
                     _powerAssertionActive = true;
                 }
 
-                if (settings.DimScreenWhenActiveEnabled)
-                {
-                    TryDimScreen();
-                }
-
                 if (settings.JiggleMouseEnabled)
                 {
-                    InputSimulator.JiggleMouse();
-                    RecordSyntheticInput();
+                    InputSimulator.JiggleMouse(activityToken);
                 }
 
                 if (settings.TypeTextEnabled)
@@ -376,16 +451,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     var text = SettingsStore.ReadTypingText();
                     if (!string.IsNullOrWhiteSpace(text))
                     {
-                        await TypeTextAsync(text, cancellationToken);
-                        await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+                        await TypeTextAsync(text, activityToken);
+                        await Task.Delay(TimeSpan.FromSeconds(5), activityToken);
                         continue;
                     }
                 }
 
-                await Task.Delay(ActivityProfile.GetIdleDelay(), cancellationToken);
+                await Task.Delay(ActivityProfile.GetIdleDelay(), activityToken);
             }
             catch (OperationCanceledException)
             {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    continue;
+                }
+
                 break;
             }
             catch (Exception ex)
@@ -403,7 +483,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
             cancellationToken.ThrowIfCancellationRequested();
             var character = text[index];
             InputSimulator.TypeCharacter(character);
-            RecordSyntheticInput();
             var delay = TypingProfile.GetDelay(text, index);
             if (delay > TimeSpan.Zero)
             {
@@ -423,19 +502,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void RefreshUi()
     {
-        _activeMenuItem.Checked = _settings.IsActive;
-        _jiggleMouseMenuItem.Checked = _settings.JiggleMouseEnabled;
-        _typeTextMenuItem.Checked = _settings.TypeTextEnabled;
+        var settings = GetSettingsSnapshot();
+        _activeMenuItem.Checked = settings.IsActive;
+        _jiggleMouseMenuItem.Checked = settings.JiggleMouseEnabled;
+        _typeTextMenuItem.Checked = settings.TypeTextEnabled;
         _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
-        _dimScreenMenuItem.Checked = _settings.DimScreenWhenActiveEnabled;
-        _enableAfterInactivityMenuItem.Checked = _settings.EnableAfterInactivityEnabled;
-        _idleThresholdControl.TotalSeconds = _settings.EnableAfterInactivitySeconds;
-        _idleThresholdHost.Visible = _settings.EnableAfterInactivityEnabled;
+        _dimScreenMenuItem.Checked = settings.DimScreenWhenActiveEnabled;
+        _enableAfterInactivityMenuItem.Checked = settings.EnableAfterInactivityEnabled;
+        _idleThresholdControl.TotalSeconds = settings.EnableAfterInactivitySeconds;
+        _idleThresholdHost.Visible = settings.EnableAfterInactivityEnabled;
 
-        var effectiveActive = IsEffectivelyActive(_settings);
+        var effectiveActive = _activityController.IsEffectivelyActive(settings);
         _notifyIcon.Icon = effectiveActive ? _activeIcon : _inactiveIcon;
         _notifyIcon.Text = effectiveActive
-            ? (_settings.IsActive ? "StayActive: active" : "StayActive: active after inactivity")
+            ? (settings.IsActive ? "StayActive: active" : "StayActive: active after inactivity")
             : "StayActive: inactive";
     }
 
@@ -459,50 +539,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Size = control.Size
         };
     }
-
-    private bool IsEffectivelyActive(AppSettings settings)
-    {
-        if (settings.IsActive)
-        {
-            return true;
-        }
-
-        if (!settings.EnableAfterInactivityEnabled)
-        {
-            return false;
-        }
-
-        if (_isIdleTriggeredActive)
-        {
-            return !HasUserInputSinceLastSyntheticInput();
-        }
-
-        return IdleMonitor.GetInactiveDuration() >= TimeSpan.FromSeconds(settings.EnableAfterInactivitySeconds);
-    }
-
-    private bool HasUserInputSinceLastSyntheticInput()
-    {
-        if (_lastSyntheticInputTick is null)
-        {
-            return false;
-        }
-
-        var elapsedSinceSynthetic = TimeSpan.FromMilliseconds(
-            Math.Max(0, Environment.TickCount64 - _lastSyntheticInputTick.Value));
-        var inactiveDuration = IdleMonitor.GetInactiveDuration();
-        return inactiveDuration + SyntheticInputTolerance < elapsedSinceSynthetic;
-    }
-
-    private void RecordSyntheticInput()
-    {
-        _lastSyntheticInputTick = Environment.TickCount64;
-    }
-
-    private void ResetIdleTriggeredState()
-    {
-        _isIdleTriggeredActive = false;
-        _lastSyntheticInputTick = null;
-    }
 }
 
 internal sealed class AppSettings
@@ -520,6 +556,20 @@ internal sealed class AppSettings
     public bool EnableAfterInactivityEnabled { get; set; }
 
     public int EnableAfterInactivitySeconds { get; set; } = 300;
+
+    public AppSettings Clone()
+    {
+        return new AppSettings
+        {
+            StartupInitialized = StartupInitialized,
+            IsActive = IsActive,
+            JiggleMouseEnabled = JiggleMouseEnabled,
+            TypeTextEnabled = TypeTextEnabled,
+            DimScreenWhenActiveEnabled = DimScreenWhenActiveEnabled,
+            EnableAfterInactivityEnabled = EnableAfterInactivityEnabled,
+            EnableAfterInactivitySeconds = EnableAfterInactivitySeconds
+        };
+    }
 }
 
 internal static class StartupService
@@ -627,6 +677,30 @@ internal static class SettingsStore
 
 internal static class BrightnessService
 {
+    public static BrightnessSnapshot? CaptureCurrentBrightness()
+    {
+        using var brightnessSearcher = new ManagementObjectSearcher(
+            @"root\wmi",
+            "SELECT * FROM WmiMonitorBrightness WHERE Active = TRUE");
+
+        var levels = new List<MonitorBrightnessLevel>();
+        foreach (ManagementObject brightness in brightnessSearcher.Get())
+        {
+            var instanceName = brightness["InstanceName"] as string;
+            var currentBrightness = brightness["CurrentBrightness"];
+            if (string.IsNullOrWhiteSpace(instanceName) || currentBrightness is null)
+            {
+                continue;
+            }
+
+            levels.Add(new MonitorBrightnessLevel(instanceName, Convert.ToByte(currentBrightness)));
+        }
+
+        return levels.Count == 0
+            ? null
+            : new BrightnessSnapshot(levels);
+    }
+
     public static bool TrySetLowestBrightness()
     {
         var lowestBrightness = GetLowestSupportedBrightness();
@@ -643,6 +717,31 @@ internal static class BrightnessService
         }
 
         return updated;
+    }
+
+    public static void Restore(BrightnessSnapshot snapshot)
+    {
+        var brightnessByMonitor = snapshot.Levels.ToDictionary(level => level.InstanceName, level => level.Brightness, StringComparer.OrdinalIgnoreCase);
+        if (brightnessByMonitor.Count == 0)
+        {
+            return;
+        }
+
+        using var methodsSearcher = new ManagementObjectSearcher(
+            @"root\wmi",
+            "SELECT * FROM WmiMonitorBrightnessMethods WHERE Active = TRUE");
+
+        foreach (ManagementObject method in methodsSearcher.Get())
+        {
+            var instanceName = method["InstanceName"] as string;
+            if (string.IsNullOrWhiteSpace(instanceName)
+                || !brightnessByMonitor.TryGetValue(instanceName, out var brightness))
+            {
+                continue;
+            }
+
+            method.InvokeMethod("WmiSetBrightness", new object[] { 1u, brightness });
+        }
     }
 
     private static byte GetLowestSupportedBrightness()
@@ -912,10 +1011,9 @@ internal static class IdleMonitor
             return TimeSpan.Zero;
         }
 
-        var elapsedMilliseconds = Environment.TickCount64 - info.dwTime;
-        return elapsedMilliseconds <= 0
-            ? TimeSpan.Zero
-            : TimeSpan.FromMilliseconds(elapsedMilliseconds);
+        var currentTick = unchecked((uint)Environment.TickCount64);
+        var elapsedMilliseconds = unchecked(currentTick - info.dwTime);
+        return TimeSpan.FromMilliseconds(elapsedMilliseconds);
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -1042,8 +1140,9 @@ internal static class InputSimulator
     private const uint KeyeventfUnicode = 0x0004;
     private const ushort VkReturn = 0x0D;
     private const ushort VkTab = 0x09;
+    internal static readonly IntPtr SyntheticInputMarker = new(unchecked((long)0x5354415941435449));
 
-    public static void JiggleMouse()
+    public static void JiggleMouse(CancellationToken cancellationToken)
     {
         var pattern = ActivityProfile.GetCirclePattern();
         var previousX = 0;
@@ -1051,6 +1150,7 @@ internal static class InputSimulator
 
         for (var step = 0; step < pattern.Steps; step++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var angle = (pattern.StartAngleDegrees + (step * 360.0 / pattern.Steps)) * Math.PI / 180.0;
             var wobble = Math.Sin(angle * 2.0) * 1.5;
             var radius = pattern.Radius + wobble;
@@ -1098,7 +1198,8 @@ internal static class InputSimulator
                     {
                         dx = deltaX,
                         dy = deltaY,
-                        dwFlags = MouseeventfMove
+                        dwFlags = MouseeventfMove,
+                        dwExtraInfo = SyntheticInputMarker
                     }
                 }
             }
@@ -1118,7 +1219,8 @@ internal static class InputSimulator
                 {
                     ki = new KeyboardInput
                     {
-                        wVk = virtualKey
+                        wVk = virtualKey,
+                        dwExtraInfo = SyntheticInputMarker
                     }
                 }
             },
@@ -1130,7 +1232,8 @@ internal static class InputSimulator
                     ki = new KeyboardInput
                     {
                         wVk = virtualKey,
-                        dwFlags = KeyeventfKeyup
+                        dwFlags = KeyeventfKeyup,
+                        dwExtraInfo = SyntheticInputMarker
                     }
                 }
             }
@@ -1151,7 +1254,8 @@ internal static class InputSimulator
                     ki = new KeyboardInput
                     {
                         wScan = character,
-                        dwFlags = KeyeventfUnicode
+                        dwFlags = KeyeventfUnicode,
+                        dwExtraInfo = SyntheticInputMarker
                     }
                 }
             },
@@ -1163,7 +1267,8 @@ internal static class InputSimulator
                     ki = new KeyboardInput
                     {
                         wScan = character,
-                        dwFlags = KeyeventfUnicode | KeyeventfKeyup
+                        dwFlags = KeyeventfUnicode | KeyeventfKeyup,
+                        dwExtraInfo = SyntheticInputMarker
                     }
                 }
             }
