@@ -59,9 +59,8 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/videos/")) {
     const isThumbnail = url.pathname.endsWith("/thumbnail");
     const isCaptionFile = url.pathname.includes("/captions/") && url.pathname.endsWith("/file");
-    const isFullStream = url.pathname.endsWith("/stream") && !request.headers.has("range");
 
-    if (isThumbnail || isCaptionFile || isFullStream) {
+    if (isThumbnail || isCaptionFile) {
       event.respondWith(staleWhileRevalidate(request, MEDIA_CACHE));
     }
   }

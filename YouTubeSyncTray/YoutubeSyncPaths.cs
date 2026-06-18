@@ -20,7 +20,7 @@ internal sealed class YoutubeSyncPaths
         var stateRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "YouTubeSyncTray");
-        var downloadsRoot = ResolveDownloadsRoot(assetRoot);
+        var downloadsRoot = ResolveDownloadsRoot(stateRoot);
 
         MaybeMigrateLegacyState(assetRoot, stateRoot);
         MaybeMigrateDownloads(stateRoot, assetRoot, downloadsRoot);
@@ -48,6 +48,7 @@ internal sealed class YoutubeSyncPaths
             FfmpegRootPath = ffmpegRoot
         };
 
+        ValidateRequiredAssets(paths);
         Directory.CreateDirectory(paths.RootPath);
         Directory.CreateDirectory(paths.BrowserProfilesPath);
         Directory.CreateDirectory(paths.DownloadsPath);
@@ -57,18 +58,9 @@ internal sealed class YoutubeSyncPaths
         return paths;
     }
 
-    private static string ResolveDownloadsRoot(string assetRoot)
+    private static string ResolveDownloadsRoot(string stateRoot)
     {
-        var projectRoot = FindProjectRoot(assetRoot);
-        if (!string.IsNullOrWhiteSpace(projectRoot))
-        {
-            return Path.Combine(projectRoot, "Downloads");
-        }
-
-        var assetParent = Directory.GetParent(assetRoot)?.FullName;
-        return string.IsNullOrWhiteSpace(assetParent)
-            ? Path.Combine(AppContext.BaseDirectory, "Downloads")
-            : Path.Combine(assetParent, "Downloads");
+        return Path.Combine(stateRoot, "Downloads");
     }
 
     private static string? FindProjectRoot(string assetRoot)
@@ -161,14 +153,26 @@ internal sealed class YoutubeSyncPaths
             var stateDownloads = Path.Combine(stateRoot, "downloads");
             if (Directory.Exists(stateDownloads) && Directory.EnumerateFileSystemEntries(stateDownloads).Any())
             {
-                CopyDirectoryIfExists(stateDownloads, downloadsRoot);
+                MoveDirectoryContentsIfExists(stateDownloads, downloadsRoot);
                 return;
             }
 
             var legacyDownloads = ResolveLegacyDirectoryPath(legacyRoot, "downloads");
             if (Directory.Exists(legacyDownloads) && Directory.EnumerateFileSystemEntries(legacyDownloads).Any())
             {
-                CopyDirectoryIfExists(legacyDownloads, downloadsRoot);
+                MoveDirectoryContentsIfExists(legacyDownloads, downloadsRoot);
+                return;
+            }
+
+            var projectRoot = FindProjectRoot(legacyRoot);
+            var projectDownloads = string.IsNullOrWhiteSpace(projectRoot)
+                ? null
+                : Path.Combine(projectRoot, "Downloads");
+            if (!string.IsNullOrWhiteSpace(projectDownloads)
+                && Directory.Exists(projectDownloads)
+                && Directory.EnumerateFileSystemEntries(projectDownloads).Any())
+            {
+                MoveDirectoryContentsIfExists(projectDownloads, downloadsRoot);
             }
         }
         catch
@@ -210,6 +214,41 @@ internal sealed class YoutubeSyncPaths
         }
     }
 
+    private static void MoveDirectoryContentsIfExists(string sourcePath, string destinationPath)
+    {
+        if (!Directory.Exists(sourcePath))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(destinationPath);
+        foreach (var directory in Directory.GetDirectories(sourcePath, "*", SearchOption.AllDirectories))
+        {
+            var relativePath = Path.GetRelativePath(sourcePath, directory);
+            Directory.CreateDirectory(Path.Combine(destinationPath, relativePath));
+        }
+
+        foreach (var file in Directory.GetFiles(sourcePath, "*", SearchOption.AllDirectories))
+        {
+            var relativePath = Path.GetRelativePath(sourcePath, file);
+            var destinationFile = Path.Combine(destinationPath, relativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
+            if (File.Exists(destinationFile))
+            {
+                continue;
+            }
+
+            try
+            {
+                File.Move(file, destinationFile);
+            }
+            catch
+            {
+                File.Copy(file, destinationFile, overwrite: false);
+            }
+        }
+    }
+
     private static void CopyFileIfExists(string sourcePath, string destinationPath)
     {
         if (!File.Exists(sourcePath))
@@ -219,6 +258,26 @@ internal sealed class YoutubeSyncPaths
 
         Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
         File.Copy(sourcePath, destinationPath, overwrite: false);
+    }
+
+    private static void ValidateRequiredAssets(YoutubeSyncPaths paths)
+    {
+        if (!File.Exists(paths.YtDlpPath))
+        {
+            throw new FileNotFoundException(
+                $"Could not find bundled yt-dlp at {paths.YtDlpPath}. Restore YouTubeSyncTray/youtube-sync/yt-dlp.exe before starting YouTube Sync.",
+                paths.YtDlpPath);
+        }
+
+        var ffmpegExe = string.IsNullOrWhiteSpace(paths.FfmpegRootPath)
+            ? null
+            : Path.Combine(paths.FfmpegRootPath, "bin", "ffmpeg.exe");
+        if (string.IsNullOrWhiteSpace(ffmpegExe) || !File.Exists(ffmpegExe))
+        {
+            throw new FileNotFoundException(
+                "Could not find bundled ffmpeg. Restore YouTubeSyncTray/youtube-sync/tools/ffmpeg-*/bin/ffmpeg.exe before starting YouTube Sync.",
+                ffmpegExe ?? string.Empty);
+        }
     }
 
     private static string ResolveLegacyDirectoryPath(string legacyRoot, string name)

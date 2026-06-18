@@ -46,6 +46,7 @@ const state = {
   savedPlaybackProgressByVideoId: new Map(),
   syncAuthMessage: "Authentication has not been verified yet for the selected account.",
   syncAuthState: "missing",
+  syncPaused: false,
   syncButtonAnimationFrame: 0,
   syncButtonAnimationTimer: null,
   toastTimer: null,
@@ -2177,6 +2178,9 @@ function updateStatus(status, options = {}) {
   state.lastStatusPayload = JSON.parse(JSON.stringify(status));
   state.isUsingCachedSnapshot = Boolean(options.fromCache);
   state.isBusy = Boolean(status.isBusy);
+  state.syncPaused = !state.isBusy
+    && typeof status.status === "string"
+    && status.status.toLowerCase().includes("sync paused");
   state.isRefreshingYouTubeAccounts = Boolean(status.isRefreshingYouTubeAccounts);
   state.syncAuthState = normalizeSyncAuthState(status.syncAuthState);
   state.syncAuthMessage = typeof status.syncAuthMessage === "string" && status.syncAuthMessage.trim() !== ""
@@ -2241,7 +2245,7 @@ function updateStatus(status, options = {}) {
     resetCaptionUi();
   }
 
-  elements.syncButton.disabled = state.isBusy;
+  elements.syncButton.disabled = false;
   updateSyncButtonState(state.isBusy);
   elements.settingsButton.disabled = false;
   elements.clearSelectionButton.disabled = state.isBusy && state.selectedIds.size === 0;
@@ -2269,14 +2273,15 @@ function updateSyncButtonState(isBusy) {
     }
 
     state.syncButtonAnimationFrame = 0;
-    elements.syncButton.textContent = "Sync Now";
-    elements.syncButton.setAttribute("aria-label", `Sync Now. ${state.syncAuthMessage}`);
+    elements.syncButton.textContent = state.syncPaused ? "Resume Sync" : "Sync Now";
+    elements.syncButton.setAttribute("aria-label", `${elements.syncButton.textContent}. ${state.syncAuthMessage}`);
     return;
   }
 
   const frames = ["Syncing.", "Syncing..", "Syncing..."];
   elements.syncButton.textContent = frames[state.syncButtonAnimationFrame % frames.length];
-  elements.syncButton.setAttribute("aria-label", `${elements.syncButton.textContent} ${state.syncAuthMessage}`);
+  elements.syncButton.title = `Click to pause syncing. ${state.syncAuthMessage}`;
+  elements.syncButton.setAttribute("aria-label", `${elements.syncButton.textContent} Click to pause syncing. ${state.syncAuthMessage}`);
 
   if (state.syncButtonAnimationTimer !== null) {
     return;
@@ -2285,7 +2290,7 @@ function updateSyncButtonState(isBusy) {
   state.syncButtonAnimationTimer = window.setInterval(() => {
     state.syncButtonAnimationFrame = (state.syncButtonAnimationFrame + 1) % frames.length;
     elements.syncButton.textContent = frames[state.syncButtonAnimationFrame];
-    elements.syncButton.setAttribute("aria-label", `${elements.syncButton.textContent} ${state.syncAuthMessage}`);
+    elements.syncButton.setAttribute("aria-label", `${elements.syncButton.textContent} Click to pause syncing. ${state.syncAuthMessage}`);
   }, 500);
 }
 

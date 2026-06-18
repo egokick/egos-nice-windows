@@ -69,7 +69,10 @@ internal sealed class ThumbnailCacheService
             using var cancellationRegistration = cancellationToken.Register(() => TryStopProcess(process));
             try
             {
+                var stdOutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                var stdErrTask = process.StandardError.ReadToEndAsync(cancellationToken);
                 await process.WaitForExitAsync(cancellationToken);
+                await Task.WhenAll(stdOutTask, stdErrTask);
             }
             finally
             {

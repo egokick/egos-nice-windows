@@ -16,10 +16,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Remove="AuthTool\**\*.cs;IntegrationTests\**\*.cs" />
-    <EmbeddedResource Remove="AuthTool\**\*;IntegrationTests\**\*" />
-    <None Remove="AuthTool\**\*;IntegrationTests\**\*" />
-    <Content Remove="AuthTool\**\*;IntegrationTests\**\*" />
+    <Compile Remove="AuthTool\**\*.cs;IntegrationTests\**\*.cs;bin\**\*.cs;obj\**\*.cs" />
+    <EmbeddedResource Remove="AuthTool\**\*;IntegrationTests\**\*;bin\**\*;obj\**\*" />
+    <None Remove="AuthTool\**\*;IntegrationTests\**\*;bin\**\*;obj\**\*" />
+    <Content Remove="AuthTool\**\*;IntegrationTests\**\*;bin\**\*;obj\**\*" />
   </ItemGroup>
 
   <ItemGroup>

@@ -35,6 +35,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _enableAfterInactivityMenuItem;
     private readonly ToolStripControlHost _idleThresholdHost;
     private readonly ToolStripMenuItem _editTextMenuItem;
+    private readonly ToolStripMenuItem _openWorkVmMenuItem;
+    private readonly ToolStripMenuItem _switchBluetoothToVmMenuItem;
+    private readonly ToolStripMenuItem _returnBluetoothToLaptopMenuItem;
     private readonly Icon _activeIcon;
     private readonly Icon _inactiveIcon;
     private readonly SynchronizationContext _uiContext;
@@ -44,12 +47,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly object _idleSessionLock = new();
     private readonly ActivitySessionController _activityController;
     private readonly IUserActivityMonitor _userActivityMonitor;
+    private readonly WorkVmService _workVmService;
 
     private AppSettings _settings;
+    private WorkVmStatus? _workVmStatus;
     private CancellationTokenSource? _idleSessionCancellation;
     private CancellationTokenSource? _runnerCancellation;
     private Task? _runnerTask;
     private bool _powerAssertionActive;
+    private bool _workVmActionRunning;
+    private bool _workVmStatusRefreshRunning;
 
     public TrayApplicationContext()
     {
@@ -57,6 +64,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settings = SettingsStore.Load();
         _activityController = new ActivitySessionController(new SystemIdleMonitor(), new SystemMonitorBrightnessService());
         _userActivityMonitor = new UserActivityMonitor();
+        _workVmService = new WorkVmService();
         _userActivityMonitor.RealUserActivity += (_, _) => _uiContext.Post(_ => HandleRealUserActivity(), null);
         _activeIcon = TrayIconFactory.CreateEyeOpenIcon();
         _inactiveIcon = TrayIconFactory.CreateEyeClosedIcon();
@@ -104,11 +112,24 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _editTextMenuItem = new ToolStripMenuItem("Edit text file");
         _editTextMenuItem.Click += (_, _) => OpenTextFile();
 
+        _openWorkVmMenuItem = new ToolStripMenuItem("Open VM");
+        _openWorkVmMenuItem.Click += (_, _) => OpenWorkVm();
+
+        _switchBluetoothToVmMenuItem = new ToolStripMenuItem("Put Bluetooth on VM");
+        _switchBluetoothToVmMenuItem.Click += (_, _) => SwitchBluetoothToVm();
+
+        _returnBluetoothToLaptopMenuItem = new ToolStripMenuItem("Put Bluetooth on laptop");
+        _returnBluetoothToLaptopMenuItem.Click += (_, _) => ReturnBluetoothToLaptop();
+
         var exitMenuItem = new ToolStripMenuItem("Exit");
         exitMenuItem.Click += (_, _) => ExitThread();
 
         _contextMenu = new StickyContextMenuStrip();
-        _contextMenu.Opening += (_, _) => RefreshUi();
+        _contextMenu.Opening += (_, _) =>
+        {
+            RefreshUi();
+            QueueWorkVmStatusRefresh();
+        };
         _contextMenu.RegisterStickyItem(_activeMenuItem);
         _contextMenu.RegisterStickyItem(_jiggleMouseMenuItem);
         _contextMenu.RegisterStickyItem(_typeTextMenuItem);
@@ -125,6 +146,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _contextMenu.Items.Add(_idleThresholdHost);
         _contextMenu.Items.Add(_editTextMenuItem);
         _contextMenu.Items.Add(new ToolStripSeparator());
+        _contextMenu.Items.Add(_openWorkVmMenuItem);
+        _contextMenu.Items.Add(_switchBluetoothToVmMenuItem);
+        _contextMenu.Items.Add(_returnBluetoothToLaptopMenuItem);
+        _contextMenu.Items.Add(new ToolStripSeparator());
         _contextMenu.Items.Add(exitMenuItem);
 
         _notifyIcon = new NotifyIcon
@@ -139,6 +164,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RefreshUi();
         EnsureStartupPreference();
         ApplyRunnerState();
+        QueueWorkVmStatusRefresh();
     }
 
     protected override void ExitThreadCore()
@@ -310,6 +336,30 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void OpenWorkVm()
+    {
+        BeginWorkVmAction(
+            "Opening WorkVM and setting it to boot from the OS disk.",
+            "WorkVM open command started.",
+            () => _workVmService.StartVmReady());
+    }
+
+    private void SwitchBluetoothToVm()
+    {
+        BeginWorkVmAction(
+            "Requesting admin approval to switch Bluetooth to WorkVM.",
+            "Bluetooth switch to WorkVM started.",
+            () => _workVmService.PassBluetoothToVm());
+    }
+
+    private void ReturnBluetoothToLaptop()
+    {
+        BeginWorkVmAction(
+            "Requesting admin approval to return Bluetooth to the laptop.",
+            "Bluetooth return to laptop started.",
+            () => _workVmService.ReturnBluetoothToLaptop());
+    }
+
     private void ToggleStartup()
     {
         try
@@ -360,6 +410,61 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         SyncIdleSessionCancellation(idleSessionActive: false);
         RefreshUi();
+    }
+
+    private void BeginWorkVmAction(string startingMessage, string completionMessage, Action action)
+    {
+        if (_workVmActionRunning)
+        {
+            return;
+        }
+
+        _workVmActionRunning = true;
+        RefreshWorkVmMenuItems();
+        ShowInfoBalloon(startingMessage);
+
+        Task.Run(action).ContinueWith(task =>
+        {
+            _uiContext.Post(_ =>
+            {
+                _workVmActionRunning = false;
+
+                if (task.Exception is not null)
+                {
+                    ShowErrorBalloon($"WorkVM action failed: {task.Exception.GetBaseException().Message}");
+                }
+                else
+                {
+                    ShowInfoBalloon(completionMessage);
+                }
+
+                RefreshUi();
+                QueueWorkVmStatusRefresh();
+            }, null);
+        });
+    }
+
+    private void QueueWorkVmStatusRefresh()
+    {
+        if (_workVmStatusRefreshRunning)
+        {
+            return;
+        }
+
+        _workVmStatusRefreshRunning = true;
+        Task.Run(() => _workVmService.GetStatus()).ContinueWith(task =>
+        {
+            _uiContext.Post(_ =>
+            {
+                _workVmStatusRefreshRunning = false;
+                if (task.Exception is null)
+                {
+                    _workVmStatus = task.Result;
+                }
+
+                RefreshWorkVmMenuItems();
+            }, null);
+        });
     }
 
     private void ApplyRunnerState()
@@ -444,6 +549,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 if (settings.JiggleMouseEnabled)
                 {
                     InputSimulator.JiggleMouse(activityToken);
+                    InputSimulator.PulseKeepAliveInput();
                 }
 
                 if (settings.TypeTextEnabled)
@@ -511,12 +617,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _enableAfterInactivityMenuItem.Checked = settings.EnableAfterInactivityEnabled;
         _idleThresholdControl.TotalSeconds = settings.EnableAfterInactivitySeconds;
         _idleThresholdHost.Visible = settings.EnableAfterInactivityEnabled;
+        RefreshWorkVmMenuItems();
 
         var effectiveActive = _activityController.IsEffectivelyActive(settings);
         _notifyIcon.Icon = effectiveActive ? _activeIcon : _inactiveIcon;
         _notifyIcon.Text = effectiveActive
             ? (settings.IsActive ? "StayActive: active" : "StayActive: active after inactivity")
             : "StayActive: inactive";
+    }
+
+    private void RefreshWorkVmMenuItems()
+    {
+        var status = _workVmStatus;
+        var scriptsAvailable = status is null
+            || (status.WorkVmFolderExists
+                && status.StartScriptExists
+                && status.BluetoothToVmScriptExists
+                && status.BluetoothToLaptopScriptExists);
+
+        _openWorkVmMenuItem.Enabled = !_workVmActionRunning && scriptsAvailable;
+        _switchBluetoothToVmMenuItem.Enabled = !_workVmActionRunning && scriptsAvailable;
+        _returnBluetoothToLaptopMenuItem.Enabled = !_workVmActionRunning && scriptsAvailable;
     }
 
     private void ShowInfoBalloon(string message)
@@ -1139,6 +1260,7 @@ internal static class InputSimulator
     private const uint KeyeventfKeyup = 0x0002;
     private const uint KeyeventfUnicode = 0x0004;
     private const ushort VkReturn = 0x0D;
+    private const ushort VkShift = 0x10;
     private const ushort VkTab = 0x09;
     internal static readonly IntPtr SyntheticInputMarker = new(unchecked((long)0x5354415941435449));
 
@@ -1166,6 +1288,12 @@ internal static class InputSimulator
         {
             SendMouseMove(-previousX, -previousY);
         }
+    }
+
+    public static void PulseKeepAliveInput()
+    {
+        NudgeCursorPosition();
+        SendVirtualKey(VkShift);
     }
 
     public static void TypeCharacter(char character)
@@ -1206,6 +1334,19 @@ internal static class InputSimulator
         };
 
         _ = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
+    }
+
+    private static void NudgeCursorPosition()
+    {
+        if (!GetCursorPos(out var point))
+        {
+            return;
+        }
+
+        var offset = Environment.TickCount % 2 == 0 ? 8 : -8;
+        _ = SetCursorPos(point.X + offset, point.Y);
+        Thread.Sleep(40);
+        _ = SetCursorPos(point.X, point.Y);
     }
 
     private static void SendVirtualKey(ushort virtualKey)
@@ -1280,6 +1421,12 @@ internal static class InputSimulator
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, Input[] pInputs, int cbSize);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetCursorPos(out Point point);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetCursorPos(int x, int y);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct Input
     {
@@ -1316,6 +1463,13 @@ internal static class InputSimulator
         public uint dwFlags;
         public uint time;
         public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point
+    {
+        public int X;
+        public int Y;
     }
 }
 

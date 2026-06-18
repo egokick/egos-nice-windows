@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -277,7 +277,15 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         app.MapGet("/api/status", (HttpContext context) => Results.Json(
             BuildStatusDto(IsLocalRequest(context)),
             _jsonOptions));
-        app.MapGet("/api/settings", async () => Results.Json(await _requestGetSettingsAsync(), _jsonOptions));
+        app.MapGet("/api/settings", async (HttpContext context) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return Results.Json(await _requestGetSettingsAsync(), _jsonOptions);
+        });
         app.MapGet("/api/videos", () => Results.Json(BuildVideoDtos(), _jsonOptions));
         app.MapGet("/api/videos/{videoId}/thumbnail", GetThumbnailAsync);
         app.MapGet("/api/videos/{videoId}/captions", GetVideoCaptions);
@@ -319,25 +327,59 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                 _jsonOptions,
                 statusCode: result.Success ? StatusCodes.Status200OK : StatusCodes.Status409Conflict);
         });
-        app.MapPost("/api/sync", async () => ToHttpResult(await _requestSyncAsync()));
-        app.MapPost("/api/remove", async (RemoveVideosRequest request) => ToHttpResult(
-            await _requestRemoveAsync(request.VideoIds
+        app.MapPost("/api/sync", async (HttpContext context) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestSyncAsync());
+        });
+        app.MapPost("/api/remove", async (HttpContext context, RemoveVideosRequest request) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestRemoveAsync(request.VideoIds
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray(),
-                request.MarkHidden)));
-        app.MapPost("/api/restore", async (RestoreVideosRequest request) => ToHttpResult(
-            await _requestRestoreAsync(request.VideoIds
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray())));
-        app.MapPost("/api/redownload", async (RestoreVideosRequest request) => ToHttpResult(
-            await _requestRedownloadAsync(request.VideoIds
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray())));
-        app.MapPost("/api/videos/progress", (SaveVideoProgressRequest request) =>
+                request.MarkHidden));
+        });
+        app.MapPost("/api/restore", async (HttpContext context, RestoreVideosRequest request) =>
         {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestRestoreAsync(request.VideoIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray()));
+        });
+        app.MapPost("/api/redownload", async (HttpContext context, RestoreVideosRequest request) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestRedownloadAsync(request.VideoIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray()));
+        });
+        app.MapPost("/api/videos/progress", (HttpContext context, SaveVideoProgressRequest request) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
             if (string.IsNullOrWhiteSpace(request.VideoId))
             {
                 return Results.BadRequest(new LibraryCommandResponse(false, "A video id is required."));
@@ -374,16 +416,51 @@ internal sealed class LibraryWebServer : IAsyncDisposable
 
             return ToHttpResult(await _requestOpenLatestSyncLogAsync());
         });
-        app.MapPost("/api/browser-account/select", async (SelectAccountRequest request) => ToHttpResult(
-            await _requestSelectBrowserAccountAsync(request.AccountKey ?? string.Empty)));
-        app.MapPost("/api/youtube-account/select", async (SelectAccountRequest request) => ToHttpResult(
-            await _requestSelectYouTubeAccountAsync(request.AccountKey ?? string.Empty)));
-        app.MapPost("/api/settings/summary", async (SettingsRequest request) => Results.Json(
-            await _requestRefreshSettingsSummaryAsync(request),
-            _jsonOptions));
-        app.MapPost("/api/settings/save", async (SettingsRequest request) => ToHttpResult(
-            await _requestSaveSettingsAsync(request)));
-        app.MapPost("/api/settings/open", async () => ToHttpResult(await _requestOpenSettingsAsync()));
+        app.MapPost("/api/browser-account/select", async (HttpContext context, SelectAccountRequest request) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestSelectBrowserAccountAsync(request.AccountKey ?? string.Empty));
+        });
+        app.MapPost("/api/youtube-account/select", async (HttpContext context, SelectAccountRequest request) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestSelectYouTubeAccountAsync(request.AccountKey ?? string.Empty));
+        });
+        app.MapPost("/api/settings/summary", async (HttpContext context, SettingsRequest request) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return Results.Json(await _requestRefreshSettingsSummaryAsync(request), _jsonOptions);
+        });
+        app.MapPost("/api/settings/save", async (HttpContext context, SettingsRequest request) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestSaveSettingsAsync(request));
+        });
+        app.MapPost("/api/settings/open", async (HttpContext context) =>
+        {
+            if (!IsLocalRequest(context))
+            {
+                return BuildForbiddenResult();
+            }
+
+            return ToHttpResult(await _requestOpenSettingsAsync());
+        });
     }
 
     private BrowserLibraryStatusDto BuildStatusDto(bool canOpenDownloadsFolder)
@@ -789,7 +866,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
     private IResult BuildForbiddenResult()
     {
         return Results.Json(
-            new LibraryCommandResponse(false, "Hotspot control is only available from the laptop running YouTube Sync."),
+            new LibraryCommandResponse(false, "This action is only available from the laptop running YouTube Sync."),
             _jsonOptions,
             statusCode: StatusCodes.Status403Forbidden);
     }
@@ -1221,4 +1298,3 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         int PrimaryPort,
         string[] ListenAddresses);
 }
-

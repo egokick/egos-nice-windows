@@ -28,6 +28,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly object _trackedTaskGate = new();
     private readonly CancellationTokenSource _shutdownCts = new();
     private AppSettings _settings;
+    private CancellationTokenSource? _activeSyncCts;
+    private AppSettings? _activeSyncSettings;
+    private string? _pausedSyncYouTubeAccountKey;
+    private bool _resumePausedSyncWhenSelectionMatches;
     private bool _isBusy;
     private bool _isShuttingDown;
     private HashSet<string> _pendingRemovalIds = new(StringComparer.Ordinal);
@@ -192,13 +196,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             var previousYouTubeAccountKey = _settings.SelectedYouTubeAccountKey;
             PersistResolvedBrowserSelection();
             ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: false);
-            var browserAligned = AlignSelectedBrowserAccountForCurrentYouTubeAccount();
-            if (browserAligned)
-            {
-                ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: false);
-            }
-            if (browserAligned
-                || !string.Equals(previousBrowserAccountKey, _settings.SelectedBrowserAccountKey, StringComparison.Ordinal)
+            if (!string.Equals(previousBrowserAccountKey, _settings.SelectedBrowserAccountKey, StringComparison.Ordinal)
                 || !string.Equals(previousYouTubeAccountKey, _settings.SelectedYouTubeAccountKey, StringComparison.Ordinal))
             {
                 SettingsStore.Save(_settings);
@@ -305,6 +303,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         _settings.BrowserCookies = form.BrowserCookies;
         _settings.BrowserProfile = form.BrowserProfile;
+        var pausedSync = PauseActiveSyncForSelectionChange();
         SettingsStore.Save(_settings);
         RefreshLibraryForCurrentSelection(
             clearWatchLaterTotalCount: shouldClearWatchLaterTotalCount,
@@ -314,7 +313,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
             restoreCachedWatchLaterOrder: true);
         _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
         ShowInfoBalloon(
-            BuildSettingsSavedMessage());
+            pausedSync
+                ? "Settings saved. The current sync was paused because the selected account changed."
+                : BuildSettingsSavedMessage());
         RefreshMenu();
     }
 
@@ -438,6 +439,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             _settings.BrowserCookies = settings.BrowserCookies;
             _settings.BrowserProfile = settings.BrowserProfile;
+            var pausedSync = PauseActiveSyncForSelectionChange();
             SettingsStore.Save(_settings);
             RefreshLibraryForCurrentSelection(
                 clearWatchLaterTotalCount: shouldClearWatchLaterTotalCount,
@@ -447,7 +449,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 restoreCachedWatchLaterOrder: true);
             _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
             RefreshMenu();
-            return Task.FromResult(new LibraryWebServer.LibraryCommandResponse(true, BuildSettingsSavedMessage()));
+            return Task.FromResult(new LibraryWebServer.LibraryCommandResponse(
+                true,
+                pausedSync
+                    ? "Settings saved. The current sync was paused because the selected account changed."
+                    : BuildSettingsSavedMessage()));
         });
     }
 
@@ -555,6 +561,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
+        var resumePausedSyncIfCurrentSelectionMatches = false;
+        CancellationTokenSource? syncCts = null;
         try
         {
             if (initiatedManually)
@@ -563,15 +571,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
 
             TrayLog.Write(_paths, $"RunSyncAsync started. showSuccessBalloon={showSuccessBalloon}");
-            if (AlignSelectedBrowserAccountForCurrentYouTubeAccount())
-            {
-                ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: false);
-                SettingsStore.Save(_settings);
-            }
 
             SetBusy(true, $"Syncing up to the most recent {_settings.DownloadCount} videos...");
             var syncSettings = _settings.CreateSnapshot();
             var startingSettings = syncSettings.CreateSnapshot();
+            syncCts = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+            _activeSyncCts = syncCts;
+            _activeSyncSettings = syncSettings;
+            _pausedSyncYouTubeAccountKey = null;
+            _resumePausedSyncWhenSelectionMatches = false;
             var syncAccountScope = _accountScopeResolver.Resolve(syncSettings);
             if (showSuccessBalloon)
             {
@@ -605,7 +613,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             var summary = await TrackShutdownTask(_syncService.SyncRecentAsync(
                 syncSettings,
                 progress,
-                _shutdownCts.Token,
+                syncCts.Token,
                 watchLaterTotalProgress,
                 watchLaterOrderProgress,
                 syncTargetProgress));
@@ -638,6 +646,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             TrayLog.Write(_paths, "RunSyncAsync cancelled during shutdown.");
         }
+        catch (OperationCanceledException)
+        {
+            TrayLog.Write(_paths, "RunSyncAsync paused because the selected account changed.");
+            SetBusy(false, "Sync paused because the selected account changed.");
+            resumePausedSyncIfCurrentSelectionMatches = true;
+        }
         catch (Exception ex)
         {
             TrayLog.Write(_paths, $"RunSyncAsync failed: {ex}");
@@ -645,6 +659,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
             UpdateSyncAuthStateFromException(ex);
             ShowErrorBalloon(ex.Message);
             StartQueuedRemovalIfIdle();
+        }
+        finally
+        {
+            if (ReferenceEquals(_activeSyncCts, syncCts))
+            {
+                _activeSyncCts = null;
+                _activeSyncSettings = null;
+            }
+
+            syncCts?.Dispose();
+        }
+
+        if (resumePausedSyncIfCurrentSelectionMatches && _resumePausedSyncWhenSelectionMatches)
+        {
+            ResumePausedSyncIfCurrentSelectionMatches();
         }
     }
 
@@ -932,7 +961,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             if (_isBusy)
             {
+                if (PauseActiveSyncFromToggle())
+                {
+                    return new LibraryWebServer.LibraryCommandResponse(
+                        true,
+                        "Sync pause requested. Click Sync again to resume from the remaining videos.");
+                }
+
                 return new LibraryWebServer.LibraryCommandResponse(false, "The tray app is already busy.");
+            }
+
+            if (ResumePausedSyncFromToggle())
+            {
+                return new LibraryWebServer.LibraryCommandResponse(
+                    true,
+                    $"Sync resumed for up to the most recent {_settings.DownloadCount} Watch Later videos.");
             }
 
             _ = RunSyncAsync(showSuccessBalloon: true, initiatedManually: true);
@@ -1154,6 +1197,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _settings.SelectedAccountKey = null;
             _settings.SelectedBrowserAccountKey = selectedAccount.AccountKey;
             ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: true);
+            var pausedSync = PauseActiveSyncForSelectionChange();
             SettingsStore.Save(_settings);
             RefreshLibraryForCurrentSelection(
                 clearWatchLaterTotalCount: true,
@@ -1164,9 +1208,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 restoreCachedWatchLaterOrder: true);
             _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
             SetSyncAuthMissing("Authentication has not been checked for this library yet. Click Sync Now to reconnect if needed.");
+            ResumePausedSyncIfCurrentSelectionMatches();
 
-            var message = _isBusy
-                ? $"Saved {selectedAccount.DisplayName} on {selectedAccount.BrowserName} ({selectedAccount.Profile}). The current sync will finish first, and the next sync will use this account."
+            var message = pausedSync
+                ? $"Now using {selectedAccount.DisplayName} on {selectedAccount.BrowserName} ({selectedAccount.Profile}). The previous sync was paused so this account can use its own credentials."
+                : _isBusy
+                    ? $"Saved {selectedAccount.DisplayName} on {selectedAccount.BrowserName} ({selectedAccount.Profile})."
                 : $"Now using {selectedAccount.DisplayName} on {selectedAccount.BrowserName} ({selectedAccount.Profile}).";
 
             return new LibraryWebServer.LibraryCommandResponse(
@@ -1202,9 +1249,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             _settings.SelectedAccountKey = null;
             _settings.SelectedYouTubeAccountKey = selectedYouTubeAccount.AccountKey;
-            AlignSelectedBrowserAccountForCurrentYouTubeAccount(
-                youTubeAccounts: youTubeAccounts,
-                browserAccounts: _accountDiscovery.DiscoverAccounts(_settings));
+            var pausedSync = PauseActiveSyncForSelectionChange();
             if (!string.IsNullOrWhiteSpace(_settings.SelectedBrowserAccountKey))
             {
                 _knownLibraryScopeStore.RememberSelectedYouTubeAccount(
@@ -1223,13 +1268,88 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 restoreCachedWatchLaterOrder: true);
             _ = TrackShutdownTask(OptimizeLibraryPlaybackInBackgroundAsync(_settings.CreateSnapshot()));
             SetSyncAuthMissing("Authentication has not been checked for this YouTube account yet. Click Sync Now to reconnect if needed.");
+            ResumePausedSyncIfCurrentSelectionMatches();
 
-            var message = _isBusy
-                ? $"Saved YouTube account {selectedYouTubeAccount.Label}. Downloaded videos for that account are shown now, and the next sync will use it."
+            var message = pausedSync
+                ? $"Now using YouTube account {selectedYouTubeAccount.Label}. The previous sync was paused so this account can use its own browser credentials."
+                : _isBusy
+                    ? $"Saved YouTube account {selectedYouTubeAccount.Label}. Downloaded videos for that account are shown now."
                 : $"Now using YouTube account {selectedYouTubeAccount.Label}. Downloaded videos for that account are shown now.";
 
             return new LibraryWebServer.LibraryCommandResponse(true, message);
         });
+    }
+
+    private bool PauseActiveSyncForSelectionChange()
+    {
+        var activeSyncSettings = _activeSyncSettings;
+        var activeSyncCts = _activeSyncCts;
+        if (activeSyncSettings is null
+            || activeSyncCts is null
+            || activeSyncCts.IsCancellationRequested
+            || MatchesLibrarySelection(activeSyncSettings, _settings))
+        {
+            return false;
+        }
+
+        _pausedSyncYouTubeAccountKey = activeSyncSettings.SelectedYouTubeAccountKey;
+        _resumePausedSyncWhenSelectionMatches = true;
+        activeSyncCts.Cancel();
+        SetBusy(true, "Pausing current sync because the selected account changed...");
+        return true;
+    }
+
+    private bool PauseActiveSyncFromToggle()
+    {
+        var activeSyncSettings = _activeSyncSettings;
+        var activeSyncCts = _activeSyncCts;
+        if (activeSyncSettings is null || activeSyncCts is null || activeSyncCts.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        _pausedSyncYouTubeAccountKey = activeSyncSettings.SelectedYouTubeAccountKey;
+        _resumePausedSyncWhenSelectionMatches = false;
+        activeSyncCts.Cancel();
+        SetBusy(true, "Pausing sync...");
+        return true;
+    }
+
+    private bool ResumePausedSyncFromToggle()
+    {
+        if (string.IsNullOrWhiteSpace(_pausedSyncYouTubeAccountKey))
+        {
+            return false;
+        }
+
+        if (!string.Equals(_settings.SelectedYouTubeAccountKey, _pausedSyncYouTubeAccountKey, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        _pausedSyncYouTubeAccountKey = null;
+        _resumePausedSyncWhenSelectionMatches = false;
+        _ = RunSyncAsync(showSuccessBalloon: true, initiatedManually: true);
+        return true;
+    }
+
+    private void ResumePausedSyncIfCurrentSelectionMatches()
+    {
+        if (_isBusy || !_resumePausedSyncWhenSelectionMatches || string.IsNullOrWhiteSpace(_pausedSyncYouTubeAccountKey))
+        {
+            return;
+        }
+
+        if (!string.Equals(_settings.SelectedYouTubeAccountKey, _pausedSyncYouTubeAccountKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var resumedYouTubeAccountKey = _pausedSyncYouTubeAccountKey;
+        _pausedSyncYouTubeAccountKey = null;
+        _resumePausedSyncWhenSelectionMatches = false;
+        TrayLog.Write(_paths, $"Resuming paused sync for YouTube account {resumedYouTubeAccountKey}.");
+        _ = RunSyncAsync(showSuccessBalloon: false, initiatedManually: false);
     }
 
     private void NormalizeSelectedYouTubeAccountForCurrentBrowser(bool allowNetwork = true)
@@ -1777,15 +1897,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 var selectionChanged = NormalizeSelectedYouTubeAccountForCurrentBrowser(
                     youTubeAccounts,
                     clearSelectionWhenNoLocalScopeExists: false);
-                var browserAligned = AlignSelectedBrowserAccountForCurrentYouTubeAccount(
-                    youTubeAccounts: youTubeAccounts,
-                    browserAccounts: _accountDiscovery.DiscoverAccounts(_settings));
-                if (browserAligned)
-                {
-                    ApplyPreferredYouTubeSelectionForCurrentBrowser(clearSelectionWhenNoLocalScopeExists: false);
-                }
 
-                if (selectionChanged || browserAligned)
+                if (selectionChanged)
                 {
                     SettingsStore.Save(_settings);
                     RefreshLibraryForCurrentSelection(
