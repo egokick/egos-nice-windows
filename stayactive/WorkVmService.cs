@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace StayActive;
 
@@ -241,17 +242,26 @@ internal sealed class WorkVmService
 
     private static bool ContainsAttachedBluetoothUsb(string vmInfo)
     {
-        var attachedIndex = vmInfo.IndexOf("Currently attached USB devices:", StringComparison.OrdinalIgnoreCase);
-        if (attachedIndex < 0)
+        var match = Regex.Match(
+            vmInfo,
+            @"Currently attached USB devices:\s*(?<devices>[\s\S]*?)(?:\r?\nBandwidth groups:|\r?\nShared folders:|\r?\nVRDE:|\r?\nUSB Device Filters:|\z)",
+            RegexOptions.IgnoreCase);
+        if (!match.Success)
         {
             return false;
         }
 
-        var attachedSection = vmInfo[attachedIndex..];
+        var attachedSection = match.Groups["devices"].Value;
+        if (attachedSection.Contains("<none>", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         return attachedSection.Contains("13d3", StringComparison.OrdinalIgnoreCase)
             || attachedSection.Contains("3602", StringComparison.OrdinalIgnoreCase)
             || attachedSection.Contains("Wireless_Device", StringComparison.OrdinalIgnoreCase)
-            || attachedSection.Contains("MediaTek", StringComparison.OrdinalIgnoreCase);
+            || attachedSection.Contains("MediaTek", StringComparison.OrdinalIgnoreCase)
+            || attachedSection.Contains("IMC Networks", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool ContainsCapturedBluetoothUsb(string usbHost)

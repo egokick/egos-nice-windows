@@ -339,9 +339,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private void OpenWorkVm()
     {
         BeginWorkVmAction(
-            "Opening WorkVM and setting it to boot from the OS disk.",
-            "WorkVM open command started.",
-            () => _workVmService.StartVmReady());
+            "Requesting admin approval to open WorkVM with Bluetooth.",
+            "WorkVM Bluetooth-ready open command started.",
+            () => _workVmService.PassBluetoothToVm());
     }
 
     private void SwitchBluetoothToVm()

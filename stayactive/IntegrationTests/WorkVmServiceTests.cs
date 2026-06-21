@@ -117,6 +117,35 @@ public sealed class WorkVmServiceTests : IDisposable
         Assert.Equal(BluetoothControlTarget.Vm, status.BluetoothControlTarget);
     }
 
+    [Fact]
+    public void GetStatus_WhenBluetoothOnlyAppearsInUsbFilter_DoesNotReportVm()
+    {
+        _runner.CapturedOutputByArgument["showvminfo \"WorkRDP\" --machinereadable"] = "VMState=\"running\"";
+        _runner.CapturedOutputByArgument["showvminfo \"WorkRDP\""] = """
+            Currently attached USB devices: <none>
+
+            USB Device Filters:
+
+            Index:            0
+            Active:           yes
+            Name:             Laptop MediaTek Bluetooth Adapter VIDPID
+            VendorId:         13d3
+            ProductId:        3602
+            """;
+        _runner.CapturedOutputByArgument["list usbhost"] = """
+            UUID:               25fc3ad5-de61-4499-9cd0-622ab8b19cea
+            VendorId:           0x13d3 (13D3)
+            ProductId:          0x3602 (3602)
+            Current State:      Busy
+            """;
+        _runner.CapturedOutputByArgument["-NoProfile -ExecutionPolicy Bypass -Command \"$device = Get-PnpDevice | Where-Object { $_.InstanceId -like 'USB\\VID_13D3&PID_3602&MI_00*' } | Select-Object -First 1; if ($null -ne $device) { [string]$device.Status; [string]$device.Problem }\""] = "OK";
+        var service = new WorkVmService(_runner, _repoRoot);
+
+        var status = service.GetStatus();
+
+        Assert.Equal(BluetoothControlTarget.Laptop, status.BluetoothControlTarget);
+    }
+
     public void Dispose()
     {
         Directory.Delete(_repoRoot, recursive: true);

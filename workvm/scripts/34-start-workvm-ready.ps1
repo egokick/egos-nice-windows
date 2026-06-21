@@ -174,6 +174,54 @@ function Get-VmState {
     throw "Could not read VM state for '$VMName'."
 }
 
+function Get-VmInfo {
+    return (& $script:VBoxManage showvminfo $VMName) -join "`n"
+}
+
+function Test-DisplayEnabled {
+    $info = Get-VmInfo
+    return $info -match "State:\s+running" -and
+        $info -match "Video mode:\s+\d+x\d+x32.*enabled"
+}
+
+function Test-DisplayDisabled {
+    $info = Get-VmInfo
+    return $info -match "State:\s+running" -and
+        $info -match "Video mode:\s+\d+x\d+x0.*disabled"
+}
+
+function Reset-GuestGraphicsDriver {
+    Write-Host "VM '$VMName' display is black/disabled. Resetting the Windows guest graphics driver." -ForegroundColor Yellow
+    Invoke-VBoxWithLockRetry -Arguments @("controlvm", $VMName, "keyboardputscancode", "e0", "5b", "1d", "2a", "30", "b0", "aa", "9d", "e0", "db") -Attempts 5 -DelaySeconds 1
+}
+
+function Ensure-DisplayVisible {
+    param([int]$TimeoutSeconds = 30)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $resetSent = $false
+
+    while ((Get-Date) -lt $deadline) {
+        if (Test-DisplayEnabled) {
+            Write-Host "VM '$VMName' display is active."
+            return
+        }
+
+        if (-not $resetSent -and (Test-DisplayDisabled)) {
+            Reset-GuestGraphicsDriver
+            $resetSent = $true
+            Start-Sleep -Seconds 5
+            continue
+        }
+
+        Start-Sleep -Seconds 2
+    }
+
+    if (Test-DisplayDisabled) {
+        Reset-GuestGraphicsDriver
+    }
+}
+
 function Enable-CopyPaste {
     param([string]$State)
 
@@ -239,6 +287,7 @@ $state = Get-VmState
 if ($state -eq "saved") {
     Write-Host "VM '$VMName' is saved. Resuming it without changing powered-off-only settings."
     Invoke-VBoxWithLockRetry -Arguments @("startvm", $VMName, "--type", "gui")
+    Ensure-DisplayVisible
     return
 }
 
@@ -249,8 +298,9 @@ if ($state -eq "aborted-saved") {
 }
 
 if ($state -eq "running") {
-    Enable-CopyPaste -State $state
-    Set-DisplayMode -State $state
+    [void](Enable-CopyPaste -State $state)
+    [void](Set-DisplayMode -State $state)
+    Ensure-DisplayVisible
     Write-Host "VM '$VMName' is already running. Copy/paste settings are bidirectional and display hint is ${Width}x${Height}."
     return
 }
@@ -258,6 +308,7 @@ if ($state -eq "running") {
 if ($state -ne "poweroff" -and $state -ne "aborted") {
     Write-Host "VM '$VMName' is currently '$state'. Starting it without changing powered-off-only settings."
     Invoke-VBoxWithLockRetry -Arguments @("startvm", $VMName, "--type", "gui")
+    Ensure-DisplayVisible
     return
 }
 
@@ -273,6 +324,7 @@ if (-not (Set-DisplayMode -State $state)) {
 if (-not $preStartSettingsApplied) {
     Write-Host "VM '$VMName' is locked, so Open VM will start it without changing boot/storage settings this time." -ForegroundColor Yellow
     Invoke-VBoxWithLockRetry -Arguments @("startvm", $VMName, "--type", "gui")
+    Ensure-DisplayVisible
     return
 }
 
@@ -303,6 +355,7 @@ if ($dvdMatch.Success -and $dvdMatch.Groups[1].Value -ne "none") {
 Invoke-VBoxWithLockRetry -Arguments @("startvm", $VMName, "--type", "gui")
 Start-Sleep -Seconds 5
 Invoke-VBoxWithLockRetry -Arguments @("controlvm", $VMName, "setvideomodehint", "$Width", "$Height", "$BitsPerPixel")
+Ensure-DisplayVisible
 
 Write-Host ""
 Write-Host "VM '$VMName' is starting with the OS disk first in boot order and display hint ${Width}x${Height}."
