@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Wi-Fi Devices</title>
+    <link rel="icon" href="/favicon.svg?v=1" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css?v=26">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Wi-Fi Devices</h1>
+        <p id="pollSummary">Waiting for first poll</p>
+      </div>
+      <div class="top-actions">
+        <a class="nav-button" href="/finances">Finances</a>
+        <div class="metric">
+          <span class="metric-value" id="onlineCount">0</span>
+          <span class="metric-label">online</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="knownCount">0</span>
+          <span class="metric-label">known</span>
+        </div>
+        <button id="pollNow" type="button">Poll now</button>
+      </div>
+    </header>
+
+    <div id="pollAlert" class="poll-alert" hidden></div>
+
+    <main class="layout">
+      <aside class="device-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Devices</h2>
+            <p id="sourceStatus">No source yet</p>
+          </div>
+          <div class="select-actions">
+            <button id="selectAll" type="button">All</button>
+            <button id="selectNone" type="button">None</button>
+          </div>
+        </div>
+        <label class="search-box">
+          <span>Search</span>
+          <input id="deviceSearch" type="search" autocomplete="off" placeholder="Name, MAC, or IP">
+        </label>
+        <label class="ignore-toggle">
+          <input id="showIgnored" type="checkbox">
+          <span>Show ignored devices</span>
+        </label>
+        <div class="group-tools">
+          <div class="group-filter">
+            <span>Group Filter</span>
+            <button id="groupFilterButton" class="group-filter-button" type="button">All devices</button>
+            <div id="groupFilterMenu" class="group-filter-menu" hidden></div>
+          </div>
+          <div class="group-create">
+            <input id="newGroupName" type="text" autocomplete="off" placeholder="New group">
+            <button id="createGroup" type="button">Create</button>
+          </div>
+        </div>
+        <div id="deviceList" class="device-list"></div>
+      </aside>
+
+      <section class="insights">
+        <div class="insight-toolbar">
+          <div>
+            <h2>Selected Devices</h2>
+            <p id="selectionSummary">No devices selected</p>
+          </div>
+          <label class="range-select">
+            <span>Range</span>
+            <select id="rangeHours">
+              <option value="24">24 hours</option>
+              <option value="168" selected>7 days</option>
+              <option value="720">30 days</option>
+              <option value="2160">90 days</option>
+            </select>
+          </label>
+        </div>
+
+        <section class="chart-section">
+          <div class="section-title">
+            <h3>Online Timeline</h3>
+            <div class="legend">
+              <span><i class="legend-online"></i>Online</span>
+              <span><i class="legend-offline"></i>Offline</span>
+              <span><i class="legend-event"></i>Change</span>
+            </div>
+          </div>
+          <div class="timeline-shell">
+            <svg id="timelineChart" role="img" aria-label="Online timeline"></svg>
+          </div>
+          <div class="timeline-time-scroll">
+            <span class="scroll-endcap" aria-hidden="true"></span>
+            <input id="timelineScroll" type="range" min="0" max="0" step="1" value="0" aria-label="Timeline time position">
+            <span class="scroll-endcap" aria-hidden="true"></span>
+            <output id="timelineScrollLabel">Current window</output>
+          </div>
+        </section>
+
+        <section class="chart-section">
+          <div class="section-title">
+            <h3>Usual Online Times</h3>
+            <p id="heatmapCaption">Select one or more devices</p>
+          </div>
+          <div id="heatmap" class="heatmap"></div>
+        </section>
+
+        <section class="chart-section">
+          <div class="section-title">
+            <h3>Online and Offline Events</h3>
+            <p id="eventCount">0 events</p>
+          </div>
+          <div id="eventList" class="event-list"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js?v=25" defer></script>
+  </body>
+</html>

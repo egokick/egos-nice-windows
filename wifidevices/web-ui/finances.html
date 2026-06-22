@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Finances</title>
+    <link rel="icon" href="/favicon.svg?v=1" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css?v=26">
+    <link rel="stylesheet" href="/finance.css?v=7">
+  </head>
+  <body class="finance-page">
+    <header class="topbar finance-topbar">
+      <div>
+        <h1>Finances</h1>
+        <p id="financeSummary">Loading finance dashboard</p>
+      </div>
+      <div class="top-actions">
+        <a class="nav-button" href="/">Wi-Fi Devices</a>
+        <button id="refreshFinance" type="button">Refresh now</button>
+      </div>
+    </header>
+
+    <div id="financeAlert" class="poll-alert" hidden></div>
+
+    <main class="finance-layout">
+      <section class="net-band">
+        <div class="net-copy">
+          <p>After paying all debt</p>
+          <strong id="netAfterDebt">$0.00</strong>
+        </div>
+        <div class="net-badge">Net position</div>
+      </section>
+
+      <section class="finance-metrics">
+        <div class="finance-metric metric-cash">
+          <span>Cash Available</span>
+          <strong id="totalCash">$0.00</strong>
+        </div>
+        <div class="finance-metric metric-credit">
+          <span>Credit Available</span>
+          <strong id="totalCredit">$0.00</strong>
+        </div>
+        <div class="finance-metric metric-debt">
+          <span>Debt Owed</span>
+          <strong id="totalDebt">$0.00</strong>
+        </div>
+      </section>
+
+      <section class="chart-section account-setup-section">
+        <div class="section-title">
+          <h3 id="accountFormTitle">Accounts</h3>
+          <div class="account-tools">
+            <select id="editAccountSelect" aria-label="Select account to edit">
+              <option value="">Edit account...</option>
+            </select>
+            <button id="showAccountForm" type="button">Add account</button>
+          </div>
+        </div>
+        <form id="accountForm" class="account-form" hidden>
+          <input id="accountId" name="id" type="hidden">
+          <label>
+            <span>Account name</span>
+            <input id="accountName" name="name" type="text" autocomplete="off" required placeholder="Rewards Visa">
+          </label>
+          <label>
+            <span>Type</span>
+            <select id="accountKind" name="kind">
+              <option value="credit_card">Credit card</option>
+              <option value="checking">Checking</option>
+              <option value="savings">Savings</option>
+              <option value="bank">Bank account</option>
+              <option value="loan">Loan</option>
+            </select>
+          </label>
+          <label>
+            <span>Institution</span>
+            <input id="accountInstitution" name="institution" type="text" autocomplete="off" placeholder="Bank or card issuer">
+          </label>
+          <label>
+            <span>Website URL</span>
+            <input id="accountLoginUrl" name="loginUrl" type="url" autocomplete="off" placeholder="https://example.com/login">
+          </label>
+          <label>
+            <span>Username</span>
+            <input id="accountUsername" name="username" type="text" autocomplete="off">
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="accountPassword" name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved password">
+          </label>
+          <label>
+            <span>Cash balance</span>
+            <input id="accountCashBalance" name="cashBalance" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Balance owed</span>
+            <input id="accountBalanceOwed" name="balanceOwed" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Credit limit</span>
+            <input id="accountCreditLimit" name="creditLimit" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Available credit</span>
+            <input id="accountCreditAvailable" name="creditAvailable" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>APR %</span>
+            <input id="accountAprPercent" name="aprPercent" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Collector notes</span>
+            <textarea id="accountCollectorNotes" name="collectorNotes" rows="3" placeholder="Login flow, MFA method, balance location"></textarea>
+          </label>
+          <div class="account-form-actions">
+            <p id="accountFormStatus">Values are stored locally. Website refreshes require a Codex-assisted session.</p>
+            <div class="account-form-buttons">
+              <button id="cancelAccountForm" type="button">Cancel</button>
+              <button id="saveAccount" type="submit">Save account</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section class="chart-section">
+        <div class="section-title">
+          <h3>Values Over Time</h3>
+          <div class="chart-tools">
+            <p id="historyCaption">No history yet</p>
+            <select id="historyRange" aria-label="Values over time range">
+              <option value="24h">24h</option>
+              <option value="1w" selected>1 week</option>
+              <option value="1m">1 month</option>
+              <option value="3m">3 months</option>
+              <option value="6m">6 months</option>
+              <option value="12m">12 months</option>
+              <option value="24m">24 months</option>
+            </select>
+          </div>
+        </div>
+        <div class="finance-chart-shell">
+          <svg id="financeChart" role="img" aria-label="Finance history chart"></svg>
+        </div>
+      </section>
+
+      <section class="finance-grid">
+        <section class="chart-section">
+          <div class="section-title">
+            <h3>Credit Cards</h3>
+            <p id="cardCount">0 cards</p>
+          </div>
+          <div class="finance-table-shell">
+            <table class="finance-table">
+              <thead>
+                <tr>
+                  <th>Card</th>
+                  <th>Owed</th>
+                  <th>Available</th>
+                  <th>APR</th>
+                  <th>Utilization</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="cardRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="chart-section">
+          <div class="section-title">
+            <h3>Accounts</h3>
+            <p id="accountCount">0 accounts</p>
+          </div>
+          <div class="finance-table-shell">
+            <table class="finance-table">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th>Type</th>
+                  <th>Cash</th>
+                  <th>Debt</th>
+                  <th>APR</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="accountRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="chart-section">
+        <div class="section-title">
+          <h3>Refresh Log</h3>
+          <p id="refreshCaption">No refreshes yet</p>
+        </div>
+        <div id="refreshLog" class="refresh-log"></div>
+      </section>
+    </main>
+
+    <script src="/finance.js?v=8" defer></script>
+  </body>
+</html>
