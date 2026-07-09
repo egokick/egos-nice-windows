@@ -621,6 +621,10 @@ h3 {
   text-decoration: underline;
 }
 
+.row-hidden {
+  fill: #8b9891;
+}
+
 .row-sub-label,
 .axis-label,
 .no-samples,
@@ -652,6 +656,47 @@ h3 {
 .timeline-event-dot {
   stroke: #fff;
   stroke-width: 2;
+}
+
+.timeline-eye-toggle {
+  cursor: pointer;
+  outline: none;
+}
+
+.timeline-eye-hit {
+  fill: transparent;
+  stroke: transparent;
+}
+
+.timeline-eye-toggle:hover .timeline-eye-hit,
+.timeline-eye-toggle:focus .timeline-eye-hit {
+  fill: rgba(22, 132, 95, 0.08);
+  stroke: rgba(22, 132, 95, 0.28);
+}
+
+.timeline-eye-shape {
+  fill: none;
+  stroke: #16845f;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.timeline-eye-pupil {
+  fill: #16845f;
+}
+
+.timeline-eye-slash {
+  stroke: #bd4f43;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.timeline-eye-hidden .timeline-eye-shape {
+  stroke: #8b9891;
+}
+
+.timeline-eye-hidden .timeline-eye-pupil {
+  fill: #8b9891;
 }
 
 .now-line {

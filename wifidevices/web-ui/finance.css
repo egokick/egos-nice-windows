@@ -308,6 +308,72 @@
   font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
+.axis-label-x {
+  text-anchor: middle;
+}
+
+.chart-point {
+  stroke: #ffffff;
+  stroke-width: 2;
+}
+
+.chart-legend-toggle {
+  cursor: pointer;
+  outline: none;
+}
+
+.chart-legend-hit {
+  fill: transparent;
+  stroke: transparent;
+}
+
+.chart-legend-toggle:hover .chart-legend-hit,
+.chart-legend-toggle:focus .chart-legend-hit {
+  fill: rgba(36, 95, 143, 0.08);
+  stroke: rgba(36, 95, 143, 0.22);
+}
+
+.chart-legend-hidden {
+  opacity: 0.34;
+}
+
+.chart-legend-hidden line {
+  stroke-dasharray: 4 4;
+}
+
+.chart-hover-overlay {
+  fill: transparent;
+  pointer-events: all;
+}
+
+.chart-hover-line {
+  stroke: rgba(23, 32, 29, 0.32);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.chart-tooltip {
+  pointer-events: none;
+}
+
+.chart-tooltip-box {
+  fill: rgba(255, 255, 255, 0.96);
+  stroke: rgba(23, 32, 29, 0.14);
+  stroke-width: 1;
+  filter: drop-shadow(0 8px 18px rgba(18, 27, 24, 0.14));
+}
+
+.chart-tooltip-title {
+  fill: var(--finance-ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chart-tooltip-row {
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .finance-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

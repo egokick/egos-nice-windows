@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -30,6 +31,7 @@ using FormsNotifyIcon = System.Windows.Forms.NotifyIcon;
 using FormsToolStripMenuItem = System.Windows.Forms.ToolStripMenuItem;
 
 const string DefaultLocalUrl = "http://127.0.0.1:5136";
+Directory.SetCurrentDirectory(StartupRegistration.ResolveRuntimeWorkingDirectory(args));
 var webRoot = ResolveWebRoot();
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -444,16 +446,38 @@ public static class StartupRegistration
 
     private static string BuildCommand(string localUrl)
     {
-        var executable = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "wifidevices.exe");
+        var executable = ResolveStartupExecutable();
         var workingDirectory = ResolveStartupWorkingDirectory();
-        var arguments = $"--urls {Quote(localUrl)}";
+        var arguments = $"--working-directory {Quote(workingDirectory)} --urls {Quote(localUrl)}";
         if (string.Equals(Path.GetFileName(executable), "dotnet.exe", StringComparison.OrdinalIgnoreCase))
         {
             var dll = Path.Combine(AppContext.BaseDirectory, "wifidevices.dll");
             arguments = $"{Quote(dll)} {arguments}";
         }
 
-        return $"cmd.exe /c start \"\" /min /d {Quote(workingDirectory)} {Quote(executable)} {arguments}";
+        return $"{Quote(executable)} {arguments}";
+    }
+
+    private static string ResolveStartupExecutable()
+    {
+        var bundledExe = Path.Combine(AppContext.BaseDirectory, "wifidevices.exe");
+        if (File.Exists(bundledExe))
+        {
+            return bundledExe;
+        }
+
+        return Environment.ProcessPath ?? bundledExe;
+    }
+
+    public static string ResolveRuntimeWorkingDirectory(string[] args)
+    {
+        var requested = ReadArgumentValue(args, "--working-directory");
+        if (!string.IsNullOrWhiteSpace(requested) && Directory.Exists(requested))
+        {
+            return requested;
+        }
+
+        return ResolveStartupWorkingDirectory();
     }
 
     private static string ResolveStartupWorkingDirectory()
@@ -465,6 +489,21 @@ public static class StartupRegistration
         }
 
         return AppContext.BaseDirectory;
+    }
+
+    private static string? ReadArgumentValue(string[] args, string name)
+    {
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (!string.Equals(args[index], name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return index + 1 < args.Length ? args[index + 1] : null;
+        }
+
+        return null;
     }
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
@@ -1387,24 +1426,32 @@ public sealed class CompositeDeviceSource : IDeviceSource
         var local = await _local.PollAsync(cancellationToken);
         if (local.Success && local.Devices.Count > 0)
         {
-            var note = remote.Success
-                ? "Remote returned no recognizable devices; using Windows ARP/ping fallback."
-                : $"Remote unavailable; using Windows ARP/ping fallback. {remote.Error}";
-
-            return local with { Message = note };
+            return local;
         }
 
-        if (remote.Success)
+        var errors = new List<string>();
+        if (!remote.Success && !string.IsNullOrWhiteSpace(remote.Error))
         {
-            return remote;
+            errors.Add(remote.Error);
         }
-
-        if (local.Success)
+        else if (remote.Success)
         {
-            return local with { Message = $"Remote unavailable and local fallback found no devices. {remote.Error}" };
+            errors.Add("Remote poll returned no recognizable devices.");
         }
 
-        return DevicePollResult.Failure("No device source succeeded.", "none", "none");
+        if (!local.Success && !string.IsNullOrWhiteSpace(local.Error))
+        {
+            errors.Add(local.Error);
+        }
+        else if (local.Success)
+        {
+            errors.Add("Local fallback returned no devices.");
+        }
+
+        return DevicePollResult.Failure(
+            errors.Count == 0 ? "No device source returned devices." : string.Join(" ", errors),
+            "none",
+            "none");
     }
 }
 
@@ -1455,7 +1502,7 @@ public sealed class RemoteWifiDeviceSource : IDeviceSource
 
                 if (devices.Count == 0 && _settings.HasCredentials && LooksLikeLogin(first.Body))
                 {
-                    await TryLoginAsync(client, sourceUri, cancellationToken);
+                    await TryLoginAsync(client, sourceUri, first.Body, cancellationToken);
                     var afterLogin = await FetchAsync(client, sourceUri, cancellationToken);
                     devices = DeviceExtractor.Extract(afterLogin.Body, afterLogin.ContentType, "remote").ToList();
                 }
@@ -1482,15 +1529,30 @@ public sealed class RemoteWifiDeviceSource : IDeviceSource
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (_settings.HasRemoteUrl && Uri.TryCreate(_settings.Url, UriKind.Absolute, out var configuredUri))
         {
-            if (seen.Add(configuredUri.AbsoluteUri))
+            foreach (var candidate in ExpandConfiguredDeviceListUris(configuredUri))
             {
-                yield return configuredUri;
+                if (seen.Add(candidate.AbsoluteUri))
+                {
+                    yield return candidate;
+                }
             }
         }
 
         if (seen.Add(LocalDeviceListUri.AbsoluteUri))
         {
             yield return LocalDeviceListUri;
+        }
+    }
+
+    private static IEnumerable<Uri> ExpandConfiguredDeviceListUris(Uri configuredUri)
+    {
+        var root = new Uri(configuredUri.GetLeftPart(UriPartial.Authority));
+        var deviceListUri = new Uri(root, "/cgi-bin/devices.ha");
+        yield return deviceListUri;
+
+        if (Uri.Compare(configuredUri, deviceListUri, UriComponents.AbsoluteUri, UriFormat.Unescaped, StringComparison.OrdinalIgnoreCase) != 0)
+        {
+            yield return configuredUri;
         }
     }
 
@@ -1508,8 +1570,10 @@ public sealed class RemoteWifiDeviceSource : IDeviceSource
         return new HttpFetchResult(body, response.Content.Headers.ContentType?.MediaType);
     }
 
-    private async Task TryLoginAsync(HttpClient client, Uri sourceUri, CancellationToken cancellationToken)
+    private async Task TryLoginAsync(HttpClient client, Uri sourceUri, string loginBody, CancellationToken cancellationToken)
     {
+        await TryNonceHashLoginAsync(client, sourceUri, loginBody, cancellationToken);
+
         var loginUris = BuildLoginUris(sourceUri);
         foreach (var loginUri in loginUris)
         {
@@ -1527,6 +1591,83 @@ public sealed class RemoteWifiDeviceSource : IDeviceSource
             AddAuthHeaders(jsonRequest);
             await SendIgnoringFailureAsync(client, jsonRequest, cancellationToken);
         }
+    }
+
+    private async Task TryNonceHashLoginAsync(HttpClient client, Uri sourceUri, string loginBody, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.Password))
+        {
+            return;
+        }
+
+        var nonce = ExtractInputValue(loginBody, "nonce");
+        if (string.IsNullOrWhiteSpace(nonce))
+        {
+            return;
+        }
+
+        var action = ExtractFormAction(loginBody);
+        var loginUri = !string.IsNullOrWhiteSpace(action)
+            ? new Uri(sourceUri, action)
+            : new Uri(new Uri(sourceUri.GetLeftPart(UriPartial.Authority)), "/cgi-bin/login.ha");
+        var formUsername = ExtractInputValue(loginBody, "username");
+        var usernames = new[] { _settings.Username, formUsername, "login" }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var username in usernames)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, loginUri)
+            {
+                Content = new FormUrlEncodedContent(BuildNonceHashLoginFields(username!, nonce, _settings.Password))
+            };
+            AddAuthHeaders(request);
+            await SendIgnoringFailureAsync(client, request, cancellationToken);
+        }
+    }
+
+    private static IEnumerable<KeyValuePair<string, string>> BuildNonceHashLoginFields(string username, string nonce, string password)
+    {
+        yield return new KeyValuePair<string, string>("nonce", nonce);
+        yield return new KeyValuePair<string, string>("username", username);
+        yield return new KeyValuePair<string, string>("password", new string('*', Math.Max(1, password.Length)));
+        yield return new KeyValuePair<string, string>("hashpassword", Md5Hex(password + nonce));
+        yield return new KeyValuePair<string, string>("Continue", "Login");
+    }
+
+    private static string Md5Hex(string value)
+    {
+        var bytes = MD5.HashData(Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    private static string? ExtractFormAction(string html)
+    {
+        var match = Regex.Match(html, @"(?is)<form\b(?<attrs>[^>]*)>");
+        return match.Success ? ExtractHtmlAttribute(match.Groups["attrs"].Value, "action") : null;
+    }
+
+    private static string? ExtractInputValue(string html, string name)
+    {
+        foreach (Match match in Regex.Matches(html, @"(?is)<input\b(?<attrs>[^>]*)>"))
+        {
+            var attrs = match.Groups["attrs"].Value;
+            var inputName = ExtractHtmlAttribute(attrs, "name");
+            if (string.Equals(inputName, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return ExtractHtmlAttribute(attrs, "value");
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ExtractHtmlAttribute(string attributes, string name)
+    {
+        var match = Regex.Match(
+            attributes,
+            $@"(?is)\b{Regex.Escape(name)}\s*=\s*(?:""(?<value>[^""]*)""|'(?<value>[^']*)'|(?<value>[^\s>]+))");
+        return match.Success ? WebUtility.HtmlDecode(match.Groups["value"].Value) : null;
     }
 
     private async Task SendIgnoringFailureAsync(HttpClient client, HttpRequestMessage request, CancellationToken cancellationToken)
@@ -1579,15 +1720,15 @@ public sealed class RemoteWifiDeviceSource : IDeviceSource
         }
     }
 
-    private object BuildLoginObject() => new
+    private Dictionary<string, string?> BuildLoginObject() => new(StringComparer.Ordinal)
     {
-        username = _settings.Username,
-        user = _settings.Username,
-        password = _settings.Password,
-        pass = _settings.Password,
-        devicecode = _settings.DeviceCode,
-        deviceCode = _settings.DeviceCode,
-        code = _settings.DeviceCode
+        ["username"] = _settings.Username,
+        ["user"] = _settings.Username,
+        ["password"] = _settings.Password,
+        ["pass"] = _settings.Password,
+        ["devicecode"] = _settings.DeviceCode,
+        ["deviceCode"] = _settings.DeviceCode,
+        ["code"] = _settings.DeviceCode
     };
 
     private static IEnumerable<Uri> BuildLoginUris(Uri sourceUri)
@@ -1646,6 +1787,14 @@ public sealed class WindowsNetworkDeviceSource : IDeviceSource
         if (network is null)
         {
             return DevicePollResult.Failure("No active IPv4 network with a gateway was found.", "Windows ARP/ping", "local");
+        }
+
+        if (!network.Contains(LocalNetworkInfo.RouterAddress))
+        {
+            return DevicePollResult.Failure(
+                $"Windows ARP fallback is disabled because this machine is not on the router local subnet ({LocalNetworkInfo.RouterAddress}).",
+                "Windows ARP/ping",
+                "local");
         }
 
         await PingSubnetAsync(network, cancellationToken);
@@ -3081,6 +3230,8 @@ public static class DeviceExtractor
 
 public sealed record LocalNetworkInfo(IPAddress Address, IPAddress Mask)
 {
+    public static IPAddress RouterAddress { get; } = IPAddress.Parse("192.168.1.254");
+
     public static LocalNetworkInfo? FindPrimaryNetwork()
     {
         foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
@@ -3135,6 +3286,14 @@ public sealed record LocalNetworkInfo(IPAddress Address, IPAddress Mask)
         {
             yield return FromUInt32(current);
         }
+    }
+
+    public bool Contains(IPAddress address)
+    {
+        var ownAddress = ToUInt32(Address);
+        var targetAddress = ToUInt32(address);
+        var mask = ToUInt32(Mask);
+        return (ownAddress & mask) == (targetAddress & mask);
     }
 
     private static uint ToUInt32(IPAddress address)

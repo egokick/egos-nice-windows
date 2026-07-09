@@ -43,11 +43,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _lightIcon;
     private readonly Icon _darkIcon;
     private readonly System.Windows.Forms.Timer _scheduleTimer;
+    private readonly SynchronizationContext _uiContext;
+    private readonly object _brightnessUpdateLock = new();
 
     private AppSettings _settings;
+    private int? _pendingBrightness;
+    private bool _brightnessUpdateRunning;
 
     public TrayApplicationContext()
     {
+        _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = SettingsStore.Load();
         _lightIcon = TrayIconFactory.CreateSunIcon();
         _darkIcon = TrayIconFactory.CreateMoonIcon();
@@ -79,7 +84,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _brightnessSeparatorMenuItem = new ToolStripSeparator();
 
         _brightnessSliderControl = new BrightnessSliderControl();
-        _brightnessSliderControl.BrightnessChanged += (_, _) => UpdateBrightness(_brightnessSliderControl.Brightness);
+        _brightnessSliderControl.BrightnessChanged += (_, _) => QueueBrightnessUpdate(_brightnessSliderControl.Brightness);
         _brightnessSliderHost = CreateSliderHost(_brightnessSliderControl);
 
         var exitMenuItem = new ToolStripMenuItem("Exit");
@@ -309,23 +314,92 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _brightnessSliderControl.SetUnavailable();
     }
 
-    private void UpdateBrightness(int brightness)
+    private void QueueBrightnessUpdate(int brightness)
     {
-        try
+        lock (_brightnessUpdateLock)
         {
-            if (BrightnessService.TrySetBrightness(brightness))
+            _pendingBrightness = Math.Clamp(brightness, 0, 100);
+            if (_brightnessUpdateRunning)
             {
                 return;
             }
 
-            RefreshBrightnessControl();
-            ShowErrorBalloon("Brightness control is unavailable on this display.");
+            _brightnessUpdateRunning = true;
         }
-        catch (Exception ex)
+
+        _ = Task.Run(ProcessQueuedBrightnessUpdates);
+    }
+
+    private void ProcessQueuedBrightnessUpdates()
+    {
+        while (true)
         {
-            RefreshBrightnessControl();
-            ShowErrorBalloon($"Brightness update failed: {ex.Message}");
+            int brightness;
+            lock (_brightnessUpdateLock)
+            {
+                if (_pendingBrightness is not { } pendingBrightness)
+                {
+                    _brightnessUpdateRunning = false;
+                    return;
+                }
+
+                brightness = pendingBrightness;
+                _pendingBrightness = null;
+            }
+
+            var result = TrySetBrightnessWithRetries(brightness);
+            if (result.Success)
+            {
+                continue;
+            }
+
+            lock (_brightnessUpdateLock)
+            {
+                if (_pendingBrightness is not null)
+                {
+                    continue;
+                }
+
+                _brightnessUpdateRunning = false;
+            }
+
+            _uiContext.Post(_ =>
+            {
+                RefreshBrightnessControl();
+                ShowErrorBalloon(result.ErrorMessage);
+            }, null);
+            return;
         }
+    }
+
+    private static BrightnessUpdateResult TrySetBrightnessWithRetries(int brightness)
+    {
+        const int maxAttempts = 4;
+        Exception? lastException = null;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                if (BrightnessService.TrySetBrightness(brightness))
+                {
+                    return BrightnessUpdateResult.Successful;
+                }
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+            }
+
+            if (attempt < maxAttempts)
+            {
+                Thread.Sleep(75 * attempt);
+            }
+        }
+
+        return lastException is null
+            ? BrightnessUpdateResult.Failed("Brightness control is unavailable on this display.")
+            : BrightnessUpdateResult.Failed($"Brightness update failed: {lastException.Message}");
     }
 
     private static ToolStripControlHost CreateSliderHost(Control control)
@@ -337,6 +411,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Padding = Padding.Empty,
             Size = control.Size
         };
+    }
+}
+
+internal sealed record BrightnessUpdateResult(bool Success, string ErrorMessage)
+{
+    public static readonly BrightnessUpdateResult Successful = new(true, string.Empty);
+
+    public static BrightnessUpdateResult Failed(string errorMessage)
+    {
+        return new BrightnessUpdateResult(false, errorMessage);
     }
 }
 

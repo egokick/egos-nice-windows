@@ -1,11 +1,13 @@
 const ZOOM_HOUR_STEPS = [6, 12, 24, 48, 72, 168, 336, 720, 2160];
 const MAX_HISTORY_HOURS = 2160;
+const UNKNOWN_GAP_MS = 60 * 60 * 1000;
 
 const appState = {
   devices: [],
   groups: [],
   groupFilters: readStoredGroupFilters(),
   expandedGroups: readStoredExpandedGroups(),
+  hiddenTimelineChildren: readStoredHiddenTimelineChildren(),
   showIgnored: localStorage.getItem("wifiDevices:showIgnored") === "true",
   selected: new Set(JSON.parse(localStorage.getItem("wifiDevices:selected") || "[]")),
   rangeHours: normalizeRangeHours(Number(localStorage.getItem("wifiDevices:rangeHours") || "168")),
@@ -308,6 +310,19 @@ function persistExpandedGroups() {
   localStorage.setItem("wifiDevices:expandedGroups", JSON.stringify([...appState.expandedGroups]));
 }
 
+function readStoredHiddenTimelineChildren() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("wifiDevices:hiddenTimelineChildren") || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter(Boolean) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function persistHiddenTimelineChildren() {
+  localStorage.setItem("wifiDevices:hiddenTimelineChildren", JSON.stringify([...appState.hiddenTimelineChildren]));
+}
+
 async function refreshAll() {
   try {
     const state = await fetchJson("/api/state");
@@ -377,10 +392,12 @@ function renderSummary(state) {
   const poll = state.poll || {};
   const completed = poll.lastCompletedUtc ? formatDateTime(poll.lastCompletedUtc) : "not completed";
   const source = poll.source || "no source";
-  const status = poll.isRunning ? "polling" : poll.lastSucceeded ? "last poll ok" : "last poll failed";
+  const status = poll.isRunning ? "polling" : poll.lastSucceeded ? "poll success" : "poll failed";
   els.pollSummary.textContent = `${status} - ${completed}`;
-  els.sourceStatus.textContent = poll.error || poll.message || source;
-  els.sourceStatus.classList.toggle("toast", Boolean(poll.error || poll.message));
+  els.sourceStatus.textContent = poll.lastSucceeded
+    ? `${source} - ${poll.deviceCount || 0} devices`
+    : poll.error || source;
+  els.sourceStatus.classList.toggle("toast", Boolean(poll.error));
   renderPollAlert(poll);
 }
 
@@ -454,8 +471,7 @@ function renderGroupControls() {
 
 function renderPollAlert(poll) {
   const hasFailure = Boolean(poll.error);
-  const hasWarning = !hasFailure && Boolean(poll.message);
-  if (!hasFailure && !hasWarning) {
+  if (!hasFailure) {
     els.pollAlert.hidden = true;
     els.pollAlert.textContent = "";
     els.pollAlert.className = "poll-alert";
@@ -463,9 +479,8 @@ function renderPollAlert(poll) {
   }
 
   els.pollAlert.hidden = false;
-  els.pollAlert.className = `poll-alert ${hasFailure ? "poll-alert-failed" : "poll-alert-warning"}`;
-  const title = hasFailure ? "Device poll failed" : "Device poll degraded";
-  els.pollAlert.textContent = `${title}: ${poll.error || poll.message}`;
+  els.pollAlert.className = "poll-alert poll-alert-failed";
+  els.pollAlert.textContent = `Device poll failed: ${poll.error}`;
 }
 
 function renderDevices() {
@@ -644,8 +659,17 @@ function renderTimeline() {
       ? `${row.expanded ? "v" : ">"} ${row.label}`
       : row.label;
     const detail = row.detail;
-    const labelX = row.kind === "device-child" ? 30 : 12;
-    const labelElement = drawSvgText(svg, labelX, y + 19, label, row.kind === "group" ? "row-label row-label-toggle" : "row-label");
+    const labelX = row.kind === "device-child" ? 46 : 12;
+    if (row.kind === "device-child") {
+      drawEyeToggle(svg, 14, y + 10, row);
+    }
+
+    const labelElement = drawSvgText(
+      svg,
+      labelX,
+      y + 19,
+      label,
+      row.kind === "group" ? "row-label row-label-toggle" : "row-label");
     if (row.kind === "group") {
       labelElement.setAttribute("role", "button");
       labelElement.setAttribute("tabindex", "0");
@@ -658,6 +682,9 @@ function renderTimeline() {
           toggle();
         }
       });
+      if (row.expanded && row.hiddenChildren > 0) {
+        drawShowHiddenToggle(svg, left - 30, y + 10, row);
+      }
     }
     drawSvgText(svg, labelX, y + 36, detail, "row-sub-label");
 
@@ -681,9 +708,9 @@ function renderTimeline() {
     for (let i = 0; i < samples.length; i++) {
       const current = samples[i];
       const next = samples[i + 1];
-      const segmentEnd = next
-        ? new Date(Math.min(next.time.getTime(), now.getTime(), end.getTime()))
-        : new Date(Math.min(now.getTime(), end.getTime()));
+      const maxKnownUntil = current.time.getTime() + UNKNOWN_GAP_MS;
+      const nextTime = next?.time.getTime() ?? now.getTime();
+      const segmentEnd = new Date(Math.min(nextTime, maxKnownUntil, now.getTime(), end.getTime()));
       if (segmentEnd <= current.time) {
         continue;
       }
@@ -1020,11 +1047,13 @@ function deviceRowsForGroup(group) {
   return appState.devices
     .filter(device =>
       (!device.ignored || appState.showIgnored)
-      && (device.groups || []).includes(group))
+      && (device.groups || []).includes(group)
+      && !appState.hiddenTimelineChildren.has(hiddenTimelineChildKey(group, device.mac)))
     .map(device => ({
       kind: "device-child",
       parentGroup: group,
       key: `${group}:${device.mac}`,
+      mac: device.mac,
       label: device.displayName || device.hostName || device.mac,
       detail: [device.lastIpAddress, device.networkBand, device.mac].filter(Boolean).join("  "),
       samples: samplesByMac.get(device.mac) || [],
@@ -1043,12 +1072,15 @@ function groupChartRow(group) {
 
   const samples = aggregateGroupSamples(group, memberMacs);
   const events = aggregateGroupEvents(group, samples);
+  const hiddenChildren = memberDevices.filter(device => appState.hiddenTimelineChildren.has(hiddenTimelineChildKey(group, device.mac))).length;
+  const hiddenDetail = hiddenChildren > 0 ? `, ${hiddenChildren} hidden` : "";
   return {
     kind: "group",
     key: group,
     label: group,
-    detail: `${memberDevices.length} device${memberDevices.length === 1 ? "" : "s"} - click name to ${appState.expandedGroups.has(group) ? "collapse" : "expand"}`,
+    detail: `${memberDevices.length} device${memberDevices.length === 1 ? "" : "s"}${hiddenDetail} - click name to ${appState.expandedGroups.has(group) ? "collapse" : "expand"}`,
     expanded: appState.expandedGroups.has(group),
+    hiddenChildren,
     samples,
     events
   };
@@ -1061,6 +1093,33 @@ function toggleGroupExpanded(group) {
     appState.expandedGroups.add(group);
   }
   persistExpandedGroups();
+  renderTimeline();
+}
+
+function hiddenTimelineChildKey(group, mac) {
+  return `${group}:${mac}`;
+}
+
+function toggleTimelineChild(row) {
+  const key = hiddenTimelineChildKey(row.parentGroup, row.mac);
+  if (appState.hiddenTimelineChildren.has(key)) {
+    appState.hiddenTimelineChildren.delete(key);
+  } else {
+    appState.hiddenTimelineChildren.add(key);
+  }
+
+  persistHiddenTimelineChildren();
+  renderTimeline();
+}
+
+function showHiddenTimelineChildren(group) {
+  for (const key of [...appState.hiddenTimelineChildren]) {
+    if (key.startsWith(`${group}:`)) {
+      appState.hiddenTimelineChildren.delete(key);
+    }
+  }
+
+  persistHiddenTimelineChildren();
   renderTimeline();
 }
 
@@ -1178,6 +1237,106 @@ function drawCircle(svg, x, y, radius, fill, className = "") {
     circle.setAttribute("class", className);
   }
   svg.append(circle);
+}
+
+function drawEyeToggle(svg, x, y, row) {
+  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  group.setAttribute("class", `timeline-eye-toggle${row.hidden ? " timeline-eye-hidden" : ""}`);
+  group.setAttribute("role", "button");
+  group.setAttribute("tabindex", "0");
+  group.setAttribute("aria-label", `${row.hidden ? "Show" : "Hide"} ${row.label} in online timeline`);
+
+  const hit = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  hit.setAttribute("x", String(x - 4));
+  hit.setAttribute("y", String(y - 4));
+  hit.setAttribute("width", "28");
+  hit.setAttribute("height", "26");
+  hit.setAttribute("rx", "6");
+  hit.setAttribute("class", "timeline-eye-hit");
+  group.append(hit);
+
+  const eye = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  eye.setAttribute("d", `M ${x} ${y + 7} C ${x + 4} ${y + 1}, ${x + 14} ${y + 1}, ${x + 18} ${y + 7} C ${x + 14} ${y + 13}, ${x + 4} ${y + 13}, ${x} ${y + 7} Z`);
+  eye.setAttribute("class", "timeline-eye-shape");
+  group.append(eye);
+
+  const pupil = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  pupil.setAttribute("cx", String(x + 9));
+  pupil.setAttribute("cy", String(y + 7));
+  pupil.setAttribute("r", "2.7");
+  pupil.setAttribute("class", "timeline-eye-pupil");
+  group.append(pupil);
+
+  if (row.hidden) {
+    const slash = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    slash.setAttribute("x1", String(x + 1));
+    slash.setAttribute("y1", String(y + 15));
+    slash.setAttribute("x2", String(x + 17));
+    slash.setAttribute("y2", String(y - 1));
+    slash.setAttribute("class", "timeline-eye-slash");
+    group.append(slash);
+  }
+
+  const toggle = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleTimelineChild(row);
+  };
+  group.addEventListener("click", toggle);
+  group.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      toggle(event);
+    }
+  });
+
+  svg.append(group);
+}
+
+function drawShowHiddenToggle(svg, x, y, row) {
+  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  group.setAttribute("class", "timeline-eye-toggle timeline-eye-restore");
+  group.setAttribute("role", "button");
+  group.setAttribute("tabindex", "0");
+  group.setAttribute("aria-label", `Show ${row.hiddenChildren} hidden device${row.hiddenChildren === 1 ? "" : "s"} in ${row.label}`);
+
+  const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+  title.textContent = `Show ${row.hiddenChildren} hidden`;
+  group.append(title);
+
+  const badge = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  badge.setAttribute("x", String(x - 6));
+  badge.setAttribute("y", String(y - 4));
+  badge.setAttribute("width", "28");
+  badge.setAttribute("height", "26");
+  badge.setAttribute("rx", "7");
+  badge.setAttribute("class", "timeline-eye-hit");
+  group.append(badge);
+
+  const eye = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  eye.setAttribute("d", `M ${x} ${y + 7} C ${x + 4} ${y + 1}, ${x + 14} ${y + 1}, ${x + 18} ${y + 7} C ${x + 14} ${y + 13}, ${x + 4} ${y + 13}, ${x} ${y + 7} Z`);
+  eye.setAttribute("class", "timeline-eye-shape");
+  group.append(eye);
+
+  const pupil = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  pupil.setAttribute("cx", String(x + 9));
+  pupil.setAttribute("cy", String(y + 7));
+  pupil.setAttribute("r", "2.7");
+  pupil.setAttribute("class", "timeline-eye-pupil");
+  group.append(pupil);
+
+  const toggle = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    showHiddenTimelineChildren(row.key);
+  };
+  group.addEventListener("click", toggle);
+  group.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      toggle(event);
+    }
+  });
+
+  svg.append(group);
 }
 
 function drawSvgText(svg, x, y, text, className) {

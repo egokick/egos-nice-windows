@@ -35,6 +35,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _enableAfterInactivityMenuItem;
     private readonly ToolStripControlHost _idleThresholdHost;
     private readonly ToolStripMenuItem _editTextMenuItem;
+    private readonly ToolStripMenuItem _openAgentChannelMenuItem;
     private readonly ToolStripMenuItem _openWorkVmMenuItem;
     private readonly ToolStripMenuItem _switchBluetoothToVmMenuItem;
     private readonly ToolStripMenuItem _returnBluetoothToLaptopMenuItem;
@@ -112,6 +113,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _editTextMenuItem = new ToolStripMenuItem("Edit text file");
         _editTextMenuItem.Click += (_, _) => OpenTextFile();
 
+        _openAgentChannelMenuItem = new ToolStripMenuItem("Open AI Chat");
+        _openAgentChannelMenuItem.Click += (_, _) => OpenAgentChannel();
+
         _openWorkVmMenuItem = new ToolStripMenuItem("Open VM");
         _openWorkVmMenuItem.Click += (_, _) => OpenWorkVm();
 
@@ -145,6 +149,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _contextMenu.Items.Add(_enableAfterInactivityMenuItem);
         _contextMenu.Items.Add(_idleThresholdHost);
         _contextMenu.Items.Add(_editTextMenuItem);
+        _contextMenu.Items.Add(_openAgentChannelMenuItem);
         _contextMenu.Items.Add(new ToolStripSeparator());
         _contextMenu.Items.Add(_openWorkVmMenuItem);
         _contextMenu.Items.Add(_switchBluetoothToVmMenuItem);
@@ -333,6 +338,29 @@ internal sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             ShowErrorBalloon($"Could not open text file: {ex.Message}");
+        }
+    }
+
+    private void OpenAgentChannel()
+    {
+        try
+        {
+            var executablePath = AgentChannelLauncher.GetExecutablePath();
+            if (!File.Exists(executablePath))
+            {
+                ShowErrorBalloon("AI Chat is not built yet. Build AgentChannel first.");
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = executablePath,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            ShowErrorBalloon($"Could not open AI Chat: {ex.Message}");
         }
     }
 
@@ -736,6 +764,23 @@ internal static class StartupService
         {
             key.DeleteValue(AppName, throwOnMissingValue: false);
         }
+    }
+}
+
+internal static class AgentChannelLauncher
+{
+    public static string GetExecutablePath()
+    {
+        var baseDirectory = AppContext.BaseDirectory;
+        var candidates = new[]
+        {
+            Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "..", "AgentChannel", "bin", "Release", "net10.0-windows", "AgentChannel.exe")),
+            Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "..", "AgentChannel", "bin", "Debug", "net10.0-windows", "AgentChannel.exe")),
+            Path.GetFullPath(Path.Combine(baseDirectory, "..", "AgentChannel", "AgentChannel.exe")),
+            Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? baseDirectory, "AgentChannel.exe")
+        };
+
+        return candidates.FirstOrDefault(File.Exists) ?? candidates[0];
     }
 }
 

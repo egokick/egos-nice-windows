@@ -1,0 +1,2053 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Workbench — Workflow Operations</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d12;
+      --surface-1: #11141b;
+      --surface-2: #171b24;
+      --surface-3: #1d222d;
+      --surface-4: #242b38;
+      --line: #2b3240;
+      --line-strong: #394354;
+      --text: #f2f5f9;
+      --text-2: #b8c1ce;
+      --text-3: #7f8a9a;
+      --blue: #7c9cff;
+      --blue-strong: #5d7ff0;
+      --blue-soft: #202a4b;
+      --green: #57d89a;
+      --green-soft: #16382d;
+      --amber: #f5bd62;
+      --amber-soft: #3b2c17;
+      --red: #ff7f8c;
+      --red-soft: #411f28;
+      --purple: #b69cff;
+      --purple-soft: #30264e;
+      --cyan: #6bd9e8;
+      --shadow: 0 16px 42px rgba(0,0,0,.32);
+      --radius: 12px;
+      --control-h: 36px;
+      --row-h: 54px;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--bg); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    body[data-density="compact"] { --control-h: 32px; --row-h: 46px; font-size: 13px; }
+    button, input, select, textarea { font: inherit; }
+    button, select, input, textarea { color: var(--text); }
+    button {
+      min-height: var(--control-h);
+      padding: 0 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--surface-2);
+      cursor: pointer;
+      transition: border-color .14s ease, background .14s ease, transform .14s ease, opacity .14s ease;
+    }
+    button:hover:not(:disabled) { border-color: #536177; background: var(--surface-3); }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+      outline: 3px solid rgba(124,156,255,.42);
+      outline-offset: 2px;
+    }
+    .btn-primary { background: var(--blue-strong); border-color: var(--blue-strong); color: #fff; font-weight: 650; }
+    .btn-primary:hover:not(:disabled) { background: #6b8df8; border-color: #6b8df8; }
+    .btn-danger { color: #ffd9dd; background: var(--red-soft); border-color: #713342; }
+    .btn-success { color: #d9ffed; background: var(--green-soft); border-color: #28634d; }
+    .btn-ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+    .btn-ghost:hover:not(:disabled) { background: var(--surface-3); border-color: var(--line); color: var(--text); }
+    .btn-small { min-height: 30px; padding: 0 9px; font-size: 12px; }
+    .icon-btn { width: var(--control-h); padding: 0; display: inline-grid; place-items: center; font-size: 18px; }
+    .link-btn { border: 0; min-height: auto; padding: 0; background: transparent; color: var(--blue); }
+    .link-btn:hover:not(:disabled) { border: 0; background: transparent; color: #a8bbff; }
+    .muted { color: var(--text-2); }
+    .subtle { color: var(--text-3); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .nowrap { white-space: nowrap; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+    .app-header {
+      height: 64px;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(17,20,27,.96);
+      position: sticky;
+      top: 0;
+      z-index: 30;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 215px; }
+    .brand-mark {
+      width: 32px; height: 32px; border-radius: 9px;
+      display: grid; place-items: center;
+      background: var(--blue); color: #0e1424; font-weight: 900;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.35);
+    }
+    .brand-title { font-size: 15px; font-weight: 750; letter-spacing: -.01em; }
+    .brand-sub { font-size: 11px; color: var(--text-3); margin-top: -2px; }
+    .header-context { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .context-select, .toolbar-control {
+      height: var(--control-h);
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--surface-2);
+      padding: 0 32px 0 10px;
+    }
+    .branch-chip, .health-chip, .quiet-chip {
+      height: var(--control-h); display: inline-flex; align-items: center; gap: 7px;
+      padding: 0 10px; border: 1px solid var(--line); border-radius: 8px;
+      color: var(--text-2); background: var(--surface-1); white-space: nowrap;
+    }
+    .health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(87,216,154,.1); }
+    .header-spacer { flex: 1; }
+    .header-actions { display: flex; gap: 8px; align-items: center; }
+    .mobile-menu { display: none; }
+
+    .shell { display: grid; grid-template-columns: 280px minmax(0,1fr); min-height: 100vh; }
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: var(--surface-1);
+      padding: 18px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      min-height: 100vh;
+      overflow-y: auto;
+    }
+    .mobile-sidebar-context { display: none; }
+    .sidebar-head { display: flex; align-items: center; justify-content: space-between; padding: 0 6px 8px; }
+    .sidebar-title { color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; font-size: 11px; font-weight: 750; }
+    .view-list { display: grid; gap: 3px; }
+    .view-button {
+      width: 100%; border-color: transparent; background: transparent; display: flex; align-items: center;
+      justify-content: space-between; color: var(--text-2); text-align: left; padding: 0 10px;
+    }
+    .view-button:hover { background: var(--surface-2); border-color: transparent; }
+    .view-button.active { background: var(--blue-soft); border-color: #3c4d82; color: #e9efff; }
+    .view-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .view-icon { width: 10px; height: 10px; border-radius: 50%; background: var(--text-3); flex: none; }
+    .view-icon.review { background: var(--amber); }
+    .view-icon.failed { background: var(--red); }
+    .view-icon.running { background: var(--blue); }
+    .view-icon.completed { background: var(--green); }
+    .count-badge { min-width: 24px; padding: 1px 7px; text-align: center; border-radius: 99px; background: var(--surface-3); color: var(--text-2); font-size: 11px; }
+    .view-button.active .count-badge { background: #364675; color: #fff; }
+    .workflow-search-wrap { position: relative; margin-bottom: 8px; }
+    .workflow-search, .run-search {
+      width: 100%; height: var(--control-h); border: 1px solid var(--line); border-radius: 8px;
+      background: var(--surface-2); padding: 0 10px; outline: 0;
+    }
+    .workflow-list { display: grid; gap: 3px; }
+    .workflow-item {
+      display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px;
+      border: 1px solid transparent; border-radius: 7px; padding: 3px 6px 3px 8px;
+    }
+    .workflow-item:hover { background: var(--surface-2); }
+    .workflow-item.active { background: var(--surface-2); border-color: var(--line-strong); }
+    .workflow-select { min-height: auto; border: 0; background: transparent; padding: 0; text-align: left; min-width: 0; }
+    .workflow-select:hover:not(:disabled) { background: transparent; border: 0; }
+    .workflow-name { display: block; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 650; }
+    .workflow-controls { display: flex; align-items: center; gap: 4px; }
+    .workflow-controls .mini-icon { min-height: 24px; width: 24px; }
+    .mini-icon { min-height: 28px; width: 28px; padding: 0; border-color: transparent; background: transparent; color: var(--text-3); }
+    .mini-icon:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+    .new-workflow-icon { color: var(--blue); background: var(--blue-soft); }
+    .new-workflow-icon:hover:not(:disabled) { color: #fff; background: var(--blue-strong); }
+    .workflow-run-control { color: var(--green); background: var(--green-soft); }
+    .workflow-run-control:hover:not(:disabled) { color: #d9ffea; background: #1c513d; }
+    .workflow-run-control.btn-danger { color: #ffb5bd; background: var(--red-soft); border-color: #723441; }
+    .workflow-run-control.btn-danger:hover:not(:disabled) { color: #ffe1e5; background: #5a2732; }
+    .workflow-order { height: 26px; max-width: 104px; padding-inline: 7px; font-size: 11px; }
+    .switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+    .switch input { position: absolute; opacity: 0; pointer-events: none; }
+    .switch-track { width: 32px; height: 18px; border-radius: 99px; background: #3a4352; position: relative; transition: background .15s; }
+    .switch-track::after { content: ""; width: 12px; height: 12px; border-radius: 50%; position: absolute; left: 3px; top: 3px; background: #cad1dc; transition: transform .15s; }
+    .switch input:checked + .switch-track { background: var(--blue-strong); }
+    .switch input:checked + .switch-track::after { transform: translateX(14px); background: #fff; }
+    .switch input:focus-visible + .switch-track { outline: 3px solid rgba(124,156,255,.42); outline-offset: 2px; }
+    .sidebar-foot { margin-top: auto; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #0e1117; }
+    .directory-picker { display: flex; align-items: center; gap: 6px; }
+    .directory-picker select { min-width: 0; flex: 1; height: 30px; font-size: 11px; }
+
+    .main { min-width: 0; padding: 18px; }
+    .pause-banner {
+      display: none; margin-bottom: 14px; align-items: center; gap: 12px; padding: 11px 13px;
+      border: 1px solid #75582a; border-radius: 10px; background: var(--amber-soft); color: #ffe8bd;
+    }
+    .pause-banner.visible { display: flex; }
+    .pause-banner strong { margin-right: 3px; }
+    .pause-banner .banner-spacer { flex: 1; }
+    .card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-1); box-shadow: 0 1px 0 rgba(255,255,255,.02); }
+    .run-split { display: flex; flex-direction: column; height: calc(100vh - 36px); min-height: 600px; }
+    .runs-card { overflow: hidden; flex: 0 0 var(--runs-pane-height, 42%); min-height: 0; display: flex; flex-direction: column; }
+    .section-header { min-height: 58px; padding: 12px 14px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+    .section-heading { min-width: 130px; }
+    .section-heading h1, .section-heading h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+    .section-kicker { color: var(--text-3); font-size: 11px; margin-top: 2px; }
+    .toolbar { flex: 1; min-width: 0; display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
+    .search-wrap { width: min(260px, 30vw); }
+    .active-filter-bar { display: none; padding: 9px 14px; border-bottom: 1px solid var(--line); background: #10141d; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .active-filter-bar.visible { display: flex; }
+    .filter-chip { min-height: 27px; display: inline-flex; align-items: center; gap: 6px; padding: 0 7px 0 9px; border: 1px solid #3d4e7f; border-radius: 99px; background: var(--blue-soft); color: #dce5ff; font-size: 11px; }
+    .filter-chip button { min-height: 20px; width: 20px; padding: 0; border: 0; background: transparent; color: #9fb2ee; }
+    .table-wrap { flex: 1; min-height: 0; max-height: none; overflow: auto; }
+    .run-table { width: 100%; min-width: 920px; border-collapse: collapse; table-layout: fixed; }
+    .run-table col:nth-child(1) { width: 116px; }
+    .run-table col:nth-child(2) { width: 190px; }
+    .run-table col:nth-child(3) { width: 145px; }
+    .run-table col:nth-child(4) { width: 86px; }
+    .run-table col:nth-child(6) { width: 96px; }
+    .run-table th { height: 36px; position: sticky; top: 0; z-index: 2; background: var(--surface-2); color: var(--text-3); font-size: 10px; text-transform: uppercase; letter-spacing: .065em; text-align: left; padding: 0 12px; border-bottom: 1px solid var(--line); }
+    .run-table td { height: var(--row-h); padding: 8px 12px; border-bottom: 1px solid #222834; vertical-align: middle; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
+    .run-table tbody tr { cursor: pointer; outline: 0; }
+    .run-table tbody tr:hover { background: #151a23; }
+    .run-table tbody tr.selected { background: #192139; box-shadow: inset 3px 0 0 var(--blue); }
+    .run-table tbody tr.selected td { color: #dfe7f5; }
+    .run-table tbody tr:last-child td { border-bottom: 0; }
+    .run-main { color: var(--text); font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .run-sub { color: var(--text-3); font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .status {
+      display: inline-flex; align-items: center; gap: 6px; min-height: 25px; padding: 0 8px;
+      border: 1px solid var(--line); border-radius: 99px; font-size: 11px; font-weight: 700; white-space: nowrap;
+    }
+    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .status.running { color: #b7c8ff; background: var(--blue-soft); border-color: #40558f; }
+    .status.review { color: #ffd891; background: var(--amber-soft); border-color: #73562b; }
+    .status.failed { color: #ffb5bd; background: var(--red-soft); border-color: #723441; }
+    .status.stopped { color: #c9c3db; background: #282532; border-color: #494354; }
+    .status.completed { color: #a8f0cd; background: var(--green-soft); border-color: #29634d; }
+    .status.rejected { color: #e0bac0; background: #322229; border-color: #5d3943; }
+    .status.applying, .status.queued { color: #d4c3ff; background: var(--purple-soft); border-color: #584784; }
+    .check-label { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650; white-space: nowrap; }
+    .check-label::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
+    .check-label.passed { color: var(--green); }
+    .check-label.passed::before { background: var(--green); }
+    .check-label.failed { color: var(--red); }
+    .check-label.failed::before { background: var(--red); }
+    .check-label.running { color: var(--blue); }
+    .check-label.running::before { background: var(--blue); }
+    .check-label.stale { color: var(--amber); }
+    .check-label.stale::before { background: var(--amber); }
+    .changes-inline { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+    .diff-count { color: var(--text-2); font-size: 11px; }
+    .plus { color: var(--green); }
+    .minus { color: var(--red); }
+    .mobile-run-list { display: none; }
+    .empty-state { padding: 46px 20px; text-align: center; color: var(--text-2); }
+    .empty-state strong { display: block; color: var(--text); font-size: 15px; margin-bottom: 5px; }
+
+    .run-resize-handle { height: 16px; flex: 0 0 16px; display: grid; place-items: center; cursor: row-resize; touch-action: none; }
+    .run-resize-handle::before { content: ""; width: 42px; height: 4px; border-radius: 99px; background: var(--line-strong); transition: background .15s, width .15s; }
+    .run-resize-handle:hover::before, .run-resize-handle:focus-visible::before, .run-resize-handle.dragging::before { width: 62px; background: var(--blue); }
+    .run-resize-handle:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+    .detail-card { margin-top: 0; overflow: auto; min-height: 0; flex: 1 1 0; }
+    .detail-top {
+      min-height: 76px; padding: 14px 16px; display: flex; align-items: center; gap: 14px;
+      border-bottom: 1px solid var(--line); background: #10131a;
+    }
+    .detail-identity { min-width: 0; flex: 1; }
+    .detail-title-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .detail-title-row h2 { margin: 0; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .detail-meta { color: var(--text-3); font-size: 12px; margin-top: 5px; display: flex; flex-wrap: wrap; gap: 6px 12px; }
+    .detail-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+    .detail-tabs { height: 44px; padding: 0 14px; display: flex; align-items: end; gap: 2px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+    .tab-button { min-height: 43px; border: 0; border-radius: 0; background: transparent; color: var(--text-3); padding: 0 13px; border-bottom: 2px solid transparent; white-space: nowrap; }
+    .tab-button:hover:not(:disabled) { border-color: transparent; border-bottom-color: #4b566a; background: transparent; color: var(--text); }
+    .tab-button.active { color: #e9eeff; border-bottom-color: var(--blue); }
+    .detail-body { padding: 16px; }
+    .detail-grid { display: grid; grid-template-columns: minmax(0,1.25fr) minmax(300px,.75fr); gap: 14px; align-items: start; }
+    .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); overflow: hidden; }
+    .panel + .panel { margin-top: 12px; }
+    .panel-head { min-height: 43px; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); color: var(--text); font-weight: 650; }
+    .panel-head-meta { color: var(--text-3); font-size: 11px; font-weight: 500; }
+    .panel-body { padding: 13px; }
+    .summary-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+    .summary-list li { display: grid; grid-template-columns: 22px minmax(0,1fr); gap: 8px; color: var(--text-2); }
+    .step-icon { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; margin-top: 1px; background: var(--green-soft); color: var(--green); font-size: 11px; font-weight: 800; }
+    .step-icon.current { background: var(--blue-soft); color: var(--blue); }
+    .metric-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+    .metric { min-height: 58px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: #12161e; }
+    .metric-label { color: var(--text-3); font-size: 10px; text-transform: uppercase; letter-spacing: .055em; }
+    .metric-value { margin-top: 5px; color: var(--text); font-weight: 700; }
+    .activity-callout { padding: 12px; border-left: 3px solid var(--blue); border-radius: 7px; background: #151c2c; }
+    .activity-callout.review { border-left-color: var(--amber); background: #251f17; }
+    .activity-callout.failed { border-left-color: var(--red); background: #25181e; }
+    .activity-title { color: var(--text); font-weight: 700; }
+    .activity-text { color: var(--text-2); margin-top: 4px; }
+    .command { margin-top: 10px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: #090b10; color: #d1d9e6; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .inline-actions { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+    .notice { padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-2); background: #12161e; }
+    .notice.warning { background: var(--amber-soft); border-color: #684e28; color: #f7dcaa; }
+    .notice.danger { background: var(--red-soft); border-color: #65313d; color: #ffc3ca; }
+    .notice.success { background: var(--green-soft); border-color: #285a48; color: #c7f8df; }
+    .timeline { position: relative; display: grid; gap: 0; }
+    .timeline-item { display: grid; grid-template-columns: 86px 14px minmax(0,1fr); gap: 8px; min-height: 54px; }
+    .timeline-time { color: var(--text-3); font-size: 11px; padding-top: 1px; }
+    .timeline-marker { position: relative; }
+    .timeline-marker::before { content: ""; width: 8px; height: 8px; border: 2px solid var(--blue); border-radius: 50%; background: var(--surface-2); position: absolute; left: 1px; top: 3px; z-index: 1; }
+    .timeline-marker::after { content: ""; width: 1px; background: var(--line-strong); position: absolute; left: 6px; top: 15px; bottom: -3px; }
+    .timeline-item:last-child .timeline-marker::after { display: none; }
+    .timeline-content { color: var(--text-2); padding-bottom: 16px; }
+    .timeline-content strong { color: var(--text); }
+    .file-list { display: grid; gap: 10px; }
+    .file-card { border: 1px solid var(--line); border-radius: 9px; background: #12161e; overflow: hidden; }
+    .file-head { min-height: 48px; padding: 8px 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .file-name { min-width: 0; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dbe3ef; }
+    .file-meta { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 11px; flex: none; }
+    .file-actions { display: flex; gap: 6px; align-items: center; }
+    .decision { display: inline-flex; min-height: 23px; align-items: center; padding: 0 7px; border-radius: 99px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+    .decision.included, .decision.applied { color: var(--green); background: var(--green-soft); }
+    .decision.excluded, .decision.rejected { color: var(--red); background: var(--red-soft); }
+    .decision.draft { color: var(--amber); background: var(--amber-soft); }
+    .diff { margin: 0; padding: 10px 0; border-top: 1px solid var(--line); background: #090b10; overflow-x: auto; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .diff-line { display: block; padding: 0 12px; min-width: max-content; white-space: pre; }
+    .diff-line.add { color: #b9f4d7; background: rgba(45,130,91,.16); }
+    .diff-line.del { color: #ffc0c6; background: rgba(160,54,70,.16); }
+    .check-table { width: 100%; border-collapse: collapse; }
+    .check-table th, .check-table td { padding: 10px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .check-table th { color: var(--text-3); font-size: 10px; text-transform: uppercase; letter-spacing: .055em; }
+    .check-table tr:last-child td { border-bottom: 0; }
+    .output { color: var(--text-2); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    .note-list { display: grid; gap: 8px; }
+    .note { padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: #12161e; }
+    .note-meta { color: var(--text-3); font-size: 10px; margin-bottom: 4px; }
+    .iteration-card { display: grid; grid-template-columns: 92px minmax(0,1fr) auto; gap: 12px; padding: 12px; border-bottom: 1px solid var(--line); align-items: start; }
+    .iteration-card:last-child { border-bottom: 0; }
+    .iteration-number { color: var(--blue); font-weight: 750; }
+    .iteration-title { color: var(--text); font-weight: 650; }
+    .iteration-summary { color: var(--text-2); margin-top: 3px; }
+    .iteration-state { color: var(--text-3); font-size: 11px; white-space: nowrap; }
+
+    .backdrop { position: fixed; inset: 0; z-index: 80; background: rgba(3,5,8,.68); opacity: 0; pointer-events: none; transition: opacity .18s ease; }
+    #sidebarBackdrop { z-index: 50; }
+    #drawerBackdrop { z-index: 80; }
+    #modalBackdrop { z-index: 100; }
+    .backdrop.open { opacity: 1; pointer-events: auto; }
+    .drawer {
+      position: fixed; inset: 0 0 0 auto; z-index: 90; width: min(880px, calc(100vw - 40px));
+      background: var(--surface-1); border-left: 1px solid var(--line-strong); box-shadow: var(--shadow);
+      display: grid; grid-template-rows: auto auto minmax(0,1fr) auto; transform: translateX(105%); transition: transform .2s ease;
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer-header { min-height: 72px; padding: 13px 18px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+    .drawer-title-wrap { flex: 1; min-width: 0; }
+    .drawer-title { font-size: 18px; font-weight: 750; }
+    .drawer-subtitle { color: var(--text-3); font-size: 12px; margin-top: 3px; }
+    .drawer-tabs { height: 48px; padding: 0 14px; border-bottom: 1px solid var(--line); display: flex; align-items: end; gap: 2px; overflow-x: auto; }
+    .drawer-body { padding: 18px; overflow: auto; }
+    .drawer-footer { min-height: 68px; padding: 12px 18px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 12px; background: #10131a; }
+    .drawer-footer-note { flex: 1; color: var(--text-3); font-size: 11px; }
+    .editor-grid { display: grid; grid-template-columns: minmax(0,1.08fr) minmax(300px,.92fr); gap: 14px; }
+    .composer { min-height: 132px; width: 100%; resize: vertical; border: 1px solid #425589; border-radius: 9px; background: #101624; padding: 12px; line-height: 1.5; }
+    .composer::placeholder { color: #6f7c91; }
+    .example-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .proposal-empty { min-height: 255px; display: grid; place-items: center; padding: 25px; text-align: center; color: var(--text-3); }
+    .proposal-content { padding: 13px; }
+    .proposal-summary { display: grid; gap: 7px; margin-bottom: 12px; }
+    .proposal-item { display: grid; grid-template-columns: 76px minmax(0,1fr); gap: 8px; color: var(--text-2); }
+    .proposal-item strong { color: var(--purple); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+    .prompt-reader { margin-top: 12px; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+    .prompt-reader summary { padding: 11px 12px; cursor: pointer; color: var(--text-2); background: #12161e; }
+    .prompt-reader[open] summary { border-bottom: 1px solid var(--line); }
+    .prompt-source { width: 100%; min-height: 330px; resize: vertical; border: 0; background: #090b10; padding: 13px; color: #d8e0ec; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .draft-banner { margin-bottom: 12px; display: flex; align-items: center; gap: 9px; padding: 10px 11px; border: 1px solid #4f4379; border-radius: 8px; background: var(--purple-soft); color: #e5dbff; }
+    .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }
+    .form-group { display: grid; gap: 6px; align-content: start; }
+    .form-group.full { grid-column: 1 / -1; }
+    .form-group label { color: var(--text-2); font-size: 12px; font-weight: 650; }
+    .field-help { color: var(--text-3); font-size: 11px; margin-top: -2px; }
+    .field, .textarea {
+      width: 100%; min-height: var(--control-h); border: 1px solid var(--line-strong); border-radius: 8px;
+      background: var(--surface-2); padding: 7px 10px;
+    }
+    .textarea { min-height: 86px; resize: vertical; }
+    .validation { color: var(--red); font-size: 11px; min-height: 16px; }
+    .safety-option { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 10px; padding: 11px; border: 1px solid var(--line); border-radius: 9px; background: #12161e; }
+    .safety-option input { margin-top: 3px; }
+    .safety-title { color: var(--text); font-weight: 650; }
+    .safety-copy { color: var(--text-3); font-size: 11px; margin-top: 2px; }
+    .version-list { display: grid; gap: 9px; }
+    .version-card { padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: #12161e; }
+    .version-head { display: flex; align-items: center; gap: 10px; }
+    .version-number { color: var(--purple); font-weight: 750; }
+    .version-current { padding: 2px 7px; border-radius: 99px; background: var(--green-soft); color: var(--green); font-size: 10px; text-transform: uppercase; font-weight: 750; }
+    .version-date { margin-left: auto; color: var(--text-3); font-size: 11px; }
+    .version-note { color: var(--text-2); margin-top: 7px; }
+    .version-actions { display: flex; gap: 7px; margin-top: 9px; }
+
+    .modal {
+      position: fixed; z-index: 110; inset: 50% auto auto 50%; transform: translate(-50%,-47%) scale(.98);
+      width: min(540px, calc(100vw - 28px)); max-height: calc(100vh - 40px); overflow: hidden;
+      border: 1px solid var(--line-strong); border-radius: 13px; background: var(--surface-1); box-shadow: var(--shadow);
+      opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s;
+    }
+    .modal.open { opacity: 1; pointer-events: auto; transform: translate(-50%,-50%) scale(1); }
+    .modal-header { min-height: 57px; padding: 11px 14px 11px 17px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+    .modal-header h2 { margin: 0; font-size: 16px; flex: 1; }
+    .modal-body { padding: 16px; overflow: auto; max-height: calc(100vh - 180px); }
+    .modal-footer { min-height: 60px; padding: 11px 14px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+    .toast-region { position: fixed; z-index: 150; right: 16px; bottom: 16px; width: min(360px, calc(100vw - 32px)); display: grid; gap: 8px; pointer-events: none; }
+    .toast { padding: 11px 12px; border: 1px solid var(--line-strong); border-radius: 9px; background: #1a1f29; box-shadow: var(--shadow); animation: toast-in .18s ease; }
+    .toast-title { font-weight: 700; color: var(--text); }
+    .toast-copy { color: var(--text-2); font-size: 12px; margin-top: 2px; }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+
+    @media (max-width: 1180px) {
+      .shell { grid-template-columns: 240px minmax(0,1fr); }
+      .sidebar { padding-inline: 10px; }
+      .brand { min-width: auto; }
+      .brand-copy { display: none; }
+      .detail-grid, .editor-grid { grid-template-columns: 1fr; }
+      .table-wrap { max-height: 350px; }
+      .run-table th:nth-child(6), .run-table td:nth-child(6) { display: none; }
+    }
+    @media (max-width: 900px) {
+      .mobile-menu { display: inline-grid; }
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { position: static; width: auto; min-height: auto; transform: none; box-shadow: none; }
+      .sidebar.open { transform: translateX(0); }
+      .mobile-sidebar-context { display: block; }
+      .header-context { flex: 1; }
+      .context-select { max-width: 210px; }
+      .header-context .branch-select { display: none; }
+      .health-chip { display: none; }
+      .header-actions .pause-label { display: none; }
+      .main { padding: 14px; }
+      .toolbar-control.sort-control { display: none; }
+      .run-split { height: auto; min-height: 0; }
+      .runs-card, .detail-card { min-height: 0; flex: none; }
+      .run-resize-handle { display: none; }
+      .detail-card { margin-top: 16px; overflow: hidden; }
+    }
+    @media (max-width: 720px) {
+      .main { padding: 10px; }
+      .section-header { align-items: flex-start; flex-direction: column; }
+      .section-heading { width: 100%; }
+      .toolbar { width: 100%; justify-content: stretch; flex-wrap: wrap; }
+      .search-wrap { width: 100%; }
+      .toolbar-control { flex: 1; min-width: 130px; }
+      .table-wrap { display: none; }
+      .mobile-run-list { display: grid; }
+      .mobile-run-card { padding: 12px; border-bottom: 1px solid var(--line); cursor: pointer; outline: 0; }
+      .mobile-run-card.selected { background: #192139; box-shadow: inset 3px 0 0 var(--blue); }
+      .mobile-run-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .mobile-run-title { margin-top: 10px; font-weight: 700; color: var(--text); }
+      .mobile-run-meta { margin-top: 3px; color: var(--text-3); font-size: 11px; }
+      .mobile-run-activity { margin-top: 9px; color: var(--text-2); }
+      .mobile-run-foot { margin-top: 9px; display: flex; align-items: center; justify-content: space-between; color: var(--text-3); font-size: 11px; }
+      .detail-top { align-items: flex-start; flex-direction: column; }
+      .detail-actions { width: 100%; justify-content: flex-start; }
+      .detail-actions button { flex: 1; min-width: 110px; }
+      .detail-body { padding: 11px; }
+      .metric-grid { grid-template-columns: 1fr 1fr; }
+      .timeline-item { grid-template-columns: 65px 14px minmax(0,1fr); }
+      .file-head { align-items: flex-start; flex-direction: column; }
+      .file-actions { width: 100%; }
+      .iteration-card { grid-template-columns: 80px minmax(0,1fr); }
+      .iteration-state { grid-column: 2; }
+      .drawer { width: 100vw; }
+      .drawer-body { padding: 12px; }
+      .drawer-footer { flex-wrap: wrap; }
+      .drawer-footer-note { flex-basis: 100%; }
+      .form-grid { grid-template-columns: 1fr; }
+      .form-group.full { grid-column: auto; }
+      .proposal-item { grid-template-columns: 1fr; gap: 2px; }
+    }
+    @media (max-width: 430px) {
+      .context-select { max-width: 118px; }
+      .header-actions { gap: 4px; }
+      .metric-grid { grid-template-columns: 1fr; }
+      .detail-tabs { padding-inline: 6px; }
+      .tab-button { padding-inline: 10px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body data-density="comfortable">
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Workflow navigation">
+      <section class="mobile-sidebar-context">
+        <div class="sidebar-head"><span class="sidebar-title">Local context</span></div>
+        <div class="form-group">
+          <label for="sidebarBranchSelect">Current branch</label>
+          <select id="sidebarBranchSelect" class="field mono" data-action="changeBranch">
+            <option>feature/login</option><option>feature/auth</option><option>feature/types</option><option>main</option><option>release/next</option>
+          </select>
+          <button type="button" id="sidebarPauseButton" data-action="toggleGlobalPause">Pause automations</button>
+        </div>
+      </section>
+      <section>
+        <div class="sidebar-head"><span class="sidebar-title">Workflows</span><div class="workflow-controls"><label class="sr-only" for="workflowSort">Order workflows</label><select id="workflowSort" class="toolbar-control workflow-order" data-action="changeWorkflowSort"><option value="custom">Custom</option><option value="alpha-asc">A–Z</option><option value="alpha-desc">Z–A</option></select><button type="button" class="mini-icon new-workflow-icon" data-action="newWorkflow" aria-label="New workflow">＋</button></div></div>
+        <div class="workflow-search-wrap"><label class="sr-only" for="workflowSearch">Search workflows</label><input id="workflowSearch" class="workflow-search" type="search" placeholder="Search workflows…" ></div>
+        <div class="workflow-list" id="workflowList"></div>
+      </section>
+      <div class="sidebar-foot">
+        <label class="sidebar-title" for="directorySelect">Working directory</label>
+        <div class="directory-picker"><select id="directorySelect" class="toolbar-control mono" data-action="changeDirectory"></select><button type="button" class="mini-icon new-workflow-icon" data-action="addDirectory" aria-label="Add directory" title="Add directory">＋</button></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="pause-banner" id="pauseBanner" role="status">
+        <span aria-hidden="true">Ⅱ</span>
+        <div><strong>Automatic triggers are paused.</strong> Active runs continue, and manual runs are still available.</div>
+        <span class="banner-spacer"></span>
+        <button type="button" class="btn-small" data-action="toggleGlobalPause">Resume automations</button>
+      </div>
+
+      <div class="run-split" id="runSplit">
+      <section class="card runs-card" aria-labelledby="runsHeading">
+        <div class="section-header">
+          <div class="section-heading"><h1 id="runsHeading">All runs</h1><div class="section-kicker" id="runsKicker">0 visible</div></div>
+          <div class="toolbar">
+            <div class="search-wrap"><label class="sr-only" for="runSearch">Search runs</label><input id="runSearch" class="run-search" type="search" placeholder="Search workflow, branch, commit…" ></div>
+            <label class="sr-only" for="triggerFilter">Trigger</label>
+            <select id="triggerFilter" class="toolbar-control" data-action="changeTriggerFilter">
+              <option value="all">All triggers</option><option value="post_commit">Post-commit</option><option value="test_failure">Test failure</option><option value="schedule">Schedule</option><option value="manual">Manual</option><option value="file_watch">File watch</option>
+            </select>
+            <label class="sr-only" for="runStatusFilter">Run status</label>
+            <select id="runStatusFilter" class="toolbar-control" data-action="changeRunStatusFilter">
+              <option value="all">All runs</option><option value="review">Needs review</option><option value="failed">Failed</option><option value="running">Running</option><option value="completed">Completed</option>
+            </select>
+            <label class="sr-only" for="sortRuns">Sort runs</label>
+            <select id="sortRuns" class="toolbar-control sort-control" data-action="changeSort">
+              <option value="updated">Recently updated</option><option value="newest">Newest started</option><option value="oldest">Oldest started</option>
+            </select>
+          </div>
+        </div>
+        <div class="active-filter-bar" id="activeFilterBar"></div>
+        <div class="table-wrap">
+          <table class="run-table">
+            <colgroup><col><col><col><col><col><col></colgroup>
+            <thead><tr><th>Status</th><th>Workflow / trigger</th><th>Branch / commit</th><th>Iteration</th><th>Latest activity</th><th>Elapsed</th></tr></thead>
+            <tbody id="runRows"></tbody>
+          </table>
+        </div>
+        <div class="mobile-run-list" id="mobileRunList"></div>
+      </section>
+      <div class="run-resize-handle" id="runResizeHandle" role="separator" aria-label="Resize run list and run details" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="42" tabindex="0"></div>
+      <section class="card detail-card" id="runDetail"></section>
+      </div>
+    </main>
+  </div>
+
+  <div class="backdrop" id="sidebarBackdrop" data-action="toggleSidebar"></div>
+
+  <div class="backdrop" id="drawerBackdrop" data-action="requestCloseWorkflow"></div>
+  <aside class="drawer" id="workflowDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-hidden="true" inert hidden>
+    <header class="drawer-header"><div class="drawer-title-wrap"><div class="drawer-title" id="drawerTitle">Edit workflow</div><div class="drawer-subtitle" id="drawerSubtitle"></div></div><button type="button" class="icon-btn btn-ghost" data-action="requestCloseWorkflow" aria-label="Close workflow editor">×</button></header>
+    <nav class="drawer-tabs" id="drawerTabs" role="tablist" aria-label="Workflow editor sections"></nav>
+    <div class="drawer-body" id="drawerBody"></div>
+    <footer class="drawer-footer"><div class="drawer-footer-note" id="drawerFooterNote"></div><button type="button" data-action="requestCloseWorkflow">Cancel</button><button type="button" class="btn-primary" id="saveWorkflowButton" data-action="saveWorkflow">Save as revision</button></footer>
+  </aside>
+
+  <div class="backdrop" id="modalBackdrop"></div>
+  <section class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-hidden="true" inert hidden>
+    <header class="modal-header"><h2 id="modalTitle">Dialog</h2><button type="button" class="icon-btn btn-ghost" data-action="closeModal" aria-label="Close dialog">×</button></header>
+    <div class="modal-body" id="modalBody"></div>
+    <footer class="modal-footer" id="modalFooter"></footer>
+  </section>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="false"></div>
+
+  <script>
+    'use strict';
+
+    const STORAGE_KEY = 'ai-workbench-redesigned-v1';
+    const MS = { sec: 1000, min: 60_000, hour: 3_600_000 };
+    const nowSeed = Date.now();
+    const deepClone = value => JSON.parse(JSON.stringify(value));
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const uid = prefix => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,7)}`;
+    const byId = id => document.getElementById(id);
+
+    const prompts = {
+      commitReview: `You are the Commit Review workflow.
+
+Goal:
+Review each human commit, identify correctness risks, and propose the smallest safe patch.
+
+Operating loop:
+1. Read the triggering commit diff and relevant surrounding files.
+2. Summarize the intent of the commit before changing anything.
+3. Look for bugs, missing tests, type issues, duplicated logic, and risky behavior changes.
+4. Make the smallest possible fix only when the issue is clear.
+5. Run focused checks first, then broader checks if the focused checks pass.
+6. At the end of every iteration, record what changed, what was learned, and whether another iteration is useful.
+7. Continue without an iteration limit until complete, blocked, stopped by policy, or waiting for human approval.
+
+Completion:
+Stop at human approval with a concise summary, risk callout, changed files, exact checks, and recommended next action.
+
+Safety:
+- Never change unrelated formatting or styling.
+- Never run destructive git commands.
+- Ignore AI-created commits.
+- If the fix is ambiguous, explain the choice instead of guessing.`,
+      testFixer: `You are the Test Fixer workflow.
+
+Goal:
+When local tests fail, reproduce the failure, diagnose the root cause, make a focused patch, and rerun the smallest relevant check.
+
+Operating loop:
+1. Capture the failing command, test name, stack trace, and recent related changes.
+2. Reproduce the failure before editing code.
+3. Identify whether the issue is in the test, production code, mock setup, timers, async behavior, or types.
+4. Patch the narrowest responsible area.
+5. Rerun the focused test.
+6. Continue iterating until the focused failure is resolved, then run the broader suite needed for confidence.
+
+Completion:
+Stop for approval with the root cause, patch summary, exact checks, and remaining risk.
+
+Safety:
+- Do not mask failures by deleting assertions.
+- Do not broaden mocks without explaining why.
+- Prefer one focused fix per iteration.
+- Ask for help when repeated iterations stop making progress.`,
+      cleanup: `You are the Nightly Cleanup workflow.
+
+Goal:
+On a schedule, scan for low-risk cleanup opportunities and prepare suggestions without surprising the user.
+
+Operating loop:
+1. Scan for stale TODOs, duplicated helpers, deprecated APIs, lint suppressions, and dead exports.
+2. Rank candidates by safety and usefulness.
+3. Only patch tiny, low-risk items.
+4. Run the narrowest relevant checks.
+5. Continue until the safe candidate list is exhausted, then stop with a suggestion report.
+
+Safety:
+- Suggest only by default.
+- No production behavior changes without explicit approval.
+- Keep diffs small and easy to reject.`,
+      typeFixer: `You are the Type Fixer workflow.
+
+Goal:
+Resolve TypeScript and typecheck failures with minimal changes and clear reasoning.
+
+Operating loop:
+1. Run typecheck and capture exact errors.
+2. Trace each error to the source type, adapter, or call site.
+3. Prefer fixing the source contract over spreading casts.
+4. Rerun typecheck after each focused change.
+5. Continue until typecheck passes or the contract requires a human decision.
+
+Safety:
+- No broad rewrites.
+- No any-casts unless clearly justified.
+- Keep runtime behavior unchanged unless approved.`,
+      refactor: `You are the Big Refactor workflow.
+
+Goal:
+Run a larger refactor only when manually started, while keeping every iteration inspectable and reversible.
+
+Operating loop:
+1. Restate the requested refactor and define the boundary.
+2. Create a small plan with checkpoints.
+3. Change one coherent slice per iteration.
+4. Run focused checks after each slice.
+5. Summarize progress and pause for approval before expanding scope.
+
+Safety:
+- Manual runs only.
+- Never auto-apply.
+- Preserve behavior unless the user explicitly requests a behavior change.
+- Checkpoint after each iteration.`
+    };
+
+    function version(version, prompt, note, ageMinutes) {
+      return { version, prompt, note, createdAt: nowSeed - ageMinutes * MS.min };
+    }
+
+    const seedWorkflows = [
+      {
+        id: 'commit-review', name: 'Commit Review', description: 'Review each human commit, run checks, and propose the smallest safe fix.', enabled: true,
+        prompt: prompts.commitReview, promptVersion: 4, promptUpdatedAt: nowSeed - 44 * MS.min,
+        promptVersions: [
+          version(4, prompts.commitReview, 'Record progress each iteration and remove any iteration ceiling.', 44),
+          version(3, prompts.commitReview.replace('6. At the end of every iteration, record what changed, what was learned, and whether another iteration is useful.\n7. Continue without an iteration limit until complete, blocked, stopped by policy, or waiting for human approval.\n', ''), 'Make patches smaller and report exact checks.', 2_880),
+          version(2, prompts.commitReview.replace('- Ignore AI-created commits.\n', ''), 'Ignore commits produced by automated agents.', 10_080)
+        ],
+        trigger: { type: 'post_commit', branchPattern: 'main, feature/*', authors: 'human', hookBehavior: 'after_each_commit', debounceSeconds: 10 },
+        scope: { repository: 'my-app', overlap: 'queue' },
+        safety: { approval: 'always', destructive: 'ask', protectedPaths: '.env*\nsrc/auth/permissions/**', stallMinutes: 20, onStall: 'pause' }
+      },
+      {
+        id: 'test-fixer', name: 'Test Fixer', description: 'Reproduce local test failures, diagnose the cause, patch narrowly, and rerun focused checks.', enabled: true,
+        prompt: prompts.testFixer, promptVersion: 3, promptUpdatedAt: nowSeed - 1_320 * MS.min,
+        promptVersions: [version(3, prompts.testFixer, 'Stop and ask after repeated iterations without progress.', 1_320), version(2, prompts.testFixer, 'Prefer focused tests before the full suite.', 8_640)],
+        trigger: { type: 'test_failure', branchPattern: 'current branch', testCommand: 'npm test', eventSource: 'local test wrapper', cooldownSeconds: 30 },
+        scope: { repository: 'my-app', overlap: 'skip' },
+        safety: { approval: 'always', destructive: 'ask', protectedPaths: 'e2e/fixtures/**', stallMinutes: 18, onStall: 'fail' }
+      },
+      {
+        id: 'nightly-cleanup', name: 'Nightly Cleanup', description: 'Scan for small, low-risk cleanup opportunities and prepare a suggestion report.', enabled: true,
+        prompt: prompts.cleanup, promptVersion: 2, promptUpdatedAt: nowSeed - 6_700 * MS.min,
+        promptVersions: [version(2, prompts.cleanup, 'Keep the workflow suggest-only.', 6_700), version(1, prompts.cleanup, 'Initial workflow prompt.', 20_000)],
+        trigger: { type: 'schedule', branchPattern: 'main', cadence: 'weekdays', time: '02:30', timezone: 'America/Chicago' },
+        scope: { repository: 'my-app', overlap: 'skip' },
+        safety: { approval: 'suggest', destructive: 'never', protectedPaths: 'src/auth/**\nsrc/payments/**', stallMinutes: 30, onStall: 'pause' }
+      },
+      {
+        id: 'type-fixer', name: 'Type Fixer', description: 'Fix TypeScript failures with minimal changes and no broad rewrites.', enabled: true,
+        prompt: prompts.typeFixer, promptVersion: 2, promptUpdatedAt: nowSeed - 9_000 * MS.min,
+        promptVersions: [version(2, prompts.typeFixer, 'Require an explicit human decision for ambiguous contracts.', 9_000), version(1, prompts.typeFixer, 'Initial workflow prompt.', 24_000)],
+        trigger: { type: 'manual', branchPattern: 'feature/*' },
+        scope: { repository: 'my-app', overlap: 'parallel' },
+        safety: { approval: 'always', destructive: 'ask', protectedPaths: 'src/api/contracts/**', stallMinutes: 15, onStall: 'fail' }
+      },
+      {
+        id: 'big-refactor', name: 'Big Refactor', description: 'Manual-only checkpointed loop for larger refactors.', enabled: false,
+        prompt: prompts.refactor, promptVersion: 1, promptUpdatedAt: nowSeed - 15_000 * MS.min,
+        promptVersions: [version(1, prompts.refactor, 'Initial workflow prompt.', 15_000)],
+        trigger: { type: 'manual', branchPattern: 'current branch' },
+        scope: { repository: 'my-app', overlap: 'skip' },
+        safety: { approval: 'always', destructive: 'never', protectedPaths: '.github/**\ninfra/**', stallMinutes: 25, onStall: 'pause' }
+      }
+    ];
+
+    function event(ageSeconds, text, type = 'progress') { return { at: nowSeed - ageSeconds * MS.sec, text, type }; }
+    function note(ageSeconds, text, author = 'Agent') { return { id: uid('note'), at: nowSeed - ageSeconds * MS.sec, text, author }; }
+
+    const seedRuns = [
+      {
+        id: 'run-commit-wait', workflowId: 'commit-review', repository:'my-app', status: 'review', trigger: 'post_commit', branch: 'feature/login', commit: 'abc123', iteration: 2,
+        startedAt: nowSeed - 252 * MS.sec, activeMs: 191 * MS.sec, endedAt: null, heartbeatAt: null, activityAt: nowSeed - 61 * MS.sec, stateEnteredAt: nowSeed - 61 * MS.sec,
+        currentActivity: 'Ready for your review', currentAction: 'The patch is complete, checks pass, and nothing has been applied to the working tree.', currentCommand: '', currentFile: '',
+        changes: { add: 36, del: 11, state: 'draft' }, checkStatus: 'passed', risk: 'Medium', promptVersion: 4, archived: false,
+        summarySteps: [
+          'Read commit abc123 and isolated the changed login flow.',
+          'Found duplicated validation logic in LoginForm.tsx.',
+          'Added a missing null check in authClient.ts.',
+          'Added a regression test and ran the focused and full checks.',
+          'Prepared three files for review; the working tree is unchanged.'
+        ],
+        files: [
+          { path: 'src/components/LoginForm.tsx', add: 18, del: 9, decision: 'included', diff: [' export function LoginForm() {','-  const isValid = validate(form.email, form.password);','-  if (!isValid) return setError("Invalid credentials");','+  const validation = validateLoginForm(form);','+  if (!validation.ok) return setError(validation.message);','   return submitLogin(form);',' }'] },
+          { path: 'src/auth/authClient.ts', add: 6, del: 1, decision: 'included', diff: [' export async function refreshSession(session) {','-  return client.refresh(session.token);','+  if (!session?.token) return null;','+  return client.refresh(session.token);',' }'] },
+          { path: 'src/auth/authClient.test.ts', add: 12, del: 0, decision: 'included', diff: ['+it("does not refresh a missing session", async () => {','+  await expect(refreshSession(null)).resolves.toBeNull();','+});'] }
+        ],
+        checks: [
+          { id: 'test', name: 'npm test', status: 'passed', output: '118 passed, 0 failed', duration: '21.4s' },
+          { id: 'types', name: 'npm run typecheck', status: 'passed', output: 'No type errors found', duration: '8.2s' },
+          { id: 'lint', name: 'npm run lint', status: 'passed', output: '0 warnings, 0 errors', duration: '4.8s' }
+        ],
+        notes: [note(77, 'The main risk is changing login validation behavior. Existing error messages are preserved and covered by a regression test.'), note(64, 'No files have been applied. This run is waiting for human approval.')],
+        events: [event(252,'Started post-commit review for abc123.','start'), event(238,'Read commit diff: 3 files changed.'), event(161,'Patched duplicated validation path.'), event(94,'All checks passed.','check'), event(61,'Stopped at the human approval gate.','state')],
+        iterations: [
+          { iteration: 1, title: 'Review pass', summary: 'Found duplicated login validation and a missing null guard.', state: 'completed', duration: '1m 17s' },
+          { iteration: 2, title: 'Focused fix', summary: 'Made the minimal patch, added coverage, and passed all checks.', state: 'needs review', duration: '1m 54s' }
+        ]
+      },
+      {
+        id: 'run-test-fixer-active', workflowId: 'test-fixer', repository:'my-app', status: 'running', trigger: 'test_failure', branch: 'feature/auth', commit: 'def456', iteration: 3,
+        startedAt: nowSeed - 511 * MS.sec, activeMs: 0, endedAt: null, heartbeatAt: nowSeed - 3 * MS.sec, activityAt: nowSeed - 48 * MS.sec, stateEnteredAt: nowSeed - 511 * MS.sec,
+        currentActivity: 'Running the focused auth test', currentAction: 'Waiting for the refreshed-session assertion after advancing fake timers.', currentCommand: 'npm test -- auth.test.ts -t "refreshes expired session"', currentFile: 'src/auth/auth.test.ts',
+        changes: { add: 12, del: 4, state: 'draft' }, checkStatus: 'running', risk: 'Medium', promptVersion: 3, archived: false,
+        summarySteps: ['Reproduced the auth.test.ts timeout.','Narrowed the failure to session refresh timer behavior.','Inspected auth/session.ts and auth.test.ts.','Adjusted fake timers before awaiting the refresh promise.','The focused test is running now.'],
+        files: [
+          { path: 'src/auth/auth.test.ts', add: 9, del: 3, decision: 'draft', diff: [' it("refreshes expired session", async () => {','-  await refreshExpiredSession();','-  expect(client.refresh).toHaveBeenCalled();','+  const promise = refreshExpiredSession();','+  vi.advanceTimersByTime(SESSION_REFRESH_DELAY_MS);','+  await promise;','+  expect(client.refresh).toHaveBeenCalledOnce();',' });'] },
+          { path: 'src/auth/session.ts', add: 3, del: 1, decision: 'draft', diff: ['-const SESSION_REFRESH_DELAY_MS = 1000;','+export const SESSION_REFRESH_DELAY_MS = 1000;',' export async function refreshExpiredSession() {'] }
+        ],
+        checks: [{ id:'focused', name:'npm test -- auth.test.ts', status:'running', output:'Focused test is currently running…', duration:'—' }, { id:'suite', name:'npm test', status:'failed', output:'Previous run: auth.test.ts timed out', duration:'24.1s' }, { id:'types', name:'npm run typecheck', status:'passed', output:'No type errors found', duration:'8.0s' }],
+        notes: [note(145,'The timeout comes from fake timers not advancing before the refresh promise is awaited.'), note(91,'Current patch is test-scoped except for exporting the delay constant for reuse.')],
+        events: [event(511,'Received test.failed from the local test wrapper.','start'), event(484,'Reproduced auth.test.ts timeout.','check'), event(404,'Iteration 1 did not resolve the failure.'), event(252,'Iteration 2 isolated the fake timer mismatch.'), event(48,'Started the focused test for iteration 3.','check')],
+        iterations: [{ iteration:1,title:'Reproduce',summary:'Confirmed the timeout and captured the exact failing command.',state:'completed',duration:'1m 47s'},{ iteration:2,title:'Diagnose',summary:'Identified a fake timer mismatch between refresh code and the test.',state:'completed',duration:'2m 32s'},{ iteration:3,title:'Focused patch',summary:'Advanced timers before awaiting the promise; focused check is running.',state:'running',duration:'4m 12s' }]
+      },
+      {
+        id: 'run-nightly-active', workflowId: 'nightly-cleanup', repository:'my-app', status: 'running', trigger: 'schedule', branch: 'main', commit: '—', iteration: 1,
+        startedAt: nowSeed - 764 * MS.sec, activeMs: 0, endedAt: null, heartbeatAt: nowSeed - 1 * MS.sec, activityAt: nowSeed - 133 * MS.sec, stateEnteredAt: nowSeed - 764 * MS.sec,
+        currentActivity: 'Classifying cleanup candidates', currentAction: 'Grouping TODOs, lint suppressions, and dead exports by risk.', currentCommand: 'rg "TODO|deprecated|eslint-disable" src', currentFile: 'src/',
+        changes: { add: 0, del: 0, state: 'draft' }, checkStatus: 'not_run', risk: 'Low', promptVersion: 2, archived: false,
+        summarySteps: ['Started scheduled maintenance on main.','Read package scripts and indexed the project.','Found 14 possible cleanup candidates.','Currently classifying candidates; no files have been changed.'], files: [],
+        checks: [{ id:'checks',name:'Checks',status:'not_run',output:'No checks have run yet.',duration:'—' }], notes:[note(210,'This workflow is suggest-only. It will stop for review before creating or applying changes.')],
+        events:[event(764,'Started scheduled nightly cleanup.','start'),event(728,'Read package.json scripts.'),event(579,'Indexed the src directory.'),event(133,'Found 14 candidates; classifying by risk.')],
+        iterations:[{ iteration:1,title:'Repository scan',summary:'Collecting and ranking low-risk cleanup candidates.',state:'running',duration:'12m 44s' }]
+      },
+      {
+        id: 'run-type-fail', workflowId: 'type-fixer', repository:'my-app', status: 'failed', trigger: 'manual', branch: 'feature/types', commit: 'aa91ef', iteration: 7,
+        startedAt: nowSeed - 962 * MS.sec, activeMs: 722 * MS.sec, endedAt: nowSeed - 240 * MS.sec, heartbeatAt: null, activityAt: nowSeed - 240 * MS.sec, stateEnteredAt: nowSeed - 240 * MS.sec,
+        currentActivity: 'Stopped after repeated typecheck failures', currentAction: 'A human decision is needed: nullable display names or adapter normalization.', currentCommand: 'npm run typecheck', currentFile: 'src/types/user.ts',
+        changes:{add:5,del:2,state:'draft'},checkStatus:'failed',risk:'High',promptVersion:2,archived:false,
+        summarySteps:['Reproduced the typecheck failure.','Traced the mismatch to the UserProfile API adapter.','Fixed two downstream call sites.','Typecheck still fails because the API response contract is ambiguous.','Stopped according to the no-progress policy.'],
+        files:[{path:'src/types/user.ts',add:3,del:1,decision:'draft',diff:['-export type UserProfile = ApiUser;','+export type UserProfile = ApiUser & { displayName: string | null };']},{path:'src/api/userClient.ts',add:2,del:1,decision:'draft',diff:['+  displayName: payload.display_name ?? null,']}],
+        checks:[{id:'types',name:'npm run typecheck',status:'failed',output:'Property displayName is missing in ApiUserResponse at src/api/userClient.ts:42',duration:'8.4s'},{id:'test',name:'npm test',status:'passed',output:'118 passed, 0 failed',duration:'21.1s'}],
+        notes:[note(255,'Likely decision: should displayName remain nullable everywhere, or should the API adapter normalize it?'),note(243,'Risk is high because changing this contract affects multiple consumers.')],
+        events:[event(962,'Manual Type Fixer run started.','start'),event(742,'Iteration 3 patched UserProfile typing.'),event(378,'Iteration 6 still failed typecheck.','check'),event(240,'Marked failed after no clear progress.','state')],
+        iterations:[{iteration:1,title:'Reproduce',summary:'Captured the typecheck failure.',state:'completed',duration:'58s'},{iteration:2,title:'Contract trace',summary:'Traced the mismatch to ApiUserResponse.',state:'completed',duration:'1m 32s'},{iteration:3,title:'Local fix',summary:'Tried narrowing UserProfile and updated call sites.',state:'completed',duration:'2m 05s'},{iteration:7,title:'Policy stop',summary:'Contract remains ambiguous; human input is required.',state:'failed',duration:'1m 41s'}]
+      },
+      {
+        id:'run-refactor-stopped',workflowId:'big-refactor',repository:'my-app',status:'stopped',trigger:'manual',branch:'feature/router',commit:'2c72bd',iteration:4,
+        startedAt:nowSeed-2_200*MS.sec,activeMs:1_481*MS.sec,endedAt:nowSeed-719*MS.sec,heartbeatAt:null,activityAt:nowSeed-719*MS.sec,stateEnteredAt:nowSeed-719*MS.sec,
+        currentActivity:'Stopped by Tom',currentAction:'All edits and the iteration checkpoint were preserved.',currentCommand:'npm test -- router',currentFile:'src/router/index.ts',changes:{add:84,del:63,state:'draft'},checkStatus:'stale',risk:'High',promptVersion:1,archived:false,
+        summarySteps:['Mapped the legacy routing entry points.','Extracted route parsing behind an adapter.','Passed focused router tests after iteration 3.','Started consolidating redirect handling.','Stopped manually; draft changes and checkpoint remain available.'],
+        files:[{path:'src/router/index.ts',add:44,del:37,decision:'draft',diff:[' export function resolveRoute(url) {','-  return legacyRouter.resolve(url);','+  return routeAdapter.resolve(url);',' }']},{path:'src/router/routeAdapter.ts',add:40,del:26,decision:'draft',diff:['+export const routeAdapter = {','+  resolve(url) { return normalizeRoute(url); }','+};']}],
+        checks:[{id:'router',name:'npm test -- router',status:'stale',output:'Last passed before the current draft changes.',duration:'18.7s'}],notes:[note(730,'Stopped manually before consolidating redirect handling. Resume continues iteration 4 from the preserved worktree.')],
+        events:[event(2_200,'Manual Big Refactor run started.','start'),event(1_880,'Created checkpoint after iteration 1.'),event(1_320,'Focused router tests passed after iteration 3.','check'),event(719,'Stopped manually; preserved worktree and artifacts.','state')],
+        iterations:[{iteration:1,title:'Map boundaries',summary:'Mapped legacy routing entry points.',state:'completed',duration:'6m 02s'},{iteration:2,title:'Extract adapter',summary:'Introduced a compatibility adapter.',state:'completed',duration:'7m 11s'},{iteration:3,title:'Verify behavior',summary:'Focused router tests passed.',state:'completed',duration:'5m 40s'},{iteration:4,title:'Redirect handling',summary:'Partially consolidated redirects before manual stop.',state:'stopped',duration:'5m 48s'}]
+      },
+      {
+        id:'run-commit-done',workflowId:'commit-review',repository:'my-app',status:'completed',trigger:'post_commit',branch:'main',commit:'88a1f',iteration:1,
+        startedAt:nowSeed-4_680*MS.sec,activeMs:198*MS.sec,endedAt:nowSeed-4_482*MS.sec,heartbeatAt:null,activityAt:nowSeed-4_482*MS.sec,stateEnteredAt:nowSeed-4_482*MS.sec,
+        currentActivity:'Applied to main',currentAction:'The small import cleanup was applied and verified.',currentCommand:'',currentFile:'',changes:{add:4,del:1,state:'applied'},checkStatus:'passed',risk:'Low',promptVersion:3,archived:false,
+        summarySteps:['Reviewed commit 88a1f on main.','Found an unused date-fns import.','Removed the import and ran lint and tests.','Applied the patch to the working tree.'],
+        files:[{path:'src/utils/date.ts',add:4,del:1,decision:'applied',diff:['-import { format, parse } from "date-fns";','+import { format } from "date-fns";']}],
+        checks:[{id:'test',name:'npm test',status:'passed',output:'118 passed, 0 failed',duration:'21.0s'},{id:'lint',name:'npm run lint',status:'passed',output:'0 warnings, 0 errors',duration:'4.7s'}],notes:[note(4_490,'Applied a small import cleanup. No behavior changes.')],
+        events:[event(4_680,'Started post-commit review for 88a1f.','start'),event(4_620,'Removed unused import.'),event(4_545,'Checks passed.','check'),event(4_482,'Applied patch. Run completed.','state')],iterations:[{iteration:1,title:'Review and apply',summary:'Removed an unused import; checks passed.',state:'completed',duration:'3m 18s'}]
+      },
+      {
+        id:'run-cleanup-rejected',workflowId:'nightly-cleanup',repository:'my-app',status:'rejected',trigger:'schedule',branch:'main',commit:'—',iteration:2,
+        startedAt:nowSeed-86_400*MS.sec,activeMs:842*MS.sec,endedAt:nowSeed-85_558*MS.sec,heartbeatAt:null,activityAt:nowSeed-85_558*MS.sec,stateEnteredAt:nowSeed-85_558*MS.sec,
+        currentActivity:'Suggestion rejected',currentAction:'No changes were applied; the rejection reason is stored with the run.',currentCommand:'',currentFile:'',changes:{add:21,del:17,state:'rejected'},checkStatus:'passed',risk:'Low',promptVersion:2,archived:false,
+        summarySteps:['Scanned for dead exports and stale TODOs.','Prepared two cleanup suggestions.','Passed lint and typecheck.','Rejected because the team is already replacing the affected module.'],
+        files:[{path:'src/legacy/dateHelpers.ts',add:21,del:17,decision:'rejected',diff:['-export function oldFormatDate(value) {','+export function formatLegacyDate(value) {']}],
+        checks:[{id:'lint',name:'npm run lint',status:'passed',output:'0 warnings, 0 errors',duration:'4.9s'},{id:'types',name:'npm run typecheck',status:'passed',output:'No type errors found',duration:'8.2s'}],notes:[note(85_558,'Rejected: this module will be removed by the dates-v2 project next week.','Tom')],
+        events:[event(86_400,'Scheduled cleanup started.','start'),event(85_900,'Prepared two suggestions.'),event(85_700,'Checks passed.','check'),event(85_558,'Suggestion rejected; no files applied.','state')],iterations:[{iteration:1,title:'Scan',summary:'Found two low-risk cleanup candidates.',state:'completed',duration:'8m 12s'},{iteration:2,title:'Verify',summary:'Prepared the diff and passed checks.',state:'rejected',duration:'5m 50s'}]
+      }
+    ];
+
+    const initialState = {
+      version: 1,
+      workflows: seedWorkflows,
+      runs: seedRuns,
+      selectedRunId: 'run-commit-wait',
+      activeTab: 'summary',
+      view: 'all',
+      workflowFilter: null,
+      triggerFilter: 'all',
+      runSearch: '',
+      workflowSearch: '',
+      workflowSort: 'custom',
+      directories: [
+        { id:'my-app', path:'C:\\source\\my-app' },
+        { id:'payments-api', path:'C:\\source\\payments-api' },
+        { id:'design-system', path:'C:\\source\\design-system' }
+      ],
+      sort: 'updated',
+      currentRepo: 'my-app',
+      currentBranch: 'feature/login',
+      automationsPaused: false,
+      followingRunId: null,
+      settings: { density: 'comfortable', editor: 'Cursor', confirmDestructive: true, inAppAlerts: true, defaultView: 'all' }
+    };
+
+    function loadState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return deepClone(initialState);
+        const parsed = JSON.parse(raw);
+        if (parsed?.version !== 1 || !Array.isArray(parsed.workflows) || !Array.isArray(parsed.runs)) throw new Error('Unsupported data');
+        parsed.runs.forEach(run => {
+          if (!run.repository) run.repository = parsed.workflows.find(workflow => workflow.id === run.workflowId)?.scope?.repository || parsed.currentRepo || 'my-app';
+        });
+        parsed.workflows.forEach((workflow, index) => { if (workflow.customOrder == null) workflow.customOrder = index; if (workflow.pinned == null) workflow.pinned = false; });
+        if (!parsed.workflowSort) parsed.workflowSort = 'custom';
+        if (!Array.isArray(parsed.directories)) parsed.directories = deepClone(initialState.directories);
+        return parsed;
+      } catch (error) {
+        localStorage.removeItem(STORAGE_KEY);
+        return deepClone(initialState);
+      }
+    }
+
+    let state = loadState();
+    let editorState = null;
+    let modalState = null;
+    let lastFocusedElement = null;
+    let drawerLastFocusedElement = null;
+    let liveStep = 0;
+
+    function persist() {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+      catch (error) { toast('Demo state could not be saved', 'This browser may be blocking local storage.'); }
+    }
+
+    function workflowById(id) { return state.workflows.find(item => item.id === id); }
+    function runById(id) { return state.runs.find(item => item.id === id); }
+    function selectedRun() { return runById(state.selectedRunId); }
+
+    const statusMeta = {
+      running: { label: 'Running', className: 'running' },
+      review: { label: 'Needs review', className: 'review' },
+      failed: { label: 'Failed', className: 'failed' },
+      stopped: { label: 'Stopped', className: 'stopped' },
+      completed: { label: 'Completed', className: 'completed' },
+      rejected: { label: 'Rejected', className: 'rejected' },
+      applying: { label: 'Applying', className: 'applying' },
+      queued: { label: 'Queued', className: 'queued' }
+    };
+    const triggerLabels = { post_commit: 'Post-commit', test_failure: 'Test failure', schedule: 'Schedule', manual: 'Manual', file_watch: 'File watch' };
+    const checkLabels = { passed: 'Checks passed', failed: 'Checks failed', running: 'Checks running', stale: 'Checks stale', not_run: 'Not run' };
+    const viewMeta = [
+      { id:'review', label:'Needs review', icon:'review' },
+      { id:'failed', label:'Failed', icon:'failed' },
+      { id:'running', label:'Running', icon:'running' },
+      { id:'completed', label:'Completed', icon:'completed' },
+      { id:'all', label:'All runs', icon:'all' }
+    ];
+    const tabMeta = [
+      { id:'summary', label:'Summary' }, { id:'activity', label:'Activity' }, { id:'changes', label:'Changes' },
+      { id:'checks', label:'Checks' }, { id:'iterations', label:'Iterations' }, { id:'notes', label:'Notes' }
+    ];
+
+    function renderStatus(status) {
+      const meta = statusMeta[status] || { label: status, className: '' };
+      return `<span class="status ${meta.className}">${esc(meta.label)}</span>`;
+    }
+
+    function renderCheck(status) {
+      return `<span class="check-label ${esc(status)}">${esc(checkLabels[status] || status)}</span>`;
+    }
+
+    function runtimeMs(run, at = Date.now()) {
+      if (['running','applying'].includes(run.status)) return Math.max(0, (run.activeMs || 0) + at - run.stateEnteredAt);
+      return Math.max(0, run.activeMs || 0);
+    }
+
+    function durationText(milliseconds) {
+      const total = Math.max(0, Math.floor(milliseconds / 1000));
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const seconds = total % 60;
+      if (hours) return `${hours}h ${minutes}m`;
+      if (minutes) return `${minutes}m ${String(seconds).padStart(2,'0')}s`;
+      return `${seconds}s`;
+    }
+
+    function relativeTime(timestamp, at = Date.now()) {
+      if (!timestamp) return '—';
+      const seconds = Math.max(0, Math.floor((at - timestamp) / 1000));
+      if (seconds < 5) return 'just now';
+      if (seconds < 60) return `${seconds}s ago`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      const days = Math.floor(hours / 24);
+      return `${days}d ago`;
+    }
+
+    function clockTime(timestamp) {
+      return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function dateTime(timestamp) {
+      return new Date(timestamp).toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+    }
+
+    function diffText(run) {
+      if (!run.changes || (!run.changes.add && !run.changes.del && !run.files?.length)) return '<span class="subtle">No changes</span>';
+      return `<span class="diff-count"><span class="plus">+${Number(run.changes.add || 0)}</span> <span class="minus">−${Number(run.changes.del || 0)}</span></span>`;
+    }
+
+    function runsForCurrentRepo(includeArchived = false) {
+      return state.runs.filter(run => {
+        return run.repository === state.currentRepo && (includeArchived || !run.archived);
+      });
+    }
+
+    function runMatchesView(run, view = state.view) {
+      if (view === 'all') return true;
+      if (view === 'running') return ['running','applying','queued'].includes(run.status);
+      return run.status === view;
+    }
+
+    function visibleRuns() {
+      let result = runsForCurrentRepo().filter(run => runMatchesView(run));
+      if (state.workflowFilter) result = result.filter(run => run.workflowId === state.workflowFilter);
+      if (state.triggerFilter !== 'all') result = result.filter(run => run.trigger === state.triggerFilter);
+      const query = state.runSearch.trim().toLowerCase();
+      if (query) {
+        result = result.filter(run => {
+          const workflow = workflowById(run.workflowId);
+          return [workflow?.name, run.branch, run.commit, run.currentActivity, triggerLabels[run.trigger]].some(value => String(value || '').toLowerCase().includes(query));
+        });
+      }
+      result.sort((a,b) => {
+        if (state.sort === 'newest') return b.startedAt - a.startedAt;
+        if (state.sort === 'oldest') return a.startedAt - b.startedAt;
+        return (b.activityAt || b.startedAt) - (a.activityAt || a.startedAt);
+      });
+      return result;
+    }
+
+    function ensureSelection() {
+      const visible = visibleRuns();
+      if (!visible.some(run => run.id === state.selectedRunId)) state.selectedRunId = visible[0]?.id || null;
+    }
+
+    function activeRunCount() { return runsForCurrentRepo().filter(run => ['running','applying','queued'].includes(run.status)).length; }
+
+    function renderAll(options = {}) {
+      document.body.dataset.density = state.settings.density;
+      if (byId('repoSelect')) byId('repoSelect').value = state.currentRepo;
+      setSelectValue(byId('branchSelect'), state.currentBranch);
+      setSelectValue(byId('sidebarBranchSelect'), state.currentBranch);
+      const directorySelect = byId('directorySelect');
+      directorySelect.innerHTML = state.directories.map(directory => `<option value="${esc(directory.id)}">${esc(directory.path)}</option>`).join('');
+      directorySelect.value = state.currentRepo;
+      byId('pauseBanner').classList.toggle('visible', state.automationsPaused);
+      const pauseButton = byId('pauseButton');
+      if (pauseButton) { pauseButton.innerHTML = state.automationsPaused ? '<span class="pause-label">Resume automations</span><span class="pause-icon" aria-hidden="true">▶</span>' : '<span class="pause-label">Pause automations</span><span class="pause-icon" aria-hidden="true">Ⅱ</span>'; pauseButton.setAttribute('aria-label', state.automationsPaused ? 'Resume automations' : 'Pause automations'); }
+      byId('sidebarPauseButton').textContent = state.automationsPaused ? 'Resume automations' : 'Pause automations';
+      renderWorkflows();
+      ensureSelection();
+      renderRuns();
+      renderActiveFilters();
+      renderDetail();
+      if (!options.skipPersist) persist();
+    }
+
+    function setSelectValue(select, value) {
+      if (!select) return;
+      if (![...select.options].some(option => option.value === value)) select.add(new Option(value, value));
+      select.value = value;
+    }
+
+    function renderViews() {
+      const base = runsForCurrentRepo();
+      byId('viewNav').innerHTML = viewMeta.map(view => {
+        const count = base.filter(run => runMatchesView(run, view.id)).length;
+        return `<button type="button" class="view-button ${state.view === view.id ? 'active' : ''}" data-action="setView" data-view="${view.id}" aria-current="${state.view === view.id ? 'page' : 'false'}"><span class="view-name"><span class="view-icon ${view.icon}"></span><span>${esc(view.label)}</span></span><span class="count-badge">${count}</span></button>`;
+      }).join('');
+    }
+
+    function renderWorkflows() {
+      const query = state.workflowSearch.trim().toLowerCase();
+      const workflows = state.workflows.filter(workflow => workflow.scope.repository === state.currentRepo && (!query || `${workflow.name} ${workflow.description}`.toLowerCase().includes(query))).sort((a,b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        if (state.workflowSort === 'alpha-asc') return a.name.localeCompare(b.name);
+        if (state.workflowSort === 'alpha-desc') return b.name.localeCompare(a.name);
+        return Number(a.customOrder || 0) - Number(b.customOrder || 0);
+      });
+      byId('workflowSort').value = state.workflowSort;
+      byId('workflowList').innerHTML = workflows.length ? workflows.map(workflow => {
+        const selected = state.workflowFilter === workflow.id;
+        const trigger = triggerLabels[workflow.trigger.type] || workflow.trigger.type;
+        const activeRun = state.runs.find(run => run.repository === state.currentRepo && run.workflowId === workflow.id && run.status === 'running' && !run.archived);
+        return `<div class="workflow-item ${selected ? 'active' : ''}">
+          <button type="button" class="workflow-select" data-action="selectWorkflow" data-id="${esc(workflow.id)}" aria-pressed="${selected}">
+            <span class="workflow-name">${workflow.pinned ? '<span aria-label="Pinned" title="Pinned">★</span> ' : ''}${esc(workflow.name)}</span>
+          </button>
+          <div class="workflow-controls">
+            <button type="button" class="mini-icon workflow-run-control ${activeRun ? 'btn-danger' : ''}" data-action="toggleWorkflowRun" data-id="${esc(workflow.id)}" aria-label="${activeRun ? 'Stop' : 'Run'} ${esc(workflow.name)}" title="${activeRun ? 'Stop running workflow' : 'Run workflow now'}">${activeRun ? '■' : '▶'}</button>
+            <label class="switch" title="${workflow.enabled ? 'Disable' : 'Enable'} ${esc(workflow.name)}"><span class="sr-only">${workflow.enabled ? 'Disable' : 'Enable'} ${esc(workflow.name)}</span><input type="checkbox" data-action="toggleWorkflow" data-id="${esc(workflow.id)}" ${workflow.enabled ? 'checked' : ''}><span class="switch-track"></span></label>
+            <button type="button" class="mini-icon" data-action="workflowMenu" data-id="${esc(workflow.id)}" aria-label="Actions for ${esc(workflow.name)}">•••</button>
+          </div>
+        </div>`;
+      }).join('') : `<div class="empty-state" style="padding:24px 10px"><strong>No workflows</strong>${query ? 'Try a different search.' : 'Create the first workflow for this repository.'}</div>`;
+    }
+
+    function renderRuns() {
+      const runs = visibleRuns();
+      const view = viewMeta.find(item => item.id === state.view);
+      byId('runsHeading').textContent = view?.label || 'Runs';
+      byId('runsKicker').textContent = `${runs.length} visible · ${runsForCurrentRepo().length} total`;
+      byId('triggerFilter').value = state.triggerFilter;
+      byId('runStatusFilter').value = state.view;
+      byId('sortRuns').value = state.sort;
+      byId('runSearch').value = state.runSearch;
+
+      if (!runs.length) {
+        byId('runRows').innerHTML = `<tr><td colspan="6"><div class="empty-state"><strong>No runs match this view</strong>Adjust the filters or start a workflow manually.<div class="inline-actions" style="justify-content:center"><button type="button" data-action="clearRunFilters">Clear filters</button><button type="button" class="btn-primary" data-action="newWorkflow">New workflow</button></div></div></td></tr>`;
+        byId('mobileRunList').innerHTML = `<div class="empty-state"><strong>No runs match this view</strong>Adjust the filters or start a workflow manually.</div>`;
+        return;
+      }
+
+      byId('runRows').innerHTML = runs.map(run => {
+        const workflow = workflowById(run.workflowId);
+        const selected = run.id === state.selectedRunId;
+        return `<tr data-action="selectRun" data-id="${esc(run.id)}" class="${selected ? 'selected' : ''}" tabindex="0" aria-selected="${selected}">
+          <td>${renderStatus(run.status)}</td>
+          <td><div class="run-main">${esc(workflow?.name || run.workflowId)}</div><div class="run-sub">${esc(triggerLabels[run.trigger] || run.trigger)}</div></td>
+          <td><div class="run-main mono">${esc(run.branch)}</div><div class="run-sub mono">${esc(run.commit)}</div></td>
+          <td><div class="run-main nowrap">${run.iteration}</div></td>
+          <td><div class="run-main">${esc(run.currentActivity)}</div><div class="run-sub" data-relative="${run.activityAt}">${esc(relativeTime(run.activityAt))}</div></td>
+          <td><span class="mono" data-runtime="${esc(run.id)}">${esc(durationText(runtimeMs(run)))}</span></td>
+        </tr>`;
+      }).join('');
+
+      byId('mobileRunList').innerHTML = runs.map(run => {
+        const workflow = workflowById(run.workflowId);
+        const selected = run.id === state.selectedRunId;
+        return `<article class="mobile-run-card ${selected ? 'selected' : ''}" data-action="selectRun" data-id="${esc(run.id)}" tabindex="0" aria-selected="${selected}">
+          <div class="mobile-run-head">${renderStatus(run.status)}<span class="mono" data-runtime="${esc(run.id)}">${esc(durationText(runtimeMs(run)))}</span></div>
+          <div class="mobile-run-title">${esc(workflow?.name || run.workflowId)}</div>
+          <div class="mobile-run-meta">${esc(run.branch)} · ${esc(run.commit)} · Iteration ${run.iteration}</div>
+          <div class="mobile-run-activity">${esc(run.currentActivity)}</div>
+          <div class="mobile-run-foot"><span data-relative="${run.activityAt}">${esc(relativeTime(run.activityAt))}</span><span>${diffText(run)} · ${esc(checkLabels[run.checkStatus] || run.checkStatus)}</span></div>
+        </article>`;
+      }).join('');
+    }
+
+    function renderActiveFilters() {
+      const chips = [];
+      const workflow = workflowById(state.workflowFilter);
+      if (workflow) chips.push(`<span class="filter-chip">Workflow: ${esc(workflow.name)} <button type="button" data-action="clearWorkflowFilter" aria-label="Clear workflow filter">×</button></span>`);
+      if (state.triggerFilter !== 'all') chips.push(`<span class="filter-chip">Trigger: ${esc(triggerLabels[state.triggerFilter])} <button type="button" data-action="clearTriggerFilter" aria-label="Clear trigger filter">×</button></span>`);
+      if (state.runSearch) chips.push(`<span class="filter-chip">Search: “${esc(state.runSearch)}” <button type="button" data-action="clearRunSearch" aria-label="Clear run search">×</button></span>`);
+      const bar = byId('activeFilterBar');
+      bar.classList.toggle('visible', Boolean(chips.length));
+      bar.innerHTML = chips.join('') + (chips.length > 1 ? '<button type="button" class="btn-small btn-ghost" data-action="clearRunFilters">Clear all</button>' : '');
+    }
+
+    function actionButton(action, run) {
+      const attrs = `data-action="${esc(action.id)}" data-id="${esc(run.id)}"`;
+      return `<button type="button" class="${esc(action.className || '')}" ${attrs} ${action.disabled ? 'disabled' : ''} ${action.title ? `title="${esc(action.title)}"` : ''}>${esc(action.label)}</button>`;
+    }
+
+    function actionsForRun(run) {
+      if (run.status === 'running') return [
+        { id:'followRun', label: state.followingRunId === run.id ? 'Following live' : 'Follow live', className: state.followingRunId === run.id ? 'btn-primary' : '' },
+        { id:'stopRun', label:'Stop', className:'btn-danger' }
+      ];
+      if (run.status === 'review') {
+        const included = (run.files || []).filter(file => file.decision === 'included').length;
+        const canApply = run.checkStatus === 'passed' && included > 0;
+        return [
+          { id:'showChanges', label:'Review changes' },
+          { id:'applyRun', label:'Apply to branch', className:'btn-success', disabled:!canApply, title:!canApply ? 'Include at least one file and pass all checks first.' : '' },
+          { id:'requestChanges', label:'Request changes' },
+          { id:'rejectRun', label:'Reject', className:'btn-danger' }
+        ];
+      }
+      if (run.status === 'failed') return [{ id:'retryRun', label:'Retry with guidance', className:'btn-primary' }, { id:'openEditor', label:'Open editor' }];
+      if (run.status === 'stopped') return [{ id:'resumeRun', label:'Resume', className:'btn-primary' }, { id:'archiveRun', label:'Archive' }];
+      if (['completed','rejected'].includes(run.status)) return [{ id:'runAgain', label:'Run again', className:'btn-primary' }, { id:'archiveRun', label:'Archive' }];
+      return [];
+    }
+
+    function renderDetail() {
+      const run = selectedRun();
+      const target = byId('runDetail');
+      if (!run) {
+        target.innerHTML = `<div class="empty-state" style="min-height:390px;display:grid;place-items:center"><div><strong>Select a run</strong>The run summary, progress, changes, checks, and iteration history will appear here.</div></div>`;
+        return;
+      }
+      const workflow = workflowById(run.workflowId);
+      const actions = actionsForRun(run);
+      const tabs = tabMeta.map(tab => {
+        let suffix = '';
+        if (tab.id === 'changes' && run.files?.length) suffix = ` (${run.files.length})`;
+        if (tab.id === 'checks' && run.checks?.length) suffix = ` (${run.checks.length})`;
+        return `<button type="button" class="tab-button ${state.activeTab === tab.id ? 'active' : ''}" data-action="setTab" data-tab="${tab.id}" role="tab" aria-selected="${state.activeTab === tab.id}" aria-controls="run-tab-panel">${esc(tab.label + suffix)}</button>`;
+      }).join('');
+      target.innerHTML = `<div class="detail-top">
+          <div class="detail-identity"><div class="detail-title-row"><h2>${esc(workflow?.name || run.workflowId)}</h2>${renderStatus(run.status)}</div>
+            <div class="detail-meta"><span>${esc(triggerLabels[run.trigger] || run.trigger)}</span><span class="mono">${esc(run.branch)}</span><span class="mono">${esc(run.commit)}</span><span>Iteration ${run.iteration}</span><span>Prompt v${run.promptVersion}</span></div>
+          </div><div class="detail-actions">${actions.map(action => actionButton(action, run)).join('')}</div>
+        </div>
+        <nav class="detail-tabs" role="tablist" aria-label="Selected run details">${tabs}</nav>
+        <div class="detail-body" id="run-tab-panel" role="tabpanel">${renderTabContent(run)}</div>`;
+    }
+
+    function renderTabContent(run) {
+      if (state.activeTab === 'activity') return renderActivity(run);
+      if (state.activeTab === 'changes') return renderChanges(run);
+      if (state.activeTab === 'checks') return renderChecks(run);
+      if (state.activeTab === 'iterations') return renderIterations(run);
+      if (state.activeTab === 'notes') return renderNotes(run);
+      return renderSummary(run);
+    }
+
+    function stateGuidance(run) {
+      if (run.status === 'running') return 'The agent is working. Heartbeat and meaningful progress are tracked separately.';
+      if (run.status === 'review') return 'The worktree is unchanged until you apply the included files.';
+      if (run.status === 'failed') return 'Artifacts are preserved. Retry with guidance or inspect the branch manually.';
+      if (run.status === 'stopped') return 'Artifacts and execution state are preserved. Resume continues the same iteration.';
+      if (run.status === 'completed') return 'The selected changes were applied and this run is complete.';
+      if (run.status === 'rejected') return 'No changes were applied. Run again creates a separate execution.';
+      return '';
+    }
+
+    function renderSummary(run) {
+      const calloutClass = run.status === 'review' ? 'review' : run.status === 'failed' ? 'failed' : '';
+      const health = run.status === 'running' ? `<div class="notice"><strong>Agent healthy</strong> · heartbeat <span data-heartbeat="${esc(run.id)}">${esc(relativeTime(run.heartbeatAt))}</span><br><span class="subtle">Last meaningful progress <span data-relative="${run.activityAt}">${esc(relativeTime(run.activityAt))}</span></span></div>` : `<div class="notice">${esc(stateGuidance(run))}</div>`;
+      return `<div class="detail-grid">
+        <div>
+          <section class="panel"><div class="panel-head"><span>What this run has done</span><span class="panel-head-meta">${run.summarySteps.length} recorded steps</span></div><div class="panel-body"><ol class="summary-list">${run.summarySteps.map((step,index) => `<li><span class="step-icon ${index === run.summarySteps.length - 1 && run.status === 'running' ? 'current' : ''}">${index === run.summarySteps.length - 1 && run.status === 'running' ? '•' : '✓'}</span><span>${esc(step)}</span></li>`).join('')}</ol></div></section>
+          <section class="panel"><div class="panel-head"><span>Current state</span><span class="panel-head-meta" data-relative="${run.activityAt}">${esc(relativeTime(run.activityAt))}</span></div><div class="panel-body"><div class="activity-callout ${calloutClass}"><div class="activity-title">${esc(run.currentActivity)}</div><div class="activity-text">${esc(run.currentAction)}</div>${run.currentCommand ? `<div class="command">${esc(run.currentCommand)}</div>` : ''}</div></div></section>
+        </div>
+        <div>
+          <section class="panel"><div class="panel-head"><span>Run health</span><span class="panel-head-meta">local execution</span></div><div class="panel-body"><div class="metric-grid">
+            <div class="metric"><div class="metric-label">Elapsed</div><div class="metric-value mono" data-runtime="${esc(run.id)}">${esc(durationText(runtimeMs(run)))}</div></div>
+            <div class="metric"><div class="metric-label">Iteration</div><div class="metric-value">Iteration ${run.iteration}</div></div>
+            <div class="metric"><div class="metric-label">Changes</div><div class="metric-value">${diffText(run)} · ${run.files?.length || 0} files</div></div>
+            <div class="metric"><div class="metric-label">Verification</div><div class="metric-value">${renderCheck(run.checkStatus)}</div></div>
+          </div><div style="margin-top:10px">${health}</div></div></section>
+          <section class="panel"><div class="panel-head"><span>Execution context</span></div><div class="panel-body"><div class="metric-grid"><div class="metric"><div class="metric-label">Branch</div><div class="metric-value mono">${esc(run.branch)}</div></div><div class="metric"><div class="metric-label">Risk</div><div class="metric-value">${esc(run.risk)}</div></div><div class="metric"><div class="metric-label">Trigger</div><div class="metric-value">${esc(triggerLabels[run.trigger])}</div></div><div class="metric"><div class="metric-label">Prompt</div><div class="metric-value">Version ${run.promptVersion}</div></div></div></div></section>
+        </div>
+      </div>`;
+    }
+
+    function renderActivity(run) {
+      const events = [...(run.events || [])].sort((a,b) => b.at - a.at);
+      const live = run.status === 'running';
+      return `<div class="detail-grid"><div>
+        <section class="panel"><div class="panel-head"><span>${live ? 'Live activity' : 'Last activity'}</span><span class="panel-head-meta">${live ? (state.followingRunId === run.id ? 'following' : 'live') : 'snapshot'}</span></div><div class="panel-body"><div class="activity-callout ${run.status === 'failed' ? 'failed' : run.status === 'review' ? 'review' : ''}"><div class="activity-title">${esc(run.currentActivity)}</div><div class="activity-text">${esc(run.currentAction)}</div>${run.currentFile ? `<div class="run-sub" style="margin-top:8px">Current file · <span class="mono">${esc(run.currentFile)}</span></div>` : ''}${run.currentCommand ? `<div class="command">${esc(run.currentCommand)}</div>` : ''}</div>
+        ${live ? `<div class="inline-actions"><button type="button" data-action="simulateProgress" data-id="${esc(run.id)}">Simulate next progress event</button><button type="button" data-action="copySnapshot" data-id="${esc(run.id)}">Copy snapshot</button></div>` : `<div class="inline-actions"><button type="button" data-action="copySnapshot" data-id="${esc(run.id)}">Copy snapshot</button><button type="button" data-action="openEditor" data-id="${esc(run.id)}">Open editor</button></div>`}</div></section>
+        <section class="panel"><div class="panel-head"><span>Activity timeline</span><span class="panel-head-meta">${events.length} events</span></div><div class="panel-body"><div class="timeline">${events.map(item => `<div class="timeline-item"><div class="timeline-time">${esc(clockTime(item.at))}</div><div class="timeline-marker"></div><div class="timeline-content"><span>${esc(item.text)}</span><div class="subtle" data-relative="${item.at}">${esc(relativeTime(item.at))}</div></div></div>`).join('')}</div></div></section>
+      </div><div><section class="panel"><div class="panel-head"><span>Signals</span></div><div class="panel-body"><div class="metric-grid"><div class="metric"><div class="metric-label">Agent heartbeat</div><div class="metric-value" data-heartbeat="${esc(run.id)}">${live ? esc(relativeTime(run.heartbeatAt)) : 'Not active'}</div></div><div class="metric"><div class="metric-label">Last progress</div><div class="metric-value" data-relative="${run.activityAt}">${esc(relativeTime(run.activityAt))}</div></div><div class="metric"><div class="metric-label">Elapsed</div><div class="metric-value mono" data-runtime="${esc(run.id)}">${esc(durationText(runtimeMs(run)))}</div></div><div class="metric"><div class="metric-label">Current iteration</div><div class="metric-value">Iteration ${run.iteration}</div></div></div></div></section>
+      <section class="panel"><div class="panel-head"><span>Raw log</span><span class="panel-head-meta">escaped text</span></div><div class="panel-body"><details><summary style="cursor:pointer;color:var(--text-2)">Show operational log</summary><div class="command" style="max-height:260px;overflow:auto">${events.slice().reverse().map(item => `[${clockTime(item.at)}] ${item.text}`).map(esc).join('\n')}</div></details><div class="inline-actions"><button type="button" data-action="copyLog" data-id="${esc(run.id)}">Copy log</button></div></div></section></div></div>`;
+    }
+
+    function changeNotice(run) {
+      if (run.status === 'review') return `<div class="notice warning">Choose which files to include, then apply from the selected-run header. Excluding a file does not edit the generated patch.</div>`;
+      if (run.status === 'running') return `<div class="notice">Draft changes are read-only while the agent is working.</div>`;
+      if (run.status === 'completed') return `<div class="notice success">These files were applied to <span class="mono">${esc(run.branch)}</span>.</div>`;
+      if (run.status === 'rejected') return `<div class="notice danger">This proposal was rejected. No files were applied.</div>`;
+      return `<div class="notice">Artifacts are preserved for inspection. Resume or retry before applying anything.</div>`;
+    }
+
+    function renderChanges(run) {
+      if (!run.files?.length) return `<div class="empty-state"><strong>No file changes yet</strong>${run.status === 'running' ? 'The agent is still scanning and has not produced a patch.' : 'This run did not create a diff.'}<div class="inline-actions" style="justify-content:center"><button type="button" data-action="setTab" data-tab="activity">View activity</button></div></div>`;
+      return `${changeNotice(run)}<div class="file-list" style="margin-top:12px">${run.files.map(file => {
+        const canDecide = run.status === 'review';
+        const decisionLabel = file.decision === 'included' ? 'Included' : file.decision === 'excluded' ? 'Excluded' : file.decision === 'applied' ? 'Applied' : file.decision === 'rejected' ? 'Rejected' : 'Draft';
+        return `<article class="file-card"><div class="file-head"><div style="min-width:0;flex:1"><div class="file-name">${esc(file.path)}</div><div class="file-meta" style="margin-top:4px"><span class="plus">+${file.add}</span><span class="minus">−${file.del}</span><span class="decision ${esc(file.decision)}">${esc(decisionLabel)}</span></div></div><div class="file-actions">
+          ${canDecide ? `<button type="button" class="btn-small ${file.decision === 'included' ? 'btn-success' : ''}" data-action="includeFile" data-id="${esc(run.id)}" data-file="${esc(file.path)}">Include</button><button type="button" class="btn-small ${file.decision === 'excluded' ? 'btn-danger' : ''}" data-action="excludeFile" data-id="${esc(run.id)}" data-file="${esc(file.path)}">Exclude</button><button type="button" class="btn-small" data-action="commentFile" data-id="${esc(run.id)}" data-file="${esc(file.path)}">Comment</button>` : ''}
+          <button type="button" class="btn-small" data-action="openFile" data-id="${esc(run.id)}" data-file="${esc(file.path)}">Open file</button></div></div>
+          <pre class="diff">${file.diff.map(line => `<span class="diff-line ${line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : ''}">${esc(line)}</span>`).join('')}</pre></article>`;
+      }).join('')}</div>`;
+    }
+
+    function renderChecks(run) {
+      const canRerun = ['review','failed','stopped'].includes(run.status) && run.checkStatus !== 'running';
+      return `<section class="panel"><div class="panel-head"><span>Verification</span><div class="inline-actions" style="margin:0">${renderCheck(run.checkStatus)}${canRerun ? `<button type="button" class="btn-small" data-action="rerunChecks" data-id="${esc(run.id)}">Rerun checks</button>` : ''}<button type="button" class="btn-small" data-action="copyChecks" data-id="${esc(run.id)}">Copy output</button></div></div><div style="overflow:auto"><table class="check-table"><thead><tr><th>Check</th><th>Status</th><th>Duration</th><th>Output</th></tr></thead><tbody>${(run.checks || []).map(check => `<tr><td class="mono">${esc(check.name)}</td><td>${renderCheck(check.status)}</td><td class="mono subtle">${esc(check.duration || '—')}</td><td><div class="output">${esc(check.output)}</div></td></tr>`).join('')}</tbody></table></div></section>`;
+    }
+
+    function renderIterations(run) {
+      return `<section class="panel"><div class="panel-head"><span>Iteration history</span><span class="panel-head-meta">Current iteration ${run.iteration} · no iteration limit</span></div><div>${(run.iterations || []).map(item => `<article class="iteration-card"><div class="iteration-number">Iteration ${item.iteration}</div><div><div class="iteration-title">${esc(item.title)}</div><div class="iteration-summary">${esc(item.summary)}</div></div><div class="iteration-state">${esc(item.state)} · ${esc(item.duration || '—')}</div></article>`).join('')}</div></section><div class="notice" style="margin-top:12px">This workflow continues for as many iterations as needed. It stops only when complete, blocked, manually stopped, or required by a safety or approval policy.</div>`;
+    }
+
+    function renderNotes(run) {
+      return `<div class="detail-grid"><section class="panel"><div class="panel-head"><span>Notes and decisions</span><span class="panel-head-meta">${run.notes?.length || 0} notes</span></div><div class="panel-body"><div class="note-list">${(run.notes || []).slice().sort((a,b) => b.at-a.at).map(item => `<article class="note"><div class="note-meta">${esc(item.author)} · ${esc(dateTime(item.at))}</div><div>${esc(item.text)}</div></article>`).join('') || '<div class="subtle">No notes yet.</div>'}</div></div></section><section class="panel"><div class="panel-head"><span>Add context</span></div><div class="panel-body"><p class="muted">Notes remain attached to this run. Guidance can also be sent to an active agent without restarting it.</p><div class="inline-actions"><button type="button" data-action="addNote" data-id="${esc(run.id)}">Add note</button>${run.status === 'running' ? `<button type="button" class="btn-primary" data-action="sendGuidance" data-id="${esc(run.id)}">Send guidance to agent</button>` : ''}<button type="button" data-action="explainRun" data-id="${esc(run.id)}">Explain this run</button></div></div></section></div>`;
+    }
+
+    const editorTabs = [
+      { id:'behavior', label:'Behavior' }, { id:'trigger', label:'Trigger & scope' }, { id:'safety', label:'Safety' }, { id:'history', label:'Version history' }
+    ];
+
+    function blankWorkflow() {
+      return {
+        id: uid('workflow'), name: 'Untitled workflow', description: '', enabled: true,
+        prompt: '', promptVersion: 0, promptUpdatedAt: null, promptVersions: [],
+        trigger: { type:'manual', branchPattern:'current branch' },
+        scope: { repository:state.currentRepo, overlap:'skip' },
+        safety: { approval:'always', destructive:'ask', protectedPaths:'.env*', stallMinutes:20, onStall:'pause' }
+      };
+    }
+
+    function openWorkflowEditor(workflowId = null) {
+      const original = workflowId ? workflowById(workflowId) : null;
+      drawerLastFocusedElement = document.activeElement;
+      const draft = deepClone(original || blankWorkflow());
+      editorState = {
+        mode: original ? 'edit' : 'new',
+        original: deepClone(original || draft),
+        draft,
+        tab:'behavior',
+        instruction:'',
+        proposal:null,
+        proposalGeneration:0,
+        sourceEditing:false,
+        revisionNote:'',
+        appliedInstruction:'',
+        errors:{}
+      };
+      byId('drawerTitle').textContent = original ? `Edit ${original.name}` : 'Create workflow';
+      byId('drawerSubtitle').textContent = original ? `Prompt version ${original.promptVersion} · future runs only` : `New local workflow for ${state.currentRepo}`;
+      const drawer=byId('workflowDrawer');
+      drawer.hidden=false;
+      drawer.removeAttribute('inert');
+      drawer.setAttribute('aria-hidden','false');
+      byId('drawerBackdrop').classList.add('open');
+      drawer.classList.add('open');
+      document.body.style.overflow = 'hidden';
+      renderWorkflowEditor();
+      setTimeout(() => byId('workflowInstruction')?.focus(), 0);
+    }
+
+    function editorIsDirty() {
+      if (!editorState) return false;
+      return JSON.stringify(editorState.draft) !== JSON.stringify(editorState.original) || Boolean(editorState.instruction.trim()) || Boolean(editorState.proposal);
+    }
+
+    function draftIsDirty() {
+      return Boolean(editorState && JSON.stringify(editorState.draft) !== JSON.stringify(editorState.original));
+    }
+
+    function hasUnappliedAIWork() {
+      if (!editorState) return false;
+      return Boolean(editorState.proposal) || Boolean(editorState.instruction.trim() && editorState.instruction.trim() !== editorState.appliedInstruction.trim());
+    }
+
+    function promptChanged() {
+      return Boolean(editorState && editorState.draft.prompt !== editorState.original.prompt);
+    }
+
+    function activeRunsOnWorkflow(workflowId) {
+      return state.runs.filter(run => run.workflowId === workflowId && ['running','applying','queued'].includes(run.status) && !run.archived).length;
+    }
+
+    function renderWorkflowEditor() {
+      if (!editorState) return;
+      byId('drawerTabs').innerHTML = editorTabs.map(tab => `<button type="button" class="tab-button ${editorState.tab === tab.id ? 'active' : ''}" data-action="setEditorTab" data-tab="${tab.id}" role="tab" aria-selected="${editorState.tab === tab.id}">${esc(tab.label)}</button>`).join('');
+      if (editorState.tab === 'trigger') byId('drawerBody').innerHTML = renderTriggerEditor();
+      else if (editorState.tab === 'safety') byId('drawerBody').innerHTML = renderSafetyEditor();
+      else if (editorState.tab === 'history') byId('drawerBody').innerHTML = renderVersionHistory();
+      else byId('drawerBody').innerHTML = renderBehaviorEditor();
+      renderEditorFooter();
+    }
+
+    function renderEditorFooter() {
+      const dirty = editorIsDirty();
+      const draftDirty = draftIsDirty();
+      const unappliedAI = hasUnappliedAIWork();
+      const changed = promptChanged();
+      const active = editorState.mode === 'edit' ? activeRunsOnWorkflow(editorState.draft.id) : 0;
+      let note = dirty ? 'Unsaved workflow changes.' : 'No unsaved changes.';
+      if (changed) note = `Prompt version ${editorState.original.promptVersion + 1} will be used by future runs. ${active ? `${active} active ${active === 1 ? 'run continues' : 'runs continue'} using the version pinned at start.` : 'No active runs are pinned to the current version.'}`;
+      if (editorState.mode === 'new') note = editorState.draft.prompt ? 'The generated prompt and trigger settings will be saved together.' : 'Describe the workflow and generate its initial prompt before creating it.';
+      if (unappliedAI) note = 'The AI instruction or proposal has not been applied to the draft yet.';
+      byId('drawerFooterNote').textContent = note;
+      const save = byId('saveWorkflowButton');
+      save.textContent = editorState.mode === 'new' ? 'Create workflow' : changed ? 'Save as revision' : 'Save changes';
+      save.disabled = unappliedAI || (editorState.mode === 'new' ? (!editorState.draft.name.trim() || !editorState.draft.prompt.trim()) : !draftDirty);
+    }
+
+    function renderBehaviorEditor() {
+      const wf = editorState.draft;
+      const isNew = editorState.mode === 'new';
+      const proposal = editorState.proposal;
+      const stale = proposal && proposal.sourcePrompt !== wf.prompt;
+      const examples = isNew ? [
+        ['Review every commit','Review each human commit for bugs, make only small safe fixes, run focused checks, and stop for my approval.'],
+        ['Fix failing tests','When a local test fails, reproduce it, diagnose the root cause, patch narrowly, and keep iterating until checks pass or you need my input.'],
+        ['Watch a folder','Watch API schema files and update generated client types when they change, then run typecheck and stop for review.']
+      ] : [
+        ['Smaller patches','Avoid style-only edits, keep every patch as small as possible, and explain any behavior change before making it.'],
+        ['Stronger checks','Run the narrowest relevant check after each change, then run the broader suite before stopping for approval.'],
+        ['Clearer progress','At the end of each iteration, record what changed, what was learned, and whether another iteration is likely to make progress.']
+      ];
+      return `${editorState.errors.prompt ? `<div class="notice danger" style="margin-bottom:12px">${esc(editorState.errors.prompt)}</div>` : ''}<div class="form-grid" style="margin-bottom:14px">
+        <div class="form-group"><label for="workflowName">Workflow name</label><input class="field" id="workflowName" data-editor-path="name" value="${esc(wf.name)}"><div class="validation">${esc(editorState.errors.name || '')}</div></div>
+        <div class="form-group"><label for="workflowDescription">Short description</label><input class="field" id="workflowDescription" data-editor-path="description" value="${esc(wf.description)}" placeholder="What appears in the workflow list"><div class="validation"></div></div>
+      </div>
+      ${promptChanged() ? `<div class="draft-banner"><span>◆</span><div><strong>Draft prompt differs from version ${editorState.original.promptVersion}.</strong><br><span class="muted">It is not saved until you use the footer action.</span></div></div>` : ''}
+      <div class="editor-grid">
+        <section class="panel"><div class="panel-head"><span>${isNew ? 'Describe the workflow' : 'Change this workflow with AI'}</span><span class="panel-head-meta">primary path</span></div><div class="panel-body">
+          <label for="workflowInstruction" style="display:block;color:var(--text);font-weight:700;margin-bottom:7px">${isNew ? 'What should this workflow do?' : 'What should this workflow do differently?'}</label>
+          <textarea id="workflowInstruction" class="composer" placeholder="${isNew ? 'Describe the goal, operating loop, when it should stop, and anything it must never do.' : 'Describe the behavioral change in plain language. The current prompt will not change until you approve the proposal.'}">${esc(editorState.instruction)}</textarea>
+          <div class="example-row">${examples.map(([label,value]) => `<button type="button" class="btn-small" data-action="usePromptExample" data-value="${esc(value)}">${esc(label)}</button>`).join('')}</div>
+          <div class="inline-actions"><button type="button" class="btn-primary" data-action="generatePromptProposal">${proposal ? 'Generate new proposal' : isNew ? 'Generate initial prompt' : 'Generate prompt update'}</button>${proposal ? '<button type="button" data-action="focusPromptInstruction">Refine instruction</button>' : ''}</div>
+          <div class="field-help" style="margin-top:9px">The AI rewrite is simulated in this offline prototype. The proposal, review, draft, and save states behave like the intended product.</div>
+        </div></section>
+        <section class="panel"><div class="panel-head"><span>AI proposal</span><span class="panel-head-meta">${proposal ? `generation ${proposal.generation}` : 'not generated'}</span></div>${proposal ? `<div class="proposal-content">
+          ${stale ? '<div class="notice danger" style="margin-bottom:10px">The draft prompt changed after this proposal was generated. Generate a fresh proposal before applying it.</div>' : ''}
+          <div class="proposal-summary">${proposal.summary.map(item => `<div class="proposal-item"><strong>${esc(item.section)}</strong><span>${esc(item.text)}</span></div>`).join('')}</div>
+          <details open><summary style="cursor:pointer;color:var(--text-2);margin-bottom:8px">Review prompt diff</summary><pre class="diff">${proposal.diff.map(line => `<span class="diff-line ${line.type}">${esc((line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ') + line.text)}</span>`).join('')}</pre></details>
+          <div class="inline-actions"><button type="button" class="btn-success" data-action="applyPromptProposal" ${stale ? 'disabled' : ''}>Apply to draft</button><button type="button" data-action="generatePromptProposal">Regenerate</button><button type="button" data-action="discardPromptProposal">Discard</button></div>
+        </div>` : `<div class="proposal-empty"><div><div style="font-size:28px;color:var(--purple);margin-bottom:8px">◇</div><strong style="color:var(--text)">No proposal yet</strong><br>Describe the behavior you want and generate a reviewable prompt ${isNew ? 'for the new workflow' : 'update'}.</div></div>`}</section>
+      </div>
+      <details class="prompt-reader" ${editorState.sourceEditing ? 'open' : ''}><summary>${isNew && !wf.prompt ? 'Initial prompt will appear here' : `View ${promptChanged() ? 'draft' : 'current'} full prompt · version ${wf.promptVersion || 'draft'}`}</summary>
+        <div style="padding:10px 12px;border-bottom:1px solid var(--line);display:flex;gap:7px;align-items:center"><button type="button" class="btn-small" data-action="toggleDirectPromptEdit">${editorState.sourceEditing ? 'Finish direct edit' : 'Edit source directly'}</button><button type="button" class="btn-small" data-action="copyWorkflowPrompt">Copy prompt</button><span class="subtle">Direct editing is an advanced path.</span></div>
+        <textarea id="promptSource" class="prompt-source" ${editorState.sourceEditing ? '' : 'readonly'} placeholder="Generate an initial prompt first.">${esc(wf.prompt)}</textarea>
+      </details>`;
+    }
+
+    function renderTriggerEditor() {
+      const wf = editorState.draft;
+      const trigger = wf.trigger;
+      let specific = '';
+      if (trigger.type === 'schedule') specific = `<div class="form-group"><label for="scheduleCadence">Cadence</label><select class="field" id="scheduleCadence" data-editor-path="trigger.cadence"><option value="daily" ${trigger.cadence === 'daily' ? 'selected' : ''}>Every day</option><option value="weekdays" ${trigger.cadence === 'weekdays' ? 'selected' : ''}>Weekdays</option><option value="weekly" ${trigger.cadence === 'weekly' ? 'selected' : ''}>Weekly</option></select></div><div class="form-group"><label for="scheduleTime">Local time</label><input class="field" type="time" id="scheduleTime" data-editor-path="trigger.time" value="${esc(trigger.time || '02:30')}"></div><div class="form-group"><label for="scheduleTimezone">Timezone</label><select class="field" id="scheduleTimezone" data-editor-path="trigger.timezone"><option ${trigger.timezone === 'America/Chicago' ? 'selected' : ''}>America/Chicago</option><option ${trigger.timezone === 'America/New_York' ? 'selected' : ''}>America/New_York</option><option ${trigger.timezone === 'Europe/London' ? 'selected' : ''}>Europe/London</option><option ${trigger.timezone === 'UTC' ? 'selected' : ''}>UTC</option></select><div class="field-help">Next run: ${esc(nextScheduleText(trigger))}</div></div>`;
+      if (trigger.type === 'file_watch') specific = `<div class="form-group full"><label for="watchedPaths">Watched paths</label><textarea class="textarea mono" id="watchedPaths" data-editor-path="trigger.paths" placeholder="src/api/schema/**">${esc(trigger.paths || '')}</textarea><div class="field-help">One glob per line.</div></div><div class="form-group full"><label for="ignoredPaths">Ignore patterns</label><textarea class="textarea mono" id="ignoredPaths" data-editor-path="trigger.ignore" placeholder="**/*.generated.ts">${esc(trigger.ignore || '')}</textarea></div><div class="form-group"><label for="watchDebounce">Debounce</label><div style="display:flex;align-items:center;gap:8px"><input class="field" type="number" min="1" id="watchDebounce" data-editor-path="trigger.debounceSeconds" value="${Number(trigger.debounceSeconds || 5)}"><span class="subtle">seconds</span></div></div>`;
+      if (trigger.type === 'post_commit') specific = `<div class="form-group"><label for="commitAuthors">Commits to include</label><select class="field" id="commitAuthors" data-editor-path="trigger.authors"><option value="human" ${trigger.authors === 'human' ? 'selected' : ''}>Human commits only</option><option value="all" ${trigger.authors === 'all' ? 'selected' : ''}>Human and AI commits</option></select></div><div class="form-group"><label for="hookBehavior">Hook behavior</label><select class="field" id="hookBehavior" data-editor-path="trigger.hookBehavior"><option value="after_each_commit" ${trigger.hookBehavior === 'after_each_commit' ? 'selected' : ''}>After each commit</option><option value="after_idle" ${trigger.hookBehavior === 'after_idle' ? 'selected' : ''}>After commit activity is idle</option></select></div><div class="form-group"><label for="commitDebounce">Debounce</label><div style="display:flex;align-items:center;gap:8px"><input class="field" type="number" min="0" id="commitDebounce" data-editor-path="trigger.debounceSeconds" value="${Number(trigger.debounceSeconds || 10)}"><span class="subtle">seconds</span></div></div>`;
+      if (trigger.type === 'test_failure') specific = `<div class="form-group full"><label for="testCommand">Test command</label><input class="field mono" id="testCommand" data-editor-path="trigger.testCommand" value="${esc(trigger.testCommand || 'npm test')}"></div><div class="form-group"><label for="eventSource">Failure event source</label><input class="field" id="eventSource" data-editor-path="trigger.eventSource" value="${esc(trigger.eventSource || 'local test wrapper')}"></div><div class="form-group"><label for="failureCooldown">Cooldown</label><div style="display:flex;align-items:center;gap:8px"><input class="field" type="number" min="0" id="failureCooldown" data-editor-path="trigger.cooldownSeconds" value="${Number(trigger.cooldownSeconds || 30)}"><span class="subtle">seconds</span></div></div>`;
+      if (trigger.type === 'manual') specific = `<div class="form-group full"><div class="notice">This workflow starts only when you choose <strong>Run now</strong>. Disabling automatic triggers does not prevent manual runs.</div></div>`;
+      return `${editorState.errors.trigger ? `<div class="notice danger" style="margin-bottom:12px">${esc(editorState.errors.trigger)}</div>` : ''}<div class="form-grid"><div class="form-group"><label for="triggerType">Trigger type</label><select class="field" id="triggerType" data-editor-path="trigger.type"><option value="manual" ${trigger.type === 'manual' ? 'selected' : ''}>Manual</option><option value="post_commit" ${trigger.type === 'post_commit' ? 'selected' : ''}>Post-commit</option><option value="test_failure" ${trigger.type === 'test_failure' ? 'selected' : ''}>Test failure</option><option value="schedule" ${trigger.type === 'schedule' ? 'selected' : ''}>Schedule</option><option value="file_watch" ${trigger.type === 'file_watch' ? 'selected' : ''}>File watch</option></select></div><div class="form-group"><label for="workflowRepo">Repository</label><select class="field" id="workflowRepo" data-editor-path="scope.repository"><option ${wf.scope.repository === 'my-app' ? 'selected' : ''}>my-app</option><option ${wf.scope.repository === 'payments-api' ? 'selected' : ''}>payments-api</option><option ${wf.scope.repository === 'design-system' ? 'selected' : ''}>design-system</option></select></div><div class="form-group full"><label for="branchPattern">Branch matcher</label><input class="field mono" id="branchPattern" data-editor-path="trigger.branchPattern" value="${esc(trigger.branchPattern || 'current branch')}" placeholder="main, feature/*"><div class="field-help">Comma-separated branch names or glob patterns.</div></div>${specific}<div class="form-group"><label for="overlapPolicy">If another run is active</label><select class="field" id="overlapPolicy" data-editor-path="scope.overlap"><option value="skip" ${wf.scope.overlap === 'skip' ? 'selected' : ''}>Skip the new trigger</option><option value="queue" ${wf.scope.overlap === 'queue' ? 'selected' : ''}>Queue one run</option><option value="parallel" ${wf.scope.overlap === 'parallel' ? 'selected' : ''}>Run in parallel</option></select></div><div class="form-group"><label>Automatic trigger</label><label class="safety-option" style="padding:8px 10px"><input type="checkbox" data-editor-path="enabled" ${wf.enabled ? 'checked' : ''}><span><span class="safety-title">${wf.enabled ? 'Enabled' : 'Disabled'}</span><span class="safety-copy">Manual Run now remains available.</span></span></label></div></div>`;
+    }
+
+    function nextScheduleText(trigger) {
+      const label = trigger.cadence === 'weekdays' ? 'next weekday' : trigger.cadence === 'weekly' ? 'next scheduled week' : 'tomorrow';
+      return `${label} at ${trigger.time || '02:30'} (${trigger.timezone || 'local'})`;
+    }
+
+    function renderSafetyEditor() {
+      const safety = editorState.draft.safety;
+      return `<div class="form-grid"><div class="form-group full"><label for="approvalPolicy">Approval policy</label><select class="field" id="approvalPolicy" data-editor-path="safety.approval"><option value="always" ${safety.approval === 'always' ? 'selected' : ''}>Always stop for review</option><option value="low_risk" ${safety.approval === 'low_risk' ? 'selected' : ''}>Auto-apply only low-risk changes with passing checks</option><option value="suggest" ${safety.approval === 'suggest' ? 'selected' : ''}>Suggest only; never apply automatically</option></select><div class="field-help">Human Apply remains available in the review state.</div></div><div class="form-group full"><label for="destructivePolicy">Destructive commands</label><select class="field" id="destructivePolicy" data-editor-path="safety.destructive"><option value="ask" ${safety.destructive === 'ask' ? 'selected' : ''}>Ask before running</option><option value="never" ${safety.destructive === 'never' ? 'selected' : ''}>Never run</option><option value="allow_checkpoint" ${safety.destructive === 'allow_checkpoint' ? 'selected' : ''}>Allow only after a checkpoint</option></select></div><div class="form-group full"><label for="protectedPaths">Protected paths</label><textarea class="textarea mono" id="protectedPaths" data-editor-path="safety.protectedPaths" placeholder=".env*&#10;infra/**">${esc(safety.protectedPaths || '')}</textarea><div class="field-help">One glob per line. Changes require explicit approval.</div></div><div class="form-group"><label for="stallMinutes">No-progress threshold</label><div style="display:flex;align-items:center;gap:8px"><input class="field" type="number" min="1" id="stallMinutes" data-editor-path="safety.stallMinutes" value="${Number(safety.stallMinutes || 20)}"><span class="subtle">minutes</span></div></div><div class="form-group"><label for="stallAction">When stalled</label><select class="field" id="stallAction" data-editor-path="safety.onStall"><option value="pause" ${safety.onStall === 'pause' ? 'selected' : ''}>Stop and ask for guidance</option><option value="fail" ${safety.onStall === 'fail' ? 'selected' : ''}>Mark the run failed</option><option value="checkpoint" ${safety.onStall === 'checkpoint' ? 'selected' : ''}>Checkpoint and continue once</option></select></div><div class="form-group full"><div class="notice warning"><strong>Unlimited iterations do not mean uncontrolled execution.</strong> The workflow keeps iterating until completion, while these approval, command, path, and no-progress policies provide explicit stopping conditions.</div></div></div>`;
+    }
+
+    function renderVersionHistory() {
+      const versions = editorState.draft.promptVersions || [];
+      if (!versions.length) return `<div class="empty-state"><strong>No saved versions yet</strong>The initial prompt will become version 1 when this workflow is created.</div>`;
+      return `<div class="version-list">${versions.map(item => `<article class="version-card"><div class="version-head"><span class="version-number">Version ${item.version}</span>${item.version === editorState.original.promptVersion ? '<span class="version-current">Current</span>' : ''}<span class="version-date">${esc(dateTime(item.createdAt))}</span></div><div class="version-note">${esc(item.note)}</div><div class="version-actions"><button type="button" class="btn-small" data-action="comparePromptVersion" data-version="${item.version}">Compare</button>${item.prompt !== editorState.draft.prompt ? `<button type="button" class="btn-small" data-action="restorePromptVersion" data-version="${item.version}">Restore as draft</button>` : ''}</div></article>`).join('')}</div><div class="notice" style="margin-top:12px">Restoring creates a draft. Saving it records a new version instead of overwriting history.</div>`;
+    }
+
+    function setNested(object, path, value) {
+      const parts = path.split('.');
+      let cursor = object;
+      parts.slice(0,-1).forEach(part => { if (!cursor[part] || typeof cursor[part] !== 'object') cursor[part] = {}; cursor = cursor[part]; });
+      cursor[parts[parts.length - 1]] = value;
+    }
+
+    function addRuleToSection(prompt, section, line) {
+      const header = `${section}:`;
+      const lines = prompt.trim().split('\n');
+      let index = lines.findIndex(item => item.trim() === header);
+      if (index < 0) return `${prompt.trim()}\n\n${header}\n${line}`;
+      let end = lines.length;
+      for (let i = index + 1; i < lines.length; i++) {
+        if (/^[A-Z][A-Za-z ]+:$/.test(lines[i].trim())) { end = i; break; }
+      }
+      if (lines.slice(index + 1, end).some(item => item.trim().toLowerCase() === line.trim().toLowerCase())) return prompt;
+      while (end > index + 1 && !lines[end - 1].trim()) end--;
+      lines.splice(end, 0, line);
+      return lines.join('\n');
+    }
+
+    function defaultPromptFromInstruction(instruction, name) {
+      const goal = instruction.trim().replace(/\s+/g,' ');
+      return `You are the ${name || 'Local Development'} workflow.
+
+Goal:
+${goal}
+
+Operating loop:
+1. Read the trigger context and relevant repository files.
+2. Choose the smallest useful next step.
+3. Make one coherent change.
+4. Run the narrowest relevant check.
+5. Record what changed, what was learned, and whether another iteration is useful.
+6. Continue without an iteration limit until complete, blocked, manually stopped, or required to pause by policy.
+
+Completion:
+Stop with a concise summary, changed files, exact checks, remaining risk, and the recommended next action.
+
+Safety:
+- Keep changes scoped to the stated goal.
+- Never run destructive git commands without approval.
+- Pause when the next step is ambiguous.`;
+    }
+
+    function lineDiff(before, after) {
+      const a = String(before || '').split('\n');
+      const b = String(after || '').split('\n');
+      const table = Array.from({length:a.length + 1}, () => Array(b.length + 1).fill(0));
+      for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) table[i][j] = a[i] === b[j] ? table[i+1][j+1] + 1 : Math.max(table[i+1][j], table[i][j+1]);
+      const result = []; let i = 0; let j = 0;
+      while (i < a.length && j < b.length) {
+        if (a[i] === b[j]) { result.push({type:'',text:a[i]}); i++; j++; }
+        else if (table[i+1][j] >= table[i][j+1]) { result.push({type:'del',text:a[i++]}); }
+        else { result.push({type:'add',text:b[j++]}); }
+      }
+      while (i < a.length) result.push({type:'del',text:a[i++]});
+      while (j < b.length) result.push({type:'add',text:b[j++]});
+      return result;
+    }
+
+    function buildPromptProposal(instruction) {
+      const wf = editorState.draft;
+      const generation = ++editorState.proposalGeneration;
+      let next = wf.prompt.trim() || defaultPromptFromInstruction(instruction, wf.name);
+      const lower = instruction.toLowerCase();
+      const summary = [];
+      const variation = generation % 3;
+      if (!wf.prompt.trim()) summary.push({ section:'Goal', text:'Created an initial goal and unlimited operating loop from your description.' });
+      if (/small|minimal|scope|style|format/.test(lower)) {
+        const rule = variation === 1 ? '- Prefer the smallest patch that fully addresses the issue; do not include style-only edits unless requested.' : variation === 2 ? '- Keep each patch narrowly scoped and exclude unrelated formatting or cleanup.' : '- Make one minimal, reviewable change at a time and leave unrelated code untouched.';
+        next = addRuleToSection(next, 'Safety', rule);
+        summary.push({ section:'Safety', text:'Tightened patch scope and excluded unrelated style-only work.' });
+      }
+      if (/test|check|verify|typecheck|lint/.test(lower)) {
+        const rule = variation === 1 ? '7. Run the narrowest relevant check after each change, then broader checks before approval.' : variation === 2 ? '7. Verify locally after every coherent change and report the exact command and result.' : '7. Prefer focused verification first; run the broader suite only after focused checks pass.';
+        next = addRuleToSection(next, 'Operating loop', rule);
+        summary.push({ section:'Loop', text:'Made focused checks part of every iteration and broader checks part of completion.' });
+      }
+      if (/summary|summar|report|approval|review/.test(lower)) {
+        const rule = variation === 1 ? '- When stopping for approval, include cause, changed files, risk, exact checks, and the recommended next action.' : variation === 2 ? '- Make every approval summary decision-ready: intent, diff, verification, risk, and next step.' : '- End with a concise review packet covering intent, files, checks, risk, and recommendation.';
+        next = addRuleToSection(next, 'Completion', rule);
+        summary.push({ section:'Completion', text:'Expanded the approval summary into a decision-ready review packet.' });
+      }
+      if (/loop|iteration|progress|stuck|repeat|unlimited/.test(lower)) {
+        const rule = variation === 1 ? '8. At the end of each iteration, record what changed, what was learned, and whether another iteration is likely to make progress.' : variation === 2 ? '8. Treat iteration count as history, not a limit; continue until complete or a stopping policy applies.' : '8. After every iteration, log progress and stop when the next iteration is unlikely to help.';
+        next = addRuleToSection(next, 'Operating loop', rule);
+        summary.push({ section:'Loop', text:'Made iteration progress explicit without introducing an artificial maximum.' });
+      }
+      if (/auth|security|destructive|permission|protected|sensitive/.test(lower)) {
+        const rule = '- Ask before changing authentication, authorization, secrets, destructive commands, or protected paths.';
+        next = addRuleToSection(next, 'Safety', rule);
+        summary.push({ section:'Safety', text:'Added an explicit approval boundary around sensitive behavior.' });
+      }
+      if (!summary.length && wf.prompt.trim()) {
+        next = addRuleToSection(next, 'Requested behavior', `- ${instruction.trim().replace(/\s+/g,' ')}`);
+        summary.push({ section:'Behavior', text:'Added the requested behavior as an explicit instruction while preserving the existing prompt.' });
+      }
+      return { generation, instruction, sourcePrompt:wf.prompt, prompt:next, summary, diff:lineDiff(wf.prompt, next), createdAt:Date.now() };
+    }
+
+    function openModal(title, body, footer, context = {}) {
+      lastFocusedElement = document.activeElement;
+      modalState = context;
+      byId('modalTitle').textContent = title;
+      byId('modalBody').innerHTML = body;
+      byId('modalFooter').innerHTML = footer;
+      const modal=byId('modal');
+      modal.hidden=false;
+      modal.removeAttribute('inert');
+      modal.setAttribute('aria-hidden','false');
+      if(byId('workflowDrawer').classList.contains('open'))byId('workflowDrawer').setAttribute('inert','');
+      byId('modalBackdrop').classList.add('open');
+      modal.classList.add('open');
+      document.body.style.overflow = 'hidden';
+      setTimeout(() => {
+        const focusTarget = byId('modal').querySelector('textarea, input, select, button:not([disabled])');
+        focusTarget?.focus();
+      }, 0);
+    }
+
+    function closeModal() {
+      byId('modalBackdrop').classList.remove('open');
+      const modal=byId('modal');
+      modal.classList.remove('open');
+      modal.setAttribute('aria-hidden','true');
+      modal.setAttribute('inert','');
+      modal.hidden=true;
+      byId('modalBody').innerHTML = '';
+      byId('modalFooter').innerHTML = '';
+      modalState = null;
+      if (!byId('workflowDrawer').classList.contains('open')) document.body.style.overflow = '';
+      else byId('workflowDrawer').removeAttribute('inert');
+      if (lastFocusedElement?.isConnected) lastFocusedElement.focus();
+      lastFocusedElement = null;
+    }
+
+    function closeWorkflowEditor() {
+      byId('drawerBackdrop').classList.remove('open');
+      const drawer=byId('workflowDrawer');
+      drawer.classList.remove('open');
+      drawer.setAttribute('aria-hidden','true');
+      drawer.setAttribute('inert','');
+      drawer.hidden=true;
+      document.body.style.overflow = '';
+      editorState = null;
+      if (drawerLastFocusedElement?.isConnected) drawerLastFocusedElement.focus();
+      drawerLastFocusedElement = null;
+    }
+
+    function requestCloseWorkflow() {
+      if (!editorState) return closeWorkflowEditor();
+      if (!editorIsDirty()) return closeWorkflowEditor();
+      openModal('Discard unsaved workflow changes?', `<p class="muted">The saved workflow will stay unchanged. Any prompt proposal, draft prompt, trigger edits, and safety edits in this drawer will be discarded.</p>`, `<button type="button" data-action="closeModal">Keep editing</button><button type="button" class="btn-danger" data-action="discardWorkflowChanges">Discard changes</button>`, { kind:'discard-workflow' });
+    }
+
+    function toast(title, copy = '', options = {}) {
+      if (!state.settings.inAppAlerts && !options.force) return;
+      const item = document.createElement('div');
+      item.className = 'toast';
+      item.innerHTML = `<div class="toast-title">${esc(title)}</div>${copy ? `<div class="toast-copy">${esc(copy)}</div>` : ''}`;
+      byId('toastRegion').appendChild(item);
+      setTimeout(() => item.remove(), 4200);
+    }
+
+    async function copyText(label, text) {
+      let copied = false;
+      try { await navigator.clipboard.writeText(text); copied = true; }
+      catch (error) {
+        try {
+          const area = document.createElement('textarea'); area.value = text; area.style.position = 'fixed'; area.style.opacity = '0'; document.body.appendChild(area); area.select(); copied = document.execCommand('copy'); area.remove();
+        } catch (fallbackError) { copied = false; }
+      }
+      toast(copied ? `${label} copied` : `Could not copy ${label.toLowerCase()}`, copied ? 'Ready to paste.' : 'Select the text in the open panel and copy it manually.', {force:true});
+    }
+
+    function mutateRun(id, allowedStatuses, callback) {
+      const run = runById(id);
+      if (!run || run.archived) { toast('Run is no longer available', 'Refresh the current view.'); return null; }
+      if (allowedStatuses && !allowedStatuses.includes(run.status)) { toast('Action is not valid for this run state', `${statusMeta[run.status]?.label || run.status} runs cannot use that action.`); return null; }
+      callback(run);
+      persist();
+      renderAll();
+      return run;
+    }
+
+    function selectRun(id) {
+      const run = runById(id);
+      if (!run || run.archived || !visibleRuns().some(item => item.id === id)) return;
+      state.selectedRunId = id;
+      state.activeTab = 'summary';
+      renderRuns();
+      renderDetail();
+      persist();
+      if (window.innerWidth <= 720) byId('runDetail').scrollIntoView({ behavior:'smooth', block:'start' });
+    }
+
+    function startWorkflow(workflowId, copiedFromRun = null) {
+      const workflow = workflowById(workflowId);
+      if (!workflow) return;
+      const source = copiedFromRun ? runById(copiedFromRun) : null;
+      const startedAt = Date.now();
+      const targetRepository = source?.repository || workflow.scope.repository;
+      const targetBranch = source?.branch || state.currentBranch;
+      const run = {
+        id: uid('run'), workflowId: workflow.id, repository:targetRepository, status:'running', trigger:'manual', branch:targetBranch, commit:'working tree', iteration:1,
+        startedAt, activeMs:0, endedAt:null, heartbeatAt:startedAt, activityAt:startedAt, stateEnteredAt:startedAt,
+        currentActivity:'Reading repository context', currentAction: source ? `Starting a new run using the outcome of ${source.id} as context.` : 'Loading the workflow prompt and inspecting the current branch.',
+        currentCommand:'git status --short', currentFile:'', changes:{add:0,del:0,state:'draft'}, checkStatus:'not_run', risk:'Low', promptVersion:workflow.promptVersion, archived:false,
+        summarySteps:[source ? `Started a new run from the completed context of ${source.id}.` : `Started ${workflow.name} manually on ${targetBranch}.`, `Pinned workflow prompt version ${workflow.promptVersion} for this run.`],
+        files:[], checks:[{id:'checks',name:'Checks',status:'not_run',output:'No checks have run yet.',duration:'—'}],
+        notes: source ? [note(0,`New run created from ${source.id}. Previous run remains unchanged.`,'Workbench')] : [],
+        events:[{at:startedAt,text:`Manual run started on ${targetBranch}.`,type:'start'}],
+        iterations:[{iteration:1,title:'Repository context',summary:'Reading the goal, branch, and relevant files.',state:'running',duration:'0s'}]
+      };
+      state.runs.unshift(run);
+      state.currentRepo=targetRepository;state.currentBranch=targetBranch;state.selectedRunId = run.id; state.activeTab = 'summary'; state.view = 'running'; state.workflowFilter = null; state.triggerFilter = 'all'; state.runSearch = '';
+      renderAll();
+      closeModal();
+      toast('Manual run started', workflow.enabled ? `${workflow.name} is running on ${targetBranch}.` : `${workflow.name} is disabled for automatic triggers, but manual runs are allowed.`);
+    }
+
+    function showWorkflowMenu(id) {
+      const workflow = workflowById(id);
+      if (!workflow) return;
+      const automatic = workflow.enabled && !state.automationsPaused;
+      openModal(workflow.name, `<p class="muted">${esc(workflow.description)}</p><div class="metric-grid"><div class="metric"><div class="metric-label">Trigger</div><div class="metric-value">${esc(triggerLabels[workflow.trigger.type])}</div></div><div class="metric"><div class="metric-label">Prompt</div><div class="metric-value">Version ${workflow.promptVersion}</div></div><div class="metric"><div class="metric-label">Automatic runs</div><div class="metric-value">${automatic ? 'Enabled' : 'Paused'}</div></div><div class="metric"><div class="metric-label">Approval</div><div class="metric-value">${esc(workflow.safety.approval === 'always' ? 'Always review' : workflow.safety.approval === 'suggest' ? 'Suggest only' : 'Low risk')}</div></div></div>`, `<button type="button" data-action="closeModal">Close</button><button type="button" class="mini-icon ${workflow.pinned ? 'new-workflow-icon' : ''}" data-action="toggleWorkflowPin" data-id="${esc(id)}" aria-label="${workflow.pinned ? 'Unpin from top' : 'Pin to top'}" title="${workflow.pinned ? 'Unpin from top' : 'Pin to top'}">📌</button><button type="button" data-action="editWorkflowFromModal" data-id="${esc(id)}">Edit workflow</button><button type="button" class="btn-primary" data-action="runWorkflow" data-id="${esc(id)}">Run now</button>`, { kind:'workflow-menu', workflowId:id });
+    }
+
+    function requestStopRun(id) {
+      const run = runById(id);
+      if (!run || run.status !== 'running') return;
+      if (!state.settings.confirmDestructive) return executeStopRun(id);
+      openModal('Stop this run?', `<p class="muted">The agent will stop after the current operation. Draft files, logs, notes, and iteration ${run.iteration} will remain available, and you can resume later.</p><div class="notice">Stopping does not discard the worktree or end the workflow permanently.</div>`, `<button type="button" data-action="closeModal">Keep running</button><button type="button" class="btn-danger" data-action="confirmStopRun" data-id="${esc(id)}">Stop and preserve work</button>`, { kind:'stop-run', runId:id });
+    }
+
+    function executeStopRun(id) {
+      mutateRun(id, ['running'], run => {
+        const now = Date.now();
+        run.activeMs = runtimeMs(run, now); run.status = 'stopped'; run.endedAt = now; run.stateEnteredAt = now; run.heartbeatAt = null; run.activityAt = now;
+        run.currentActivity = 'Stopped manually'; run.currentAction = 'Draft files, logs, and the current iteration were preserved.';
+        if (run.checkStatus === 'running') {
+          run.checkStatus = 'stale';
+          run.checks.forEach(check => { if (check.status === 'running') { check.status = 'stale'; check.output = 'Stopped before this check completed.'; } });
+        }
+        run.events.push({at:now,text:`Stopped manually during iteration ${run.iteration}; artifacts preserved.`,type:'state'});
+        const current = run.iterations.find(item => item.iteration === run.iteration); if (current) current.state = 'stopped';
+        if (state.followingRunId === run.id) state.followingRunId = null;
+        state.view = 'all';
+      });
+      closeModal(); toast('Run stopped', 'All draft work was preserved.');
+    }
+
+    function resumeRun(id) {
+      mutateRun(id, ['stopped'], run => {
+        const now = Date.now();
+        run.status='running'; run.endedAt=null; run.stateEnteredAt=now; run.heartbeatAt=now; run.activityAt=now; run.currentActivity=`Resuming iteration ${run.iteration}`; run.currentAction='Reloading the preserved worktree and continuing from the last checkpoint.';
+        run.events.push({at:now,text:`Resumed preserved state for iteration ${run.iteration}.`,type:'state'});
+        const current = run.iterations.find(item => item.iteration === run.iteration); if (current) current.state='running';
+      });
+      toast('Run resumed', `Continuing iteration ${runById(id)?.iteration}.`);
+    }
+
+    function openGuidanceModal(id, mode) {
+      const run = runById(id); if (!run) return;
+      const title = mode === 'revision' ? 'Request changes' : mode === 'guidance' ? 'Send guidance to the agent' : 'Retry with guidance';
+      const intro = mode === 'revision' ? 'The current proposal stays preserved. Your instruction starts a new iteration in this same run.' : mode === 'guidance' ? 'This note is added to the active iteration without restarting it.' : 'Artifacts remain preserved. Your instruction starts the next iteration in this run.';
+      openModal(title, `<p class="muted">${esc(intro)}</p><div class="form-group"><label for="guidanceText">Instruction</label><textarea id="guidanceText" class="textarea" style="min-height:120px" placeholder="Explain what should change, what to preserve, or what decision to make next."></textarea><div class="validation" id="guidanceError"></div></div>`, `<button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-primary" data-action="submitGuidance" data-id="${esc(id)}" data-mode="${esc(mode)}">${mode === 'guidance' ? 'Send guidance' : mode === 'revision' ? 'Start next iteration' : 'Retry'}</button>`, { kind:'guidance', runId:id, mode });
+    }
+
+    function submitGuidance(id, mode) {
+      const text = byId('guidanceText')?.value.trim();
+      if (!text) { byId('guidanceError').textContent = 'Add an instruction before continuing.'; byId('guidanceText').focus(); return; }
+      if (mode === 'guidance') {
+        mutateRun(id,['running'],run => { const now=Date.now(); run.notes.push({id:uid('note'),at:now,text,author:'Tom'}); run.events.push({at:now,text:`Human guidance received: ${text}`,type:'guidance'}); run.activityAt=now; run.currentActivity='Incorporating new guidance'; run.currentAction=text; });
+        closeModal(); toast('Guidance sent', 'The active iteration continues with the new instruction.'); return;
+      }
+      const allowed = mode === 'revision' ? ['review'] : ['failed'];
+      mutateRun(id,allowed,run => {
+        const now=Date.now(); run.iteration += 1; run.status='running'; run.endedAt=null; run.stateEnteredAt=now; run.heartbeatAt=now; run.activityAt=now; run.checkStatus='stale';
+        run.checks.forEach(check => { check.status='stale'; if (!String(check.output).startsWith('Previous result:')) check.output=`Previous result: ${check.output}`; });
+        run.currentActivity = mode === 'revision' ? `Starting revision in iteration ${run.iteration}` : `Retrying in iteration ${run.iteration}`; run.currentAction=text;
+        run.files.forEach(file => { if (!['applied','rejected'].includes(file.decision)) file.decision='draft'; });
+        run.notes.push({id:uid('note'),at:now,text,author:'Tom'}); run.events.push({at:now,text:`Iteration ${run.iteration} started with guidance: ${text}`,type:'state'});
+        run.iterations.push({iteration:run.iteration,title:mode === 'revision' ? 'Requested revision' : 'Guided retry',summary:text,state:'running',duration:'0s'});
+        state.view = 'running';
+      });
+      closeModal(); toast(mode === 'revision' ? 'Revision started' : 'Retry started', `The run is now working in iteration ${runById(id)?.iteration}.`);
+    }
+
+    function requestRejectRun(id) {
+      const run=runById(id); if(!run||run.status!=='review') return;
+      openModal('Reject this proposal?', `<p class="muted">No files will be applied. The diff, checks, notes, and rejection reason remain attached to the run.</p><div class="form-group"><label for="rejectionReason">Reason</label><textarea id="rejectionReason" class="textarea" placeholder="Why are you rejecting this result?"></textarea><div class="validation" id="rejectionError"></div></div>`, `<button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-danger" data-action="confirmRejectRun" data-id="${esc(id)}">Reject proposal</button>`, {kind:'reject-run',runId:id});
+    }
+
+    function confirmRejectRun(id) {
+      const reason=byId('rejectionReason')?.value.trim(); if(!reason){byId('rejectionError').textContent='Add a reason so the decision is recorded.';byId('rejectionReason').focus();return;}
+      state.view='all';
+      mutateRun(id,['review'],run=>{const now=Date.now();run.status='rejected';run.endedAt=now;run.stateEnteredAt=now;run.activityAt=now;run.currentActivity='Proposal rejected';run.currentAction='No changes were applied. The reason is recorded with the run.';run.changes.state='rejected';run.files.forEach(file=>file.decision='rejected');run.notes.push({id:uid('note'),at:now,text:`Rejected: ${reason}`,author:'Tom'});run.events.push({at:now,text:`Proposal rejected: ${reason}`,type:'state'});const current=run.iterations.find(item=>item.iteration===run.iteration);if(current)current.state='rejected';});
+      closeModal();toast('Proposal rejected','The working tree was not changed.');
+    }
+
+    function requestApplyRun(id) {
+      const run=runById(id);if(!run||run.status!=='review')return;
+      const included=run.files.filter(file=>file.decision==='included');
+      if(run.checkStatus!=='passed'||!included.length){toast('This run is not ready to apply','All checks must pass and at least one file must be included.');return;}
+      openModal('Apply selected files?', `<p class="muted">Apply ${included.length} ${included.length===1?'file':'files'} to <span class="mono">${esc(run.branch)}</span>. Excluded files will remain unapplied in the run record.</p><div class="notice success"><strong>Checks passed.</strong> ${esc(run.checks.map(check=>check.name).join(', '))}</div><div class="file-list" style="margin-top:10px">${included.map(file=>`<div class="file-card"><div class="file-head"><span class="file-name">${esc(file.path)}</span><span class="diff-count"><span class="plus">+${file.add}</span> <span class="minus">−${file.del}</span></span></div></div>`).join('')}</div>`, `<button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-success" data-action="confirmApplyRun" data-id="${esc(id)}">Apply to ${esc(run.branch)}</button>`, {kind:'apply-run',runId:id});
+    }
+
+    function confirmApplyRun(id) {
+      const run=runById(id);if(!run||run.status!=='review'){closeModal();return;}
+      const included=run.files.filter(file=>file.decision==='included');if(run.checkStatus!=='passed'||!included.length){closeModal();return;}
+      run.status='applying';run.stateEnteredAt=Date.now();run.activityAt=Date.now();run.currentActivity='Applying selected files';run.currentAction=`Writing ${included.length} reviewed ${included.length===1?'file':'files'} to ${run.branch}.`;run.events.push({at:Date.now(),text:`Applying ${included.length} reviewed files to ${run.branch}.`,type:'state'});state.view='all';persist();closeModal();renderAll();
+      setTimeout(()=>{const current=runById(id);if(!current||current.status!=='applying')return;const now=Date.now();current.activeMs=runtimeMs(current,now);current.status='completed';current.endedAt=now;current.stateEnteredAt=now;current.activityAt=now;current.currentActivity=`Applied to ${current.branch}`;current.currentAction='The selected files were applied successfully. Excluded files were left unchanged.';current.changes={add:included.reduce((sum,file)=>sum+Number(file.add||0),0),del:included.reduce((sum,file)=>sum+Number(file.del||0),0),state:'applied'};current.files.forEach(file=>{if(file.decision==='included')file.decision='applied';});current.summarySteps.push(`Applied ${included.length} reviewed ${included.length===1?'file':'files'} to ${current.branch}.`);current.events.push({at:now,text:'Apply finished. Run completed.',type:'state'});const iteration=current.iterations.find(item=>item.iteration===current.iteration);if(iteration)iteration.state='completed';state.activeTab='summary';renderAll();toast('Changes applied',`${included.length} ${included.length===1?'file was':'files were'} applied to ${current.branch}.`);},850);
+    }
+
+    function includeFile(runId,path,include) {
+      mutateRun(runId,['review'],run=>{const file=run.files.find(item=>item.path===path);if(file)file.decision=include?'included':'excluded';});
+    }
+
+    function openFileComment(runId,path) {
+      const run=runById(runId);if(!run||run.status!=='review')return;
+      openModal('Comment on file', `<p class="muted mono">${esc(path)}</p><div class="form-group"><label for="fileComment">Review comment</label><textarea id="fileComment" class="textarea" placeholder="Explain what should change in this file."></textarea><div class="validation" id="fileCommentError"></div></div>`, `<button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-primary" data-action="saveFileComment" data-id="${esc(runId)}" data-file="${esc(path)}">Add comment</button>`, {kind:'file-comment',runId,path});
+    }
+
+    function saveFileComment(runId,path) {
+      const text=byId('fileComment')?.value.trim();if(!text){byId('fileCommentError').textContent='Add a review comment first.';return;}
+      mutateRun(runId,['review'],run=>{run.notes.push({id:uid('note'),at:Date.now(),author:'Tom',text:`${path}: ${text}`});});closeModal();toast('File comment added','It is attached to this run and ready for a revision request.');
+    }
+
+    function requestArchiveRun(id) {
+      const run=runById(id);if(!run||!['stopped','completed','rejected'].includes(run.status))return;
+      if(!state.settings.confirmDestructive)return executeArchiveRun(id);
+      openModal('Archive this run?', `<p class="muted">The run will disappear from normal views, but its summary, logs, diff, checks, and notes remain in saved demo state until you reset the prototype.</p>`, `<button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-danger" data-action="confirmArchiveRun" data-id="${esc(id)}">Archive run</button>`, {kind:'archive-run',runId:id});
+    }
+
+    function executeArchiveRun(id) {
+      mutateRun(id,['stopped','completed','rejected'],run=>{run.archived=true;if(state.selectedRunId===id)state.selectedRunId=null;});closeModal();toast('Run archived','It has been removed from normal run views.');
+    }
+
+    function rerunChecks(id) {
+      const run=runById(id);if(!run||!['review','failed','stopped'].includes(run.status)||run.checkStatus==='running')return;
+      const token=uid('checks');run.checkRunToken=token;run.checkStatus='running';run.checks.forEach(check=>{check.status='running';check.output='Running…';check.duration='—';});run.activityAt=Date.now();run.events.push({at:Date.now(),text:'Rerunning verification checks.','type':'check'});persist();renderAll();toast('Checks started','This demo will finish them in a moment.');
+      setTimeout(()=>{const current=runById(id);if(!current||current.checkRunToken!==token||current.archived||!['review','failed','stopped'].includes(current.status))return;delete current.checkRunToken;current.checkStatus='passed';current.checks.forEach((check,index)=>{check.status='passed';check.output=index===0?'118 passed, 0 failed':'No errors found';check.duration=index===0?'21.2s':'8.1s';});current.activityAt=Date.now();current.events.push({at:Date.now(),text:'Verification checks passed.','type':'check'});renderAll();toast('Checks passed','Verification is up to date.');},1200);
+    }
+
+    function simulateProgress(id) {
+      mutateRun(id,['running'],run=>{
+        const now=Date.now();run.demoStep=(run.demoStep||0)+1;run.heartbeatAt=now;run.activityAt=now;
+        const step=run.demoStep;
+        if(step===1){run.currentActivity='Inspecting the next relevant file';run.currentAction='Following the current hypothesis into the smallest responsible code path.';run.currentCommand='rg "refreshSession|SESSION_REFRESH" src';run.currentFile='src/auth/session.ts';run.events.push({at:now,text:'Inspected the next relevant code path.',type:'progress'});run.summarySteps.push('Inspected the next relevant code path and refined the working hypothesis.');}
+        else if(step===2){run.currentActivity='Running focused verification';run.currentAction='The draft change is ready for the smallest relevant check.';run.currentCommand='npm test -- --runInBand';run.currentFile='terminal';run.checkStatus='running';run.checks.forEach(check=>check.status='running');run.events.push({at:now,text:'Started focused verification.','type':'check'});run.summarySteps.push('Finished the draft change and started focused verification.');}
+        else {
+          run.activeMs=runtimeMs(run,now);run.status='review';run.stateEnteredAt=now;run.heartbeatAt=null;run.currentActivity='Ready for your review';run.currentAction='The simulated iteration is complete, checks pass, and the draft has not been applied.';run.checkStatus='passed';run.checks.forEach((check,index)=>{check.status='passed';check.output=index===0?'Focused verification passed':'No errors found';check.duration=index===0?'18.8s':'7.9s';});
+          if(!run.files.length){run.files=[{path:'src/cleanup/removeDeprecated.ts',add:14,del:8,decision:'included',diff:['-export const deprecatedHelper = legacyHelper;','+export const formatCandidate = modernHelper;']}];run.changes={add:14,del:8,state:'draft'};}else run.files.forEach(file=>file.decision='included');
+          run.events.push({at:now,text:'Checks passed; stopped at the approval gate.','type':'state'});run.summarySteps.push('Passed focused verification and stopped before applying changes.');
+          const current=run.iterations.find(item=>item.iteration===run.iteration);if(current){current.state='needs review';current.summary=run.summarySteps.at(-1);}state.followingRunId=null;state.activeTab='summary';state.view='review';
+        }
+      });
+    }
+
+    function addNoteModal(id) {
+      const run=runById(id);if(!run)return;
+      openModal('Add a run note', `<p class="muted">This note is stored with the run and appears in its Notes tab.</p><div class="form-group"><label for="runNoteText">Note</label><textarea id="runNoteText" class="textarea" placeholder="Record a decision, observation, or follow-up."></textarea><div class="validation" id="runNoteError"></div></div>`, `<button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-primary" data-action="saveRunNote" data-id="${esc(id)}">Add note</button>`, {kind:'run-note',runId:id});
+    }
+
+    function saveRunNote(id) {
+      const text=byId('runNoteText')?.value.trim();if(!text){byId('runNoteError').textContent='Add a note first.';return;}
+      const run=runById(id);if(!run)return;run.notes.push({id:uid('note'),at:Date.now(),author:'Tom',text});persist();closeModal();renderDetail();toast('Note added','The run record has been updated.');
+    }
+
+    function explainRun(id) {
+      const run=runById(id);const workflow=run&&workflowById(run.workflowId);if(!run)return;
+      const cause=run.status==='failed'?'The agent stopped because the next change depends on a product or contract decision.':run.status==='review'?'The run finished its current work and reached the required human approval gate.':run.status==='running'?'The agent is still executing the current iteration and reporting healthy heartbeats.':run.status==='stopped'?'The run was stopped manually, with its worktree preserved.':run.status==='completed'?'The reviewed files were applied after checks passed.':'The proposal was rejected and nothing was applied.';
+      openModal('Run explanation', `<div class="notice"><strong>${esc(workflow?.name||run.workflowId)} · ${esc(statusMeta[run.status]?.label)}</strong><br>${esc(cause)}</div><div class="panel" style="margin-top:12px"><div class="panel-head"><span>What matters now</span></div><div class="panel-body"><p>${esc(run.currentAction)}</p><ul class="muted"><li>Current iteration: ${run.iteration} with no configured maximum.</li><li>Risk: ${esc(run.risk)}.</li><li>${esc(checkLabels[run.checkStatus]||run.checkStatus)}.</li><li>${run.files?.length||0} changed ${run.files?.length===1?'file':'files'} preserved in the run record.</li></ul></div></div>`, `<button type="button" data-action="closeModal">Close</button><button type="button" data-action="copyExplanation" data-id="${esc(id)}">Copy explanation</button>`, {kind:'explanation',runId:id});
+    }
+
+    function openSettings() {
+      const s=state.settings;
+      openModal('Workbench settings', `<div class="form-grid"><div class="form-group"><label for="settingDensity">Display density</label><select class="field" id="settingDensity"><option value="comfortable" ${s.density==='comfortable'?'selected':''}>Comfortable</option><option value="compact" ${s.density==='compact'?'selected':''}>Compact</option></select><div class="field-help">Changes row and control height visibly.</div></div><div class="form-group"><label for="settingEditor">Local editor</label><select class="field" id="settingEditor"><option ${s.editor==='Cursor'?'selected':''}>Cursor</option><option ${s.editor==='VS Code'?'selected':''}>VS Code</option><option ${s.editor==='Zed'?'selected':''}>Zed</option></select></div><div class="form-group"><label for="settingDefaultView">Default run view</label><select class="field" id="settingDefaultView"><option value="all" ${s.defaultView==='all'?'selected':''}>All runs</option><option value="review" ${s.defaultView==='review'?'selected':''}>Needs review</option><option value="running" ${s.defaultView==='running'?'selected':''}>Running</option></select></div><div class="form-group full"><label class="safety-option"><input type="checkbox" id="settingConfirm" ${s.confirmDestructive?'checked':''}><span><span class="safety-title">Confirm stop, reject, and archive actions</span><span class="safety-copy">Adds a review step before actions that end or hide work.</span></span></label></div><div class="form-group full"><label class="safety-option"><input type="checkbox" id="settingAlerts" ${s.inAppAlerts?'checked':''}><span><span class="safety-title">In-app completion alerts</span><span class="safety-copy">Shows small local notifications when runs and checks change state.</span></span></label></div></div><div class="notice" style="margin-top:14px">Demo state is saved locally in this browser and uses no network requests.</div>`, `<button type="button" class="btn-danger" data-action="requestResetDemo">Reset demo data</button><span style="flex:1"></span><button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-primary" data-action="saveSettings">Save settings</button>`, {kind:'settings'});
+    }
+
+    function saveSettings() {
+      state.settings.density=byId('settingDensity').value;state.settings.editor=byId('settingEditor').value;state.settings.defaultView=byId('settingDefaultView').value;state.settings.confirmDestructive=byId('settingConfirm').checked;state.settings.inAppAlerts=byId('settingAlerts').checked;persist();closeModal();renderAll();toast('Settings saved',`Display density is now ${state.settings.density}.`,{force:true});
+    }
+
+    function requestResetDemo() {
+      openModal('Reset the prototype?', `<p class="muted">This restores the original workflows, runs, prompt versions, settings, notes, and filters. Changes made while testing the prototype will be removed.</p>`, `<button type="button" data-action="openSettings">Cancel</button><button type="button" class="btn-danger" data-action="confirmResetDemo">Reset everything</button>`, {kind:'reset-demo'});
+    }
+
+    function resetDemo() {
+      localStorage.removeItem(STORAGE_KEY);state=deepClone(initialState);closeModal();renderAll();toast('Demo reset','The original example data has been restored.',{force:true});
+    }
+
+    function saveWorkflow() {
+      if(!editorState)return;
+      if(hasUnappliedAIWork()){editorState.tab='behavior';renderWorkflowEditor();toast('Apply or clear the AI work first','The instruction or proposal has not changed the draft yet.');return;}
+      const wf=editorState.draft;
+      editorState.errors={};
+      if(!wf.name.trim())editorState.errors.name='Workflow name is required.';
+      if(state.workflows.some(item=>item.id!==wf.id&&item.scope.repository===wf.scope.repository&&item.name.trim().toLowerCase()===wf.name.trim().toLowerCase()))editorState.errors.name='A workflow with this name already exists in the repository.';
+      if(!wf.prompt.trim())editorState.errors.prompt='Generate or write a workflow prompt first.';
+      if(!wf.trigger.branchPattern?.trim())editorState.errors.trigger='Add at least one branch name or glob pattern.';
+      if(wf.trigger.type==='file_watch'&&!wf.trigger.paths?.trim())editorState.errors.trigger='Add at least one watched path for the file-watch trigger.';
+      if(wf.trigger.type==='test_failure'&&!wf.trigger.testCommand?.trim())editorState.errors.trigger='Add the test command that produces the failure event.';
+      if(wf.trigger.type==='schedule'&&(!wf.trigger.time||!wf.trigger.timezone))editorState.errors.trigger='Choose both a scheduled time and timezone.';
+      if(Object.keys(editorState.errors).length){editorState.tab=editorState.errors.name||editorState.errors.prompt?'behavior':'trigger';renderWorkflowEditor();toast('Workflow needs attention','Fix the highlighted fields before saving.');return;}
+      const now=Date.now();const changed=promptChanged();
+      if(editorState.mode==='new'){
+        wf.promptVersion=1;wf.promptUpdatedAt=now;wf.promptVersions=[{version:1,prompt:wf.prompt,note:editorState.revisionNote||editorState.instruction||'Initial generated prompt',createdAt:now}];state.workflows.push(deepClone(wf));state.currentRepo=wf.scope.repository;state.currentBranch={ 'my-app':'feature/login','payments-api':'main','design-system':'release/next' }[wf.scope.repository]||'main';state.workflowFilter=wf.id;state.view='all';
+        closeWorkflowEditor();renderAll();toast('Workflow created',`${wf.name} is ready. Manual Run now is available immediately.`);return;
+      }
+      if(changed){wf.promptVersion=editorState.original.promptVersion+1;wf.promptUpdatedAt=now;wf.promptVersions=[{version:wf.promptVersion,prompt:wf.prompt,note:editorState.revisionNote||editorState.appliedInstruction||'Prompt updated',createdAt:now},...(editorState.original.promptVersions||[])];}
+      const index=state.workflows.findIndex(item=>item.id===wf.id);if(index>=0)state.workflows[index]=deepClone(wf);
+      if (editorState.original.scope.repository !== wf.scope.repository) { state.currentRepo=wf.scope.repository; state.currentBranch={ 'my-app':'feature/login','payments-api':'main','design-system':'release/next' }[wf.scope.repository]||'main'; state.workflowFilter=wf.id; }
+      closeWorkflowEditor();renderAll();toast(changed?'Prompt revision saved':'Workflow settings saved',changed?`Future runs will use version ${wf.promptVersion}. Active runs keep their pinned version.`:'Trigger and safety settings were updated.');
+    }
+
+    function comparePromptVersion(versionNumber) {
+      const item=editorState?.draft.promptVersions?.find(value=>value.version===versionNumber);if(!item)return;
+      const diff=lineDiff(item.prompt,editorState.draft.prompt);
+      openModal(`Compare version ${versionNumber} with draft`, `<div class="notice">Red lines are from version ${versionNumber}; green lines are in the current draft.</div><pre class="diff" style="margin-top:12px;max-height:55vh">${diff.map(line=>`<span class="diff-line ${line.type}">${esc((line.type==='add'?'+':line.type==='del'?'-':' ')+line.text)}</span>`).join('')}</pre>`, `<button type="button" data-action="closeModal">Close comparison</button><button type="button" data-action="restorePromptVersion" data-version="${versionNumber}">Restore version ${versionNumber} as draft</button>`, {kind:'compare-version',version:versionNumber});
+    }
+
+    function restorePromptVersion(versionNumber) {
+      const item=editorState?.draft.promptVersions?.find(value=>value.version===Number(versionNumber));if(!item)return;
+      editorState.draft.prompt=item.prompt;editorState.revisionNote=`Restore version ${item.version}: ${item.note}`;editorState.proposal=null;editorState.sourceEditing=false;editorState.tab='behavior';closeModal();renderWorkflowEditor();toast('Version restored to draft',`Saving will create version ${editorState.original.promptVersion+1}; history remains intact.`);
+    }
+
+    function toggleSidebar() {
+      byId('sidebar').classList.toggle('open');
+      byId('sidebarBackdrop').classList.toggle('open',byId('sidebar').classList.contains('open'));
+      const button=document.querySelector('.mobile-menu');if(button)button.setAttribute('aria-label',byId('sidebar').classList.contains('open')?'Close navigation':'Open navigation');
+    }
+
+    function toggleWorkflowRun(workflowId) {
+      const activeRun = state.runs.find(run => run.repository === state.currentRepo && run.workflowId === workflowId && run.status === 'running' && !run.archived);
+      if (activeRun) return executeStopRun(activeRun.id);
+      startWorkflow(workflowId);
+    }
+
+    function toggleWorkflowPin(workflowId) {
+      const workflow = workflowById(workflowId);
+      if (!workflow) return;
+      workflow.pinned = !workflow.pinned;
+      persist(); closeModal(); renderWorkflows();
+      toast(workflow.pinned ? 'Workflow pinned' : 'Workflow unpinned', `${workflow.name} ${workflow.pinned ? 'will appear at the top.' : 'will use the selected order.'}`);
+    }
+
+    function addDirectoryModal() {
+      openModal('Add working directory', `<div class="form-group"><label for="directoryPath">Directory path</label><input id="directoryPath" class="field mono" placeholder="C:\\source\\new-project"><div class="field-help">This creates a new local workspace entry in the mockup.</div><div class="validation" id="directoryPathError"></div></div>`, `<button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-primary" data-action="saveDirectory">Add directory</button>`, { kind:'add-directory' });
+    }
+
+    function saveDirectory() {
+      const path = byId('directoryPath')?.value.trim();
+      if (!path) { byId('directoryPathError').textContent = 'Enter a directory path.'; return; }
+      if (state.directories.some(directory => directory.path.toLowerCase() === path.toLowerCase())) { byId('directoryPathError').textContent = 'That directory is already listed.'; return; }
+      const id = uid('directory'); state.directories.push({ id, path }); state.currentRepo = id; state.currentBranch = 'main'; state.workflowFilter = null; state.view = 'all';
+      persist(); closeModal(); renderAll(); toast('Directory added', `${path} is now the active workspace.`);
+    }
+
+    function bindRunSplitter() {
+      const split = byId('runSplit');
+      const handle = byId('runResizeHandle');
+      if (!split || !handle) return;
+      const setHeight = clientY => {
+        const bounds = split.getBoundingClientRect();
+        const min = 0;
+        const max = Math.max(min, bounds.height - handle.offsetHeight);
+        const height = Math.min(max, Math.max(min, clientY - bounds.top));
+        split.style.setProperty('--runs-pane-height', `${height}px`);
+        handle.setAttribute('aria-valuenow', String(Math.round(height / bounds.height * 100)));
+      };
+      handle.addEventListener('pointerdown', event => {
+        if (window.innerWidth <= 900) return;
+        event.preventDefault(); handle.setPointerCapture(event.pointerId); handle.classList.add('dragging'); setHeight(event.clientY);
+      });
+      handle.addEventListener('pointermove', event => { if (handle.hasPointerCapture(event.pointerId)) setHeight(event.clientY); });
+      handle.addEventListener('pointerup', event => { if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId); handle.classList.remove('dragging'); });
+      handle.addEventListener('keydown', event => {
+        if (!['ArrowUp','ArrowDown','Home','End'].includes(event.key)) return;
+        event.preventDefault(); const bounds = split.getBoundingClientRect(); const current = parseFloat(getComputedStyle(split).getPropertyValue('--runs-pane-height')) || bounds.height * .42;
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? bounds.height - handle.offsetHeight : current + (event.key === 'ArrowUp' ? -32 : 32);
+        setHeight(bounds.top + next);
+      });
+    }
+
+    function handleAction(action, element) {
+      const id=element.dataset.id;
+      if(action==='toggleSidebar')return toggleSidebar();
+      if(action==='setView'){state.view=element.dataset.view;state.workflowFilter=null;state.activeTab='summary';renderAll();return;}
+      if(action==='selectWorkflow'){state.workflowFilter=state.workflowFilter===id?null:id;state.view='all';state.activeTab='summary';renderAll();if(window.innerWidth<=900)toggleSidebar();return;}
+      if(action==='workflowMenu')return showWorkflowMenu(id);
+      if(action==='toggleWorkflowPin')return toggleWorkflowPin(id);
+      if(action==='newWorkflow')return openWorkflowEditor();
+      if(action==='addDirectory')return addDirectoryModal();
+      if(action==='saveDirectory')return saveDirectory();
+      if(action==='toggleWorkflowRun')return toggleWorkflowRun(id);
+      if(action==='editWorkflowFromModal'){closeModal();return openWorkflowEditor(id);}
+      if(action==='runWorkflow')return startWorkflow(id);
+      if(action==='selectRun')return selectRun(id);
+      if(action==='setTab'){state.activeTab=element.dataset.tab;renderDetail();persist();return;}
+      if(action==='showChanges'){state.activeTab='changes';renderDetail();return;}
+      if(action==='followRun'){state.followingRunId=state.followingRunId===id?null:id;state.activeTab='activity';renderDetail();persist();return;}
+      if(action==='stopRun')return requestStopRun(id);
+      if(action==='confirmStopRun')return executeStopRun(id);
+      if(action==='resumeRun')return resumeRun(id);
+      if(action==='requestChanges')return openGuidanceModal(id,'revision');
+      if(action==='retryRun')return openGuidanceModal(id,'retry');
+      if(action==='sendGuidance')return openGuidanceModal(id,'guidance');
+      if(action==='submitGuidance')return submitGuidance(id,element.dataset.mode);
+      if(action==='rejectRun')return requestRejectRun(id);
+      if(action==='confirmRejectRun')return confirmRejectRun(id);
+      if(action==='applyRun')return requestApplyRun(id);
+      if(action==='confirmApplyRun')return confirmApplyRun(id);
+      if(action==='includeFile')return includeFile(id,element.dataset.file,true);
+      if(action==='excludeFile')return includeFile(id,element.dataset.file,false);
+      if(action==='commentFile')return openFileComment(id,element.dataset.file);
+      if(action==='saveFileComment')return saveFileComment(id,element.dataset.file);
+      if(action==='openFile'){const run=runById(id);toast('Open file',`Would open ${element.dataset.file} in ${state.settings.editor} on ${run?.branch||state.currentBranch}.`);return;}
+      if(action==='openEditor'){const run=runById(id);toast('Open editor',`Would open ${state.settings.editor} on ${run?.branch||state.currentBranch}.`);return;}
+      if(action==='archiveRun')return requestArchiveRun(id);
+      if(action==='confirmArchiveRun')return executeArchiveRun(id);
+      if(action==='runAgain'){const source=runById(id);if(source)return startWorkflow(source.workflowId,id);}
+      if(action==='rerunChecks')return rerunChecks(id);
+      if(action==='simulateProgress')return simulateProgress(id);
+      if(action==='addNote')return addNoteModal(id);
+      if(action==='saveRunNote')return saveRunNote(id);
+      if(action==='explainRun')return explainRun(id);
+      if(action==='copyExplanation'){const run=runById(id);if(run)return copyText('Explanation',`${workflowById(run.workflowId)?.name}: ${run.currentActivity}\n${run.currentAction}\nIteration ${run.iteration}; ${checkLabels[run.checkStatus]}; risk ${run.risk}.`);}
+      if(action==='copySnapshot'){const run=runById(id);if(run)return copyText('Snapshot',`${workflowById(run.workflowId)?.name} — ${statusMeta[run.status]?.label}\nBranch: ${run.branch} · Commit: ${run.commit}\nIteration ${run.iteration}\nActivity: ${run.currentActivity}\n${run.currentAction}\nChecks: ${checkLabels[run.checkStatus]}\nElapsed: ${durationText(runtimeMs(run))}`);}
+      if(action==='copyLog'){const run=runById(id);if(run)return copyText('Log',(run.events||[]).slice().sort((a,b)=>a.at-b.at).map(item=>`[${new Date(item.at).toISOString()}] ${item.text}`).join('\n'));}
+      if(action==='copyChecks'){const run=runById(id);if(run)return copyText('Check output',(run.checks||[]).map(check=>`${check.name}: ${check.status}\n${check.output}`).join('\n\n'));}
+      if(action==='toggleGlobalPause'){state.automationsPaused=!state.automationsPaused;renderAll();toast(state.automationsPaused?'Automatic triggers paused':'Automatic triggers resumed',state.automationsPaused?'Running workflows continue; manual Run now remains available.':'Enabled workflow triggers can start new runs again.');return;}
+      if(action==='clearWorkflowFilter'){state.workflowFilter=null;renderAll();return;}
+      if(action==='clearTriggerFilter'){state.triggerFilter='all';renderAll();return;}
+      if(action==='clearRunSearch'){state.runSearch='';renderAll();return;}
+      if(action==='clearRunFilters'){state.workflowFilter=null;state.triggerFilter='all';state.runSearch='';state.view='all';renderAll();return;}
+      if(action==='openSettings')return openSettings();
+      if(action==='saveSettings')return saveSettings();
+      if(action==='requestResetDemo')return requestResetDemo();
+      if(action==='confirmResetDemo')return resetDemo();
+      if(action==='closeModal')return closeModal();
+      if(action==='requestCloseWorkflow')return requestCloseWorkflow();
+      if(action==='discardWorkflowChanges'){closeModal();return closeWorkflowEditor();}
+      if(action==='setEditorTab'){editorState.tab=element.dataset.tab;renderWorkflowEditor();return;}
+      if(action==='usePromptExample'){editorState.instruction=element.dataset.value||'';const input=byId('workflowInstruction');if(input){input.value=editorState.instruction;input.focus();}return;}
+      if(action==='focusPromptInstruction'){byId('workflowInstruction')?.focus();return;}
+      if(action==='generatePromptProposal'){
+        const instruction=byId('workflowInstruction')?.value.trim()||editorState.instruction.trim();
+        if(!instruction){toast('Describe the behavior first','Add a plain-language instruction before generating a proposal.');byId('workflowInstruction')?.focus();return;}
+        editorState.instruction=instruction;editorState.proposal=buildPromptProposal(instruction);renderWorkflowEditor();return;
+      }
+      if(action==='applyPromptProposal'){
+        const proposal=editorState.proposal;if(!proposal||proposal.sourcePrompt!==editorState.draft.prompt)return;
+        editorState.draft.prompt=proposal.prompt;editorState.revisionNote=proposal.instruction;editorState.appliedInstruction=proposal.instruction;editorState.proposal=null;editorState.sourceEditing=false;renderWorkflowEditor();toast('Proposal applied to draft','The saved workflow is still unchanged until you use the footer action.');return;
+      }
+      if(action==='discardPromptProposal'){editorState.proposal=null;renderWorkflowEditor();toast('Proposal discarded','The draft prompt was not changed.');return;}
+      if(action==='toggleDirectPromptEdit'){editorState.sourceEditing=!editorState.sourceEditing;if(!editorState.sourceEditing&&promptChanged())editorState.revisionNote='Direct prompt edit';renderWorkflowEditor();if(editorState.sourceEditing)setTimeout(()=>byId('promptSource')?.focus(),0);return;}
+      if(action==='copyWorkflowPrompt')return copyText('Workflow prompt',editorState?.draft.prompt||'');
+      if(action==='saveWorkflow')return saveWorkflow();
+      if(action==='comparePromptVersion')return comparePromptVersion(Number(element.dataset.version));
+      if(action==='restorePromptVersion')return restorePromptVersion(Number(element.dataset.version));
+    }
+
+    document.addEventListener('click',event=>{
+      if(event.target===byId('modalBackdrop')){closeModal();return;}
+      const element=event.target.closest('[data-action]');
+      if(!element||element.matches('select,input[type="checkbox"]'))return;
+      handleAction(element.dataset.action,element);
+    });
+
+    document.addEventListener('change',event=>{
+      const target=event.target;
+      if(target.dataset.action==='changeRepo'){
+        state.currentRepo=target.value;state.currentBranch={ 'my-app':'feature/login','payments-api':'main','design-system':'release/next' }[target.value]||'main';state.view=state.settings.defaultView;state.workflowFilter=null;state.triggerFilter='all';state.runSearch='';state.activeTab='summary';renderAll();return;
+      }
+      if(target.dataset.action==='changeBranch'){state.currentBranch=target.value;persist();toast('Branch context changed',`Manual runs will start on ${state.currentBranch}.`);return;}
+      if(target.dataset.action==='changeDirectory'){state.currentRepo=target.value;state.currentBranch={ 'my-app':'feature/login','payments-api':'main','design-system':'release/next' }[target.value]||'main';state.workflowFilter=null;state.view=state.settings.defaultView;state.triggerFilter='all';state.runSearch='';state.activeTab='summary';renderAll();return;}
+      if(target.dataset.action==='changeTriggerFilter'){state.triggerFilter=target.value;state.activeTab='summary';renderAll();return;}
+      if(target.dataset.action==='changeRunStatusFilter'){state.view=target.value;state.activeTab='summary';renderAll();return;}
+      if(target.dataset.action==='changeWorkflowSort'){state.workflowSort=target.value;renderWorkflows();persist();return;}
+      if(target.dataset.action==='changeSort'){state.sort=target.value;renderAll();return;}
+      if(target.dataset.action==='toggleWorkflow'){
+        const workflow=workflowById(target.dataset.id);if(!workflow)return;workflow.enabled=target.checked;persist();renderWorkflows();toast(workflow.enabled?'Workflow enabled':'Workflow disabled',workflow.enabled?(state.automationsPaused?'Its trigger remains globally paused; manual runs are available.':'Automatic triggers can start future runs.'):'Manual Run now remains available.');return;
+      }
+      if(editorState&&target.dataset.editorPath){
+        let value=target.type==='checkbox'?target.checked:target.type==='number'?Number(target.value):target.value;setNested(editorState.draft,target.dataset.editorPath,value);
+        if(target.dataset.editorPath==='trigger.type'){
+          const type=value;const branch=editorState.draft.trigger.branchPattern||'current branch';editorState.draft.trigger={type,branchPattern:branch,...(type==='schedule'?{cadence:'weekdays',time:'02:30',timezone:'America/Chicago'}:type==='file_watch'?{paths:'src/**',ignore:'**/*.generated.*',debounceSeconds:5}:type==='post_commit'?{authors:'human',hookBehavior:'after_each_commit',debounceSeconds:10}:type==='test_failure'?{testCommand:'npm test',eventSource:'local test wrapper',cooldownSeconds:30}:{})};renderWorkflowEditor();
+        }else renderEditorFooter();
+      }
+    });
+
+    document.addEventListener('input',event=>{
+      const target=event.target;
+      if(target.id==='workflowSearch'){state.workflowSearch=target.value;renderWorkflows();persist();return;}
+      if(target.id==='runSearch'){state.runSearch=target.value;ensureSelection();renderRuns();renderActiveFilters();renderDetail();persist();return;}
+      if(!editorState)return;
+      if(target.id==='workflowInstruction'){editorState.instruction=target.value;return;}
+      if(target.id==='promptSource'){
+        editorState.draft.prompt=target.value;editorState.revisionNote='Direct prompt edit';renderEditorFooter();return;
+      }
+      if(target.dataset.editorPath){let value=target.type==='number'?Number(target.value):target.value;setNested(editorState.draft,target.dataset.editorPath,value);if(target.dataset.editorPath==='name')editorState.errors.name='';renderEditorFooter();}
+    });
+
+    function trapFocus(event,container) {
+      const nodes=[...container.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex="0"]')].filter(node=>node.offsetParent!==null);
+      if(!nodes.length)return;
+      const first=nodes[0],last=nodes[nodes.length-1];
+      if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}
+      else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
+    }
+
+    document.addEventListener('keydown',event=>{
+      const modalOpen=byId('modal').classList.contains('open');const drawerOpen=byId('workflowDrawer').classList.contains('open');
+      if(event.key==='Tab'&&modalOpen)return trapFocus(event,byId('modal'));
+      if(event.key==='Tab'&&drawerOpen)return trapFocus(event,byId('workflowDrawer'));
+      if(event.key==='Escape'){
+        if(modalOpen){event.preventDefault();closeModal();return;}
+        if(drawerOpen){event.preventDefault();requestCloseWorkflow();return;}
+        if(byId('sidebar').classList.contains('open')){event.preventDefault();toggleSidebar();return;}
+        if(state.workflowFilter||state.triggerFilter!=='all'||state.runSearch){event.preventDefault();state.workflowFilter=null;state.triggerFilter='all';state.runSearch='';renderAll();return;}
+      }
+      const actionable=event.target.closest?.('[data-action="selectRun"]');
+      if(actionable&&(event.key==='Enter'||event.key===' ')){event.preventDefault();selectRun(actionable.dataset.id);return;}
+      if(['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)||modalOpen||drawerOpen)return;
+      if(event.key==='j'||event.key==='k'){
+        const runs=visibleRuns();if(!runs.length)return;event.preventDefault();let index=runs.findIndex(run=>run.id===state.selectedRunId);index=event.key==='j'?Math.min(runs.length-1,index+1):Math.max(0,index-1);selectRun(runs[index].id);
+      }
+    });
+
+    bindRunSplitter();
+    let tickCount=0;
+    setInterval(()=>{
+      const now=Date.now();tickCount++;
+      if(tickCount%4===0)state.runs.filter(run=>run.status==='running'&&!run.archived).forEach(run=>run.heartbeatAt=now);
+      document.querySelectorAll('[data-runtime]').forEach(node=>{const run=runById(node.dataset.runtime);if(run)node.textContent=durationText(runtimeMs(run,now));});
+      document.querySelectorAll('[data-relative]').forEach(node=>{node.textContent=relativeTime(Number(node.dataset.relative),now);});
+      document.querySelectorAll('[data-heartbeat]').forEach(node=>{const run=runById(node.dataset.heartbeat);if(run)node.textContent=run.status==='running'?relativeTime(run.heartbeatAt,now):'Not active';});
+      if(tickCount%10===0)persist();
+    },1000);
+
+    renderAll({skipPersist:true});
+  </script>
+</body>
+</html>
