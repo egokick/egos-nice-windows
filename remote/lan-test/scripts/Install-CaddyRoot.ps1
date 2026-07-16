@@ -13,7 +13,7 @@ if (-not (Test-Path -LiteralPath $CertificatePath -PathType Leaf)) {
 
 $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($CertificatePath)
 try {
-    if (-not $certificate.Subject.Contains('Caddy Local Authority', [StringComparison]::OrdinalIgnoreCase)) {
+    if ($certificate.Subject.IndexOf('Caddy Local Authority', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
         throw 'The supplied certificate is not the expected Caddy local root authority.'
     }
 
