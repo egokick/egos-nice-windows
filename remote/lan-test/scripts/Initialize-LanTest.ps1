@@ -47,23 +47,41 @@ function Assert-PrivateIpv4([string]$Value) {
     return $address.IPAddressToString
 }
 
+function New-RandomBytes([int]$ByteCount) {
+    [byte[]]$bytes = New-Object byte[] $ByteCount
+    $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($bytes)
+        return ,$bytes
+    }
+    finally {
+        $random.Dispose()
+    }
+}
+
+function Clear-SensitiveBytes([byte[]]$Bytes) {
+    if ($null -ne $Bytes) {
+        [Array]::Clear($Bytes, 0, $Bytes.Length)
+    }
+}
+
 function New-Base64Secret([int]$ByteCount) {
-    $bytes = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes($ByteCount)
+    [byte[]]$bytes = New-RandomBytes $ByteCount
     try {
         return [Convert]::ToBase64String($bytes)
     }
     finally {
-        [System.Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)
+        Clear-SensitiveBytes $bytes
     }
 }
 
 function New-UrlSafePassword {
-    $bytes = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+    [byte[]]$bytes = New-RandomBytes 32
     try {
         return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
     }
     finally {
-        [System.Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)
+        Clear-SensitiveBytes $bytes
     }
 }
 
