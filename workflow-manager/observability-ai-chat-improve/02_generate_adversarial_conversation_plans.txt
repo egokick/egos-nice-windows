@@ -1,0 +1,49 @@
+Generate adversarial multi-turn conversation plans from collected open feedback rows.
+
+Input:
+
+- `01_open_feedback_conversations.md` or `01_open_feedback_conversations.json` from the current run folder.
+- Each input item represents one open Confluence feedback row and may include a historic Observability AI Chat conversation.
+
+Purpose:
+
+For each open row, design a realistic multi-turn user conversation that attempts to reproduce the remaining problem described by the row. These are instructional prompts for a later browser-validation agent. They are not hardcoded tests and are not exact text that must be pasted verbatim.
+
+Planning rules:
+
+1. Preserve the original problem statement and any historic conversation context.
+2. Identify the failure condition the validation agent should test. Examples: wrong monitor type, missing custom metric flow, bad Datadog query, failure to ask clarifying questions, incorrect tags, wrong priority, missing notification route, not using notebook recommendation when appropriate, or premature monitor creation.
+3. Create a multi-turn user plan with 3-8 user turns unless the source problem clearly needs fewer.
+4. Do not stack every requirement into a single user message. The plan should mimic a real user gradually adding detail, correcting the assistant, or asking for the next step.
+5. Write each user turn at the abstraction level of what the user should say, not as one exact hardcoded sentence. Use wording like:
+   - "Ask for a monitor for ..."
+   - "When the assistant asks for scope, provide ..."
+   - "Push back that ..."
+   - "Ask it to create the monitor only after ..."
+6. Include realistic ambiguity when ambiguity is part of the problem.
+7. Include an expected pass/fail oracle. The validation subagent must be able to decide whether the original Confluence row problem is resolved.
+8. Include any setup assumptions needed for the browser validation, such as target service/env/team/signal names, but avoid fabricating irrelevant business data. If the source row lacks enough detail, mark missing details and design a plan that naturally asks the assistant to request clarification.
+
+Output:
+
+Create:
+`runs\yyyyMMdd-HHmmss\02_adversarial_conversation_plans.md`
+
+Also create:
+`runs\yyyyMMdd-HHmmss\02_adversarial_conversation_plans.json`
+
+For each source row, include:
+
+- PlanId
+- Source TableIndex and RowIndex
+- Source ChatId, if any
+- Original FeedbackProblem
+- FailureConditionToReproduce
+- HistoricConversationSummary
+- UserTurnPlan, as an ordered list of abstract user instructions
+- ExpectedAssistantBehaviors
+- PassCriteria
+- FailCriteria
+- NotesForBrowserValidationSubagent
+
+Do not run the browser validation in this step.

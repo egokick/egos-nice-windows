@@ -1,0 +1,78 @@
+Prompt template for the browser-validation Codex/subagent.
+
+Use this prompt in a separate Codex instance/subagent for exactly one source row and one adversarial conversation plan at a time.
+
+Subagent mission:
+Use Playwright to interact with the local Observability AI Chat in the currently open Microsoft Edge browser and determine whether the original Confluence table-row problem still reproduces.
+
+Inputs the orchestrator must provide to this subagent:
+
+- SourcePageUrl
+- TableIndex
+- RowIndex
+- Original FeedbackProblem
+- Source ChatId and FullConversation, if any
+- PlanId
+- UserTurnPlan from `02_adversarial_conversation_plans`
+- ExpectedAssistantBehaviors
+- PassCriteria
+- FailCriteria
+- Any prior failed validation chatid and failure notes for this row, if this is an iteration after a fix
+
+Hard requirements:
+
+1. Use Playwright to control the currently open Microsoft Edge browser. Do not ask the user to operate the browser.
+2. If the app prompts for sign-in, click the sign-in/sign-in-with-Azure button yourself.
+3. If an email/account picker is shown, choose `Thomas.Doyle@libertymutual.com`.
+4. Do not ask the user to sign in or click anything.
+5. If the Copilot token dialog appears, wait for any saved browser token validation to finish. If the dialog still requires a token and no token is already available in the browser, report `BLOCKED_ENVIRONMENT_COPILOT_TOKEN_REQUIRED`; do not ask the user for a token.
+6. Do not update source code or prompts in this validation subagent.
+
+Local app target:
+
+- Prefer `http://localhost:3000/datadog-monitors`.
+- If that route is unavailable, try `http://localhost:3000/` and navigate to the Observability AI Chat / Datadog monitors area.
+- If the local app or API is not running, start it using the helper scripts in `code-analysis\mario-ai`:
+  - API: `.\start-api-hotreload.ps1`
+  - App: `.\start-app-hotreload.ps1`
+  Use the default SSO mode unless the orchestrator explicitly tells you FlightMode is required.
+
+Browser execution:
+
+1. Open or focus the Observability AI Chat page.
+2. Complete sign-in if prompted, without asking the user.
+3. Start a new chat when possible, so the test has a clean chatid.
+4. Follow the `UserTurnPlan` one turn at a time. Convert each abstract instruction into a realistic user message for that turn. Do not paste the entire plan into one message.
+5. Wait for the assistant response to finish before sending the next user turn.
+6. Capture the resulting chatid from the URL query parameter `chatid` or from the UI/API state.
+7. Capture enough transcript detail to evaluate the original problem.
+
+Pass/fail decision:
+
+- PASS only if the assistant behavior satisfies the row-specific PassCriteria and the original FeedbackProblem no longer reproduces.
+- FAIL if the assistant repeats the original issue, omits a required decision/action, creates the wrong artifact, uses invalid Datadog query/tag/notification/priority behavior, fails to ask needed clarifying questions, or otherwise violates the FailCriteria.
+- BLOCKED only for environment/setup issues outside the assistant behavior, such as local app down and cannot be started, auth impossible, or missing Copilot token.
+
+Output:
+
+Return a concise structured report to the orchestrator:
+
+```text
+ValidationResult: PASS | FAIL | BLOCKED
+BlockerCode: <only if BLOCKED>
+SourcePageUrl:
+TableIndex:
+RowIndex:
+PlanId:
+NewChatId:
+OriginalFeedbackProblem:
+DecisionSummary:
+Evidence:
+- User turn N summary:
+- Assistant response N summary:
+FailureDetails:
+RemainingProblem:
+ScreenshotsOrArtifacts:
+```
+
+If the result is FAIL, the `FailureDetails` must be specific enough for the fix subagent to know what to change and must include the new chatid.

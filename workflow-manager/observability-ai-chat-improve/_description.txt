@@ -1,0 +1,3 @@
+Workflow prompts for improving Observability AI Chat from open Confluence validation feedback rows.
+
+The workflow reads open rows from the Confluence validation page, enriches rows with any linked Observability AI Chat conversation from the marioai database, creates realistic multi-turn adversarial user plans, runs those plans against the local app in Edge with Playwright, and loops through prompt/code fixes until each selected row passes or is explicitly blocked.

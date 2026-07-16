@@ -1,0 +1,89 @@
+Orchestrate the full Observability AI Chat improvement loop.
+
+This prompt is for the parent/orchestrator agent. It coordinates collection, adversarial planning, browser validation subagents, and fix subagents.
+
+Run setup:
+
+1. Create a run folder under this task folder:
+   `code-analysis\_tom_project_tracking\observability-ai-chat-improve\runs\yyyyMMdd-HHmmss`
+2. Keep all generated artifacts for the run in that folder.
+3. Use the current checked-out git branch. Do not create or switch branches unless the user explicitly asks.
+4. Do not update the source Confluence page unless the user explicitly asks.
+
+Workflow:
+
+1. Run `01_collect_open_feedback_and_conversation.txt`.
+   - Output one row per open Confluence validation table row.
+   - Include full Observability AI Chat conversation text in one cell when a chatid is present.
+2. Run `02_generate_adversarial_conversation_plans.txt`.
+   - Output one multi-turn plan per open row.
+3. For each selected open row, start iteration 1.
+4. Spawn a new separate browser-validation Codex/subagent using `03_run_browser_validation_subagent_prompt.txt`.
+   - Give it exactly one row and one plan.
+   - It must use Playwright against the currently open Edge browser.
+   - It must click sign-in itself if prompted and choose `Thomas.Doyle@libertymutual.com` if an email is required.
+   - It must return PASS, FAIL, or BLOCKED.
+5. If validation returns PASS:
+   - Record the row as passed.
+   - Stop iterating that row.
+6. If validation returns BLOCKED:
+   - Record the blocker.
+   - Stop iterating that row unless the blocker can be resolved without user secrets or user interaction.
+7. If validation returns FAIL:
+   - Spawn a new separate fix Codex/subagent using `04_fix_observability_chat_subagent_prompt.txt`.
+   - Give it the original row, historic conversation, adversarial plan, latest validation chatid, latest validation transcript, FailureDetails, and RemainingProblem.
+   - The fix subagent may modify prompts or code, but it must not run browser validation itself.
+8. After the fix subagent reports CHANGED:
+   - Re-run `02_generate_adversarial_conversation_plans.txt` for that same row only if the fix materially changes the expected user flow or if the prior plan is now stale. Otherwise reuse the prior plan.
+   - Spawn a fresh browser-validation subagent using `03_run_browser_validation_subagent_prompt.txt`.
+   - Include the previous failed chatid and fix summary in the validation prompt.
+9. Continue the loop for the row until PASS, BLOCKED, or three fix attempts have been made.
+
+Iteration artifacts:
+
+For each row and iteration, write:
+
+- `row-<tableIndex>-<rowIndex>\iteration-<n>\validation_prompt.txt`
+- `row-<tableIndex>-<rowIndex>\iteration-<n>\validation_result.md`
+- `row-<tableIndex>-<rowIndex>\iteration-<n>\fix_prompt.txt` when validation failed
+- `row-<tableIndex>-<rowIndex>\iteration-<n>\fix_result.md` when a fix subagent ran
+
+Maintain a run summary:
+
+`runs\yyyyMMdd-HHmmss\summary.md`
+
+Summary columns:
+
+1. TableIndex
+2. RowIndex
+3. OriginalFeedbackProblem
+4. SourceChatId
+5. LatestValidationChatId
+6. Iterations
+7. FinalStatus: PASS | FAIL_AFTER_MAX_ATTEMPTS | BLOCKED
+8. FilesChanged
+9. FinalNotes
+
+Communication between validation and fix subagents:
+
+- The validation subagent's FAIL output must include the new chatid and exact remaining failure.
+- The orchestrator must pass that chatid and failure details to a fresh fix subagent instance.
+- Do not reuse the same fix subagent instance across iterations. Each fix attempt must start from a fresh prompt with the latest evidence.
+
+Stop conditions:
+
+- Stop immediately for a row when validation returns PASS.
+- Stop immediately for a row when validation is BLOCKED by auth, missing Copilot token, unavailable local app, unavailable database, or unavailable Confluence, unless the blocker can be resolved with existing non-secret local configuration.
+- Stop after three fix attempts for one row and mark `FAIL_AFTER_MAX_ATTEMPTS`.
+
+Final output to user:
+
+Provide a concise summary with:
+
+- run folder path
+- number of open rows collected
+- rows passed
+- rows blocked
+- rows still failing after max attempts
+- files changed, if any
+- validation chatids created

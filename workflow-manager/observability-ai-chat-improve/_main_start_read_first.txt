@@ -1,0 +1,33 @@
+This task folder contains prompts for the Observability AI Chat improvement workflow. Do not execute the workflow unless the user explicitly asks to run it. The current request may only be to author or update these prompts.
+
+Goal:
+Use open rows from the Confluence page "AI Prompt Validation Datadog Monitor Creation Assistant" to drive repeatable adversarial validation and fixes for Observability AI Chat.
+
+Source Confluence page:
+https://libertymutual.atlassian.net/wiki/spaces/UGS/pages/2540306943/AI+Prompt+Validation+Datadog+Monitor+Creation+Assistant
+
+When running this workflow, use the current checked-out git branch. Do not create or switch branches unless the user explicitly asks.
+
+Always read these files before executing the workflow:
+
+1. 01_collect_open_feedback_and_conversation.txt
+2. 02_generate_adversarial_conversation_plans.txt
+3. 03_run_browser_validation_subagent_prompt.txt
+4. 04_fix_observability_chat_subagent_prompt.txt
+5. 05_iteration_orchestrator_prompt.txt
+
+Recommended execution model:
+
+1. Run 01 to collect open Confluence rows and enrich each row with the linked Observability AI Chat conversation when the row feedback includes a chatid.
+2. Run 02 to create one realistic multi-turn adversarial conversation plan per collected row.
+3. Spawn a separate Codex/subagent using 03 for exactly one row/plan at a time. The validation subagent must use Playwright against the currently open Edge browser and must click through sign-in itself if prompted.
+4. If validation fails, spawn a separate Codex/subagent using 04. Give it the row, original feedback, historic conversation, generated plan, validation transcript, failure notes, and new chatid.
+5. Use 05 to repeat the plan -> browser validation -> fix loop for that row until it passes, is blocked by environment, or reaches the configured iteration limit.
+
+Important constraints:
+
+- Do not ask the user to sign in during browser validation. The browser validation subagent must click the sign-in button itself if prompted.
+- If an email/account picker is shown during sign-in, choose `Thomas.Doyle@libertymutual.com`.
+- Do not print, save, or commit secrets, OAuth tokens, Copilot tokens, or database passwords.
+- Do not update the Confluence source page unless the user explicitly asks.
+- Keep outputs in this task folder under a run-specific subfolder such as `runs\yyyyMMdd-HHmmss`.

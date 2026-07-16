@@ -1,0 +1,143 @@
+Collect open validation feedback rows and enrich them with linked Observability AI Chat conversations.
+
+Source page:
+https://libertymutual.atlassian.net/wiki/spaces/UGS/pages/2540306943/AI+Prompt+Validation+Datadog+Monitor+Creation+Assistant
+
+Confluence access:
+
+- Prefer the local MarioAI CLI:
+  `python .\code-analysis\mario-ai\marioai_api_cli.py confluence get-page 2540306943 --body-format storage --account-email thomas.doyle@libertymutual.com`
+- The CLI reads the `marioai-confluence` Generic Credential from Windows Credential Manager. Do not print or persist the credential value.
+- If the credential owner has explicitly changed, use the updated account email; otherwise use `thomas.doyle@libertymutual.com`.
+- If the CLI cannot read the credential, stop and ask the user to restore the `marioai-confluence` credential. Do not ask for the secret value in chat.
+
+Confluence parsing:
+
+1. Fetch the page body in Confluence storage format.
+2. Parse all table rows.
+3. Identify rows whose status/open-state cell indicates the row is still open. Treat normalized cell values such as `open`, `todo`, `not done`, `failing`, `failed`, or `needs work` as open only when they appear in a status-like column or in the row's explicit status cell. Do not treat a prose sentence that merely contains the word "open" as an open status.
+4. For every open row, preserve every source cell value in source order. Also capture the table index, row index within the table, normalized status, and the feedback/problem cell text.
+5. Extract any chat id from the row feedback/problem text. Recognize explicit forms such as `chatid=abc123`, `chatId abc123`, `chat id: abc123`, or a full Observability AI Chat URL with a `chatid` query parameter. Current browser chat IDs are usually six alphanumeric characters, but database `ConversationId` can also be a UUID. Do not infer a chat id from unrelated six-character strings.
+
+Database connection details for chat conversation enrichment:
+
+- The primary conversation table is `marioai.ObservabilityChatTurn`.
+- Optional supporting tables are `marioai.ObservabilityChatMessageFeedback` and `marioai.ObservabilityChatStateSnapshot`.
+- `readmeapi` builds its database connection from:
+  - `DatabaseConnectionWriter`
+  - `DatabaseConnectionReader`
+  - `DatabaseUser`
+  - `DatabasePassword`
+- The app connection string shape is:
+  `Server={DatabaseConnectionWriter};user={DatabaseUser};password={DatabasePassword};charset=utf8mb4;`
+- For local Windows development, the canonical standard TCP/IP values are:
+  - Hostname: `sre.cvt6y767htpf.us-east-1.rds.amazonaws.com`
+  - Port: `3306`
+  - Username: `admin`
+  - SSL: `Require`
+  - Password: Windows Credential Manager Generic Credential target `sre.cvt6y767htpf.us-east-1.rds.amazonaws.com`
+- Check for the local password credential with:
+  `cmdkey /list:sre.cvt6y767htpf.us-east-1.rds.amazonaws.com`
+- If the Windows credential does not exist, stop and ask the user to set it with:
+  `cmdkey /generic:sre.cvt6y767htpf.us-east-1.rds.amazonaws.com /user:admin /pass:<READONLY_DB_PASSWORD>`
+- If the AWS CLI is authenticated to sandbox account `448855094770`, deployed appsettings can be inspected from `s3://sre-448855094770/shared/appsettings.json`; do not print secret values. Use it only to confirm setting names or non-secret connection host values.
+
+Conversation query:
+
+Use the extracted `chatid` as `ConversationId`.
+
+```sql
+SELECT
+  ObservabilityChatTurnId,
+  TurnId,
+  ConversationId,
+  ConversationTitle,
+  RunId,
+  PromptHash,
+  UserEmail,
+  UserMessage,
+  AssistantReply,
+  ToolCallSummaryJson,
+  IsSuccess,
+  ErrorMessage,
+  WhenCreated
+FROM marioai.ObservabilityChatTurn
+WHERE ConversationId = @chatid
+ORDER BY WhenCreated, ObservabilityChatTurnId;
+```
+
+Optional feedback query:
+
+```sql
+SELECT
+  ObservabilityChatMessageFeedbackId,
+  ConversationId,
+  MessageIndex,
+  MessageContentHash,
+  FeedbackType,
+  CommentText,
+  UserEmail,
+  WhenCreated
+FROM marioai.ObservabilityChatMessageFeedback
+WHERE ConversationId = @chatid
+ORDER BY WhenCreated, ObservabilityChatMessageFeedbackId;
+```
+
+Optional state snapshot query:
+
+```sql
+SELECT
+  ObservabilityChatStateSnapshotId,
+  ConversationId,
+  TurnId,
+  MessageRole,
+  MessageIndex,
+  MessageContentHash,
+  StateMachineVersion,
+  Status,
+  ActiveStateId,
+  ActiveStateLabel,
+  EvaluationCount,
+  YesEvaluationCount,
+  EvaluationsJson,
+  ResolverJson,
+  ErrorMessage,
+  WhenCreated,
+  WhenUpdated
+FROM marioai.ObservabilityChatStateSnapshot
+WHERE ConversationId = @chatid
+ORDER BY MessageIndex, MessageRole, WhenCreated, ObservabilityChatStateSnapshotId;
+```
+
+Full conversation formatting:
+
+- Preserve all turns in chronological order.
+- For each row from `ObservabilityChatTurn`, emit:
+  - `USER` message with `WhenCreated`, `TurnId`, and `UserEmail`
+  - `ASSISTANT` message with `AssistantReply`, `ToolCallSummaryJson`, `IsSuccess`, and `ErrorMessage` when present
+- Include linked message feedback and state snapshot summaries after the relevant assistant message when available.
+- If the row has a chatid but no database rows are found, set the full conversation cell to `CHATID FOUND BUT NO DATABASE CONVERSATION ROWS FOUND`.
+- If the row has no chatid, leave the full conversation cell blank and set the chatid cell to blank.
+
+Output:
+
+Create a run-specific artifact in this task folder, for example:
+`runs\yyyyMMdd-HHmmss\01_open_feedback_conversations.md`
+
+The output must be a Markdown table with one output row per open Confluence table row. Each output row must include one cell containing the full conversation text when a chatid exists.
+
+Required columns:
+
+1. SourcePageUrl
+2. TableIndex
+3. RowIndex
+4. Status
+5. FeedbackProblem
+6. ChatId
+7. FullConversation
+8. SourceRowCellsJson
+
+Also write the same data as JSON:
+`runs\yyyyMMdd-HHmmss\01_open_feedback_conversations.json`
+
+Do not update the source Confluence page.

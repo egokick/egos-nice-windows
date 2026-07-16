@@ -1,0 +1,85 @@
+Prompt template for the fix Codex/subagent.
+
+Use this prompt in a separate Codex instance/subagent only after browser validation returns FAIL for a specific Confluence source row.
+
+Subagent mission:
+Amend the Observability AI Chat prompts and/or code so the assistant satisfies the original Confluence table-row expectation and passes the adversarial browser-validation plan.
+
+Inputs the orchestrator must provide:
+
+- SourcePageUrl
+- TableIndex
+- RowIndex
+- Original FeedbackProblem
+- Source ChatId and FullConversation, if any
+- Adversarial PlanId and UserTurnPlan
+- Latest validation NewChatId
+- Latest validation transcript/evidence
+- Latest FailureDetails and RemainingProblem
+- Prior fix attempts for this row, if any
+
+Relevant prompt folder:
+
+- `code-analysis\_tom_project_tracking\observability-ai-chat`
+
+Start by reading:
+
+1. `code-analysis\_tom_project_tracking\observability-ai-chat\_main_start_read_first.txt`
+2. `code-analysis\_tom_project_tracking\observability-ai-chat\core\decision_workflow.txt`
+3. Any read-on-demand prompt file identified by the failing behavior, such as:
+   - `workflows\existing_monitor_coverage_check.txt`
+   - `workflows\notebook_recommendation.txt`
+   - `workflows\custom_metric_monitor_flow.txt`
+   - `custom_metrics\queries_naming_grouping.txt`
+   - `monitors\tags_scope_and_priority.txt`
+   - `monitors\anomaly_query_standard.txt`
+   - `monitors\naming_message_and_notifications.txt`
+   - `responses\creation_and_search_response_rules.txt`
+   - `state_machine\monitor_assistant_state_machine_v1.txt`
+
+Relevant app surfaces to inspect only when prompt changes are insufficient:
+
+- `code-analysis\readmeapi\Services\ObservabilityChatPromptCache.cs`
+- `code-analysis\readmeapi\Services\SreCopilotAgentRunner.cs`
+- `code-analysis\readmeapi\Controllers\SreAgentController.cs`
+- `code-analysis\readmeapi\Services\ObservabilityChatStateMachineService.cs`
+- `code-analysis\readmeapp\src\pages\MarioAI\MarioAIDatadogMonitors.tsx`
+- `code-analysis\readmeapp\src\components\AiAssistant`
+
+Fix rules:
+
+1. Prefer prompt changes in `code-analysis\_tom_project_tracking\observability-ai-chat` when the failure is assistant reasoning, workflow ordering, response format, or Datadog-monitor guidance.
+2. Change application code only when the failure is caused by code behavior, missing tool wiring, state-machine handling, browser UI behavior, or API behavior.
+3. Keep changes surgical and directly tied to the failing source row. Do not rewrite unrelated prompts.
+4. Do not add compatibility shims or fallback paths for old local states.
+5. Preserve current successful behavior from other Observability AI Chat workflows.
+6. If changing code, add or update targeted tests when a reasonable test surface exists.
+7. If changing prompts only, include a concise rationale in the final report; do not invent tests that do not exist.
+
+Validation after changes:
+
+- For prompt-only changes, run the smallest available static check or no-op validation that exists for the prompt-loading surface if one exists. Otherwise report that no executable prompt-only test exists.
+- For React changes, run targeted `npm test -- --watchAll=false --runInBand --runTestsByPath ...` and/or `npm run build` from `code-analysis\readmeapp`.
+- For .NET backend changes, run the smallest relevant test project/test filter from `code-analysis` if available.
+
+Output:
+
+Return a structured report to the orchestrator:
+
+```text
+FixStatus: CHANGED | NO_CHANGE_BLOCKED
+SourcePageUrl:
+TableIndex:
+RowIndex:
+OriginalFeedbackProblem:
+LatestValidationChatId:
+RootCause:
+FilesChanged:
+ChangeSummary:
+WhyThisShouldFixTheFailure:
+ValidationRun:
+RemainingRisks:
+NextValidationInstructions:
+```
+
+Do not run the browser-validation step yourself. The orchestrator must spawn a fresh browser-validation subagent with prompt 03 after your changes.

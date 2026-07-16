@@ -1,0 +1,414 @@
+WORKFLOW MANAGER: AUTO-IMPROVE PROMPTS AND INDEPENDENT EVALUATOR
+================================================================
+
+Status
+------
+
+This document describes the intended production behavior behind the interactive
+HTML mockup. The mockup simulates prompt generation, replay, scoring, and version
+activation locally; it does not actually launch agents or create isolated worktrees.
+
+
+1. Primary-source research
+--------------------------
+
+The design is informed by Andrej Karpathy's autoresearch project and the posts
+linked from that repository:
+
+- Repository: https://github.com/karpathy/autoresearch
+- README: https://github.com/karpathy/autoresearch/blob/master/README.md
+- Agent program: https://github.com/karpathy/autoresearch/blob/master/program.md
+- Linked project post: https://x.com/karpathy/status/2029701092347630069
+- Linked follow-up post: https://x.com/karpathy/status/2031135152349524125
+
+The important autoresearch mechanics are:
+
+1. The editable surface is deliberately narrow. The agent changes train.py while
+   prepare.py and the evaluation harness remain fixed.
+2. Every experiment receives the same five-minute training budget, making results
+   on the same machine reasonably comparable.
+3. A ground-truth metric, validation bits per byte (val_bpb), decides whether a
+   candidate improved. Lower is better.
+4. Every attempt is logged with its commit, metric, memory, outcome, and short
+   description. Crashes and discarded attempts remain part of the experiment log.
+5. A candidate is committed before evaluation. If it improves the metric, the
+   branch advances; otherwise the code returns to the prior best state.
+6. Experiments occur on a dedicated branch. The fixed evaluation code and data are
+   not modified by the research agent.
+7. The autonomous loop continues without asking a human after every experiment.
+   The human improves the research program; the agent improves the training code.
+8. Simplicity is a secondary constraint. A tiny metric gain is not automatically
+   worth a large, brittle increase in complexity.
+
+The workflow feature applies this pattern to prompts rather than neural-network
+training code:
+
+- A generator/verifier prompt pair is the experimental candidate.
+- Preserved workflow tasks are the evaluation dataset.
+- An isolated replay is the fixed training run.
+- A concrete metric or frozen evaluator rubric is the validation metric.
+- The 0-100 evaluator score is the normalized result.
+- Version history is the experiment log.
+- The highest comparable score is the best-so-far branch tip.
+
+
+2. Why the unit of evaluation is a prompt pair
+----------------------------------------------
+
+When a workflow has a verifier, generator and verifier prompts form one interacting
+system. A verifier can appear excellent with one generator and unhelpful with
+another. Likewise, a generator may look inefficient because a verifier returns vague
+or contradictory feedback.
+
+Therefore the primary scored object is an evaluated pair:
+
+  Generator v4 + Verifier v2 -> 88/100
+
+The result also contains a generator subscore, verifier subscore, and role-targeted
+feedback. This lets the UI satisfy the need to score each version without claiming
+that a verifier has a context-free intrinsic score. For workflows with no verifier,
+the scored object contains only the generator version.
+
+
+3. Agent boundaries
+-------------------
+
+Generator
+
+- Produces or modifies the requested work.
+- Receives its own prompt, task inputs, allowed tools, and any structured verifier
+  feedback from the preceding review round.
+- Does not see evaluator private reasoning or hidden holdout tasks.
+
+Verifier (optional)
+
+- Is a separate instance with its own prompt.
+- Reviews the generator artifact read-only.
+- Marks the result verifier-complete only when every saved standard is met.
+- Otherwise reports a concrete problem with cited evidence and an actionable feedback
+  packet for the next generator round.
+- Exposes only two semantic routes: verifier-complete or verifier-reported-problem;
+  no additional decision state is inserted between them.
+- Does not edit the artifact and does not see the generator's private reasoning.
+
+Independent evaluator
+
+- Is a third, separate instance with its own versioned prompt.
+- Scores completed generator-only or generator/verifier executions from 0 to 100.
+- Receives task inputs, final artifacts, checks, timing, iteration history, verdicts,
+  and structured feedback. It does not receive private chain-of-thought.
+- Attributes lost points to generator, verifier, their interaction, or an invalid
+  evaluation.
+- Proposes one bounded prompt change but never edits the production work artifact.
+
+Prompt improver
+
+- Converts evaluator feedback into candidate generator and verifier prompt versions.
+- Changes only the prompt surfaces that the evaluation identified.
+- Cannot edit the replay dataset, evaluation harness, evaluator prompt, score
+  normalization, time/tool budget, or completion thresholds during an experiment.
+
+Keeping these roles separate prevents a prompt from grading its own work and prevents
+the improver from moving the goalposts while optimizing against them.
+
+
+4. Evaluation contract and 0-100 scoring
+----------------------------------------
+
+Metric selection defaults to "Automatic: prefer a concrete metric."
+
+Concrete metric path
+
+Use a concrete metric when it is stable, attributable to the workflow, and available
+for both baseline and candidate replays. Examples include:
+
+- Median minutes watched after a generated recommendation.
+- Focused tests passing divided by tests attempted.
+- Type errors resolved divided by initial type errors.
+- Suggestions supported by checks divided by suggestions evaluated.
+- Median time to a passing build.
+- Defects found after verifier completion per completed task.
+
+The raw metric is preserved. The UI shows a 0-100 normalized score so different
+versions remain easy to scan, but the raw value and formula are the source of truth.
+
+Example when higher is better:
+
+  score = clamp(0, 100,
+                100 * (candidate - unacceptable_floor)
+                    / (target - unacceptable_floor))
+
+Example when lower is better:
+
+  score = clamp(0, 100,
+                100 * (unacceptable_ceiling - candidate)
+                    / (unacceptable_ceiling - target))
+
+Every concrete contract stores and exposes:
+
+- Raw value source: the stable field, query, or adapter producing the measurement.
+- Unit: minutes, percent, defects, checks, or another explicit display unit.
+- Better direction: higher or lower.
+- Target: the raw value mapped to 100.
+- Unacceptable bound: the raw value mapped to 0.
+- Normalization: the saved formula that maps and clamps raw values to 0-100.
+- Aggregation window: for example, the latest 10 terminal runs or all terminal runs
+  in the last 30 days.
+
+Those fields are frozen for each evaluation or auto-improve experiment. The raw
+observations, aggregation output, and normalized value are retained together.
+Different concrete contracts share the same combined score series after each value
+has been normalized to 0-100; the card and graph label for every point still identify
+its source contract. Changing any contract field creates a labeled new scoring regime
+inside that series. Historical points keep their original frozen values and are not
+silently recomputed.
+
+The aggregation window is an eligibility rule, not display-only metadata. "Latest
+5/10/20" sorts matching terminal artifacts by terminal timestamp and selects only
+that many; "last 30 days" excludes older artifacts before either baseline or
+candidate scoring. The selected artifact IDs are retained with the evaluation.
+
+When the configured source is present in captured run metrics, the evaluator stores
+every raw observation and its unit before aggregation. The self-contained HTML cannot
+query arbitrary external analytics fields. In that case it may show an explicitly
+labelled demo proxy derived from terminal outcomes and checks, together with an
+explanation that the external metric was unavailable. A demo proxy must never be
+presented as though it came from the configured external source.
+
+Evaluator-rubric fallback
+
+Not every workflow has a useful objective metric. The evaluator must still output a
+score from 0 to 100. A saved rubric should use explicit weighted dimensions, for
+example:
+
+- Outcome correctness and evidence: 60%
+- Generator/verifier efficiency: 25%
+- Feedback usefulness: 15%
+
+Each deduction must cite observable evidence. The same evaluator prompt version,
+rubric, model, tool access, replay inputs, and sampling policy must be used for all
+scores that appear on one comparable graph.
+
+Iteration count is diagnostic, not the objective
+
+Many generator/verifier rounds can indicate a weak generator prompt or low-quality
+verifier feedback. However, optimizing only for fewer rounds would reward a verifier
+that marks weak work complete too quickly. Round count is therefore one signal alongside
+correctness, evidence quality, regressions, and feedback usefulness. A fast wrong
+answer must score below a slower correct answer.
+
+
+5. Version-history experience
+-----------------------------
+
+The Version history tab contains five layers:
+
+1. Independent evaluator summary
+   Shows the evaluator role boundary, current scoring contract, concrete-versus-rubric
+   mode, eligible replay count, and Improve prompts action.
+
+2. Score-over-time graph
+   Plots 0-100 overall scores against labels such as G2/V1, G3/V1, and G4/V2. Every
+   plotted value is also repeated as text in the evaluated-pair cards so color and
+   graph inspection are not required for accessibility.
+
+3. Evaluated prompt-pair cards
+   Each card shows overall score, generator and verifier subscores, replay count,
+   average review rounds, evaluator prompt version, evidence-targeted feedback,
+   active/best state, and User-created or Auto-generated provenance. It also repeats
+   the frozen metric name, raw source, unit, direction, target, unacceptable bound,
+   aggregation window, raw observation or labelled demo proxy, and evaluator version.
+   The graph exposes the same contract label for every plotted point.
+
+4. Evaluator settings
+   Contains metric selection, metric/rubric name, scoring definition, and the separate
+   evaluator prompt. Concrete mode additionally exposes raw source, unit, better
+   direction, target, unacceptable bound, normalization formula, and aggregation
+   window. Changing the evaluator prompt creates a new evaluator prompt version. The
+   approved product contract keeps one combined 0-100 graph across evaluator and
+   metric regimes; every point is labeled with the exact evaluator version and metric
+   contract that produced it so the cross-regime comparison remains explicit.
+
+5. Prompt archives
+   Preserves independent generator and verifier source histories with Compare and
+   Restore as draft actions. Auto-generated and user-created versions use different
+   labels. A version with insufficient run evidence says Awaiting runs; it never shows
+   0, because 0 means evaluated and worst. The evaluator has its own archive containing
+   every complete prompt body, version, note, and timestamp, with View and Restore as
+   draft actions so a historical score's evaluator contract remains auditable.
+
+
+6. Improve prompts lifecycle
+----------------------------
+
+The action becomes available after at least two terminal runs provide comparable
+artifacts. Terminal evidence includes verifier-complete results, verifier-reported
+problems, failed runs, and deliberately stopped runs. Two is a minimal prototype
+threshold; a production default should usually require a larger and more varied set.
+
+Step 1: Freeze a baseline
+
+- Resolve the active generator/verifier pair.
+- Record prompt contents, prompt version IDs, evaluator prompt version, metric
+  contract, tool policy, model versions, budgets, and replay dataset snapshot.
+- Determine the best comparable baseline score.
+- Apply the saved aggregation window immediately and freeze the resulting artifact
+  IDs, diffs, checks, notes, iteration history, and verifier verdict/findings/feedback.
+- Persist that immutable envelope with the experiment token. Candidate creation and
+  scoring must use it even if workflow or evaluator settings change while the job runs.
+
+Step 2: Propose one bounded change
+
+- The evaluator's highest-impact feedback becomes an experiment hypothesis.
+- The improver may create a new generator version, a new verifier version, or both.
+- Every generated version receives Auto-generated provenance and a parent version.
+- One experiment should address one coherent hypothesis so a score change remains
+  interpretable.
+
+Step 3: Build isolated replay copies
+
+- Each preserved task is restored into a fresh worktree, snapshot, container, or
+  equivalent copy at the exact pre-run state.
+- Replays cannot write to the user's active branch or original working directory.
+- External side effects are blocked or replaced by recorded fixtures.
+- Secrets, network policy, dependencies, clocks, and tool versions are held constant.
+- Baseline and candidate use the same inputs and budgets.
+
+Step 4: Run candidates
+
+- Run the candidate pair over all selected replay tasks.
+- Preserve artifacts for every attempt, including failures, crashes, timeouts, and
+  verifier disagreements.
+- If variance matters, repeat trials with fixed, recorded seeds.
+
+Step 5: Evaluate
+
+- Apply the frozen concrete metric or evaluator rubric.
+- Produce overall, generator, and optional verifier scores.
+- Preserve whether the verifier completed the result or reported a problem, including
+  the evidence packet returned to the generator.
+- Return cited feedback and the role it targets.
+- Mark invalid replays separately; an infrastructure failure is not a score of zero.
+
+Step 6: Keep, discard, or retest
+
+- Retain every candidate in history.
+- Promote a candidate only when its comparable score exceeds the best score by more
+  than the configured noise/tie threshold.
+- Retest marginal improvements rather than promoting measurement noise.
+- Prefer the simpler prompt when scores are statistically tied.
+
+Step 7: Activate
+
+- With automatic selection enabled, atomically activate the best scored pair.
+- A losing auto-generated candidate remains inspectable but never becomes active.
+- Selecting another pair manually disables automatic best selection.
+- Resume best automatically reactivates the best comparable pair and future winners.
+- Runs already in progress keep the prompt pair pinned at their start time.
+
+
+7. Avoiding evaluator gaming and overfitting
+--------------------------------------------
+
+Self-improvement systems can optimize the scoreboard instead of the real goal. The
+production design should include:
+
+- Read-only evaluation harness and replay inputs.
+- A holdout replay set not shown to the prompt improver.
+- Separate development and promotion scores.
+- Multiple evaluator passes or repeated concrete measurements when variance is high.
+- Score confidence intervals and a minimum meaningful improvement threshold.
+- Regression gates that can veto promotion even when the primary score rises.
+- Complexity/token/cost constraints as secondary metrics.
+- Periodic independent audit of evaluator drift and surprising high-scoring candidates.
+- A ban on candidate prompts referring to task IDs, expected answers, or evaluator
+  implementation details.
+- Explicit regime labels when the evaluator prompt, model, rubric, normalization,
+  tools, or replay corpus changes materially. Normalized scores remain on the one
+  combined graph while raw values and contracts remain independently auditable.
+
+
+8. Data retained for auditability
+---------------------------------
+
+Each evaluated pair should retain:
+
+- Pair ID and parent pair ID.
+- Generator prompt version and verifier prompt version, if present.
+- User-created or Auto-generated provenance.
+- Evaluator prompt/model version.
+- Metric type, name, raw source, raw values, unit, direction, target, unacceptable
+  bound, aggregation window, formula, and normalized score.
+- Whether a raw value was measured or is an explicitly labelled mockup proxy, plus
+  the proxy explanation when external data was unavailable.
+- Replay snapshot IDs, task IDs, seeds, tools, budgets, and environment fingerprint.
+- Final artifacts and diffs, check outputs, notes, iteration summaries, verifier
+  verdicts, criterion findings, and structured feedback packets.
+- Overall and role-level scores.
+- Structured deductions with artifact citations.
+- Number of generator/verifier rounds and feedback packets.
+- Candidate status: waiting, replaying, evaluating, scored, failed, or invalid.
+- Activation reason: automatic best, manual selection, rollback, or holdout failure.
+- Creation/evaluation times and cost.
+
+This makes a score reproducible and answers why a prompt became active.
+
+
+9. Failure and edge-case behavior
+--------------------------------
+
+- Fewer than two eligible runs: Improve prompts is disabled.
+- Pending new version: display Awaiting runs, not 0.
+- Replay infrastructure failure: mark Invalid and retry; do not punish the prompt.
+- Candidate crash caused by prompt behavior: retain the failure and score it under the
+  frozen contract.
+- Missing verifier: evaluate generator only and remove verifier UI.
+- Verifier enabled later: add the new pair to the combined series; do not backfill an
+  invented verifier subscore for earlier generator-only points.
+- Evaluator prompt edited: version it and label subsequent combined-graph points with
+  the new evaluator regime.
+- Metric changed: preserve every historical raw value and contract, normalize the new
+  contract to 0-100, and continue the same labeled combined graph without rewriting
+  prior points.
+- Statistical tie: keep the current best or prefer the simpler prompt.
+- Manual override: never silently replace it until automatic best selection is resumed.
+- Drawer closes during replay: the backend job continues; reopening reads job state by
+  workflow and experiment ID.
+
+
+10. What the HTML mockup simulates
+----------------------------------
+
+The mockup implements the visible product contract:
+
+- Evaluator summary and editable evaluator prompt.
+- Automatic concrete-metric-first setting and rubric fallback.
+- Editable concrete contracts with raw source, unit, direction, target, unacceptable
+  bound, visible 0-100 normalization, and aggregation window.
+- Version-pair graph and 0-100 scorecards.
+- Generator/verifier subscores and targeted feedback.
+- User-created and Auto-generated labels.
+- Best and Active labels.
+- Improve prompts progress through Propose, Replay, and Score.
+- Creation of new generator and optional verifier versions.
+- Automatic promotion when the new score is best.
+- Manual version selection and resuming automatic best selection.
+- Isolated replay explanations and prompt source archives.
+- Enforced latest-N/30-day evidence windows and deliberately stopped terminal evidence.
+- Frozen experiment baselines that remain stable across mid-replay editor changes.
+- Per-point/card scoring-contract labels, retained raw observations or clearly marked
+  demo proxies, and restorable evaluator prompt-body archives.
+
+The mockup's scores and timeout are illustrative. Production requires a durable job
+service, real isolation, artifact storage, metric adapters, evaluator execution,
+confidence/noise handling, and atomic prompt-pair activation.
+
+
+11. Product principle
+---------------------
+
+The feature should optimize demonstrated workflow performance, not prompt novelty.
+The evaluator contract is the fixed benchmark, isolated replays are the experiments,
+version history is the lab notebook, and the active prompt pair is simply the best
+reproducible result so far. Every automatic change must remain inspectable, reversible,
+and subordinate to a user's explicit manual choice.
