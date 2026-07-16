@@ -135,6 +135,14 @@ if (-not [string]::IsNullOrWhiteSpace($workingTree)) {
 }
 
 $docker = Get-DockerPath
+$dockerDirectory = Split-Path -Parent $docker
+if ($dockerDirectory -notin ($env:Path -split ';')) {
+    # Docker Desktop stores docker-credential-desktop.exe beside docker.exe.
+    # Calling the CLI by absolute path is not enough: registry pulls also need
+    # the helper to be discoverable on PATH.
+    $env:Path = $dockerDirectory + ';' + $env:Path
+}
+
 & $docker version --format '{{.Server.Version}}' | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'Docker Desktop is not ready.'
