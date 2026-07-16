@@ -115,7 +115,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $requiredServices = @('caddy', 'headscale', 'meshcentral', 'postgres', 'keycloak', 'remotehub')
-$missingServices = $requiredServices | Where-Object { $_ -notin $runningServices }
+$missingServices = @($requiredServices | Where-Object { $_ -notin $runningServices })
 if ($missingServices.Count -gt 0) {
     throw "The LAN stack did not leave all required services running: $($missingServices -join ', ')."
 }
