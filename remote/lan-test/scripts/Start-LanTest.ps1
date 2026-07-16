@@ -6,6 +6,28 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Enable-DockerDesktopCli {
+    $command = Get-Command docker.exe -ErrorAction SilentlyContinue
+    $dockerPath = if ($null -ne $command) {
+        $command.Source
+    }
+    else {
+        Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin\docker.exe'
+    }
+
+    if (-not (Test-Path -LiteralPath $dockerPath -PathType Leaf)) {
+        throw 'Docker Desktop is required. Start Docker Desktop and try again.'
+    }
+
+    $dockerDirectory = Split-Path -Parent $dockerPath
+    if ($dockerDirectory -notin ($env:Path -split ';')) {
+        # Docker registry credentials are resolved by a helper beside docker.exe.
+        $env:Path = $dockerDirectory + ';' + $env:Path
+    }
+}
+
+Enable-DockerDesktopCli
+
 $lanRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $environmentFile = Join-Path $lanRoot '.env'
 $composeFile = Join-Path $lanRoot 'compose.yaml'

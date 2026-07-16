@@ -11,6 +11,28 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Enable-DockerDesktopCli {
+    $command = Get-Command docker.exe -ErrorAction SilentlyContinue
+    $dockerPath = if ($null -ne $command) {
+        $command.Source
+    }
+    else {
+        Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin\docker.exe'
+    }
+
+    if (-not (Test-Path -LiteralPath $dockerPath -PathType Leaf)) {
+        throw 'Docker Desktop is required. Start Docker Desktop and try again.'
+    }
+
+    $dockerDirectory = Split-Path -Parent $dockerPath
+    if ($dockerDirectory -notin ($env:Path -split ';')) {
+        # Docker registry credentials are resolved by a helper beside docker.exe.
+        $env:Path = $dockerDirectory + ';' + $env:Path
+    }
+}
+
+Enable-DockerDesktopCli
+
 if (-not $MeshCentralAdministratorCreated -or -not $EnableLan) {
     throw 'Refusing to publish the LAN endpoint. Re-run only after creating the single MeshCentral administrator, with both confirmation switches.'
 }
