@@ -16,6 +16,7 @@ public sealed class DevelopmentHeaderAuthenticationHandler : AuthenticationHandl
     public const string SchemeName = "RemoteHubLocalDevelopment";
     public const string SubjectHeader = "X-RemoteHub-Dev-Subject";
     public const string ScopesHeader = "X-RemoteHub-Dev-Scopes";
+    public const string RolesHeader = "X-RemoteHub-Dev-Roles";
 
     private readonly IHostEnvironment _environment;
 
@@ -44,6 +45,7 @@ public sealed class DevelopmentHeaderAuthenticationHandler : AuthenticationHandl
 
         var subject = Request.Headers[SubjectHeader].ToString().Trim();
         var scopes = Request.Headers[ScopesHeader].ToString().Trim();
+        var roles = Request.Headers[RolesHeader].ToString().Trim();
         if (subject.Length == 0 || scopes.Length == 0)
         {
             return Task.FromResult(AuthenticateResult.NoResult());
@@ -59,6 +61,14 @@ public sealed class DevelopmentHeaderAuthenticationHandler : AuthenticationHandl
             new("sub", subject),
             new("scope", scopes)
         };
+        foreach (var role in roles.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (role.Length <= 128 && !role.Any(char.IsControl))
+            {
+                claims.Add(new Claim("role", role));
+            }
+        }
+
         var identity = new ClaimsIdentity(claims, SchemeName, "sub", "role");
         var ticket = new AuthenticationTicket(new ClaimsPrincipal(identity), SchemeName);
         return Task.FromResult(AuthenticateResult.Success(ticket));

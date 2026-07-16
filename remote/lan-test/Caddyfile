@@ -1,0 +1,47 @@
+{
+    admin off
+}
+
+# The only cleartext handler is Headscale's connectivity probe. Port 80 is not
+# published by compose; all real client traffic uses internal-CA HTTPS on 443.
+http://headscale.stayactive.test {
+    @generate204 path /generate_204
+    respond @generate204 204
+    redir https://{host}{uri} permanent
+}
+
+http://meshcentral.stayactive.test {
+    redir https://{host}{uri} permanent
+}
+
+http://remotehub.stayactive.test {
+    redir https://{host}{uri} permanent
+}
+
+http://id.stayactive.test {
+    redir https://{host}{uri} permanent
+}
+
+headscale.stayactive.test {
+    tls internal
+    reverse_proxy headscale:8080
+}
+
+meshcentral.stayactive.test {
+    tls internal
+    reverse_proxy meshcentral:4430
+}
+
+remotehub.stayactive.test {
+    tls internal
+    reverse_proxy remotehub:5088
+}
+
+id.stayactive.test {
+    tls internal
+    reverse_proxy keycloak:8080 {
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Port 443
+    }
+}

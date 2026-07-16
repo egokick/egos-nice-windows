@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using StayActive.Remotes;
@@ -26,7 +27,7 @@ public sealed class RemoteHubOidcAccessTokenProviderTests
                 }
                 """)
         };
-        var listener = new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41231/stayactive-test/"));
+        var listener = new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41231/"));
         var browser = new FakeBrowser(uri =>
         {
             var query = ParseQuery(uri);
@@ -90,7 +91,7 @@ public sealed class RemoteHubOidcAccessTokenProviderTests
             storage,
             http,
             new FakeBrowser(_ => { }),
-            new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41232/stayactive-test/")));
+            new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41232/")));
 
         var accessToken = await provider.GetAccessTokenAsync(CancellationToken.None);
 
@@ -115,9 +116,9 @@ public sealed class RemoteHubOidcAccessTokenProviderTests
             TokenResponse = new RemoteHubOidcHttpResponse(200, "{ \"access_token\": \"must-not-be-read\" }")
         };
         var listener = new FakeLoopbackCallbackListener(
-            new Uri("http://127.0.0.1:41233/stayactive-test/"))
+            new Uri("http://127.0.0.1:41233/"))
         {
-            Callback = new Uri("http://127.0.0.1:41233/stayactive-test/?code=private-code&state=wrong-state")
+            Callback = new Uri("http://127.0.0.1:41233/?code=private-code&state=wrong-state")
         };
         using var provider = CreateProvider(storage, http, new FakeBrowser(_ => { }), listener);
 
@@ -155,7 +156,7 @@ public sealed class RemoteHubOidcAccessTokenProviderTests
             storage,
             http,
             new FakeBrowser(_ => { }),
-            new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41234/stayactive-test/")));
+            new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41234/")));
 
         var exception = await Assert.ThrowsAsync<RemoteHubAuthenticationRequiredException>(
             () => provider.GetAccessTokenAsync(CancellationToken.None));
@@ -164,6 +165,26 @@ public sealed class RemoteHubOidcAccessTokenProviderTests
         Assert.DoesNotContain(savedRefreshToken, exception.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(responseSecret, exception.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(responseSecret, http.TokenResponse.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SystemLoopbackCallbackListener_UsesTheNarrowRegisteredRootPath()
+    {
+        using var listener = new SystemRemoteHubLoopbackCallbackListener();
+        var redirectUri = listener.Start();
+
+        Assert.Equal("http", redirectUri.Scheme);
+        Assert.Equal("127.0.0.1", redirectUri.Host);
+        Assert.Equal("/", redirectUri.AbsolutePath);
+
+        var callbackTask = listener.WaitForCallbackAsync(CancellationToken.None);
+        using var client = new HttpClient();
+        using var response = await client.GetAsync(new Uri(redirectUri.AbsoluteUri + "?code=one-time-code&state=expected-state"));
+        var callback = await callbackTask;
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(redirectUri.AbsolutePath, callback.AbsolutePath);
+        Assert.Equal(redirectUri.Port, callback.Port);
     }
 
     [Theory]
@@ -186,7 +207,7 @@ public sealed class RemoteHubOidcAccessTokenProviderTests
             storage,
             http,
             new FakeBrowser(_ => { }),
-            new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41235/stayactive-test/")));
+            new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41235/")));
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 

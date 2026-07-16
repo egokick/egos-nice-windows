@@ -1,8 +1,8 @@
 {
   "RemoteHub": {
     "Authentication": {
-      "Authority": "__REPLACE_OIDC_AUTHORITY__",
-      "Audience": "__REPLACE_REMOTEHUB_OIDC_AUDIENCE__"
+      "Authority": "https://id.stayactive.test/realms/stayactive",
+      "Audience": "stayactive-remotehub"
     },
     "Authorization": {
       "AdministratorRole": "stayactive.remotehub.admin",
@@ -10,12 +10,12 @@
     },
     "Storage": {
       "JournalPath": "/var/lib/stayactive-remotehub/inventory.journal.jsonl",
-      "JournalHmacKey": "__REPLACE_REMOTEHUB_JOURNAL_HMAC_KEY_BASE64__"
+      "JournalHmacKey": "__REMOTEHUB_JOURNAL_HMAC_KEY_BASE64__"
     },
     "AdminSpa": {
       "Enabled": true,
-      "PublicOrigin": "https://__REPLACE_REMOTEHUB_FQDN__",
-      "ClientId": "__REPLACE_REMOTEHUB_ADMIN_OIDC_CLIENT_ID__",
+      "PublicOrigin": "https://remotehub.stayactive.test",
+      "ClientId": "stayactive-remotehub-admin",
       "Scopes": "openid profile remotehub.inventory.write remotehub.audit.read remotehub.admin"
     }
   }

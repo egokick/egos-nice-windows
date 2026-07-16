@@ -51,6 +51,24 @@ public sealed class RemoteHubSettingsTests
         Assert.True(settings.LocalDevelopmentEnabled);
         Assert.Null(settings.OidcAuthority);
         Assert.Equal("remotehub.fleet.read", settings.FleetReadScope);
+        Assert.Equal("stayactive.remotehub.admin", settings.AdministratorRole);
+        Assert.Equal("remotehub.admin", settings.AdministratorRoleScope);
+    }
+
+    [Fact]
+    public void Invalid_administrator_role_is_rejected()
+    {
+        var builder = CreateBuilder(Environments.Development, new Dictionary<string, string?>
+        {
+            ["RemoteHub:LocalDevelopment:Enabled"] = "true",
+            ["RemoteHub:Storage:JournalPath"] = Path.Combine(Path.GetTempPath(), "remotehub-settings", "inventory.journal.jsonl"),
+            ["RemoteHub:Storage:JournalHmacKey"] = TestHmacKey(),
+            ["RemoteHub:Authorization:AdministratorRole"] = "not a role"
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() => RemoteHubSettings.Load(builder.Configuration, builder.Environment));
+
+        Assert.Contains("AdministratorRole", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

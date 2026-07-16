@@ -19,7 +19,9 @@ public sealed record RemoteHubSettings(
     byte[] JournalHmacKey,
     string FleetReadScope,
     string InventoryWriteScope,
-    string AuditReadScope)
+    string AuditReadScope,
+    string AdministratorRole,
+    string AdministratorRoleScope)
 {
     public const string FleetReadPolicy = "remotehub.fleet.read";
     public const string InventoryWritePolicy = "remotehub.inventory.write";
@@ -92,13 +94,22 @@ public sealed record RemoteHubSettings(
         var fleetReadScope = ReadScope(configuration, "RemoteHub:Authorization:FleetReadScope", "remotehub.fleet.read");
         var inventoryWriteScope = ReadScope(configuration, "RemoteHub:Authorization:InventoryWriteScope", "remotehub.inventory.write");
         var auditReadScope = ReadScope(configuration, "RemoteHub:Authorization:AuditReadScope", "remotehub.audit.read");
+        var administratorRole = ReadRole(
+            configuration,
+            "RemoteHub:Authorization:AdministratorRole",
+            "stayactive.remotehub.admin");
+        var administratorRoleScope = ReadScope(
+            configuration,
+            "RemoteHub:Authorization:AdministratorRoleScope",
+            "remotehub.admin");
         var adminSpa = LoadAdminSpaSettings(
             configuration,
             environment,
             developmentEnabled,
             authority,
             inventoryWriteScope,
-            auditReadScope);
+            auditReadScope,
+            administratorRoleScope);
 
         return new RemoteHubSettings(
             developmentEnabled,
@@ -110,7 +121,9 @@ public sealed record RemoteHubSettings(
             hmacKey,
             fleetReadScope,
             inventoryWriteScope,
-            auditReadScope);
+            auditReadScope,
+            administratorRole,
+            administratorRoleScope);
     }
 
     private static AdminSpaSettings? LoadAdminSpaSettings(
@@ -119,7 +132,8 @@ public sealed record RemoteHubSettings(
         bool localDevelopmentEnabled,
         string authority,
         string inventoryWriteScope,
-        string auditReadScope)
+        string auditReadScope,
+        string administratorRoleScope)
     {
         if (!ReadBoolean(configuration, "RemoteHub:AdminSpa:Enabled"))
         {
@@ -181,7 +195,8 @@ public sealed record RemoteHubSettings(
         var scopes = ParseAdminSpaScopes(
             configuration["RemoteHub:AdminSpa:Scopes"],
             inventoryWriteScope,
-            auditReadScope);
+            auditReadScope,
+            administratorRoleScope);
         var normalizedOrigin = publicOriginUri.GetLeftPart(UriPartial.Authority).TrimEnd('/');
         return new AdminSpaSettings(
             authorityUri.GetLeftPart(UriPartial.Path).TrimEnd('/'),
@@ -190,10 +205,14 @@ public sealed record RemoteHubSettings(
             scopes);
     }
 
-    private static string[] ParseAdminSpaScopes(string? rawValue, string inventoryWriteScope, string auditReadScope)
+    private static string[] ParseAdminSpaScopes(
+        string? rawValue,
+        string inventoryWriteScope,
+        string auditReadScope,
+        string administratorRoleScope)
     {
         var scopes = string.IsNullOrWhiteSpace(rawValue)
-            ? ["openid", "profile", inventoryWriteScope, auditReadScope]
+            ? ["openid", "profile", inventoryWriteScope, auditReadScope, administratorRoleScope]
             : rawValue.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         if (scopes.Length == 0
@@ -205,10 +224,11 @@ public sealed record RemoteHubSettings(
         }
 
         if (!scopes.Contains("openid", StringComparer.Ordinal)
-            || !scopes.Contains(inventoryWriteScope, StringComparer.Ordinal))
+            || !scopes.Contains(inventoryWriteScope, StringComparer.Ordinal)
+            || !scopes.Contains(administratorRoleScope, StringComparer.Ordinal))
         {
             throw new InvalidOperationException(
-                "RemoteHub:AdminSpa:Scopes must include openid and the configured inventory-write scope.");
+                "RemoteHub:AdminSpa:Scopes must include openid, the configured inventory-write scope, and the administrator-role scope.");
         }
 
         if (scopes.Contains("offline_access", StringComparer.Ordinal))
@@ -250,6 +270,22 @@ public sealed record RemoteHubSettings(
         }
 
         return scope;
+    }
+
+    private static string ReadRole(IConfiguration configuration, string key, string defaultValue)
+    {
+        var role = Normalize(configuration[key]);
+        if (role.Length == 0)
+        {
+            role = defaultValue;
+        }
+
+        if (role.Length > 128 || role.Any(char.IsWhiteSpace) || role.Any(char.IsControl))
+        {
+            throw new InvalidOperationException($"{key} must contain one non-whitespace role value.");
+        }
+
+        return role;
     }
 
     private static byte[] DecodeHmacKey(string? rawValue)

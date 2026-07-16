@@ -79,6 +79,29 @@ public sealed class RemoteHubEndpointTests
     }
 
     [Fact]
+    public async Task Admin_endpoints_require_the_dedicated_administrator_role()
+    {
+        var client = await StartClientAsync();
+        try
+        {
+            using var request = CreateRequest(
+                HttpMethod.Get,
+                "/api/v1/admin/audit?take=10",
+                "remotehub.inventory.write",
+                roles: string.Empty);
+
+            using var response = await client.SendAsync(request);
+
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        }
+        finally
+        {
+            client.Dispose();
+            await StopAndCleanUpAsync();
+        }
+    }
+
+    [Fact]
     public async Task Admin_endpoint_rejects_numeric_capability_values()
     {
         var client = await StartClientAsync();
@@ -153,11 +176,20 @@ public sealed class RemoteHubEndpointTests
         return await client.SendAsync(request);
     }
 
-    private static HttpRequestMessage CreateRequest(HttpMethod method, string path, string scopes)
+    private static HttpRequestMessage CreateRequest(
+        HttpMethod method,
+        string path,
+        string scopes,
+        string roles = "stayactive.remotehub.admin")
     {
         var request = new HttpRequestMessage(method, path);
         request.Headers.Add(DevelopmentHeaderAuthenticationHandler.SubjectHeader, "test-operator");
         request.Headers.Add(DevelopmentHeaderAuthenticationHandler.ScopesHeader, scopes);
+        if (!string.IsNullOrWhiteSpace(roles))
+        {
+            request.Headers.Add(DevelopmentHeaderAuthenticationHandler.RolesHeader, roles);
+        }
+
         return request;
     }
 }

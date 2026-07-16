@@ -100,14 +100,16 @@ Back up the journal and its HMAC key separately and securely.
 RemoteHub validates issuer, audience, signature, expiry, scope (`scope` or
 `scp`), and caller identity (`sub` or `client_id`). Configure the operator-owned
 issuer to mint access tokens for the exact RemoteHub audience in the rendered
-configuration and to include the named scopes below. Do not use a shared
-client, a client secret, or an implicit/password/client-credentials grant for
-either browser/native public client.
+configuration and to include the named scopes below. Tokens that call the Admin
+inventory or audit APIs must additionally carry the dedicated flat `role` claim
+`stayactive.remotehub.admin`; assign it only to approved operators. Do not use
+a shared client, a client secret, or an implicit/password/client-credentials
+grant for either browser/native public client.
 
 | Client | Required registration and scopes | Browser/CORS and token handling |
 | --- | --- | --- |
-| StayActive Windows tray | A **native public client** using Authorization Code plus mandatory `S256` PKCE. Allow its loopback callback on `http://127.0.0.1:<dynamic-port>/` according to the provider's native-app loopback support; do not substitute a LAN callback. Request exactly `openid profile remotehub.fleet.read offline_access`. | The tray exchanges the code locally and protects any refresh token with Windows DPAPI. It needs an access token with the RemoteHub audience and `remotehub.fleet.read`; it is not a browser origin, so browser CORS is not a replacement for the provider's native-public-client controls. |
-| RemoteHub Admin page | A **browser public client** using Authorization Code plus mandatory `S256` PKCE, with no client secret. Register exactly `https://<REMOTEHUB_FQDN>/admin/` as the redirect URI and exactly `https://<REMOTEHUB_FQDN>` as its web origin. Request `openid profile remotehub.inventory.write remotehub.audit.read`; never grant or request `offline_access`. | Allow the exact Admin origin in the issuer's CORS policy for discovery/token requests. It needs an access token with the RemoteHub audience and the listed administrator scopes. The page keeps its access token only in memory and uses no refresh token. |
+| StayActive Windows tray | A **native public client** using Authorization Code plus mandatory `S256` PKCE. Allow its loopback callback on `http://127.0.0.1:<dynamic-port>/` according to the provider's native-app loopback support; do not substitute a LAN callback. For Keycloak, register the exact root form `http://127.0.0.1/` (including the trailing slash), which permits the dynamic port but rejects child paths. Request exactly `openid profile remotehub.fleet.read offline_access`. | The tray exchanges the code locally and protects any refresh token with Windows DPAPI. It needs an access token with the RemoteHub audience and `remotehub.fleet.read`; it is not a browser origin, so browser CORS is not a replacement for the provider's native-public-client controls. |
+| RemoteHub Admin page | A **browser public client** using Authorization Code plus mandatory `S256` PKCE, with no client secret. Register exactly `https://<REMOTEHUB_FQDN>/admin/` as the redirect URI and exactly `https://<REMOTEHUB_FQDN>` as its web origin. Request `openid profile remotehub.inventory.write remotehub.audit.read remotehub.admin`; never grant or request `offline_access`. | Allow the exact Admin origin in the issuer's CORS policy for discovery/token requests. It needs an access token with the RemoteHub audience and the listed administrator scopes. The page keeps its access token only in memory and uses no refresh token. |
 
 The `RemoteHub__AdminSpa__ClientId` in the rendered configuration is the second
 client above. The Windows tray's issuer/client ID are configured in its Remotes

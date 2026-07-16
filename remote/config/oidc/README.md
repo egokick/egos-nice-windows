@@ -8,7 +8,7 @@ least-privilege scopes for each relying party.
 
 Register a dedicated **native public client** for the StayActive tray. It must
 use Authorization Code flow with `S256` PKCE and the standard loopback callback
-on `http://127.0.0.1:<dynamic-port>/`; require the provider's native-app
+on `http://127.0.0.1:<dynamic-port>/`; for Keycloak, register exactly `http://127.0.0.1/` (including the trailing slash) so only the dynamic port varies. Require the provider's native-app
 loopback support rather than registering a LAN callback or a static port.
 
 Allow exactly these requested scopes:
@@ -35,7 +35,7 @@ Register these exact values:
 ```text
 Redirect URI: https://<REMOTEHUB_FQDN>/admin/
 Web origin:   https://<REMOTEHUB_FQDN>
-Scopes:       openid profile remotehub.inventory.write remotehub.audit.read
+Scopes:       openid profile remotehub.inventory.write remotehub.audit.read remotehub.admin
 ```
 
 Issue an access token for the RemoteHub audience containing

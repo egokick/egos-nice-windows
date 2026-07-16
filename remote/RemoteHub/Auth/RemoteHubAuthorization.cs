@@ -14,11 +14,14 @@ public static class RemoteHubAuthorization
 
         options.AddPolicy(RemoteHubSettings.InventoryWritePolicy, policy =>
             policy.RequireAuthenticatedUser().RequireAssertion(context =>
-                HasScope(context.User, settings.InventoryWriteScope) && RemoteHubIdentity.GetActorSubject(context.User) is not null));
+                HasScope(context.User, settings.InventoryWriteScope)
+                && HasRole(context.User, settings.AdministratorRole)
+                && RemoteHubIdentity.GetActorSubject(context.User) is not null));
 
         options.AddPolicy(RemoteHubSettings.AuditReadPolicy, policy =>
             policy.RequireAuthenticatedUser().RequireAssertion(context =>
                 (HasScope(context.User, settings.AuditReadScope) || HasScope(context.User, settings.InventoryWriteScope))
+                && HasRole(context.User, settings.AdministratorRole)
                 && RemoteHubIdentity.GetActorSubject(context.User) is not null));
     }
 
@@ -27,6 +30,12 @@ public static class RemoteHubAuthorization
             .Where(static claim => claim.Type is "scope" or "scp")
             .SelectMany(static claim => claim.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             .Any(scope => string.Equals(scope, requiredScope, StringComparison.Ordinal));
+
+    public static bool HasRole(ClaimsPrincipal user, string requiredRole) =>
+        user.Claims
+            .Where(static claim => claim.Type is "role" or ClaimTypes.Role)
+            .SelectMany(static claim => claim.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .Any(role => string.Equals(role, requiredRole, StringComparison.Ordinal));
 }
 
 public static class RemoteHubIdentity

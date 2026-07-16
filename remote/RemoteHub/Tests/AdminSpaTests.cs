@@ -26,7 +26,20 @@ public sealed class AdminSpaTests
         Assert.Equal("https://remotehub.example.test/admin/", admin.RedirectUri);
         Assert.Contains("openid", admin.Scopes);
         Assert.Contains("remotehub.inventory.write", admin.Scopes);
+        Assert.Contains("remotehub.admin", admin.Scopes);
         Assert.DoesNotContain("offline_access", admin.Scopes);
+    }
+
+    [Fact]
+    public void Admin_spa_rejects_a_configuration_without_the_administrator_role_scope()
+    {
+        var values = CreateSettings(Path.Combine(Path.GetTempPath(), "remotehub-admin-settings", "inventory.journal.jsonl"));
+        values["RemoteHub:AdminSpa:Scopes"] = "openid profile remotehub.inventory.write remotehub.audit.read";
+        var builder = CreateBuilder(Environments.Production, values);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => RemoteHubSettings.Load(builder.Configuration, builder.Environment));
+
+        Assert.Contains("administrator-role scope", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -68,6 +81,7 @@ public sealed class AdminSpaTests
             var scriptContent = await script.Content.ReadAsStringAsync();
             Assert.Contains("code_challenge_method: \"S256\"", scriptContent, StringComparison.Ordinal);
             Assert.DoesNotContain("client_secret", scriptContent, StringComparison.Ordinal);
+            Assert.DoesNotContain("includes(\"none\")", scriptContent, StringComparison.Ordinal);
 
             using var configurationResponse = await client.GetAsync("/admin/config.json");
             Assert.Equal(HttpStatusCode.OK, configurationResponse.StatusCode);

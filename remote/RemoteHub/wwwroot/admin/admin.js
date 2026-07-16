@@ -226,10 +226,11 @@ function assertPkceDiscovery(discovery) {
     || !discovery.code_challenge_methods_supported.includes("S256")) {
     throw new Error("Configured OIDC provider does not advertise required S256 PKCE support.");
   }
-  if (!Array.isArray(discovery.token_endpoint_auth_methods_supported)
-    || !discovery.token_endpoint_auth_methods_supported.includes("none")) {
-    throw new Error("Configured OIDC provider does not permit public-client token exchange without a client secret.");
-  }
+  // token_endpoint_auth_methods_supported is issuer-wide metadata, not a
+  // statement of what this particular client may do. Keycloak, for example,
+  // supports public clients but does not advertise "none" in that array.
+  // This browser always sends no client secret; the configured public client
+  // and mandatory S256 PKCE policy enforce that at the token endpoint.
 }
 
 async function refreshData() {

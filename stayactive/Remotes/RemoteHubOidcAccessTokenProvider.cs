@@ -669,7 +669,7 @@ internal sealed class RemoteHubOidcAccessTokenProvider : IRemoteHubAccessTokenPr
             && string.Equals(redirectUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
             && string.Equals(redirectUri.Host, "127.0.0.1", StringComparison.Ordinal)
             && redirectUri.Port is > 0 and <= 65535
-            && !string.IsNullOrWhiteSpace(redirectUri.AbsolutePath)
+            && string.Equals(redirectUri.AbsolutePath, "/", StringComparison.Ordinal)
             && string.IsNullOrEmpty(redirectUri.UserInfo)
             && string.IsNullOrEmpty(redirectUri.Query)
             && string.IsNullOrEmpty(redirectUri.Fragment);
@@ -1401,8 +1401,13 @@ internal sealed class SystemRemoteHubLoopbackCallbackListener : IRemoteHubLoopba
         for (var attempt = 0; attempt < 5; attempt++)
         {
             var port = GetAvailableLoopbackPort();
-            var callbackPath = "/stayactive-oidc-" + CreateCallbackNonce() + "/";
-            var prefix = $"http://127.0.0.1:{port}{callbackPath}";
+            // RFC 8252 loopback redirect registrations allow the client to use
+            // an ephemeral port, but providers such as Keycloak still require
+            // the registered path to match. Keep the path fixed at the root so
+            // the native public client can register the narrow
+            // http://127.0.0.1 callback rather than an over-broad path wildcard.
+            // State and S256 PKCE bind the returned authorization response.
+            var prefix = $"http://127.0.0.1:{port}/";
             var listener = new HttpListener();
             listener.Prefixes.Add(prefix);
             try

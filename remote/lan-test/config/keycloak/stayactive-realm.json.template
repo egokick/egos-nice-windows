@@ -1,0 +1,177 @@
+{
+  "realm": "stayactive",
+  "enabled": true,
+  "displayName": "StayActive Remotes LAN Test",
+  "sslRequired": "all",
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 28800,
+  "roles": {
+    "realm": [
+      { "name": "remotehub-fleet-read", "composite": false, "clientRole": false },
+      { "name": "remotehub-inventory-write", "composite": false, "clientRole": false },
+      { "name": "remotehub-audit-read", "composite": false, "clientRole": false },
+      { "name": "stayactive.remotehub.admin", "composite": false, "clientRole": false }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "remotehub.fleet.read",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "remotehub.inventory.write",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "remotehub.audit.read",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "remotehub.admin",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      },
+      "protocolMappers": [
+        {
+          "name": "flat-stayactive-remotehub-admin-role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "role",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "stayactive-remotes-tray",
+      "name": "StayActive Windows tray",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": ["http://127.0.0.1/"],
+      "webOrigins": [],
+      "defaultClientScopes": ["profile"],
+      "optionalClientScopes": ["remotehub.fleet.read", "offline_access"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "remotehub-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "stayactive-remotehub",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "stayactive-remotehub-admin",
+      "name": "StayActive RemoteHub Admin",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": ["https://remotehub.stayactive.test/admin/"],
+      "webOrigins": ["https://remotehub.stayactive.test"],
+      "defaultClientScopes": ["profile"],
+      "optionalClientScopes": ["remotehub.inventory.write", "remotehub.audit.read", "remotehub.admin"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "use.refresh.tokens": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "remotehub-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "stayactive-remotehub",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "__OPERATOR_USERNAME__",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "__OPERATOR_PASSWORD__",
+          "temporary": true
+        }
+      ],
+      "realmRoles": [
+        "remotehub-fleet-read",
+        "remotehub-inventory-write",
+        "remotehub-audit-read",
+        "stayactive.remotehub.admin",
+        "offline_access"
+      ]
+    }
+  ]
+}

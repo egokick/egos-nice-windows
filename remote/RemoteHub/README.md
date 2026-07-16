@@ -53,12 +53,15 @@ parent `remote/` directory, but this service deliberately does not alter that
 scaffold or assume a hosted provider.
 
 Optional scope-name overrides are available only when an operator needs a
-different naming convention:
+different naming convention. Inventory and audit APIs also require the dedicated
+administrator role; configure the issuer to emit that exact flat `role` claim
+only for approved operators:
 
 ```text
 RemoteHub__Authorization__FleetReadScope=remotehub.fleet.read
 RemoteHub__Authorization__InventoryWriteScope=remotehub.inventory.write
 RemoteHub__Authorization__AuditReadScope=remotehub.audit.read
+RemoteHub__Authorization__AdministratorRole=stayactive.remotehub.admin
 ```
 
 ## Self-hosted Admin page (OIDC Authorization Code + PKCE)
@@ -86,7 +89,7 @@ Configure it only behind the operator-controlled HTTPS reverse proxy:
 RemoteHub__AdminSpa__Enabled=true
 RemoteHub__AdminSpa__PublicOrigin=https://remotehub.example.net
 RemoteHub__AdminSpa__ClientId=stayactive-remotehub-admin
-RemoteHub__AdminSpa__Scopes=openid profile remotehub.inventory.write remotehub.audit.read
+RemoteHub__AdminSpa__Scopes=openid profile remotehub.inventory.write remotehub.audit.read remotehub.admin
 ```
 
 `PublicOrigin` must be exactly the external browser origin, with no path. The

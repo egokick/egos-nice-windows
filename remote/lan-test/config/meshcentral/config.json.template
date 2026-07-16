@@ -1,0 +1,69 @@
+{
+  "settings": {
+    "cert": "meshcentral.stayactive.test",
+    "port": 4430,
+    "portBind": "0.0.0.0",
+    "aliasPort": 443,
+    "redirPort": 0,
+    "mpsPort": 0,
+    "WANonly": true,
+    "exactPorts": true,
+    "tlsOffload": "__CADDY_CONTROL_IP__",
+    "trustedProxy": "__CADDY_CONTROL_IP__",
+    "sessionKey": "__MESHCENTRAL_SESSION_KEY__",
+    "dbRecordsEncryptKey": "__MESHCENTRAL_RECORDS_KEY__",
+    "sessionTime": 30,
+    "sessionSameSite": "strict",
+    "cookieIpCheck": "strict",
+    "allowLoginToken": false,
+    "allowFraming": false,
+    "webRTC": false,
+    "selfUpdate": false,
+    "plugins": { "enabled": false },
+    "agentSignLock": true,
+    "lockAgentDownload": true,
+    "publicPushNotifications": false,
+    "desktopMultiplex": false,
+    "agentLogDump": false,
+    "agentCoreDump": false,
+    "webPageLengthRandomization": true
+  },
+  "domains": {
+    "": {
+      "title": "StayActive Remotes LAN Test",
+      "certUrl": "https://meshcentral.stayactive.test:443/",
+      "newAccounts": __MESHCENTRAL_NEW_ACCOUNTS__,
+      "localSessionRecording": false,
+      "minify": true,
+      "desktop": {
+        "viewonly": true
+      },
+      "userConsentFlags": {
+        "desktopprompt": true,
+        "desktopnotify": true,
+        "desktopprivacybar": true,
+        "fileprompt": true,
+        "filenotify": true,
+        "terminalprompt": true,
+        "terminalnotify": true
+      },
+      "desktopPrivacyBarText": "StayActive Remotes: {0} ({1}) is viewing this screen.",
+      "consentMessages": {
+        "Title": "StayActive Remotes",
+        "Desktop": "{0} ({1}) requests to view this screen. Allow?",
+        "Files": "{0} ({1}) requests a file-transfer session. Allow?",
+        "Terminal": "{0} ({1}) requests a terminal session. Allow?",
+        "consentTimeout": 30,
+        "autoAcceptOnTimeout": false,
+        "autoAcceptIfNoUser": false,
+        "autoAcceptIfDesktopNoUser": false,
+        "autoAcceptIfTerminalNoUser": false,
+        "autoAcceptIfFileNoUser": false,
+        "autoAcceptIfLocked": false,
+        "autoAcceptIfDesktopLocked": false,
+        "autoAcceptIfTerminalLocked": false,
+        "autoAcceptIfFileLocked": false
+      }
+    }
+  }
+}

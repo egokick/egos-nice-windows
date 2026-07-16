@@ -1,0 +1,53 @@
+#!/bin/sh
+# Runs inside the private Keycloak container after the imported realm exists.
+# It reads bootstrap credentials from the container environment; do not add
+# secrets to this file or echo shell commands.
+set -eu
+
+KCADM=/opt/keycloak/bin/kcadm.sh
+REALM=stayactive
+
+"$KCADM" config credentials \
+  --server http://127.0.0.1:8080 \
+  --realm master \
+  --user "$KC_BOOTSTRAP_ADMIN_USERNAME" \
+  --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" >/dev/null
+
+get_scope_id() {
+  requested_name="$1"
+  "$KCADM" get client-scopes -r "$REALM" --fields id,name --format csv --noquotes \
+    | while IFS=, read -r scope_id scope_name; do
+        if [ "$scope_name" = "$requested_name" ]; then
+          printf '%s\n' "$scope_id"
+          break
+        fi
+      done
+}
+
+get_role_id() {
+  "$KCADM" get "roles/$1" -r "$REALM" --fields id --format csv --noquotes
+}
+
+map_scope_to_role() {
+  scope_name="$1"
+  role_name="$2"
+  scope_id="$(get_scope_id "$scope_name")"
+  role_id="$(get_role_id "$role_name")"
+  if [ -z "$scope_id" ] || [ -z "$role_id" ]; then
+    echo "Required Keycloak scope or role was not found." >&2
+    exit 1
+  fi
+
+  if "$KCADM" get "client-scopes/$scope_id/scope-mappings/realm" -r "$REALM" \
+    | grep -F '"id" : "'"$role_id"'"' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  body="[{\"id\":\"$role_id\",\"name\":\"$role_name\",\"composite\":false,\"clientRole\":false,\"containerId\":\"$REALM\"}]"
+  "$KCADM" create "client-scopes/$scope_id/scope-mappings/realm" -r "$REALM" -b "$body" >/dev/null
+}
+
+map_scope_to_role remotehub.fleet.read remotehub-fleet-read
+map_scope_to_role remotehub.inventory.write remotehub-inventory-write
+map_scope_to_role remotehub.audit.read remotehub-audit-read
+map_scope_to_role remotehub.admin stayactive.remotehub.admin
