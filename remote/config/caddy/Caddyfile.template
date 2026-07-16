@@ -1,0 +1,21 @@
+# TEMPLATE ONLY. Caddy expands {$...} from the environment supplied by Compose.
+# The operator must populate the matching values in the untracked .env file.
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+{$HEADSCALE_FQDN} {
+	reverse_proxy headscale:8080
+}
+
+{$MESHCENTRAL_FQDN} {
+	reverse_proxy meshcentral:4430
+}
+
+# The RemoteHub API and its same-origin, OIDC-PKCE Admin page are reachable
+# only through this operator-controlled HTTPS edge. The Kestrel port remains
+# un-published inside the Docker control network.
+{$REMOTEHUB_FQDN} {
+	reverse_proxy remotehub:5088
+}

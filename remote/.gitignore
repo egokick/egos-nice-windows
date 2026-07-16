@@ -1,0 +1,11 @@
+# Operator-generated runtime state and credentials must never be committed.
+.env
+runtime/
+secrets/
+
+# Rendered production configuration. Keep only the *.template sources in Git.
+config/caddy/Caddyfile
+config/headscale/config.yaml
+config/headscale/policy.hujson
+config/meshcentral/config.json
+config/remotehub/appsettings.Production.json
