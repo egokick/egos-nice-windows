@@ -92,19 +92,34 @@ function Write-Utf8File([string]$Path, [string]$Content) {
 
 function Protect-LocalSecret([string]$Path) {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $fileGrants = @(
+        "${identity}:(F)",
+        'SYSTEM:(F)',
+        'BUILTIN\Administrators:(F)')
     $isDirectory = Test-Path -LiteralPath $Path -PathType Container
-    $arguments = @(
-        $Path,
-        '/inheritance:r',
-        '/grant:r',
-        "${identity}:(OI)(CI)F",
-        'SYSTEM:(OI)(CI)F',
-        'BUILTIN\Administrators:(OI)(CI)F')
+
     if ($isDirectory) {
-        $arguments += '/T'
+        # Existing descendants need access on the object itself. Apply plain
+        # full-control ACEs recursively first, then put inheritable ACEs back
+        # on the directory for future container-created files.
+        & icacls $Path /inheritance:r /grant:r @fileGrants /T | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to restrict existing local state below $Path."
+        }
+
+        $directoryGrants = @(
+            "${identity}:(OI)(CI)F",
+            'SYSTEM:(OI)(CI)F',
+            'BUILTIN\Administrators:(OI)(CI)F')
+        & icacls $Path /inheritance:r /grant:r @directoryGrants | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to restrict future local state below $Path."
+        }
+
+        return
     }
 
-    & icacls @arguments | Out-Null
+    & icacls $Path /inheritance:r /grant:r @fileGrants | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to restrict access to $Path."
     }
