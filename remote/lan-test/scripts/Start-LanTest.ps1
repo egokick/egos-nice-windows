@@ -77,8 +77,20 @@ Copy-Item -LiteralPath $rootCertificateSource -Destination $rootCertificateDesti
 $mappingDeadline = [DateTime]::UtcNow.AddSeconds(180)
 $mappingReady = $false
 while ([DateTime]::UtcNow -lt $mappingDeadline) {
-    & docker @($composePrefix + @('exec', '-T', 'keycloak', 'sh', $keycloakMapperPath)) *> $null
-    if ($LASTEXITCODE -eq 0) {
+    # kcadm writes a normal login-status line to stderr. Preserve strict error
+    # handling elsewhere, but assess this readiness probe by its process exit
+    # code rather than treating that informational line as a PowerShell error.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & docker @($composePrefix + @('exec', '-T', 'keycloak', 'sh', $keycloakMapperPath)) *> $null
+        $mappingExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($mappingExitCode -eq 0) {
         $mappingReady = $true
         break
     }
