@@ -45,20 +45,51 @@ if ($ExitNode) {
 }
 
 $composePrefix = @('compose', '--env-file', $environmentFile, '-f', $composeFile)
+$userList = & docker @($composePrefix + @('exec', '-T', 'headscale', 'headscale', 'users', 'list', '--output', 'json'))
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to list Headscale users. Ensure Finalize-LanTest.ps1 has completed.'
+}
+
+try {
+    $headscaleUsers = @($userList | Out-String | ConvertFrom-Json)
+}
+catch {
+    throw 'Headscale did not return a JSON user list.'
+}
+
+$policyOwner = $headscaleUsers | Where-Object { $_.name -eq 'stayactive-admin' } | Select-Object -First 1
+if ($null -eq $policyOwner -or $null -eq $policyOwner.id) {
+    throw 'The stayactive-admin Headscale policy owner does not exist.'
+}
+
 $arguments = $composePrefix + @(
     'exec', '-T',
     'headscale',
     'headscale', 'preauthkeys', 'create',
-    '--user', 'stayactive-admin',
+    '--force',
+    '--user', [string]$policyOwner.id,
     '--expiration', "$($LifetimeHours)h",
-    '--tags', ($tags -join ',')
+    '--tags', ($tags -join ','),
+    '--output', 'json'
 )
 
 # Headscale defaults this key to non-reusable. It is intentionally printed only
 # to this local terminal and is never written to the repository or LAN state.
-& docker @arguments
+$keyOutput = & docker @arguments
 if ($LASTEXITCODE -ne 0) {
-    throw 'Unable to create the one-time Headscale enrollment key. Ensure Finalize-LanTest.ps1 has completed.'
+    throw 'Unable to create the one-time Headscale enrollment key.'
 }
 
+try {
+    $preauthKey = $keyOutput | Out-String | ConvertFrom-Json
+}
+catch {
+    throw 'Headscale did not return the generated enrollment key as JSON.'
+}
+
+if ([string]::IsNullOrWhiteSpace($preauthKey.key)) {
+    throw 'Headscale returned an enrollment response without a key.'
+}
+
+Write-Host $preauthKey.key
 Write-Host 'Transfer the displayed enrollment key only through a secure out-of-band channel. It expires automatically and must not be pasted into chat, email, source control, or a shell history you do not control.'

@@ -105,9 +105,13 @@ https://headscale.stayactive.test
 ~~~
 
 The other laptop needs tag:stayactive and tag:stayactive-exit. Once it is
-connected, advertise its default route with the Tailscale client and manually
-approve the advertised 0.0.0.0/0 route in Headscale before selecting it in the
-StayActive tray menu.
+connected, advertise its default route with the Tailscale client. Find its
+numeric Headscale node ID, then explicitly approve only its advertised default
+route before selecting it in the StayActive tray menu:
+
+~~~powershell
+.\scripts\Approve-LanTestExitNode.ps1 -NodeId 123 -ApproveExitNode
+~~~
 
 ## Inventory and RemoteHub
 
