@@ -759,4 +759,3 @@ finally {
 }
 
 Write-Host 'The dedicated Windows enrollment controller is running. Its long-lived Headscale API key is stored only in that service account''s Windows Credential Manager.'
-
