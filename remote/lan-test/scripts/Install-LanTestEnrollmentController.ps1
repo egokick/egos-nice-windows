@@ -200,6 +200,7 @@ function New-ControllerServiceAccount {
 
     $plainPassword = New-ServicePassword
     $securePassword = ConvertTo-SecureString -String $plainPassword -AsPlainText -Force
+    $createdAccount = $false
     try {
         New-LocalUser `
             -Name $serviceAccountName `
@@ -208,6 +209,7 @@ function New-ControllerServiceAccount {
             -PasswordNeverExpires `
             -UserMayNotChangePassword `
             -Description 'Dedicated local identity for the StayActive Headscale enrollment controller.' | Out-Null
+        $createdAccount = $true
         $identity = "$env:COMPUTERNAME\$serviceAccountName"
         Assert-ServiceAccountIsIsolated $serviceAccountName
         return [pscustomobject]@{
@@ -217,8 +219,22 @@ function New-ControllerServiceAccount {
         }
     }
     catch {
+        $failure = $_
         $plainPassword = $null
-        throw
+        $securePassword = $null
+        if ($createdAccount) {
+            try {
+                # Isolation is verified immediately after creation. If it fails,
+                # remove only the account this invocation just created; it has not
+                # received a controller key or loaded a user profile yet.
+                Remove-LocalUser -Name $serviceAccountName -ErrorAction Stop
+            }
+            catch {
+                throw 'A newly-created dedicated controller account could not be removed after isolation validation failed. Resolve that local account state before retrying.'
+            }
+        }
+
+        throw $failure
     }
 }
 
@@ -268,6 +284,62 @@ function Expire-ControllerApiKey([string[]]$ComposePrefix, [string]$KeyId) {
         '--force', '--id', $KeyId)) 'Unable to expire the unused Headscale controller API key.'
 }
 
+function Get-ControllerServiceProfiles([string]$ServiceSid = '') {
+    try {
+        $profiles = @(Get-CimInstance Win32_UserProfile -ErrorAction Stop)
+    }
+    catch {
+        throw 'Unable to inspect the dedicated controller profile during protected recovery.'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ServiceSid)) {
+        return @($profiles | Where-Object { [string]$_.SID -eq $ServiceSid })
+    }
+
+    # If the local account was removed in a previous interrupted recovery, the
+    # fixed profile directory is the only safe residue we can recognize without
+    # retaining any credential, password, or additional identity metadata.
+    $systemDrive = [Environment]::GetEnvironmentVariable('SystemDrive')
+    if ([string]::IsNullOrWhiteSpace($systemDrive)) {
+        throw 'Windows SystemDrive is unavailable for protected controller recovery.'
+    }
+    $expectedPath = [System.IO.Path]::GetFullPath((Join-Path $systemDrive "Users\$serviceAccountName")).TrimEnd('\')
+    return @($profiles | Where-Object {
+            $localPath = [string]$_.LocalPath
+            if ([string]::IsNullOrWhiteSpace($localPath)) {
+                return $false
+            }
+            try {
+                return [System.IO.Path]::GetFullPath($localPath).TrimEnd('\') -ieq $expectedPath
+            }
+            catch {
+                return $false
+            }
+        })
+}
+
+function Remove-ControllerServiceProfiles([string]$ServiceSid = '') {
+    $profiles = @(Get-ControllerServiceProfiles $ServiceSid)
+    foreach ($profile in $profiles) {
+        if ([bool]$profile.Special -or [bool]$profile.Loaded) {
+            throw 'The dedicated controller credential profile is special or still loaded; do not remove it automatically.'
+        }
+        try {
+            # Win32_UserProfile removal clears the matching profile directory and
+            # registry hive, including DPAPI/Credential Manager residue, without
+            # ever requiring or reconstructing the service-account password.
+            Remove-CimInstance -InputObject $profile -ErrorAction Stop
+        }
+        catch {
+            throw 'Unable to remove the dedicated controller credential profile during protected recovery.'
+        }
+    }
+
+    if (@(Get-ControllerServiceProfiles $ServiceSid).Count -ne 0) {
+        throw 'The dedicated controller credential profile remains after protected recovery cleanup.'
+    }
+}
+
 function Resolve-PendingControllerRecovery(
     [string[]]$ComposePrefix,
     [string]$MetadataPath) {
@@ -295,19 +367,19 @@ function Resolve-PendingControllerRecovery(
     }
 
     $orphan = Get-LocalUser -Name $serviceAccountName -ErrorAction SilentlyContinue
+    $orphanSid = ''
     if ($null -ne $orphan) {
         if ($orphan.Description -ne 'Dedicated local identity for the StayActive Headscale enrollment controller.') {
             throw 'The pending controller recovery account has an unexpected identity; refuse to remove it automatically.'
         }
-
-        try {
-            Remove-LocalUser -Name $serviceAccountName -ErrorAction Stop
-        }
-        catch {
-            throw 'Unable to remove the pending dedicated controller account; resolve the protected recovery state before retrying.'
+        $orphanSid = [string]$orphan.SID
+        if ($orphanSid -notmatch '^S-1-5-21-(?:[0-9]+-){3}[0-9]+$') {
+            throw 'The pending controller recovery account has an invalid local SID; refuse to remove it automatically.'
         }
     }
 
+    # Fail closed: the raw key might have reached CredMan immediately before a
+    # crash. Revoke it before deleting an account, profile, or credential residue.
     try {
         Expire-ControllerApiKey $ComposePrefix $keyId
     }
@@ -316,10 +388,26 @@ function Resolve-PendingControllerRecovery(
     }
 
     try {
+        Remove-ControllerServiceProfiles $orphanSid
+    }
+    catch {
+        throw 'Unable to remove the pending dedicated controller credential profile after key expiration; resolve the protected recovery state before retrying.'
+    }
+
+    if ($null -ne $orphan) {
+        try {
+            Remove-LocalUser -Name $serviceAccountName -ErrorAction Stop
+        }
+        catch {
+            throw 'Unable to remove the pending dedicated controller account after key expiration; resolve the protected recovery state before retrying.'
+        }
+    }
+
+    try {
         Remove-Item -LiteralPath $MetadataPath -Force
     }
     catch {
-        throw 'Unable to clear protected controller recovery metadata after key expiration.'
+        throw 'Unable to clear protected controller recovery metadata after key expiration and residue cleanup.'
     }
 }
 function Invoke-ControllerCredentialProvisioner(
@@ -562,36 +650,26 @@ try {
 catch {
     $failure = $_
     $controllerKeyExpired = $true
+    $serviceRemoved = $true
+    $profileRemoved = $true
     $accountRemoved = $true
     if ($null -eq $existingService -and $null -ne $newIdentity) {
         if ($serviceCreated) {
             try {
-                Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+                Stop-Service -Name $serviceName -Force -ErrorAction Stop
                 & sc.exe delete $serviceName | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    throw 'Unable to delete the newly-created enrollment controller service.'
+                }
             }
             catch {
-                # Do not replace the original failure with cleanup details.
+                $serviceRemoved = $false
             }
         }
 
-        if ($null -ne $newApiKey) {
-            try {
-                # This command carries no secret. It runs as the same local
-                # service identity that owns the generic CredMan entry.
-                Invoke-ControllerCredentialProvisioner $controllerExecutable $newIdentity.Credential 'Delete'
-            }
-            catch {
-                # Expiring the Headscale key remains the fail-closed boundary.
-            }
-        }
-
-        try {
-            Remove-LocalUser -Name $serviceAccountName -ErrorAction Stop
-        }
-        catch {
-            $accountRemoved = $false
-        }
-
+        # Once Headscale has minted a key, revocation is the first cleanup
+        # action. Do not remove the account, its profile, or its CredMan entry
+        # while a crash-recovery key could still be active.
         if ($null -ne $newApiKey) {
             try {
                 Expire-ControllerApiKey $composePrefix ([string]$newApiKey.Id)
@@ -601,7 +679,59 @@ catch {
             }
         }
 
-        if ($metadataWritten -and $controllerKeyExpired -and $accountRemoved -and (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+        if ($controllerKeyExpired -and $serviceRemoved) {
+            if ($null -ne $newApiKey) {
+                try {
+                    # This command carries no secret. It runs as the same local
+                    # service identity that owns the generic CredMan entry.
+                    Invoke-ControllerCredentialProvisioner $controllerExecutable $newIdentity.Credential 'Delete'
+                }
+                catch {
+                    # Profile removal below is the password-free fallback. The
+                    # key is already expired, so preserving recovery evidence is
+                    # safer than replacing the original failure here.
+                }
+            }
+
+            $pendingAccount = Get-LocalUser -Name $serviceAccountName -ErrorAction SilentlyContinue
+            $pendingSid = ''
+            if ($null -ne $pendingAccount) {
+                if ($pendingAccount.Description -ne 'Dedicated local identity for the StayActive Headscale enrollment controller.') {
+                    $profileRemoved = $false
+                    $accountRemoved = $false
+                }
+                else {
+                    $pendingSid = [string]$pendingAccount.SID
+                }
+            }
+
+            if ($profileRemoved) {
+                try {
+                    Remove-ControllerServiceProfiles $pendingSid
+                }
+                catch {
+                    $profileRemoved = $false
+                }
+            }
+
+            if ($profileRemoved -and $null -ne $pendingAccount) {
+                try {
+                    Remove-LocalUser -Name $serviceAccountName -ErrorAction Stop
+                }
+                catch {
+                    $accountRemoved = $false
+                }
+            }
+        }
+        else {
+            # Keep the account/profile and non-secret metadata intact for the
+            # next protected recovery attempt when key revocation or service
+            # teardown could not be proven complete.
+            $profileRemoved = $false
+            $accountRemoved = $false
+        }
+
+        if ($metadataWritten -and $controllerKeyExpired -and $serviceRemoved -and $profileRemoved -and $accountRemoved -and (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
             try {
                 Remove-Item -LiteralPath $metadataPath -Force
             }
@@ -613,7 +743,7 @@ catch {
         }
     }
 
-    if (-not $controllerKeyExpired -or -not $accountRemoved) {
+    if (-not $controllerKeyExpired -or -not $serviceRemoved -or -not $profileRemoved -or -not $accountRemoved) {
         throw 'The enrollment controller installation could not complete rollback. Protected recovery metadata remains; resolve it before retrying.'
     }
 

@@ -400,6 +400,12 @@ function New-ValidatedControllerEnvironment(
     [hashtable]$ImagePins,
     [string]$RepositoryRoot) {
     $environment = ConvertTo-EnvironmentMap $EnvironmentLines
+    # Older bootstrap runs predate the controller-address variable. Treat its
+    # absence as the only safe compatibility case; finalization replaces this
+    # loopback-only value before Caddy can route to the controller.
+    if (-not $environment.ContainsKey('WINDOWS_ENROLLMENT_CONTROLLER_IP')) {
+        $environment['WINDOWS_ENROLLMENT_CONTROLLER_IP'] = '127.0.0.1'
+    }
     $orderedNames = @(
         'COMPOSE_PROJECT_NAME',
         'LAN_IP',
