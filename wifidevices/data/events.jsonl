@@ -315,3 +315,10 @@
 {"atUtc":"2026-07-10T03:45:04.2859234+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
 {"atUtc":"2026-07-10T03:45:04.2859234+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
 {"atUtc":"2026-07-10T03:45:04.2859234+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"5A:B3:9C:7F:CD:53","online":false,"ipAddress":"192.168.1.173","source":"Remote router (192.168.1.254)","hostName":"Apple iPhone"}
+{"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"B6:AD:92:56:8D:78","online":false,"ipAddress":"192.168.1.178","source":"Remote router (192.168.1.254)","hostName":"Apple iPhone"}
+{"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"E0:2B:E9:F7:48:A6","online":true,"ipAddress":"192.168.1.167","source":"Remote router (192.168.1.254)","hostName":"DESKTOP-P3N2172"}
