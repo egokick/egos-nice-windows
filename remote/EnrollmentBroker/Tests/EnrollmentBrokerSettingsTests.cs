@@ -13,13 +13,10 @@ public sealed class EnrollmentBrokerSettingsTests
     {
         var directory = Path.Combine(Path.GetTempPath(), "stayactive-enrollmentbroker-settings", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
-        var apiKeyFile = Path.Combine(directory, "headscale-api-key");
         var journalKeyFile = Path.Combine(directory, "journal-hmac-key");
-        const string apiKey = "hskey-api-configuration-secret";
         var journalKey = RandomNumberGenerator.GetBytes(32);
         try
         {
-            File.WriteAllText(apiKeyFile, apiKey);
             File.WriteAllText(journalKeyFile, Convert.ToBase64String(journalKey));
             var configuration = new ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?>
@@ -28,8 +25,7 @@ public sealed class EnrollmentBrokerSettingsTests
                     ["EnrollmentBroker:Authentication:Audience"] = "stayactive-enrollment",
                     ["EnrollmentBroker:Storage:JournalPath"] = Path.Combine(directory, "tickets.journal.jsonl"),
                     ["EnrollmentBroker:Storage:JournalHmacKeyFile"] = journalKeyFile,
-                    ["EnrollmentBroker:Headscale:ApiBaseUrl"] = "https://headscale-api.stayactive.test",
-                    ["EnrollmentBroker:Headscale:ApiKeyFile"] = apiKeyFile,
+                    ["EnrollmentBroker:Headscale:ApiBaseUrl"] = EnrollmentBrokerSettings.HeadscaleControllerApiBaseUrl,
                     ["EnrollmentBroker:Headscale:UserId"] = "1",
                     ["EnrollmentBroker:Headscale:LoginServer"] = "https://headscale.stayactive.test"
                 })
@@ -41,7 +37,6 @@ public sealed class EnrollmentBrokerSettingsTests
             Assert.Equal("stayactive-enrollment", settings.OidcAudience);
             Assert.Equal("stayactive.enrollment.write", settings.EnrollmentWriteScope);
             var diagnostic = settings.ToString();
-            Assert.DoesNotContain(apiKey, diagnostic, StringComparison.Ordinal);
             Assert.DoesNotContain(Convert.ToBase64String(journalKey), diagnostic, StringComparison.Ordinal);
             Assert.Contains("[REDACTED]", diagnostic, StringComparison.Ordinal);
         }
@@ -53,6 +48,51 @@ public sealed class EnrollmentBrokerSettingsTests
                 Directory.Delete(directory, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public void Settings_reject_legacy_controller_key_configuration_without_echoing_it()
+    {
+        const string rawControllerKey = "hskey-api-settings-test-secret";
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["EnrollmentBroker:LocalDevelopment:Enabled"] = "true",
+                ["EnrollmentBroker:Storage:JournalPath"] = Path.Combine(Path.GetTempPath(), "tickets.journal.jsonl"),
+                ["EnrollmentBroker:Storage:JournalHmacKey"] = Convert.ToBase64String(new byte[32]),
+                ["EnrollmentBroker:Headscale:ApiBaseUrl"] = EnrollmentBrokerSettings.HeadscaleControllerApiBaseUrl,
+                ["EnrollmentBroker:Headscale:ApiKey"] = rawControllerKey,
+                ["EnrollmentBroker:Headscale:UserId"] = "1",
+                ["EnrollmentBroker:Headscale:LoginServer"] = "https://headscale.stayactive.test"
+            })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            EnrollmentBrokerSettings.Load(configuration, new TestWebHostEnvironment("Testing", Path.GetTempPath())));
+
+        Assert.Contains("ApiKey", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawControllerKey, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Settings_rejects_any_headscale_api_origin_except_the_fixed_controller()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["EnrollmentBroker:LocalDevelopment:Enabled"] = "true",
+                ["EnrollmentBroker:Storage:JournalPath"] = Path.Combine(Path.GetTempPath(), "tickets.journal.jsonl"),
+                ["EnrollmentBroker:Storage:JournalHmacKey"] = Convert.ToBase64String(new byte[32]),
+                ["EnrollmentBroker:Headscale:ApiBaseUrl"] = "https://headscale-api.stayactive.test",
+                ["EnrollmentBroker:Headscale:UserId"] = "1",
+                ["EnrollmentBroker:Headscale:LoginServer"] = "https://headscale.stayactive.test"
+            })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            EnrollmentBrokerSettings.Load(configuration, new TestWebHostEnvironment("Testing", Path.GetTempPath())));
+
+        Assert.Contains(EnrollmentBrokerSettings.HeadscaleControllerApiBaseUrl, exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

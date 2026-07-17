@@ -52,6 +52,23 @@ public sealed class MeshCentralRemoteActionServiceTests
         Assert.Contains("HTTPS", result.Message);
     }
 
+    [Theory]
+    [InlineData("https://login.tailscale.com")]
+    [InlineData("https://login.tailscale.com.")]
+    public void Open_RejectsHostedTailscaleUrlAndDoesNotStartAnExternalProcess(string meshCentralUrl)
+    {
+        var launcher = new CapturingLauncher();
+        var service = CreateService(meshCentralUrl, launcher);
+
+        var result = service.Open(
+            CreateDevice(RemoteCapability.ScreenView, "node//workstation"),
+            RemoteWebAction.ViewScreen);
+
+        Assert.False(result.Succeeded);
+        Assert.Null(launcher.OpenedUri);
+        Assert.Contains("self-hosted", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void GetAvailability_RequiresTheMatchingConsentCapableDevice()
     {

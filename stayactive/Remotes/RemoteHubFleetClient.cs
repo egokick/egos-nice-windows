@@ -193,12 +193,8 @@ internal sealed class RemoteHubFleetClient : IRemoteHubInventoryClient
     internal static bool TryGetFleetEndpoint(string configuredUrl, out Uri fleetEndpoint)
     {
         fleetEndpoint = null!;
-        if (!Uri.TryCreate(configuredUrl, UriKind.Absolute, out var remoteHub)
-            || remoteHub.Scheme != Uri.UriSchemeHttps
-            || string.IsNullOrEmpty(remoteHub.Host)
-            || !string.IsNullOrEmpty(remoteHub.UserInfo)
-            || !string.IsNullOrEmpty(remoteHub.Query)
-            || !string.IsNullOrEmpty(remoteHub.Fragment))
+        if (!RemoteClientPreferences.IsSelfHostedEndpoint(configuredUrl)
+            || !Uri.TryCreate(configuredUrl, UriKind.Absolute, out var remoteHub))
         {
             return false;
         }

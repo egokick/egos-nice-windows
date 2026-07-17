@@ -6,9 +6,9 @@ namespace StayActive.EnrollmentBroker.Configuration;
 
 /// <summary>
 /// Parses all operational security boundaries before any endpoint is mapped.
-/// Production has no development-auth fallback and reads both service secrets
-/// from files, so secrets are not accidentally placed in process arguments or
-/// ordinary configuration dumps.
+/// Production has no development-auth fallback and accepts no controller credential
+/// from configuration, environment variables, command-line arguments, or files.
+/// Its journal HMAC key remains file-backed to avoid ordinary configuration dumps.
 /// </summary>
 public sealed class EnrollmentBrokerSettings
 {
@@ -24,7 +24,6 @@ public sealed class EnrollmentBrokerSettings
         string journalPath,
         byte[] journalHmacKey,
         Uri headscaleApiBaseUri,
-        string headscaleApiKey,
         string headscaleUserId,
         string headscaleLoginServer)
     {
@@ -37,7 +36,6 @@ public sealed class EnrollmentBrokerSettings
         JournalPath = journalPath;
         _journalHmacKey = journalHmacKey.ToArray();
         HeadscaleApiBaseUri = headscaleApiBaseUri;
-        HeadscaleApiKey = headscaleApiKey;
         HeadscaleUserId = headscaleUserId;
         HeadscaleLoginServer = headscaleLoginServer;
     }
@@ -62,13 +60,13 @@ public sealed class EnrollmentBrokerSettings
 
     public string HeadscaleLoginServer { get; }
 
-    internal string HeadscaleApiKey { get; }
 
     internal byte[] CreateJournalHmacKeyCopy() => _journalHmacKey.ToArray();
 
     public override string ToString() =>
-        "EnrollmentBrokerSettings { JournalHmacKey = [REDACTED], HeadscaleApiKey = [REDACTED] }";
+        "EnrollmentBrokerSettings { JournalHmacKey = [REDACTED] }";
 
+    public const string HeadscaleControllerApiBaseUrl = "https://headscale-controller.stayactive.test:4443/";
     public const string EnrollmentWritePolicy = "enrollmentbroker.ticket.write";
     public const string TicketCreationRateLimitPolicy = "enrollmentbroker.ticket.create";
 
@@ -133,17 +131,8 @@ public sealed class EnrollmentBrokerSettings
         var decodedHmacKey = DecodeHmacKey(journalHmacKey);
 
         var headscaleApiBase = Normalize(configuration["EnrollmentBroker:Headscale:ApiBaseUrl"]);
-        var headscaleApiBaseUri = ValidateHttpsOrigin(headscaleApiBase, "EnrollmentBroker:Headscale:ApiBaseUrl");
-        var headscaleApiKey = ReadSecret(
-            configuration,
-            "EnrollmentBroker:Headscale:ApiKeyFile",
-            inlineKey: null,
-            environment,
-            purpose: "Headscale API key");
-        if (!IsSafeSecret(headscaleApiKey, 1024))
-        {
-            throw new InvalidOperationException("EnrollmentBroker Headscale API key is missing or invalid.");
-        }
+        var headscaleApiBaseUri = ValidateFixedHeadscaleControllerApiBaseUrl(headscaleApiBase);
+        RejectLegacyHeadscaleApiKeyConfiguration(configuration);
 
         var headscaleUserId = Normalize(configuration["EnrollmentBroker:Headscale:UserId"]);
         if (headscaleUserId.Length is 0 or > 20
@@ -175,7 +164,6 @@ public sealed class EnrollmentBrokerSettings
             fullJournalPath,
             decodedHmacKey,
             headscaleApiBaseUri,
-            headscaleApiKey,
             headscaleUserId,
             CanonicalOrigin(headscaleLoginServerUri));
         CryptographicOperations.ZeroMemory(decodedHmacKey);
@@ -195,6 +183,17 @@ public sealed class EnrollmentBrokerSettings
         }
     }
 
+    private static Uri ValidateFixedHeadscaleControllerApiBaseUrl(string candidate)
+    {
+        if (!string.Equals(candidate, HeadscaleControllerApiBaseUrl, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"EnrollmentBroker:Headscale:ApiBaseUrl must be exactly {HeadscaleControllerApiBaseUrl}.");
+        }
+
+        return new Uri(HeadscaleControllerApiBaseUrl, UriKind.Absolute);
+    }
+
     private static Uri ValidateHttpsOrigin(string candidate, string settingName)
     {
         if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
@@ -212,6 +211,22 @@ public sealed class EnrollmentBrokerSettings
     }
 
     private static string CanonicalOrigin(Uri uri) => uri.GetLeftPart(UriPartial.Authority).TrimEnd('/');
+
+    private static void RejectLegacyHeadscaleApiKeyConfiguration(IConfiguration configuration)
+    {
+        foreach (var key in new[]
+                 {
+                     "EnrollmentBroker:Headscale:ApiKeyFile",
+                     "EnrollmentBroker:Headscale:ApiKey"
+                 })
+        {
+            if (Normalize(configuration[key]).Length > 0)
+            {
+                throw new InvalidOperationException(
+                    $"{key} is no longer supported. Store the controller key in Windows Credential Manager instead.");
+            }
+        }
+    }
 
     private static string ReadSecret(
         IConfiguration configuration,
@@ -320,9 +335,6 @@ public sealed class EnrollmentBrokerSettings
         && value.Length <= maximumLength
         && value.All(static character => !char.IsControl(character));
 
-    private static bool IsSafeSecret(string? value, int maximumLength) =>
-        IsSafeScalar(value, maximumLength)
-        && !value!.Any(char.IsWhiteSpace);
 
     private static string Normalize(string? value) => value?.Trim() ?? string.Empty;
 }

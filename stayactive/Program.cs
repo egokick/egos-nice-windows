@@ -826,27 +826,51 @@ internal sealed class AppSettings
     // These are non-secret UI/configuration values only. Enrollment keys,
     // certificates, and server API keys belong in the Windows certificate
     // store or a protected service secret store, never in settings.json.
-    public string RemoteControlPlaneUrl { get; set; } = string.Empty;
+    public string RemoteControlPlaneUrl { get; set; } = StayActiveRemoteDefaults.ControlPlaneUrl;
 
-    public string RemoteHubUrl { get; set; } = string.Empty;
+    public string RemoteHubUrl { get; set; } = StayActiveRemoteDefaults.RemoteHubUrl;
 
-    public string RemoteAdminConsoleUrl { get; set; } = string.Empty;
+    public string RemoteAdminConsoleUrl { get; set; } = StayActiveRemoteDefaults.AdminConsoleUrl;
 
-    public string RemoteMeshCentralUrl { get; set; } = string.Empty;
+    public string RemoteMeshCentralUrl { get; set; } = StayActiveRemoteDefaults.MeshCentralUrl;
 
     public string RemoteDeviceDisplayName { get; set; } = string.Empty;
 
     public string RemoteLocation { get; set; } = string.Empty;
 
-    public string RemoteHubOidcIssuerUrl { get; set; } = string.Empty;
+    public string RemoteHubOidcIssuerUrl { get; set; } = StayActiveRemoteDefaults.OidcIssuerUrl;
 
-    public string RemoteHubOidcClientId { get; set; } = string.Empty;
+    public string RemoteHubOidcClientId { get; set; } = StayActiveRemoteDefaults.FleetOidcClientId;
 
     // Broker URL and public OIDC client only. The one-time command, enrollment
     // key, certificates, and Headscale API key are never stored in settings.
-    public string RemoteEnrollmentUrl { get; set; } = string.Empty;
+    public string RemoteEnrollmentUrl { get; set; } = StayActiveRemoteDefaults.EnrollmentBrokerUrl;
 
-    public string RemoteEnrollmentOidcClientId { get; set; } = string.Empty;
+    public string RemoteEnrollmentOidcClientId { get; set; } = StayActiveRemoteDefaults.EnrollmentOidcClientId;
+
+    internal void ApplySelfHostedRemoteDefaultsIfUnconfigured()
+    {
+        if (!string.IsNullOrWhiteSpace(RemoteControlPlaneUrl)
+            || !string.IsNullOrWhiteSpace(RemoteHubUrl)
+            || !string.IsNullOrWhiteSpace(RemoteAdminConsoleUrl)
+            || !string.IsNullOrWhiteSpace(RemoteMeshCentralUrl)
+            || !string.IsNullOrWhiteSpace(RemoteHubOidcIssuerUrl)
+            || !string.IsNullOrWhiteSpace(RemoteHubOidcClientId)
+            || !string.IsNullOrWhiteSpace(RemoteEnrollmentUrl)
+            || !string.IsNullOrWhiteSpace(RemoteEnrollmentOidcClientId))
+        {
+            return;
+        }
+
+        RemoteControlPlaneUrl = StayActiveRemoteDefaults.ControlPlaneUrl;
+        RemoteHubUrl = StayActiveRemoteDefaults.RemoteHubUrl;
+        RemoteAdminConsoleUrl = StayActiveRemoteDefaults.AdminConsoleUrl;
+        RemoteMeshCentralUrl = StayActiveRemoteDefaults.MeshCentralUrl;
+        RemoteHubOidcIssuerUrl = StayActiveRemoteDefaults.OidcIssuerUrl;
+        RemoteHubOidcClientId = StayActiveRemoteDefaults.FleetOidcClientId;
+        RemoteEnrollmentUrl = StayActiveRemoteDefaults.EnrollmentBrokerUrl;
+        RemoteEnrollmentOidcClientId = StayActiveRemoteDefaults.EnrollmentOidcClientId;
+    }
 
     public AppSettings Clone()
     {
@@ -960,7 +984,9 @@ internal static class SettingsStore
                 return new AppSettings();
             }
 
-            return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
+            var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
+            settings.ApplySelfHostedRemoteDefaultsIfUnconfigured();
+            return settings;
         }
         catch
         {

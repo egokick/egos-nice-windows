@@ -276,12 +276,8 @@ internal sealed class HeadscaleTailscaleFleetClient : IRemoteFleetClient
     {
         controlPlane = null!;
         if (preferences is null
-            || !Uri.TryCreate(preferences.ControlPlaneUrl, UriKind.Absolute, out var parsedControlPlane)
-            || parsedControlPlane is null
-            || !string.Equals(parsedControlPlane.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            || string.IsNullOrWhiteSpace(parsedControlPlane.Host)
-            || !string.IsNullOrEmpty(parsedControlPlane.UserInfo)
-            || IsTailscaleHostedDomain(parsedControlPlane.Host))
+            || !RemoteClientPreferences.IsSelfHostedControlPlane(preferences.ControlPlaneUrl)
+            || !Uri.TryCreate(preferences.ControlPlaneUrl, UriKind.Absolute, out var parsedControlPlane))
         {
             return false;
         }
@@ -293,12 +289,6 @@ internal sealed class HeadscaleTailscaleFleetClient : IRemoteFleetClient
     private static string GetControlPlaneDisplayName(Uri controlPlane)
     {
         return "Headscale " + controlPlane.Authority;
-    }
-
-    private static bool IsTailscaleHostedDomain(string host)
-    {
-        return string.Equals(host, "tailscale.com", StringComparison.OrdinalIgnoreCase)
-            || host.EndsWith(".tailscale.com", StringComparison.OrdinalIgnoreCase);
     }
 
     private static RemoteFleetSnapshot CreateNotConfiguredSnapshot()

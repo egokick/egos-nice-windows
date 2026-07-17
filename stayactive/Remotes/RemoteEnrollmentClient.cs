@@ -202,7 +202,11 @@ internal sealed class RemoteEnrollmentClient : IRemoteEnrollmentClient
 {
     internal const int FixedLifetimeMinutes = 15;
     private const int MaximumResponseBytes = 128 * 1024;
-    private static readonly TimeSpan MaximumAcceptedLifetime = TimeSpan.FromMinutes(16);
+    private static readonly TimeSpan ExpectedTicketLifetime = TimeSpan.FromMinutes(FixedLifetimeMinutes);
+    // The broker creates the key immediately before its response. Keep a small
+    // allowance for clock skew and response transit, but reject a broker that
+    // tries to extend or shorten the fixed 15-minute policy.
+    private static readonly TimeSpan TicketLifetimeClockSkew = TimeSpan.FromSeconds(30);
 
     private readonly Func<RemoteClientPreferences> _getPreferences;
     private readonly IRemoteEnrollmentAccessTokenProvider _accessTokenProvider;
@@ -506,8 +510,7 @@ internal sealed class RemoteEnrollmentClient : IRemoteEnrollmentClient
         if (!TryParseTicketDocument(json, now, requireAuthKey: true, out var ticket, out var authKey)
             || ticket.Kind != requestedKind
             || ticket.State != RemoteEnrollmentTicketState.Issued
-            || ticket.ExpiresAtUtc <= now
-            || ticket.ExpiresAtUtc > now.Add(MaximumAcceptedLifetime)
+            || !HasExpectedTicketLifetime(ticket.ExpiresAtUtc, now)
             || !IsSafeAuthKey(authKey))
         {
             return false;
@@ -515,6 +518,13 @@ internal sealed class RemoteEnrollmentClient : IRemoteEnrollmentClient
 
         issuedTicket = new RemoteEnrollmentIssuedTicket(ticket, BuildJoinCommand(ticket.LoginServer, authKey!));
         return true;
+    }
+
+    private static bool HasExpectedTicketLifetime(DateTimeOffset expiresAtUtc, DateTimeOffset now)
+    {
+        var expectedExpiry = now.Add(ExpectedTicketLifetime);
+        return expiresAtUtc >= expectedExpiry.Subtract(TicketLifetimeClockSkew)
+            && expiresAtUtc <= expectedExpiry.Add(TicketLifetimeClockSkew);
     }
 
     private static bool TryParseSafeTicket(string json, DateTimeOffset now, out RemoteEnrollmentTicket ticket)
@@ -646,13 +656,8 @@ internal sealed class RemoteEnrollmentClient : IRemoteEnrollmentClient
     private static bool TryGetSafeBrokerBaseUri(string value, out Uri brokerBase)
     {
         brokerBase = null!;
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var candidate)
-            || !candidate.IsAbsoluteUri
-            || !string.Equals(candidate.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            || string.IsNullOrWhiteSpace(candidate.Host)
-            || !string.IsNullOrEmpty(candidate.UserInfo)
-            || !string.IsNullOrEmpty(candidate.Query)
-            || !string.IsNullOrEmpty(candidate.Fragment))
+        if (!RemoteClientPreferences.IsSelfHostedEndpoint(value)
+            || !Uri.TryCreate(value, UriKind.Absolute, out var candidate))
         {
             return false;
         }

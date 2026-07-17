@@ -48,13 +48,16 @@ public sealed class RemoteHubFleetClientTests
         Assert.Equal(1, tokenProvider.GetAccessTokenCallCount);
     }
 
-    [Fact]
-    public async Task RefreshAsync_WhenTheRemoteHubUrlIsUnsafe_DoesNotRequestATokenOrOpenANetworkConnection()
+    [Theory]
+    [InlineData("http://remotes.example.test")]
+    [InlineData("https://login.tailscale.com")]
+    [InlineData("https://login.tailscale.com.")]
+    public async Task RefreshAsync_WhenTheRemoteHubUrlIsUnsafe_DoesNotRequestATokenOrOpenANetworkConnection(string remoteHubUrl)
     {
         var tokenProvider = new FakeTokenProvider("test-access-token");
         var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("No HTTP request should occur."));
         using var client = new RemoteHubFleetClient(
-            () => Preferences("http://remotes.example.test"),
+            () => Preferences(remoteHubUrl),
             tokenProvider,
             new HttpClient(handler));
 

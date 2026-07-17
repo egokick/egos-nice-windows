@@ -44,11 +44,17 @@ else {
 $hostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
 $beginMarker = '# StayActive Remotes LAN test BEGIN'
 $endMarker = '# StayActive Remotes LAN test END'
-$hostNames = @(
+$publicHostNames = @(
     'headscale.stayactive.test',
     'meshcentral.stayactive.test',
     'remotehub.stayactive.test',
     'id.stayactive.test'
+)
+$controllerOnlyHostNames = @(
+    # This management-only Caddy listener is permanently loopback-bound. It
+    # is used only by the dedicated Windows controller service; it is never a
+    # LAN name even after the user-facing services are published.
+    'headscale-controller.stayactive.test'
 )
 
 $current = if (Test-Path -LiteralPath $hostsPath -PathType Leaf) {
@@ -63,7 +69,8 @@ $withoutManagedBlock = [regex]::Replace($current, $managedBlockPattern, '')
 $managedBlock = @(
     $beginMarker,
     '# Managed by StayActive. Do not add unrelated hostnames inside this block.',
-    "$targetIp $($hostNames -join ' ')",
+    "$targetIp $($publicHostNames -join ' ')",
+    "127.0.0.1 $($controllerOnlyHostNames -join ' ')",
     $endMarker
 ) -join [Environment]::NewLine
 

@@ -6,16 +6,9 @@
 }
 
 {$HEADSCALE_FQDN} {
-	# Headscale API keys are administrative. Limit this route to the isolated
-	# EnrollmentBroker control-network address; ordinary clients still reach the
-	# Headscale coordination endpoints below.
-	@enrollmentBrokerHeadscaleApi {
-		path /api/v1/*
-		remote_ip {$ENROLLMENTBROKER_CONTROL_IP}
-	}
-	handle @enrollmentBrokerHeadscaleApi {
-		reverse_proxy headscale:8080
-	}
+	# The public/LAN coordination listener never exposes Headscale's
+	# administrative REST API. The Windows controller has a separate
+	# host-loopback-only listener below.
 	handle /api/v1/* {
 		respond "Not found" 404
 	}
@@ -25,6 +18,20 @@
 	}
 }
 
+# Compose publishes this listener only at 127.0.0.1:4443. The Windows
+# controller installer adds the loopback-only hosts entry and trusts the Caddy
+# local CA before using this administrative API surface.
+https://headscale-controller.stayactive.test:4443 {
+	tls internal
+
+	handle /api/v1/* {
+		reverse_proxy headscale:8080
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}
 {$MESHCENTRAL_FQDN} {
 	reverse_proxy meshcentral:4430
 }
@@ -33,11 +40,12 @@
 # only through this operator-controlled HTTPS edge. The Kestrel port remains
 # un-published inside the Docker control network.
 {$REMOTEHUB_FQDN} {
-	# Enrollment has an intentionally separate service identity and secret
-	# boundary. RemoteHub itself remains inventory/audit only.
+	# Deployment scripts render this Windows controller address. It runs under
+	# the dedicated service identity and retains the Headscale key outside
+	# Docker; RemoteHub remains inventory/audit only.
 	@enrollmentTickets path /api/v1/enrollment-tickets /api/v1/enrollment-tickets/*
 	handle @enrollmentTickets {
-		reverse_proxy enrollmentbroker:5090
+		reverse_proxy {$WINDOWS_ENROLLMENT_CONTROLLER_IP}:5091
 	}
 
 	handle {

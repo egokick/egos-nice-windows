@@ -121,6 +121,21 @@ internal static class RemoteMenuModelBuilder
     }
 }
 
+internal static class StayActiveRemoteDefaults
+{
+    // The LAN deployment publishes these names through its local DNS/hosts
+    // bootstrap and its internal CA. They are defaults, not a lock-in: an
+    // owner can move the same self-hosted stack to another HTTPS origin later.
+    public const string ControlPlaneUrl = "https://headscale.stayactive.test";
+    public const string RemoteHubUrl = "https://remotehub.stayactive.test";
+    public const string AdminConsoleUrl = "https://remotehub.stayactive.test/admin";
+    public const string MeshCentralUrl = "https://meshcentral.stayactive.test";
+    public const string OidcIssuerUrl = "https://id.stayactive.test/realms/stayactive";
+    public const string FleetOidcClientId = "stayactive-remotes-tray";
+    public const string EnrollmentBrokerUrl = "https://remotehub.stayactive.test";
+    public const string EnrollmentOidcClientId = "stayactive-remotes-enrollment";
+}
+
 internal sealed record RemoteClientPreferences(
     string ControlPlaneUrl,
     string RemoteHubUrl,
@@ -133,27 +148,38 @@ internal sealed record RemoteClientPreferences(
     string RemoteEnrollmentUrl = "",
     string RemoteEnrollmentOidcClientId = "")
 {
-    public bool IsConfigured => IsHttpsEndpoint(RemoteHubUrl);
+    public bool IsConfigured => IsSelfHostedEndpoint(RemoteHubUrl);
 
     public bool HasControlPlane => IsSelfHostedControlPlane(ControlPlaneUrl);
 
-    public bool HasMeshCentral => IsHttpsEndpoint(MeshCentralUrl);
+    public bool HasMeshCentral => IsSelfHostedEndpoint(MeshCentralUrl);
 
-    public bool HasEnrollmentBroker => IsHttpsEndpoint(RemoteEnrollmentUrl);
+    public bool HasEnrollmentBroker => IsSelfHostedEndpoint(RemoteEnrollmentUrl);
 
-    private static bool IsHttpsEndpoint(string value)
+    internal static bool IsSelfHostedEndpoint(string? value)
     {
-        return Uri.TryCreate(value, UriKind.Absolute, out var uri)
-            && uri.Scheme == Uri.UriSchemeHttps
-            && string.IsNullOrEmpty(uri.UserInfo);
+        return !string.IsNullOrWhiteSpace(value)
+            && value.Length <= 2048
+            && Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            && uri.IsAbsoluteUri
+            && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(uri.Host)
+            && string.IsNullOrEmpty(uri.UserInfo)
+            && string.IsNullOrEmpty(uri.Query)
+            && string.IsNullOrEmpty(uri.Fragment)
+            && !IsHostedTailscaleHost(uri.Host);
     }
 
-    internal static bool IsSelfHostedControlPlane(string value)
+    internal static bool IsSelfHostedControlPlane(string? value)
     {
-        return Uri.TryCreate(value, UriKind.Absolute, out var uri)
-            && uri.Scheme == Uri.UriSchemeHttps
-            && string.IsNullOrEmpty(uri.UserInfo)
-            && !string.Equals(uri.Host, "tailscale.com", StringComparison.OrdinalIgnoreCase)
-            && !uri.Host.EndsWith(".tailscale.com", StringComparison.OrdinalIgnoreCase);
+        return IsSelfHostedEndpoint(value);
+    }
+
+    internal static bool IsHostedTailscaleHost(string? host)
+    {
+        var normalizedHost = host?.Trim().TrimEnd('.');
+        return !string.IsNullOrEmpty(normalizedHost)
+            && (string.Equals(normalizedHost, "tailscale.com", StringComparison.OrdinalIgnoreCase)
+                || normalizedHost.EndsWith(".tailscale.com", StringComparison.OrdinalIgnoreCase));
     }
 }

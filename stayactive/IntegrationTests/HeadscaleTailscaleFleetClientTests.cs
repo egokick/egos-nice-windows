@@ -94,12 +94,14 @@ public sealed class HeadscaleTailscaleFleetClientTests
         Assert.Empty(runner.Calls);
     }
 
-    [Fact]
-    public async Task RefreshAsync_WhenControlPlaneIsTheHostedTailscaleDomain_DoesNotStartAProcess()
+    [Theory]
+    [InlineData("https://login.tailscale.com")]
+    [InlineData("https://login.tailscale.com.")]
+    public async Task RefreshAsync_WhenControlPlaneIsTheHostedTailscaleDomain_DoesNotStartAProcess(string controlPlaneUrl)
     {
         var runner = new FakeTailscaleStatusProcessRunner();
         var client = new HeadscaleTailscaleFleetClient(
-            () => Preferences(controlPlaneUrl: "https://login.tailscale.com"),
+            () => Preferences(controlPlaneUrl: controlPlaneUrl),
             runner,
             new FakeTailscaleExecutableLocator(@"C:\Program Files\Tailscale\tailscale.exe"));
 
@@ -108,7 +110,6 @@ public sealed class HeadscaleTailscaleFleetClientTests
         Assert.Equal(RemoteFleetConnectionState.NotConfigured, client.GetCachedSnapshot().ConnectionState);
         Assert.Empty(runner.Calls);
     }
-
     [Fact]
     public async Task RefreshAsync_WhenTailscaleIsNotInstalled_ReportsDisconnectedWithoutStartingAProcess()
     {

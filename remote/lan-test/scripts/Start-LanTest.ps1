@@ -26,15 +26,92 @@ function Enable-DockerDesktopCli {
     }
 }
 
+function Assert-Administrator {
+    $principal = [System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'A finalized controller deployment must be restarted from an elevated PowerShell session.'
+    }
+}
+
+function Resolve-ActiveReviewedPath(
+    [string]$Path,
+    [string]$ReviewedStagingRoot,
+    [string]$PropertyName) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "The active deployment manifest has no valid $PropertyName file."
+    }
+    if (-not (Test-Path -LiteralPath $ReviewedStagingRoot -PathType Container)) {
+        throw 'The active deployment reviewed-artifact root is missing.'
+    }
+
+    $rootItem = Get-Item -LiteralPath $ReviewedStagingRoot -Force
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The active deployment manifest refers to a reparse point.'
+    }
+
+    $rootFullPath = [System.IO.Path]::GetFullPath($rootItem.FullName).TrimEnd('\') + '\'
+    $fullPath = [System.IO.Path]::GetFullPath($item.FullName)
+    if (-not $fullPath.StartsWith($rootFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "The active deployment $PropertyName file is outside protected staging."
+    }
+
+    return $fullPath
+}
+
+function Get-ActiveReviewedDeployment([string]$ManifestPath, [string]$ReviewedStagingRoot) {
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        return $null
+    }
+
+    $manifestItem = Get-Item -LiteralPath $ManifestPath -Force
+    if (($manifestItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The active deployment manifest must not be a reparse point.'
+    }
+
+    try {
+        $manifest = [System.IO.File]::ReadAllText($ManifestPath) | ConvertFrom-Json
+    }
+    catch {
+        throw 'The active deployment manifest is unreadable; refuse to use mutable LAN deployment files.'
+    }
+
+    if ([int]$manifest.SchemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace([string]$manifest.SourceRevision)) {
+        throw 'The active deployment manifest has an unsupported schema.'
+    }
+
+    return [pscustomobject]@{
+        SourceRevision = [string]$manifest.SourceRevision
+        ComposeFile = Resolve-ActiveReviewedPath ([string]$manifest.ComposeFile) $ReviewedStagingRoot 'ComposeFile'
+        EnvironmentFile = Resolve-ActiveReviewedPath ([string]$manifest.EnvironmentFile) $ReviewedStagingRoot 'EnvironmentFile'
+        KeycloakMapperTemplate = Resolve-ActiveReviewedPath ([string]$manifest.KeycloakMapperTemplate) $ReviewedStagingRoot 'KeycloakMapperTemplate'
+    }
+}
 Enable-DockerDesktopCli
 
 $lanRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$environmentFile = Join-Path $lanRoot '.env'
-$composeFile = Join-Path $lanRoot 'compose.yaml'
+$controllerRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'StayActiveRemotes\EnrollmentController'
+$reviewedStagingRoot = Join-Path $controllerRoot 'reviewed-artifacts'
+$activeDeploymentPath = Join-Path $controllerRoot 'active-deployment.json'
+$activeDeployment = Get-ActiveReviewedDeployment $activeDeploymentPath $reviewedStagingRoot
+$isFinalizedDeployment = $null -ne $activeDeployment
+
+if ($isFinalizedDeployment) {
+    Assert-Administrator
+    $environmentFile = $activeDeployment.EnvironmentFile
+    $composeFile = $activeDeployment.ComposeFile
+    $keycloakMapperTemplate = $activeDeployment.KeycloakMapperTemplate
+}
+else {
+    $environmentFile = Join-Path $lanRoot '.env'
+    $composeFile = Join-Path $lanRoot 'compose.yaml'
+    $keycloakMapperTemplate = Join-Path $lanRoot 'config\keycloak\configure-scope-mappings.sh.template'
+}
+
 $rootCertificateSource = Join-Path $lanRoot 'state\caddy\data\caddy\pki\authorities\local\root.crt'
 $rootCertificateDestination = Join-Path $lanRoot 'certs\caddy-root.crt'
 $keycloakMapperPath = '/opt/keycloak/data/import/configure-scope-mappings.sh'
-$keycloakMapperTemplate = Join-Path $lanRoot 'config\keycloak\configure-scope-mappings.sh.template'
 $keycloakMapperDestination = Join-Path $lanRoot 'generated\keycloak\configure-scope-mappings.sh'
 
 function Invoke-Docker([string[]]$Arguments, [string]$FailureMessage) {
@@ -44,18 +121,26 @@ function Invoke-Docker([string[]]$Arguments, [string]$FailureMessage) {
     }
 }
 
-function Get-HeadscaleUsers([string[]]$ComposePrefix) {
-    $userListOutput = & docker @($ComposePrefix + @('exec', '-T', 'headscale', 'headscale', 'users', 'list', '--output', 'json'))
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Unable to list Headscale users while checking the enrollment broker precondition.'
+function Assert-ControllerServiceIfInstalled {
+    $service = Get-Service -Name 'StayActiveEnrollmentController' -ErrorAction SilentlyContinue
+    if ($null -eq $service) {
+        return
     }
 
-    try {
-        return @($userListOutput | Out-String | ConvertFrom-Json | Where-Object { $null -ne $_ })
+    $deadline = [DateTime]::UtcNow.AddSeconds(45)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($service.Status -eq 'Running') {
+            return
+        }
+
+        Start-Sleep -Seconds 2
+        $service = Get-Service -Name 'StayActiveEnrollmentController' -ErrorAction SilentlyContinue
+        if ($null -eq $service) {
+            throw 'The Windows enrollment controller service disappeared during startup.'
+        }
     }
-    catch {
-        throw 'Headscale did not return a JSON user list while checking the enrollment broker precondition.'
-    }
+
+    throw 'The Windows enrollment controller service is installed but is not running; refuse to leave its Caddy ticket route active.'
 }
 
 function Wait-ForFile([string]$Path, [int]$TimeoutSeconds) {
@@ -89,7 +174,22 @@ if (-not (Test-Path -LiteralPath $keycloakMapperTemplate -PathType Leaf)) {
 $keycloakMapperContent = [System.IO.File]::ReadAllText($keycloakMapperTemplate).Replace("`r`n", "`n").Replace("`r", "`n")
 [System.IO.File]::WriteAllText($keycloakMapperDestination, $keycloakMapperContent, [System.Text.UTF8Encoding]::new($false))
 
-$composePrefix = @('compose', '--env-file', $environmentFile, '-f', $composeFile)
+$composePrefix = if ($isFinalizedDeployment) {
+    @(
+        'compose',
+        '--project-directory', $lanRoot,
+        '--env-file', $environmentFile,
+        '-f', $composeFile)
+}
+else {
+    @('compose', '--env-file', $environmentFile, '-f', $composeFile)
+}
+
+if ($isFinalizedDeployment -and -not $SkipRemoteHubBuild) {
+    # Do not rebuild a network-facing service from a mutable worktree after
+    # the controller's long-lived credential has been provisioned.
+    $SkipRemoteHubBuild = $true
+}
 
 # Caddy must create its local CA before RemoteHub starts. This prevents a
 # missing certificate path from becoming an accidental directory bind mount.
@@ -136,46 +236,22 @@ $remoteHubArguments += 'remotehub'
 Invoke-Docker ($composePrefix + $remoteHubArguments) 'Unable to build and start RemoteHub.'
 Invoke-Docker ($composePrefix + @('exec', '-T', 'remotehub', 'sh', '-ec', 'test -r /run/stayactive/caddy-root.crt')) 'RemoteHub cannot read the public Caddy root certificate required for Keycloak TLS validation.'
 
-# The broker is absent until Finalize-LanTest.ps1 has created its protected
-# secrets after the Headscale policy owner exists. Startup never creates or
-# rotates that API key. A present key is therefore an activation sentinel.
-$brokerConfigPath = Join-Path $lanRoot 'generated\enrollmentbroker\appsettings.Production.json'
-$brokerApiKeyPath = Join-Path $lanRoot 'secrets\headscale-enrollment-api-key'
-$brokerJournalKeyPath = Join-Path $lanRoot 'secrets\enrollmentbroker-journal-hmac-key'
-$brokerJournalDirectory = Join-Path $lanRoot 'state\enrollmentbroker\journal'
-$brokerActive = $false
-if (Test-Path -LiteralPath $brokerApiKeyPath -PathType Leaf) {
-    foreach ($requiredBrokerPath in @($brokerConfigPath, $brokerJournalKeyPath, $brokerJournalDirectory)) {
-        if (-not (Test-Path -LiteralPath $requiredBrokerPath)) {
-            throw "Enrollment broker activation is incomplete; required path is missing: $requiredBrokerPath"
-        }
-    }
-
-    $headscaleUsers = Get-HeadscaleUsers $composePrefix
-    if (-not ($headscaleUsers | Where-Object { $_.name -eq 'stayactive-admin' -and [string]$_.id -match '^[1-9][0-9]*$' })) {
-        throw 'Enrollment broker activation requires the stayactive-admin Headscale policy owner. Run Finalize-LanTest.ps1 first.'
-    }
-
-    Invoke-Docker ($composePrefix + @('up', '-d', 'enrollmentbroker')) 'Unable to start the isolated EnrollmentBroker.'
-    $brokerActive = $true
-}
-elseif (Test-Path -LiteralPath $brokerJournalKeyPath -PathType Leaf) {
-    throw 'Enrollment broker has a journal secret but no API-key secret; refusing to start a partial enrollment service.'
-}
-
 $runningServices = & docker @($composePrefix + @('ps', '--status', 'running', '--services'))
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to inspect the LAN stack after startup.'
 }
 
 $requiredServices = @('caddy', 'headscale', 'meshcentral', 'postgres', 'keycloak', 'remotehub')
-if ($brokerActive) {
-    $requiredServices += 'enrollmentbroker'
-}
 $missingServices = @($requiredServices | Where-Object { $_ -notin $runningServices })
 if ($missingServices.Count -gt 0) {
     throw "The LAN stack did not leave all required services running: $($missingServices -join ', ')."
 }
 
-Write-Host 'The LAN bootstrap stack is running on loopback only.'
-Write-Host 'Before opening it to the LAN, install the Caddy root certificate, create exactly one MeshCentral administrator, and then run Finalize-LanTest.ps1.'
+Assert-ControllerServiceIfInstalled
+if ($isFinalizedDeployment) {
+    Write-Host 'The finalized LAN stack is running from its protected reviewed deployment bundle.'
+}
+else {
+    Write-Host 'The LAN bootstrap stack is running on loopback only.'
+    Write-Host 'Before opening it to the LAN, install the Caddy root certificate, create exactly one MeshCentral administrator, and then run Finalize-LanTest.ps1.'
+}

@@ -25,22 +25,30 @@ http://id.stayactive.test {
 headscale.stayactive.test {
     tls internal
 
-    # Headscale's REST API accepts a broadly privileged API key. Never expose
-    # that surface to LAN clients: only the isolated EnrollmentBroker container
-    # may reach it over Caddy's internally trusted HTTPS path.
-    @enrollmentBrokerHeadscaleApi {
-        path /api/v1/*
-        remote_ip 172.30.60.16
-    }
-    handle @enrollmentBrokerHeadscaleApi {
-        reverse_proxy headscale:8080
-    }
+    # Headscale's REST API accepts a broadly privileged API key. It is never
+    # reachable through the LAN listener; the Windows controller uses the
+    # distinct host-loopback listener below.
     handle /api/v1/* {
         respond "Not found" 404
     }
 
     handle {
         reverse_proxy headscale:8080
+    }
+}
+
+# Compose publishes this site only as 127.0.0.1:4443. Deployment scripts must
+# install the matching loopback-only hosts entry and trust Caddy's local CA for
+# the Windows controller service before it can call the administrative API.
+https://headscale-controller.stayactive.test:4443 {
+    tls internal
+
+    handle /api/v1/* {
+        reverse_proxy headscale:8080
+    }
+
+    handle {
+        respond "Not found" 404
     }
 }
 
@@ -52,12 +60,11 @@ meshcentral.stayactive.test {
 remotehub.stayactive.test {
     tls internal
 
-    # This is the only broker ingress. The broker is intentionally a separate
-    # service from RemoteHub so the inventory API never receives a Headscale
-    # administrative credential.
+    # Deployment scripts provide the generated Windows controller address. It
+    # owns the Headscale credential outside Docker; no container can read it.
     @enrollmentTickets path /api/v1/enrollment-tickets /api/v1/enrollment-tickets/*
     handle @enrollmentTickets {
-        reverse_proxy enrollmentbroker:5090
+        reverse_proxy {$WINDOWS_ENROLLMENT_CONTROLLER_IP}:5091
     }
 
     handle {

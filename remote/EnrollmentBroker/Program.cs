@@ -10,10 +10,30 @@ using StayActive.EnrollmentBroker.Auth;
 using StayActive.EnrollmentBroker.Configuration;
 using StayActive.EnrollmentBroker.Domain;
 using StayActive.EnrollmentBroker.Persistence;
+using StayActive.EnrollmentBroker.Provisioning;
+using StayActive.EnrollmentBroker.Security;
 using StayActive.EnrollmentBroker.Services;
 
-var builder = WebApplication.CreateBuilder(args);
-var app = EnrollmentBrokerApplication.Build(builder);
+var credentialStore = new WindowsCredentialManagerStore();
+if (ControllerCredentialProvisioner.TryHandle(
+        args,
+        Console.In,
+        credentialStore,
+        Console.Out,
+        Console.Error,
+        out var provisioningExitCode))
+{
+    Environment.ExitCode = provisioningExitCode;
+    return;
+}
+
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory,
+    ApplicationName = typeof(EnrollmentBrokerApplication).Assembly.FullName
+});
+var app = EnrollmentBrokerApplication.Build(builder, credentialStore);
 await app.RunAsync();
 
 /// <summary>
@@ -22,9 +42,13 @@ await app.RunAsync();
 /// </summary>
 public static class EnrollmentBrokerApplication
 {
-    public static WebApplication Build(WebApplicationBuilder builder)
+    public static WebApplication Build(
+        WebApplicationBuilder builder,
+        IControllerCredentialStore? credentialStore = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
+        credentialStore ??= new WindowsCredentialManagerStore();
+        builder.Host.UseWindowsService();
 
         var settings = EnrollmentBrokerSettings.Load(builder.Configuration, builder.Environment);
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 8 * 1024);
@@ -47,19 +71,22 @@ public static class EnrollmentBrokerApplication
         });
 
         builder.Services.AddSingleton(settings);
+        builder.Services.AddSingleton<IControllerCredentialStore>(credentialStore);
         // Construct eagerly: a tampered journal must prevent the broker from
         // serving enrollment, rather than failing after a sensitive key exists.
         builder.Services.TryAddSingleton<IEnrollmentTicketStore>(_ =>
             new FileEnrollmentTicketStore(settings.JournalPath, settings.CreateJournalHmacKeyCopy()));
         builder.Services.TryAddSingleton<TimeProvider>(_ => TimeProvider.System);
-        builder.Services.TryAddSingleton<IHeadscaleV029Client>(_ =>
+        builder.Services.TryAddSingleton<IHeadscaleV029Client>(serviceProvider =>
         {
             var client = new HttpClient
             {
                 BaseAddress = settings.HeadscaleApiBaseUri,
                 Timeout = TimeSpan.FromSeconds(15)
             };
-            return new HeadscaleV029Client(client, settings.HeadscaleApiKey);
+            return new HeadscaleV029Client(
+                client,
+                serviceProvider.GetRequiredService<IControllerCredentialStore>());
         });
         builder.Services.AddSingleton<EnrollmentTicketService>();
 
@@ -101,6 +128,7 @@ public static class EnrollmentBrokerApplication
         });
 
         var app = builder.Build();
+        _ = app.Services.GetRequiredService<IHeadscaleV029Client>();
         app.Use(async (context, next) =>
         {
             // The POST response contains the raw one-time key.  Apply these to

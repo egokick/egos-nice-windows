@@ -43,10 +43,8 @@ internal sealed class RemoteAdminConsoleLauncher : IRemoteAdminConsoleLauncher
 
     internal static bool TryGetConsoleUri(string configuredUrl, out Uri consoleUri)
     {
-        if (Uri.TryCreate(configuredUrl, UriKind.Absolute, out var candidate)
-            && candidate.Scheme == Uri.UriSchemeHttps
-            && !string.IsNullOrEmpty(candidate.Host)
-            && string.IsNullOrEmpty(candidate.UserInfo))
+        if (RemoteClientPreferences.IsSelfHostedEndpoint(configuredUrl)
+            && Uri.TryCreate(configuredUrl, UriKind.Absolute, out var candidate))
         {
             consoleUri = candidate;
             return true;

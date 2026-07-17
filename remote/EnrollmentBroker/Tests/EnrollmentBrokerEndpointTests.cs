@@ -17,6 +17,7 @@ using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 using StayActive.EnrollmentBroker.Auth;
+using StayActive.EnrollmentBroker.Configuration;
 using StayActive.EnrollmentBroker.Domain;
 using StayActive.EnrollmentBroker.Services;
 
@@ -325,9 +326,7 @@ public sealed class EnrollmentBrokerEndpointTests
     private async Task<HttpClient> StartClientAsync(bool production = false, bool useStaticJwtConfiguration = false)
     {
         Directory.CreateDirectory(_directory);
-        var apiKeyFile = Path.Combine(_directory, "headscale-api-key");
         var journalKeyFile = Path.Combine(_directory, "journal-hmac-key");
-        await File.WriteAllTextAsync(apiKeyFile, "hskey-api-unit-test-secret");
         await File.WriteAllTextAsync(journalKeyFile, Convert.ToBase64String(_journalKey));
 
         var environment = production ? "Production" : "Testing";
@@ -340,8 +339,7 @@ public sealed class EnrollmentBrokerEndpointTests
         {
             ["EnrollmentBroker:Storage:JournalPath"] = Path.Combine(_directory, "tickets.journal.jsonl"),
             ["EnrollmentBroker:Storage:JournalHmacKeyFile"] = journalKeyFile,
-            ["EnrollmentBroker:Headscale:ApiBaseUrl"] = "https://headscale-api.stayactive.test",
-            ["EnrollmentBroker:Headscale:ApiKeyFile"] = apiKeyFile,
+            ["EnrollmentBroker:Headscale:ApiBaseUrl"] = EnrollmentBrokerSettings.HeadscaleControllerApiBaseUrl,
             ["EnrollmentBroker:Headscale:UserId"] = "1",
             ["EnrollmentBroker:Headscale:LoginServer"] = "https://headscale.stayactive.test"
         };
@@ -375,7 +373,7 @@ public sealed class EnrollmentBrokerEndpointTests
             });
         }
         builder.WebHost.UseUrls("http://127.0.0.1:0");
-        _app = EnrollmentBrokerApplication.Build(builder);
+        _app = EnrollmentBrokerApplication.Build(builder, new FakeControllerCredentialStore());
         await _app.StartAsync();
 
         var addresses = _app.Services.GetRequiredService<IServer>()

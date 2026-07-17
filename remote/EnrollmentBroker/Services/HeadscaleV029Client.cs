@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using StayActive.EnrollmentBroker.Security;
 
 namespace StayActive.EnrollmentBroker.Services;
 
@@ -21,7 +22,7 @@ public sealed class HeadscaleV029Client : IHeadscaleV029Client, IDisposable
     };
     private bool _disposed;
 
-    public HeadscaleV029Client(HttpClient httpClient, string apiKey)
+    public HeadscaleV029Client(HttpClient httpClient, IControllerCredentialStore credentialStore)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         if (_httpClient.BaseAddress is null)
@@ -29,12 +30,9 @@ public sealed class HeadscaleV029Client : IHeadscaleV029Client, IDisposable
             throw new ArgumentException("The Headscale HTTP client must have a base address.", nameof(httpClient));
         }
 
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new ArgumentException("A Headscale API key is required.", nameof(apiKey));
-        }
-
-        _apiKey = apiKey;
+        ArgumentNullException.ThrowIfNull(credentialStore);
+        _apiKey = ControllerCredential.Validate(
+            credentialStore.ReadGenericCredential(ControllerCredential.TargetName));
     }
 
     public async Task<HeadscaleCreatedPreAuthKey> CreateOneUsePreAuthKeyAsync(

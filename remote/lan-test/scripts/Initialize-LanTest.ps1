@@ -13,6 +13,7 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $lanRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $repoRoot = (Resolve-Path (Join-Path $lanRoot '..\..')).Path
 $environmentFile = Join-Path $lanRoot '.env'
+$imagePinsPath = Join-Path $lanRoot 'config\image-pins.json'
 
 function Get-DockerPath {
     $command = Get-Command docker.exe -ErrorAction SilentlyContinue
@@ -181,14 +182,30 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Docker Desktop is not ready.'
 }
 
-$imageInputs = [ordered]@{
-    CADDY_IMAGE = 'caddy:2.10.2'
-    HEADSCALE_IMAGE = 'headscale/headscale:0.29.2'
-    MESHCENTRAL_IMAGE = 'ghcr.io/ylianst/meshcentral:1.1.59@sha256:7a619610e187fece8d3a15b3ac9448412d32baa1a9e63c1922b328eaeea17f10'
-    KEYCLOAK_IMAGE = 'quay.io/keycloak/keycloak:26.6.3'
-    POSTGRES_IMAGE = 'postgres:17.6'
-    REMOTEHUB_SDK_IMAGE = 'mcr.microsoft.com/dotnet/sdk:10.0'
-    REMOTEHUB_RUNTIME_IMAGE = 'mcr.microsoft.com/dotnet/aspnet:10.0'
+if (-not (Test-Path -LiteralPath $imagePinsPath -PathType Leaf)) {
+    throw 'The reviewed image-pin manifest is missing.'
+}
+try {
+    $imagePinDocument = [System.IO.File]::ReadAllText($imagePinsPath) | ConvertFrom-Json
+}
+catch {
+    throw 'The reviewed image-pin manifest is invalid JSON.'
+}
+
+$imageInputs = [ordered]@{}
+foreach ($imageName in @(
+        'CADDY_IMAGE',
+        'HEADSCALE_IMAGE',
+        'MESHCENTRAL_IMAGE',
+        'KEYCLOAK_IMAGE',
+        'POSTGRES_IMAGE',
+        'REMOTEHUB_SDK_IMAGE',
+        'REMOTEHUB_RUNTIME_IMAGE')) {
+    $reference = [string]$imagePinDocument.$imageName
+    if ($reference -notmatch '^[a-z0-9][a-z0-9./_-]*@sha256:[a-f0-9]{64}$') {
+        throw "The reviewed image-pin manifest has an invalid $imageName reference."
+    }
+    $imageInputs[$imageName] = $reference
 }
 
 $imagePins = [ordered]@{}
@@ -206,17 +223,13 @@ foreach ($entry in $imageInputs.GetEnumerator()) {
     }
 
     $digest = ($digestOutput | Out-String).Trim()
-    if ([string]::IsNullOrWhiteSpace($digest) -or -not $digest.Contains('@sha256:')) {
-        if ($entry.Value.Contains('@sha256:')) {
-            $digest = $entry.Value
-        }
-        else {
-            throw "Docker did not provide a digest-pinned reference for $($entry.Value)."
-        }
+    $expectedDigest = $entry.Value.Substring($entry.Value.IndexOf('@'))
+    if ([string]::IsNullOrWhiteSpace($digest) -or -not $digest.EndsWith($expectedDigest, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Docker did not provide the reviewed immutable digest for $($entry.Key)."
     }
 
-    $imagePins[$entry.Key] = $digest
-    Write-Host "$($entry.Key): $digest"
+    $imagePins[$entry.Key] = $entry.Value
+    Write-Host "$($entry.Key): $($entry.Value)"
 }
 
 $paths = @{
@@ -229,7 +242,7 @@ foreach ($directory in @(
     (Join-Path $paths.Generated 'headscale'),
     (Join-Path $paths.Generated 'meshcentral'),
     (Join-Path $paths.Generated 'remotehub'),
-    (Join-Path $paths.Generated 'enrollmentbroker'),
+
     (Join-Path $paths.Generated 'keycloak'),
     (Join-Path $paths.State 'caddy\data'),
     (Join-Path $paths.State 'caddy\config'),
@@ -237,7 +250,7 @@ foreach ($directory in @(
     (Join-Path $paths.State 'meshcentral\data'),
     (Join-Path $paths.State 'meshcentral\files'),
     (Join-Path $paths.State 'remotehub\journal'),
-    (Join-Path $paths.State 'enrollmentbroker\journal'),
+
     $paths.Certificates,
     $paths.Secrets)) {
     [System.IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -267,10 +280,6 @@ Render-Template (Join-Path $lanRoot 'config\meshcentral\config.json.template') (
 
 Render-Template (Join-Path $lanRoot 'config\remotehub\appsettings.Production.json.template') (Join-Path $paths.Generated 'remotehub\appsettings.Production.json') @{ '__REMOTEHUB_JOURNAL_HMAC_KEY_BASE64__' = $remoteHubJournalHmacKey }
 
-# The broker is intentionally not runnable during loopback bootstrap. Its
-# positive Headscale user id and both protected secret files are created only
-# by Finalize-LanTest.ps1 after the policy owner exists.
-Render-Template (Join-Path $lanRoot 'config\enrollmentbroker\appsettings.Production.json.template') (Join-Path $paths.Generated 'enrollmentbroker\appsettings.Production.json') @{ '__HEADSCALE_ENROLLMENT_USER_ID__' = '0' }
 
 Render-Template (Join-Path $lanRoot 'config\keycloak\stayactive-realm.json.template') (Join-Path $paths.Generated 'keycloak\stayactive-realm.json') @{
     '__OPERATOR_USERNAME__' = $operatorUsername
@@ -293,8 +302,10 @@ $environmentLines = @(
     'MESHCENTRAL_CONTROL_IP=172.30.60.12',
     'REMOTEHUB_CONTROL_IP=172.30.60.13',
     'KEYCLOAK_CONTROL_IP=172.30.60.14',
-    'ENROLLMENTBROKER_CONTROL_IP=172.30.60.16',
     'POSTGRES_CONTROL_IP=172.30.60.15',
+    # Finalize-LanTest.ps1 replaces this fail-closed value with the WSL
+    # virtual-interface address of the dedicated Windows controller service.
+    'WINDOWS_ENROLLMENT_CONTROLLER_IP=127.0.0.1',
     "CADDY_IMAGE=$($imagePins.CADDY_IMAGE)",
     "HEADSCALE_IMAGE=$($imagePins.HEADSCALE_IMAGE)",
     "MESHCENTRAL_IMAGE=$($imagePins.MESHCENTRAL_IMAGE)",
@@ -303,9 +314,7 @@ $environmentLines = @(
     "REMOTEHUB_SDK_IMAGE=$($imagePins.REMOTEHUB_SDK_IMAGE)",
     "REMOTEHUB_RUNTIME_IMAGE=$($imagePins.REMOTEHUB_RUNTIME_IMAGE)",
     "REMOTEHUB_SOURCE_REVISION=$gitRevision",
-    "ENROLLMENTBROKER_SDK_IMAGE=$($imagePins.REMOTEHUB_SDK_IMAGE)",
-    "ENROLLMENTBROKER_RUNTIME_IMAGE=$($imagePins.REMOTEHUB_RUNTIME_IMAGE)",
-    "ENROLLMENTBROKER_SOURCE_REVISION=$gitRevision",
+
     'POSTGRES_DB=keycloak',
     'POSTGRES_USER=keycloak',
     "POSTGRES_PASSWORD=$postgresPassword",

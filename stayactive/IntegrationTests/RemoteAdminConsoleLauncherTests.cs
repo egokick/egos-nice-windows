@@ -33,6 +33,23 @@ public sealed class RemoteAdminConsoleLauncherTests
         Assert.Contains("HTTPS", result.Message);
     }
 
+    [Theory]
+    [InlineData("https://login.tailscale.com")]
+    [InlineData("https://login.tailscale.com.")]
+    public void Open_RejectsHostedTailscaleConsoleUrl(string adminConsoleUrl)
+    {
+        var launcher = new CapturingLauncher();
+        var service = new RemoteAdminConsoleLauncher(
+            () => Preferences(adminConsoleUrl),
+            launcher);
+
+        var result = service.Open();
+
+        Assert.False(result.Succeeded);
+        Assert.Null(launcher.Uri);
+        Assert.Contains("self-hosted", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static RemoteClientPreferences Preferences(string adminConsoleUrl)
     {
         return new RemoteClientPreferences(

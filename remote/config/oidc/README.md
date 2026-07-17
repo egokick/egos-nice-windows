@@ -61,10 +61,11 @@ Audience:     stayactive-enrollment
 Do not grant or request `offline_access`. Map only the dedicated
 `stayactive.enrollment.write` scope and a flat multivalued `role` claim with
 `stayactive.enrollment.admin` to device owners approved to add a computer. The
-broker requires both values, and the StayActive **Remotes > Add device** flow
-must obtain a fresh interactive authorization for this client rather than
-reusing the tray's RemoteHub refresh token. This client must not be a browser
-origin and must not receive RemoteHub inventory-administration scopes.
+Windows enrollment controller requires both values, and the StayActive
+**Remotes > Add device** flow must obtain a fresh interactive authorization for
+this client rather than reusing the tray's RemoteHub refresh token. It fixes
+all issued tickets to one use and exactly 15 minutes. This client must not be a
+browser origin and must not receive RemoteHub inventory-administration scopes.
 
 For the included LAN Keycloak realm, the idempotent
 `configure-scope-mappings.sh` migration creates this scope, mapper, role, and

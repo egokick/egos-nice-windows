@@ -295,6 +295,18 @@ public sealed class RemoteHubOidcAccessTokenProviderTests
         Assert.False(accepted);
     }
 
+    [Theory]
+    [InlineData("https://login.tailscale.com")]
+    [InlineData("https://login.tailscale.com.")]
+    public void TryCreateEnrollment_RejectsTailscaleHostedIssuerBeforeOidcNetworkWork(string issuer)
+    {
+        var accepted = RemoteHubOidcConfiguration.TryCreateEnrollment(
+            issuer,
+            "stayactive-remotes-enrollment",
+            out _);
+
+        Assert.False(accepted);
+    }
     [Fact]
     public async Task GetAccessTokenAsync_ObservesCallerCancellationBeforeNetworkWork()
     {

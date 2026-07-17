@@ -8,8 +8,10 @@ operator before enabling Remotes for normal use.
 
 ## Required test environment
 
-- One operator-controlled Linux server with the rendered `remote/` deployment,
-  public DNS/TLS, encrypted persistent storage, and backups.
+- One operator-controlled Windows Docker host with the rendered `remote/`
+  deployment, public DNS/TLS, encrypted persistent storage, and backups. Its
+  dedicated Windows enrollment-controller service runs on that same host so it
+  can reach Caddy's controller-only loopback API.
 - An operator-owned OIDC issuer and three distinct registered public clients:
   `stayactive-remotes-tray` for normal tray access, the configured RemoteHub
   Admin client for `https://<remotehub-fqdn>/admin/`, and
@@ -29,19 +31,29 @@ operator before enabling Remotes for normal use.
 1. Render every template to a root-owned file outside source control. Verify
    that `.env`, Compose configuration, image labels, and container inspection
    contain no OIDC secrets, RemoteHub journal HMAC key, MeshCentral encryption
-   key, broker Headscale API key, or enrollment key. Confirm the broker alone
-   receives its two read-only secret mounts and has no Docker socket or
-   Headscale-state mount.
+   key, Headscale controller API key, or enrollment key. Confirm there is no
+   Docker enrollment-controller service and no container API-key mount or key
+   file. Verify the controller key exists only as
+   `StayActive/HeadscaleController/v1` in the dedicated Windows service-account
+   Credential Manager profile; do not read or export its value. Verify that the
+   controller binary, configuration, journal, and integrity material are under
+   `%ProgramData%\StayActiveRemotes\EnrollmentController` with no write access
+   for the interactive tray user or ordinary users; they must not reside under
+   `remote/lan-test/state`.
 2. Run `docker compose --env-file .env config` and confirm that only Caddy
-   exposes TCP 80/443 and Headscale exposes the deliberately selected UDP STUN
-   port. RemoteHub, EnrollmentBroker, and MeshCentral must not have
-   host-published ports.
-3. Confirm `https://<headscale-fqdn>/health`,
-   `https://<remotehub-fqdn>/healthz`, and the broker's private `/healthz`
-   endpoint respond only through their intended path. From a host or LAN client
-   that is not `ENROLLMENTBROKER_CONTROL_IP`, request
+   exposes public TCP 80/443 and Headscale exposes the deliberately selected
+   UDP STUN port. Caddy's TCP 4443 Headscale controller API listener must be
+   host-loopback only. RemoteHub and MeshCentral must not have host-published
+   ports; the Windows controller's TCP 5091 firewall rule must permit only
+   Caddy's fixed private peer.
+3. Confirm `https://<headscale-fqdn>/health` and
+   `https://<remotehub-fqdn>/healthz` respond only through their intended
+   public paths. From every LAN/public source, request
    `https://<headscale-fqdn>/api/v1/users`; it must return `404`, not Headscale
-   authentication or API output. Repeat after every Caddy reload.
+   authentication or API output. On the controller host only, confirm
+   `headscale-controller.stayactive.test:4443` resolves to loopback and that no
+   firewall rule publishes TCP 4443. Repeat after every Caddy reload.
+
 4. Register the three OIDC public clients exactly as documented in
    [`config/oidc/README.md`](config/oidc/README.md). Require Authorization Code
    plus S256 PKCE, prohibit a client secret for all public clients, and grant
@@ -61,10 +73,11 @@ operator before enabling Remotes for normal use.
    token is written to `settings.json`.
 2. On one trusted operator laptop, choose **Remotes > Add device**. Confirm it
    obtains a fresh authorization for `stayactive-remotes-enrollment`, creates a
-   five-to-thirty-minute one-time ticket, and shows the raw ticket only at the
-   moment it is issued. Redeem it on the second laptop once; retrying the same
-   ticket must fail. Verify the broker journal/audit records ticket status but
-   never stores the raw pre-authentication key.
+   one-use ticket that expires exactly 15 minutes after issuance, and shows the
+   raw ticket only at the moment it is issued. Redeem it on the second laptop
+   once; retrying the same ticket must fail. Verify the Windows controller
+   journal/audit records ticket status but never stores the raw
+   pre-authentication key.
 3. Open the tray **Remotes** submenu on both computers. It must show only
    `tag:stayactive` Headscale peers. Verify the computer name, opted-in owner
    display name, opted-in coarse location, online state, and centrally
@@ -96,8 +109,10 @@ operator before enabling Remotes for normal use.
 - Attempt to call `POST /api/v1/enrollment-tickets` with the normal tray token,
   a token missing `stayactive.enrollment.write`, a token missing
   `stayactive.enrollment.admin`, an expired token, and no token. Each must be
-  denied. Verify no response, server log, journal, or ticket-status endpoint
-  returns the raw Headscale pre-authentication key after initial issuance.
+  denied. Attempt to request another lifetime: the controller must reject it or
+  still return the fixed one-use 15-minute policy. Verify no response, server
+  log, journal, or ticket-status endpoint returns the raw Headscale
+  pre-authentication key after initial issuance.
 - Attempt to configure a `tailscale.com` control-plane URL. The app must reject
   it; it must not fall back to Tailscale's hosted control plane or DERP map.
 - Check that RemoteHub has no endpoint for shell execution, screen data, file

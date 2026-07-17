@@ -894,7 +894,8 @@ internal static class RemoteHubOidcEndpointValidator
             && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
             && !string.IsNullOrWhiteSpace(uri.Host)
             && string.IsNullOrEmpty(uri.UserInfo)
-            && string.IsNullOrEmpty(uri.Fragment);
+            && string.IsNullOrEmpty(uri.Fragment)
+            && !RemoteClientPreferences.IsHostedTailscaleHost(uri.Host);
     }
 
     private static bool TryGetStrictHttpsUri(string? value, out Uri uri)
@@ -908,7 +909,8 @@ internal static class RemoteHubOidcEndpointValidator
             || string.IsNullOrWhiteSpace(candidate.Host)
             || !string.IsNullOrEmpty(candidate.UserInfo)
             || !string.IsNullOrEmpty(candidate.Query)
-            || !string.IsNullOrEmpty(candidate.Fragment))
+            || !string.IsNullOrEmpty(candidate.Fragment)
+            || RemoteClientPreferences.IsHostedTailscaleHost(candidate.Host))
         {
             return false;
         }

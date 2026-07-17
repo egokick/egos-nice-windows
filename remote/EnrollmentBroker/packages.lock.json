@@ -1,7 +1,7 @@
 {
   "version": 1,
   "dependencies": {
-    "net10.0": {
+    "net10.0-windows7.0": {
       "Microsoft.AspNetCore.Authentication.JwtBearer": {
         "type": "Direct",
         "requested": "[10.0.4, )",
@@ -9,6 +9,15 @@
         "contentHash": "1mUwGyeGrGETdhlU/ZzNZeN2J6ugqf9EztZyG+WQIZwkaH5+lFNza15+cNCXhXNA0MKo1iohr5vj60eqR2J44Q==",
         "dependencies": {
           "Microsoft.IdentityModel.Protocols.OpenIdConnect": "8.0.1"
+        }
+      },
+      "Microsoft.Extensions.Hosting.WindowsServices": {
+        "type": "Direct",
+        "requested": "[10.0.4, )",
+        "resolved": "10.0.4",
+        "contentHash": "7OLaQP58G+6lkbuwccdeQnWYny+wrXkjvmEWhvhtMvwQMv9DbbfElKzTDEq/QXJhC7hzNhvDFDN3MEdprb7Nqw==",
+        "dependencies": {
+          "System.ServiceProcess.ServiceController": "10.0.4"
         }
       },
       "Microsoft.IdentityModel.Abstractions": {
@@ -65,6 +74,11 @@
           "Microsoft.IdentityModel.JsonWebTokens": "8.0.1",
           "Microsoft.IdentityModel.Tokens": "8.0.1"
         }
+      },
+      "System.ServiceProcess.ServiceController": {
+        "type": "Transitive",
+        "resolved": "10.0.4",
+        "contentHash": "F3dpNO6p9DA4sk2V7RWEcm/WaYJ5O2Lkv/VLAKzMTWHri2zrxPTUbBZ9KUBSbS7ICBFbIyKFnFQLsGaDXbkqaw=="
       }
     }
   }

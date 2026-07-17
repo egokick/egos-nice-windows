@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using StayActive.EnrollmentBroker.Services;
+using StayActive.EnrollmentBroker.Security;
 
 namespace StayActive.EnrollmentBroker.Tests;
 
@@ -26,7 +27,8 @@ public sealed class HeadscaleV029ClientTests
             }
         });
         var handler = new RecordingHandler(_ => JsonResponse(createResponseBody));
-        using var client = CreateClient(handler);
+        var credentialStore = new FakeControllerCredentialStore("hskey-api-unit-test-secret");
+        using var client = CreateClient(handler, credentialStore);
 
         var created = await client.CreateOneUsePreAuthKeyAsync(
             "7",
@@ -47,6 +49,7 @@ public sealed class HeadscaleV029ClientTests
         Assert.Contains("\"reusable\":false", request.Body, StringComparison.Ordinal);
         Assert.Contains("\"ephemeral\":false", request.Body, StringComparison.Ordinal);
         Assert.Contains("\"aclTags\":[\"tag:stayactive\",\"tag:stayactive-exit\"]", request.Body, StringComparison.Ordinal);
+        Assert.Equal([ControllerCredential.TargetName], credentialStore.ReadTargets);
     }
 
     [Fact]
@@ -123,13 +126,15 @@ public sealed class HeadscaleV029ClientTests
         Assert.DoesNotContain(sensitiveBody, exception.ToString(), StringComparison.Ordinal);
     }
 
-    private static HeadscaleV029Client CreateClient(HttpMessageHandler handler) =>
+    private static HeadscaleV029Client CreateClient(
+        HttpMessageHandler handler,
+        FakeControllerCredentialStore? credentialStore = null) =>
         new(
             new HttpClient(handler)
             {
                 BaseAddress = new Uri("https://headscale-api.stayactive.test/")
             },
-            "hskey-api-unit-test-secret");
+            credentialStore ?? new FakeControllerCredentialStore("hskey-api-unit-test-secret"));
 
     private static HttpResponseMessage JsonResponse(string content) => new(HttpStatusCode.OK)
     {

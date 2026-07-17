@@ -26,34 +26,9 @@ function Enable-DockerDesktopCli {
 
     $dockerDirectory = Split-Path -Parent $dockerPath
     if ($dockerDirectory -notin ($env:Path -split ';')) {
-        # Docker registry credentials are resolved by a helper beside docker.exe.
         $env:Path = $dockerDirectory + ';' + $env:Path
     }
 }
-
-Enable-DockerDesktopCli
-
-if (-not $MeshCentralAdministratorCreated -or -not $EnableLan) {
-    throw 'Refusing to publish the LAN endpoint. Re-run only after creating the single MeshCentral administrator, with both confirmation switches.'
-}
-
-$lanRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$repoRoot = (Resolve-Path (Join-Path $lanRoot '..\..')).Path
-$environmentFile = Join-Path $lanRoot '.env'
-$composeFile = Join-Path $lanRoot 'compose.yaml'
-$policySource = Join-Path $lanRoot 'config\headscale\policy.hujson'
-$policyDestination = Join-Path $lanRoot 'generated\headscale\policy.hujson'
-$meshCentralConfigPath = Join-Path $lanRoot 'generated\meshcentral\config.json'
-$rootCertificatePath = Join-Path $lanRoot 'certs\caddy-root.crt'
-$firewallScript = Join-Path $PSScriptRoot 'Enable-LanTestFirewall.ps1'
-$hostsScript = Join-Path $PSScriptRoot 'Set-LanTestHosts.ps1'
-$brokerConfigTemplatePath = Join-Path $lanRoot 'config\enrollmentbroker\appsettings.Production.json.template'
-$brokerConfigPath = Join-Path $lanRoot 'generated\enrollmentbroker\appsettings.Production.json'
-$brokerJournalDirectory = Join-Path $lanRoot 'state\enrollmentbroker\journal'
-$brokerApiKeyPath = Join-Path $lanRoot 'secrets\headscale-enrollment-api-key'
-$brokerJournalKeyPath = Join-Path $lanRoot 'secrets\enrollmentbroker-journal-hmac-key'
-$brokerApiKeyMetadataPath = Join-Path $lanRoot 'secrets\headscale-enrollment-api-key.metadata.json'
-$brokerDockerfilePath = Join-Path $lanRoot '..\EnrollmentBroker.Dockerfile'
 
 function Invoke-Docker([string[]]$Arguments, [string]$FailureMessage) {
     & docker @Arguments
@@ -71,29 +46,47 @@ function Get-EnvironmentValue([string[]]$Lines, [string]$Name) {
     return $line.Substring($Name.Length + 1)
 }
 
-function Assert-PrivateIpv4([string]$Value) {
+function Assert-PrivateIpv4([string]$Value, [string]$ParameterName) {
     $address = $null
-    if (
-        -not [System.Net.IPAddress]::TryParse($Value, [ref]$address) -or
-        $address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
-        throw 'LAN_IP must be an IPv4 address.'
+    if (-not [System.Net.IPAddress]::TryParse($Value, [ref]$address) -or $address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        throw "$ParameterName must be an IPv4 address."
     }
 
     $bytes = $address.GetAddressBytes()
-    if (-not (
-            $bytes[0] -eq 10 -or
-            ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
-            ($bytes[0] -eq 192 -and $bytes[1] -eq 168))) {
-        throw 'LAN_IP must remain an RFC1918 private IPv4 address.'
+    $isPrivate = $bytes[0] -eq 10 -or ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+    if (-not $isPrivate) {
+        throw "$ParameterName must be an RFC1918 private IPv4 address."
     }
 
     return $address.IPAddressToString
 }
 
+function Get-WslControllerEndpoint {
+    $candidates = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
+            $_.AddressState -eq 'Preferred' -and $_.InterfaceAlias -like 'vEthernet (WSL*' -and $_.IPAddress -notlike '169.254.*'
+        })
+
+    if ($candidates.Count -ne 1) {
+        throw 'Expected exactly one Preferred IPv4 address on vEthernet (WSL*). Ensure Docker Desktop is using its WSL virtual network before finalizing.'
+    }
+
+    $candidate = $candidates[0]
+    $address = Assert-PrivateIpv4 ([string]$candidate.IPAddress) 'WSL controller address'
+    $adapter = Get-NetAdapter -InterfaceIndex $candidate.InterfaceIndex -ErrorAction Stop
+    if ($adapter.Status -ne 'Up') {
+        throw "The WSL controller interface is not up: $($candidate.InterfaceAlias)"
+    }
+
+    return [pscustomobject]@{
+        Address = $address
+        InterfaceAlias = [string]$candidate.InterfaceAlias
+    }
+}
+
 function Protect-LocalSecret([string]$Path) {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $fileGrants = @(
-        "${identity}:(F)",
+        "$($identity):(F)",
         'SYSTEM:(F)',
         'BUILTIN\Administrators:(F)')
     $isDirectory = Test-Path -LiteralPath $Path -PathType Container
@@ -105,7 +98,7 @@ function Protect-LocalSecret([string]$Path) {
         }
 
         $directoryGrants = @(
-            "${identity}:(OI)(CI)F",
+            "$($identity):(OI)(CI)F",
             'SYSTEM:(OI)(CI)F',
             'BUILTIN\Administrators:(OI)(CI)F')
         & icacls $Path /inheritance:r /grant:r @directoryGrants | Out-Null
@@ -122,23 +115,55 @@ function Protect-LocalSecret([string]$Path) {
     }
 }
 
-function New-Base64Secret([int]$ByteCount) {
-    [byte[]]$bytes = New-Object byte[] $ByteCount
-    $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try {
-        $random.GetBytes($bytes)
-        return [Convert]::ToBase64String($bytes)
+function Test-ReparsePoint([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
     }
-    finally {
-        [Array]::Clear($bytes, 0, $bytes.Length)
-        $random.Dispose()
-    }
+
+    $item = Get-Item -LiteralPath $Path -Force
+    return ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
 }
 
+function Protect-AdministratorOnlyPath(
+    [string]$Path,
+    [string]$ServiceIdentity = '',
+    [switch]$Recursive) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Cannot protect a missing deployment path: $Path"
+    }
+    if (Test-ReparsePoint $Path) {
+        throw "Refusing to trust a reparse-point deployment path: $Path"
+    }
+
+    $isDirectory = Test-Path -LiteralPath $Path -PathType Container
+    $grants = if ($isDirectory) {
+        @('SYSTEM:(OI)(CI)F', 'BUILTIN\Administrators:(OI)(CI)F')
+    }
+    else {
+        @('SYSTEM:(F)', 'BUILTIN\Administrators:(F)')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ServiceIdentity)) {
+        $grants += if ($isDirectory) {
+            "${ServiceIdentity}:(OI)(CI)RX"
+        }
+        else {
+            "${ServiceIdentity}:(RX)"
+        }
+    }
+
+    $icaclsArguments = @($Path, '/inheritance:r', '/grant:r') + $grants
+    if ($Recursive) {
+        $icaclsArguments += '/T'
+    }
+    & icacls @icaclsArguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to restrict deployment path: $Path"
+    }
+}
 function Write-AtomicUtf8File([string]$Path, [string]$Content) {
     [System.IO.Directory]::CreateDirectory((Split-Path -Parent $Path)) | Out-Null
     $pendingPath = "$Path.pending"
-    [System.IO.File]::WriteAllText($pendingPath, $Content.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($pendingPath, $Content, [System.Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $pendingPath -Destination $Path -Force
 }
 
@@ -151,6 +176,7 @@ function Set-EnvironmentValue([string[]]$Lines, [string]$Name, [string]$Value) {
                 $updatedLines.Add("$Name=$Value")
                 $found = $true
             }
+
             continue
         }
 
@@ -164,32 +190,6 @@ function Set-EnvironmentValue([string[]]$Lines, [string]$Name, [string]$Value) {
     return $updatedLines.ToArray()
 }
 
-function Get-OptionalEnvironmentValue([string[]]$Lines, [string]$Name) {
-    $line = $Lines | Where-Object { $_ -like "$Name=*" } | Select-Object -First 1
-    if ($null -eq $line) {
-        return $null
-    }
-
-    return $line.Substring($Name.Length + 1)
-}
-
-function Render-EnrollmentBrokerConfig([string]$TemplatePath, [string]$DestinationPath, [string]$HeadscaleUserId) {
-    $text = [System.IO.File]::ReadAllText($TemplatePath).Replace('__HEADSCALE_ENROLLMENT_USER_ID__', $HeadscaleUserId)
-    if ($text -match '__[A-Z0-9_]+__') {
-        throw 'EnrollmentBroker configuration contains an unrendered placeholder.'
-    }
-
-    try {
-        $null = $text | ConvertFrom-Json
-    }
-    catch {
-        throw 'Rendered EnrollmentBroker configuration is not valid JSON.'
-    }
-
-    Write-AtomicUtf8File $DestinationPath $text
-    Protect-LocalSecret $DestinationPath
-}
-
 function Get-HeadscaleUsers([string[]]$ComposePrefix) {
     $userListOutput = & docker @($ComposePrefix + @('exec', '-T', 'headscale', 'headscale', 'users', 'list', '--output', 'json'))
     if ($LASTEXITCODE -ne 0) {
@@ -200,49 +200,8 @@ function Get-HeadscaleUsers([string[]]$ComposePrefix) {
         return @($userListOutput | Out-String | ConvertFrom-Json | Where-Object { $null -ne $_ })
     }
     catch {
-        throw 'Headscale did not return a JSON user list; refusing to provision the enrollment broker.'
+        throw 'Headscale did not return a JSON user list; refusing to provision the Windows enrollment controller.'
     }
-}
-
-function New-EnrollmentBrokerApiKey([string[]]$ComposePrefix, [string]$SecretPath, [string]$MetadataPath) {
-    # The raw API key is returned only once by Headscale. Capture it without
-    # writing it to the host console, logs, .env, or rendered configuration.
-    $apiKeyOutput = & docker @($ComposePrefix + @(
-        'exec', '-T',
-        'headscale',
-        'headscale', 'apikeys', 'create',
-        '--force',
-        '--expiration', '30d',
-        '--output', 'json')) 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Unable to create the restricted EnrollmentBroker Headscale API key.'
-    }
-
-    try {
-        $apiKey = $apiKeyOutput | Out-String | ConvertFrom-Json
-    }
-    catch {
-        throw 'Headscale returned an unreadable EnrollmentBroker API-key response.'
-    }
-
-    $key = [string]$apiKey.key
-    $id = [string]$apiKey.id
-    $prefix = [string]$apiKey.prefix
-    if ($key -notmatch '^hskey-api-[A-Za-z0-9_-]+$' -or $id -notmatch '^[1-9][0-9]*$') {
-        throw 'Headscale returned an invalid EnrollmentBroker API-key response.'
-    }
-
-    Write-AtomicUtf8File $SecretPath $key
-    Protect-LocalSecret $SecretPath
-
-    $metadata = [ordered]@{
-        Id = $id
-        Prefix = $prefix
-        ExpiresAtUtc = [string]$apiKey.expiration
-        CreatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
-    } | ConvertTo-Json -Compress
-    Write-AtomicUtf8File $MetadataPath $metadata
-    Protect-LocalSecret $MetadataPath
 }
 
 function Wait-For-RunningService([string[]]$ComposePrefix, [string]$ServiceName, [int]$TimeoutSeconds) {
@@ -267,9 +226,6 @@ function Wait-For-RunningService([string[]]$ComposePrefix, [string]$ServiceName,
 }
 
 function Assert-HeadscaleApiIsBlockedOnHost {
-    # This is intentionally made from the Windows host, never from the broker
-    # address. A live Caddy route must return 404 here; a 401/other response
-    # would mean the Headscale management API bypassed the source restriction.
     $handler = [System.Net.Http.HttpClientHandler]::new()
     $handler.UseProxy = $false
     $client = [System.Net.Http.HttpClient]::new($handler)
@@ -277,7 +233,7 @@ function Assert-HeadscaleApiIsBlockedOnHost {
         $response = $client.GetAsync('https://headscale.stayactive.test/api/v1/users').GetAwaiter().GetResult()
         try {
             if ([int]$response.StatusCode -ne 404) {
-                throw "Caddy returned HTTP $([int]$response.StatusCode) for a host-originated Headscale API request."
+                throw "Caddy returned HTTP $([int]$response.StatusCode) for a public Headscale API request."
             }
         }
         finally {
@@ -285,7 +241,7 @@ function Assert-HeadscaleApiIsBlockedOnHost {
         }
     }
     catch {
-        throw "Unable to verify that Caddy blocks host-originated Headscale API requests: $($_.Exception.Message)"
+        throw "Unable to verify that the public Caddy listener blocks Headscale API requests: $($_.Exception.Message)"
     }
     finally {
         $client.Dispose()
@@ -293,22 +249,424 @@ function Assert-HeadscaleApiIsBlockedOnHost {
     }
 }
 
+function Assert-EnrollmentControllerRoute {
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.UseProxy = $false
+    $client = [System.Net.Http.HttpClient]::new($handler)
+    try {
+        $response = $client.GetAsync('https://remotehub.stayactive.test/api/v1/enrollment-tickets/00000000-0000-0000-0000-000000000000').GetAwaiter().GetResult()
+        try {
+            if ([int]$response.StatusCode -ne 401) {
+                throw "Caddy returned HTTP $([int]$response.StatusCode) instead of the controller authentication challenge."
+            }
+        }
+        finally {
+            $response.Dispose()
+        }
+    }
+    catch {
+        throw "Unable to verify Caddy-to-Windows enrollment-controller routing: $($_.Exception.Message)"
+    }
+    finally {
+        $client.Dispose()
+        $handler.Dispose()
+    }
+}
+
+function Assert-ReviewedControllerInputs([string]$RepositoryRoot) {
+    $keyAffectingPaths = @(
+        'remote/EnrollmentBroker',
+        'remote/lan-test/compose.yaml',
+        'remote/lan-test/Caddyfile',
+        'remote/lan-test/config/enrollmentbroker/appsettings.Production.json.template',
+        'remote/lan-test/config/headscale/config.yaml.template',
+        'remote/lan-test/config/headscale/policy.hujson',
+        'remote/lan-test/config/image-pins.json',
+        'remote/lan-test/config/keycloak/configure-scope-mappings.sh.template',
+        'remote/lan-test/scripts/Initialize-LanTest.ps1',
+        'remote/lan-test/scripts/Finalize-LanTest.ps1',
+        'remote/lan-test/scripts/Start-LanTest.ps1',
+        'remote/lan-test/scripts/Install-LanTestEnrollmentController.ps1',
+        'remote/lan-test/scripts/Enable-LanTestEnrollmentControllerFirewall.ps1',
+        'remote/lan-test/scripts/Enable-LanTestFirewall.ps1',
+        'remote/lan-test/scripts/Set-LanTestHosts.ps1'
+    )
+
+    foreach ($path in $keyAffectingPaths) {
+        $tracked = @(& git -C $RepositoryRoot ls-files -- $path)
+        if ($LASTEXITCODE -ne 0 -or $tracked.Count -eq 0) {
+            throw "The required controller provenance path is not tracked: $path"
+        }
+    }
+
+    $changes = @(& git -C $RepositoryRoot status --porcelain=v1 --untracked-files=all -- $keyAffectingPaths)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to verify the reviewed controller deployment inputs.'
+    }
+    if ($changes.Count -ne 0) {
+        throw 'Commit every reviewed controller, Caddy, policy, and deployment-script input before finalizing the LAN test.'
+    }
+
+    $revisionOutput = @(& git -C $RepositoryRoot rev-parse --verify 'HEAD^{commit}')
+    if ($LASTEXITCODE -ne 0 -or $revisionOutput.Count -ne 1) {
+        throw 'Unable to resolve the reviewed controller source revision.'
+    }
+
+    $revision = ([string]$revisionOutput[0]).Trim()
+    if ($revision -notmatch '^[0-9a-fA-F]{40,64}$') {
+        throw 'Git returned an invalid reviewed controller source revision.'
+    }
+
+    return $revision.ToLowerInvariant()
+}
+
+function Get-ReviewedGitText(
+    [string]$RepositoryRoot,
+    [string]$Revision,
+    [string]$RepositoryPath) {
+    if ($RepositoryPath -notmatch '^remote/[A-Za-z0-9._/-]+$') {
+        throw 'The requested reviewed deployment path is invalid.'
+    }
+
+    $content = @(& git -C $RepositoryRoot show "${Revision}:$RepositoryPath")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to load the reviewed deployment artifact: $RepositoryPath"
+    }
+
+    return $content -join [Environment]::NewLine
+}
+
+function Get-ReviewedImagePins(
+    [string]$RepositoryRoot,
+    [string]$Revision) {
+    try {
+        $document = Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/config/image-pins.json' | ConvertFrom-Json
+    }
+    catch {
+        throw 'The reviewed image-pin manifest is invalid.'
+    }
+
+    $requiredNames = @(
+        'CADDY_IMAGE',
+        'HEADSCALE_IMAGE',
+        'MESHCENTRAL_IMAGE',
+        'KEYCLOAK_IMAGE',
+        'POSTGRES_IMAGE',
+        'REMOTEHUB_SDK_IMAGE',
+        'REMOTEHUB_RUNTIME_IMAGE')
+    $unexpectedNames = @($document.PSObject.Properties.Name | Where-Object { $_ -notin $requiredNames })
+    if ($unexpectedNames.Count -ne 0) {
+        throw 'The reviewed image-pin manifest contains an unexpected image entry.'
+    }
+
+    $pins = @{}
+    foreach ($name in $requiredNames) {
+        $reference = [string]$document.$name
+        if ($reference -notmatch '^[a-z0-9][a-z0-9./_-]*@sha256:[a-f0-9]{64}$') {
+            throw "The reviewed image-pin manifest has an invalid $name reference."
+        }
+        $pins[$name] = $reference
+    }
+
+    return $pins
+}
+
+function ConvertTo-EnvironmentMap([string[]]$Lines) {
+    $environment = @{}
+    foreach ($line in $Lines) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith('#')) {
+            continue
+        }
+        if ($line -notmatch '^([A-Z_][A-Z0-9_]*)=(.*)$') {
+            throw 'The LAN environment file contains an invalid line.'
+        }
+
+        $name = $matches[1]
+        $value = $matches[2]
+        if ($environment.ContainsKey($name)) {
+            throw "The LAN environment file contains a duplicate $name entry."
+        }
+        if ($value.Contains("`r") -or $value.Contains("`n")) {
+            throw "The LAN environment file contains an invalid $name value."
+        }
+        $environment[$name] = $value
+    }
+
+    return $environment
+}
+
+function New-ValidatedControllerEnvironment(
+    [string[]]$EnvironmentLines,
+    [hashtable]$ImagePins,
+    [string]$RepositoryRoot) {
+    $environment = ConvertTo-EnvironmentMap $EnvironmentLines
+    $orderedNames = @(
+        'COMPOSE_PROJECT_NAME',
+        'LAN_IP',
+        'CADDY_BIND_ADDRESS',
+        'STUN_BIND_ADDRESS',
+        'CONTROL_NETWORK_CIDR',
+        'CADDY_CONTROL_IP',
+        'HEADSCALE_CONTROL_IP',
+        'MESHCENTRAL_CONTROL_IP',
+        'REMOTEHUB_CONTROL_IP',
+        'KEYCLOAK_CONTROL_IP',
+        'POSTGRES_CONTROL_IP',
+        'WINDOWS_ENROLLMENT_CONTROLLER_IP',
+        'CADDY_IMAGE',
+        'HEADSCALE_IMAGE',
+        'MESHCENTRAL_IMAGE',
+        'KEYCLOAK_IMAGE',
+        'POSTGRES_IMAGE',
+        'REMOTEHUB_SDK_IMAGE',
+        'REMOTEHUB_RUNTIME_IMAGE',
+        'REMOTEHUB_SOURCE_REVISION',
+        'POSTGRES_DB',
+        'POSTGRES_USER',
+        'POSTGRES_PASSWORD',
+        'KC_BOOTSTRAP_ADMIN_USERNAME',
+        'KC_BOOTSTRAP_ADMIN_PASSWORD')
+
+    foreach ($name in $environment.Keys) {
+        if ($name -notin $orderedNames) {
+            throw "The LAN environment file contains an unapproved $name entry."
+        }
+    }
+    foreach ($name in $orderedNames) {
+        if (-not $environment.ContainsKey($name)) {
+            throw "The LAN environment file is missing $name."
+        }
+    }
+
+    $fixedValues = @{
+        COMPOSE_PROJECT_NAME = 'stayactive-remotes-lan-test'
+        CADDY_BIND_ADDRESS = '127.0.0.1'
+        STUN_BIND_ADDRESS = '127.0.0.1'
+        CONTROL_NETWORK_CIDR = '172.30.60.0/24'
+        CADDY_CONTROL_IP = '172.30.60.10'
+        HEADSCALE_CONTROL_IP = '172.30.60.11'
+        MESHCENTRAL_CONTROL_IP = '172.30.60.12'
+        REMOTEHUB_CONTROL_IP = '172.30.60.13'
+        KEYCLOAK_CONTROL_IP = '172.30.60.14'
+        POSTGRES_CONTROL_IP = '172.30.60.15'
+        WINDOWS_ENROLLMENT_CONTROLLER_IP = '127.0.0.1'
+        POSTGRES_DB = 'keycloak'
+        POSTGRES_USER = 'keycloak'
+        KC_BOOTSTRAP_ADMIN_USERNAME = 'stayactive-bootstrap'
+    }
+    foreach ($entry in $fixedValues.GetEnumerator()) {
+        if ([string]$environment[$entry.Key] -ne [string]$entry.Value) {
+            throw "The LAN environment file has an unexpected $($entry.Key) value."
+        }
+    }
+
+    $environment.LAN_IP = Assert-PrivateIpv4 ([string]$environment.LAN_IP) 'LAN_IP'
+    foreach ($imageName in $ImagePins.Keys) {
+        if ([string]$environment[$imageName] -ne [string]$ImagePins[$imageName]) {
+            throw "The LAN environment file does not use the reviewed immutable $imageName reference."
+        }
+    }
+
+    foreach ($secretName in @('POSTGRES_PASSWORD', 'KC_BOOTSTRAP_ADMIN_PASSWORD')) {
+        if ([string]$environment[$secretName] -notmatch '^[A-Za-z0-9_-]{43}$') {
+            throw "The LAN environment file has an invalid $secretName format."
+        }
+    }
+
+    $remoteHubRevision = [string]$environment.REMOTEHUB_SOURCE_REVISION
+    if ($remoteHubRevision -notmatch '^[0-9a-fA-F]{40,64}$') {
+        throw 'The LAN environment file has an invalid RemoteHub source revision.'
+    }
+    $null = & git -C $RepositoryRoot rev-parse --verify "${remoteHubRevision}^{commit}"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The LAN environment file refers to an unavailable RemoteHub source revision.'
+    }
+
+    return @($orderedNames | ForEach-Object { "$_=$($environment[$_])" })
+}
+function New-ReviewedControllerDeployment(
+    [string]$RepositoryRoot,
+    [string]$LanRoot,
+    [string[]]$EnvironmentLines,
+    [string]$Revision) {
+    $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($programData)) {
+        throw 'Windows CommonApplicationData is unavailable for reviewed controller staging.'
+    }
+
+    $productRoot = Join-Path $programData 'StayActiveRemotes'
+    $controllerRoot = Join-Path $productRoot 'EnrollmentController'
+    $existingServiceIdentity = ''
+    $existingControllerAccount = Get-LocalUser -Name 'StayActiveHeadscaleController' -ErrorAction SilentlyContinue
+    if ($null -ne $existingControllerAccount) {
+        $existingServiceIdentity = "$env:COMPUTERNAME\StayActiveHeadscaleController"
+    }
+
+    foreach ($path in @($productRoot, $controllerRoot)) {
+        if (Test-ReparsePoint $path) {
+            throw "Refusing to use a reparse-point controller root: $path"
+        }
+        [System.IO.Directory]::CreateDirectory($path) | Out-Null
+        Protect-AdministratorOnlyPath $path $existingServiceIdentity
+    }
+
+    $stageParent = Join-Path $controllerRoot 'reviewed-artifacts'
+    if (Test-ReparsePoint $stageParent) {
+        throw "Refusing to use a reparse-point reviewed-artifact root: $stageParent"
+    }
+    [System.IO.Directory]::CreateDirectory($stageParent) | Out-Null
+    Protect-AdministratorOnlyPath $stageParent
+
+    $stageRoot = Join-Path $stageParent ("{0}-{1}" -f $Revision, [Guid]::NewGuid().ToString('N'))
+    [System.IO.Directory]::CreateDirectory($stageRoot) | Out-Null
+    Protect-AdministratorOnlyPath $stageRoot
+
+    $sourceArchivePath = Join-Path $stageRoot 'enrollmentbroker-source.zip'
+    $sourceDirectory = Join-Path $stageRoot 'source'
+    $artifactDirectory = Join-Path $stageRoot 'artifact'
+    $templatePath = Join-Path $stageRoot 'appsettings.Production.json.template'
+    $caddyfilePath = Join-Path $stageRoot 'Caddyfile'
+    $composeFilePath = Join-Path $stageRoot 'compose.yaml'
+    $headscaleConfigPath = Join-Path $stageRoot 'headscale-config.yaml'
+    $bootstrapPolicyPath = Join-Path $stageRoot 'headscale-bootstrap-policy.hujson'
+    $policyPath = Join-Path $stageRoot 'policy.hujson'
+    $imagePinsPath = Join-Path $stageRoot 'image-pins.json'
+    $keycloakMapperTemplatePath = Join-Path $stageRoot 'configure-scope-mappings.sh'
+    $environmentPath = Join-Path $stageRoot 'lan-test.env'
+    $installerPath = Join-Path $stageRoot 'Install-LanTestEnrollmentController.ps1'
+    $controllerFirewallPath = Join-Path $stageRoot 'Enable-LanTestEnrollmentControllerFirewall.ps1'
+    $lanFirewallPath = Join-Path $stageRoot 'Enable-LanTestFirewall.ps1'
+    $hostsPath = Join-Path $stageRoot 'Set-LanTestHosts.ps1'
+    $manifestPath = Join-Path $stageRoot 'deployment.manifest.json'
+
+    # Git archive/show read the exact committed tree object by hash. A tray
+    # process can no longer race-replace working-tree code after this point.
+    & git -C $RepositoryRoot archive --format=zip "--output=$sourceArchivePath" $Revision -- remote/EnrollmentBroker
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to stage the reviewed Windows enrollment-controller source.'
+    }
+    Expand-Archive -LiteralPath $sourceArchivePath -DestinationPath $sourceDirectory -Force
+
+    $sourceProjectPath = Join-Path $sourceDirectory 'remote\EnrollmentBroker\EnrollmentBroker.csproj'
+    if (-not (Test-Path -LiteralPath $sourceProjectPath -PathType Leaf)) {
+        throw 'The reviewed controller archive did not contain EnrollmentBroker.csproj.'
+    }
+
+    & dotnet publish $sourceProjectPath -c Release -r win-x64 --self-contained false --locked-mode --nologo --output $artifactDirectory
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to publish the reviewed Windows enrollment controller into protected staging.'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $artifactDirectory 'EnrollmentBroker.exe') -PathType Leaf)) {
+        throw 'The reviewed Windows enrollment-controller publish did not produce EnrollmentBroker.exe.'
+    }
+
+    Write-AtomicUtf8File $templatePath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/config/enrollmentbroker/appsettings.Production.json.template')
+    Write-AtomicUtf8File $caddyfilePath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/Caddyfile')
+    Write-AtomicUtf8File $composeFilePath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/compose.yaml')
+    $headscaleConfiguration = (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/config/headscale/config.yaml.template').Replace('__CADDY_CONTROL_IP__', '172.30.60.10')
+    if ($headscaleConfiguration -match '__[A-Z0-9_]+__') {
+        throw 'The reviewed Headscale configuration contains an unrendered placeholder.'
+    }
+    Write-AtomicUtf8File $headscaleConfigPath $headscaleConfiguration
+    # The final policy names stayactive-admin as the tag owner, so Headscale
+    # must first boot using this protected deny-all policy while that owner is
+    # created. Neither bootstrap phase ever mounts generated working-tree policy.
+    Write-AtomicUtf8File $bootstrapPolicyPath "{`n  `"grants`": []`n}`n"
+    Write-AtomicUtf8File $policyPath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/config/headscale/policy.hujson')
+    Write-AtomicUtf8File $imagePinsPath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/config/image-pins.json')
+    Write-AtomicUtf8File $keycloakMapperTemplatePath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/config/keycloak/configure-scope-mappings.sh.template')
+    Write-AtomicUtf8File $installerPath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/scripts/Install-LanTestEnrollmentController.ps1')
+    Write-AtomicUtf8File $controllerFirewallPath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/scripts/Enable-LanTestEnrollmentControllerFirewall.ps1')
+    Write-AtomicUtf8File $lanFirewallPath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/scripts/Enable-LanTestFirewall.ps1')
+    Write-AtomicUtf8File $hostsPath (Get-ReviewedGitText $RepositoryRoot $Revision 'remote/lan-test/scripts/Set-LanTestHosts.ps1')
+
+    $stagedEnvironmentLines = Set-EnvironmentValue $EnvironmentLines 'STAYACTIVE_CADDYFILE' ($caddyfilePath -replace '\\', '/')
+    $stagedEnvironmentLines = Set-EnvironmentValue $stagedEnvironmentLines 'STAYACTIVE_HEADSCALE_CONFIG' ($headscaleConfigPath -replace '\\', '/')
+    $stagedEnvironmentLines = Set-EnvironmentValue $stagedEnvironmentLines 'STAYACTIVE_HEADSCALE_POLICY' ($bootstrapPolicyPath -replace '\\', '/')
+    Write-AtomicUtf8File $environmentPath (($stagedEnvironmentLines -join [Environment]::NewLine) + [Environment]::NewLine)
+
+    $manifest = [ordered]@{
+        SchemaVersion = 1
+        SourceRevision = $Revision
+        CreatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        ComposeFile = $composeFilePath
+        EnvironmentFile = $environmentPath
+        Caddyfile = $caddyfilePath
+        HeadscaleConfiguration = $headscaleConfigPath
+        BootstrapPolicyFile = $bootstrapPolicyPath
+        HeadscalePolicy = $policyPath
+        ImagePins = $imagePinsPath
+        ControllerArtifactDirectory = $artifactDirectory
+        ControllerConfigurationTemplate = $templatePath
+        InstallerScript = $installerPath
+        ControllerFirewallScript = $controllerFirewallPath
+        LanFirewallScript = $lanFirewallPath
+        HostsScript = $hostsPath
+        PolicyFile = $policyPath
+        KeycloakMapperTemplate = $keycloakMapperTemplatePath
+    } | ConvertTo-Json -Compress
+    Write-AtomicUtf8File $manifestPath $manifest
+
+    # Every staged file is administrator/SYSTEM-only. The service gets only a
+    # separately ACL'd copy of the published app and rendered configuration.
+    Protect-AdministratorOnlyPath $stageRoot -Recursive
+
+    return [pscustomobject]@{
+        StageRoot = $stageRoot
+        ManifestPath = $manifestPath
+        SourceRevision = $Revision
+        ComposeFile = $composeFilePath
+        EnvironmentFile = $environmentPath
+        Caddyfile = $caddyfilePath
+        HeadscaleConfiguration = $headscaleConfigPath
+        BootstrapPolicyFile = $bootstrapPolicyPath
+        HeadscalePolicy = $policyPath
+        ImagePins = $imagePinsPath
+        ControllerArtifactDirectory = $artifactDirectory
+        ControllerConfigurationTemplate = $templatePath
+        InstallerScript = $installerPath
+        ControllerFirewallScript = $controllerFirewallPath
+        LanFirewallScript = $lanFirewallPath
+        HostsScript = $hostsPath
+        PolicyFile = $policyPath
+        KeycloakMapperTemplate = $keycloakMapperTemplatePath
+    }
+}
+Enable-DockerDesktopCli
+
+if (-not $MeshCentralAdministratorCreated -or -not $EnableLan) {
+    throw 'Refusing to publish the LAN endpoint. Re-run only after creating the single MeshCentral administrator, with both confirmation switches.'
+}
+
+$lanRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$repoRoot = (Resolve-Path (Join-Path $lanRoot '..\..')).Path
+$environmentFile = Join-Path $lanRoot '.env'
+$policyDestination = Join-Path $lanRoot 'generated\headscale\policy.hujson'
+$meshCentralConfigPath = Join-Path $lanRoot 'generated\meshcentral\config.json'
+$rootCertificatePath = Join-Path $lanRoot 'certs\caddy-root.crt'
+
 if (-not (Test-Path -LiteralPath $environmentFile -PathType Leaf)) {
     throw 'LAN test is not initialized. Run Initialize-LanTest.ps1 first.'
 }
 
-foreach ($path in @($composeFile, $policySource, $policyDestination, $meshCentralConfigPath, $rootCertificatePath, $firewallScript, $hostsScript, $brokerConfigTemplatePath, $brokerDockerfilePath)) {
+foreach ($path in @($policyDestination, $meshCentralConfigPath, $rootCertificatePath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required LAN test file is missing: $path"
     }
 }
 
 $environmentLines = [System.IO.File]::ReadAllLines($environmentFile)
-$lanIp = Assert-PrivateIpv4 (Get-EnvironmentValue $environmentLines 'LAN_IP')
+$lanIp = Assert-PrivateIpv4 (Get-EnvironmentValue $environmentLines 'LAN_IP') 'LAN_IP'
 $caddyBindAddress = Get-EnvironmentValue $environmentLines 'CADDY_BIND_ADDRESS'
 $stunBindAddress = Get-EnvironmentValue $environmentLines 'STUN_BIND_ADDRESS'
+$caddyControlIp = Assert-PrivateIpv4 (Get-EnvironmentValue $environmentLines 'CADDY_CONTROL_IP') 'CADDY_CONTROL_IP'
 if ($caddyBindAddress -ne '127.0.0.1' -or $stunBindAddress -ne '127.0.0.1') {
     throw 'Finalization requires both HTTPS and STUN to still be loopback-only. Refusing to proceed from a previously LAN-bound bootstrap state.'
+}
+
+$controllerEndpoint = Get-WslControllerEndpoint
+if ($controllerEndpoint.Address -eq $lanIp) {
+    throw 'The controller must bind to the WSL virtual-interface address, not the LAN-published Caddy address.'
 }
 
 $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($rootCertificatePath)
@@ -321,7 +679,25 @@ finally {
     $certificate.Dispose()
 }
 
-$composePrefix = @('compose', '--env-file', $environmentFile, '-f', $composeFile)
+# Freeze all credential-bearing deployment inputs from the exact reviewed Git
+# commit before creating the Headscale policy owner or controller API key.
+$reviewedRevision = Assert-ReviewedControllerInputs $repoRoot
+$reviewedImagePins = Get-ReviewedImagePins $repoRoot $reviewedRevision
+$validatedEnvironmentLines = New-ValidatedControllerEnvironment $environmentLines $reviewedImagePins $repoRoot
+$reviewedDeployment = New-ReviewedControllerDeployment $repoRoot $lanRoot $validatedEnvironmentLines $reviewedRevision
+$composePrefix = @(
+    'compose',
+    '--project-directory', $lanRoot,
+    '--env-file', $reviewedDeployment.EnvironmentFile,
+    '-f', $reviewedDeployment.ComposeFile)
+
+# Recreate both key-adjacent containers before any Headscale administrative
+# command. The running bootstrap containers must not retain a mutable Caddyfile,
+# Headscale config, policy, Compose definition, or .env file at key-mint time.
+Invoke-Docker ($composePrefix + @('up', '-d', '--force-recreate', 'caddy', 'headscale')) 'Unable to start Caddy and Headscale from the reviewed protected deployment.'
+Wait-For-RunningService $composePrefix 'caddy' 30
+Wait-For-RunningService $composePrefix 'headscale' 45
+
 $headscaleUsers = Get-HeadscaleUsers $composePrefix
 $policyOwner = $headscaleUsers | Where-Object { $_.name -eq 'stayactive-admin' } | Select-Object -First 1
 if ($null -eq $policyOwner) {
@@ -334,134 +710,36 @@ if ($null -eq $policyOwner -or [string]$policyOwner.id -notmatch '^[1-9][0-9]*$'
     throw 'The stayactive-admin Headscale policy owner was not created with a valid numeric id.'
 }
 
-Copy-Item -LiteralPath $policySource -Destination $policyDestination -Force
-Invoke-Docker ($composePrefix + @('restart', 'headscale')) 'Unable to apply the reviewed Headscale policy.'
+# Switch only the protected environment file from the reviewed deny-all policy
+# to the reviewed production policy, then recreate Headscale so there is no
+# mutable generated-policy mount during controller-key minting.
+$stagedEnvironmentLines = [System.IO.File]::ReadAllLines($reviewedDeployment.EnvironmentFile)
+$stagedEnvironmentLines = Set-EnvironmentValue $stagedEnvironmentLines 'STAYACTIVE_HEADSCALE_POLICY' ($reviewedDeployment.PolicyFile -replace '\\', '/')
+Write-AtomicUtf8File $reviewedDeployment.EnvironmentFile (($stagedEnvironmentLines -join [Environment]::NewLine) + [Environment]::NewLine)
+Protect-AdministratorOnlyPath $reviewedDeployment.EnvironmentFile
+Invoke-Docker ($composePrefix + @('up', '-d', '--force-recreate', 'headscale')) 'Unable to apply the reviewed protected Headscale policy.'
+Wait-For-RunningService $composePrefix 'headscale' 45
 
-# A bind-mounted Caddyfile is not reloaded merely because the host file
-# changes. Recreate it while HTTPS is still loopback-only, prove the management
-# API deny route is live from this host, and only then give the broker a path to
-# Headscale.
-Invoke-Docker ($composePrefix + @('up', '-d', '--force-recreate', 'caddy')) 'Unable to reload Caddy with the Headscale API source restriction.'
+$stagedEnvironmentLines = Set-EnvironmentValue $stagedEnvironmentLines 'WINDOWS_ENROLLMENT_CONTROLLER_IP' $controllerEndpoint.Address
+Write-AtomicUtf8File $reviewedDeployment.EnvironmentFile (($stagedEnvironmentLines -join [Environment]::NewLine) + [Environment]::NewLine)
+Protect-AdministratorOnlyPath $reviewedDeployment.EnvironmentFile
+
+Invoke-Docker ($composePrefix + @('up', '-d', '--force-recreate', 'caddy')) 'Unable to reload Caddy with the Windows enrollment-controller route.'
 Wait-For-RunningService $composePrefix 'caddy' 30
-& $hostsScript -Mode Bootstrap -Confirm:$false
+& $reviewedDeployment.HostsScript -Mode Bootstrap -Confirm:$false
 Assert-HeadscaleApiIsBlockedOnHost
-# The broker image carries a source revision label. Do not publish a build from
-# an uncommitted broker tree: later investigation must be able to reproduce the
-# exact code that had access to this isolated Headscale API credential.
-$brokerSourceChanges = (& git -C $repoRoot status --porcelain -- 'remote/EnrollmentBroker' 'remote/EnrollmentBroker.Dockerfile') | Out-String
-if ($LASTEXITCODE -ne 0) {
-    throw 'Unable to verify the EnrollmentBroker source revision.'
-}
-if (-not [string]::IsNullOrWhiteSpace($brokerSourceChanges)) {
-    throw 'Commit the reviewed EnrollmentBroker source before finalizing the LAN test.'
-}
-$brokerRevision = (& git -C $repoRoot rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($brokerRevision)) {
-    throw 'Unable to determine the immutable EnrollmentBroker source revision.'
-}
 
-# Older loopback-only LAN installations have no broker entries in .env. Migrate
-# only the non-secret entries in place, preserve the file's restricted ACL, and
-# keep the well-known control-network IP stable for Caddy's source restriction.
-$brokerControlIp = Get-OptionalEnvironmentValue $environmentLines 'ENROLLMENTBROKER_CONTROL_IP'
-if ($null -ne $brokerControlIp -and $brokerControlIp -ne '172.30.60.16') {
-    throw 'ENROLLMENTBROKER_CONTROL_IP must remain 172.30.60.16 for the reviewed Caddy restriction.'
-}
-$remoteHubSdkImage = Get-EnvironmentValue $environmentLines 'REMOTEHUB_SDK_IMAGE'
-$remoteHubRuntimeImage = Get-EnvironmentValue $environmentLines 'REMOTEHUB_RUNTIME_IMAGE'
-$environmentLines = @(Set-EnvironmentValue $environmentLines 'ENROLLMENTBROKER_CONTROL_IP' '172.30.60.16')
-$environmentLines = @(Set-EnvironmentValue $environmentLines 'ENROLLMENTBROKER_SDK_IMAGE' $remoteHubSdkImage)
-$environmentLines = @(Set-EnvironmentValue $environmentLines 'ENROLLMENTBROKER_RUNTIME_IMAGE' $remoteHubRuntimeImage)
-$environmentLines = @(Set-EnvironmentValue $environmentLines 'ENROLLMENTBROKER_SOURCE_REVISION' $brokerRevision)
-Write-AtomicUtf8File $environmentFile (($environmentLines -join "`n") + "`n")
-Protect-LocalSecret $environmentFile
+& $reviewedDeployment.InstallerScript `
+    -ControllerArtifactDirectory $reviewedDeployment.ControllerArtifactDirectory `
+    -ConfigurationTemplatePath $reviewedDeployment.ControllerConfigurationTemplate `
+    -HeadscaleUserId ([string]$policyOwner.id) `
+    -ControllerListenAddress $controllerEndpoint.Address `
+    -EnvironmentFile $reviewedDeployment.EnvironmentFile `
+    -ComposeFile $reviewedDeployment.ComposeFile `
+    -ComposeProjectDirectory $lanRoot
+& $reviewedDeployment.ControllerFirewallScript -ControllerAddress $controllerEndpoint.Address -CaddyAddress $caddyControlIp -InterfaceAlias $controllerEndpoint.InterfaceAlias -Confirm:$false
+Assert-EnrollmentControllerRoute
 
-# Keep the broker's configuration, journal, and two secrets inside the
-# existing restricted local state tree. It receives neither the Docker socket
-# nor Headscale's state database.
-foreach ($brokerPath in @(
-        (Split-Path -Parent $brokerConfigPath),
-        $brokerJournalDirectory,
-        (Split-Path -Parent $brokerApiKeyPath))) {
-    [System.IO.Directory]::CreateDirectory($brokerPath) | Out-Null
-    Protect-LocalSecret $brokerPath
-}
-Render-EnrollmentBrokerConfig $brokerConfigTemplatePath $brokerConfigPath ([string]$policyOwner.id)
-
-if (-not (Test-Path -LiteralPath $brokerJournalKeyPath -PathType Leaf)) {
-    $journalHmacKey = New-Base64Secret 48
-    try {
-        Write-AtomicUtf8File $brokerJournalKeyPath $journalHmacKey
-        Protect-LocalSecret $brokerJournalKeyPath
-    }
-    finally {
-        $journalHmacKey = $null
-    }
-}
-else {
-    $existingJournalKey = [System.IO.File]::ReadAllText($brokerJournalKeyPath).Trim()
-    [byte[]]$decodedJournalKey = $null
-    try {
-        $decodedJournalKey = [Convert]::FromBase64String($existingJournalKey)
-        if ($decodedJournalKey.Length -lt 32) {
-            throw 'EnrollmentBroker journal key is too short.'
-        }
-    }
-    catch {
-        throw 'The existing EnrollmentBroker journal key is invalid; refusing to overwrite it.'
-    }
-    finally {
-        if ($null -ne $decodedJournalKey) {
-            [Array]::Clear($decodedJournalKey, 0, $decodedJournalKey.Length)
-        }
-        $existingJournalKey = $null
-    }
-    Protect-LocalSecret $brokerJournalKeyPath
-}
-
-if (Test-Path -LiteralPath $brokerApiKeyPath -PathType Leaf) {
-    $existingBrokerApiKey = [System.IO.File]::ReadAllText($brokerApiKeyPath).Trim()
-    try {
-        if ($existingBrokerApiKey -notmatch '^hskey-api-[A-Za-z0-9_-]+$') {
-            throw 'EnrollmentBroker Headscale API key is invalid.'
-        }
-    }
-    finally {
-        $existingBrokerApiKey = $null
-    }
-    if (-not (Test-Path -LiteralPath $brokerApiKeyMetadataPath -PathType Leaf)) {
-        throw 'EnrollmentBroker API-key metadata is missing; refuse to start a key that cannot be safely rotated.'
-    }
-    try {
-        $existingBrokerApiKeyMetadata = [System.IO.File]::ReadAllText($brokerApiKeyMetadataPath) | ConvertFrom-Json
-    }
-    catch {
-        throw 'EnrollmentBroker API-key metadata is unreadable; refuse to start a key that cannot be safely rotated.'
-    }
-    if ([string]$existingBrokerApiKeyMetadata.Id -notmatch '^[1-9][0-9]*$') {
-        throw 'EnrollmentBroker API-key metadata lacks a valid Headscale key id.'
-    }
-    Protect-LocalSecret $brokerApiKeyPath
-    Protect-LocalSecret $brokerApiKeyMetadataPath
-}
-else {
-    # Headscale returns this broadly capable management key only once. It is
-    # created after the policy owner is known, captured without console output,
-    # and mounted exclusively into the non-root broker service.
-    New-EnrollmentBrokerApiKey $composePrefix $brokerApiKeyPath $brokerApiKeyMetadataPath
-}
-
-# Build and prove that the least-privilege service survives before publishing
-# the LAN listener. A failure here leaves Caddy and STUN loopback-only.
-Invoke-Docker ($composePrefix + @('up', '-d', '--build', 'enrollmentbroker')) 'Unable to build and start the isolated EnrollmentBroker.'
-Wait-For-RunningService $composePrefix 'enrollmentbroker' 30
-Invoke-Docker ($composePrefix + @('exec', '-T', 'enrollmentbroker', 'sh', '-ec', 'test -r /run/stayactive/caddy-root.crt && test -r /run/secrets/headscale-enrollment-api-key && test -r /run/secrets/enrollmentbroker-journal-hmac-key')) 'EnrollmentBroker cannot read its required public CA or protected secret files.'
-
-
-
-# The one-time administrator was created while Caddy was loopback-only. Turn
-# off all future account registration before any listener or firewall rule is
-# published to the LAN. The generated directory already has a restricted ACL.
 $meshCentralConfig = [System.IO.File]::ReadAllText($meshCentralConfigPath)
 if ($meshCentralConfig -match '"newAccounts"\s*:\s*true\b') {
     $meshCentralConfig = [regex]::Replace($meshCentralConfig, '("newAccounts"\s*:\s*)true\b', '$1false', 1)
@@ -479,9 +757,7 @@ $tempMeshCentralConfigPath = "$meshCentralConfigPath.pending"
 Move-Item -LiteralPath $tempMeshCentralConfigPath -Destination $meshCentralConfigPath -Force
 Invoke-Docker ($composePrefix + @('up', '-d', '--force-recreate', 'meshcentral')) 'Unable to restart MeshCentral with account registration disabled.'
 
-# Update the existing protected .env file in place. Do not replace it from the
-# parent directory, which would risk inheriting a broader ACL with secrets.
-$updatedEnvironmentLines = $environmentLines | ForEach-Object {
+$updatedEnvironmentLines = $stagedEnvironmentLines | ForEach-Object {
     if ($_ -like 'CADDY_BIND_ADDRESS=*') {
         "CADDY_BIND_ADDRESS=$lanIp"
     }
@@ -492,14 +768,26 @@ $updatedEnvironmentLines = $environmentLines | ForEach-Object {
         $_
     }
 }
-[System.IO.File]::WriteAllLines($environmentFile, $updatedEnvironmentLines, [System.Text.UTF8Encoding]::new($false))
+Write-AtomicUtf8File $reviewedDeployment.EnvironmentFile (($updatedEnvironmentLines -join [Environment]::NewLine) + [Environment]::NewLine)
+Protect-AdministratorOnlyPath $reviewedDeployment.EnvironmentFile
 
-# Open the two narrowly scoped firewall rules while both service listeners are
-# still loopback-only, then publish HTTPS and STUN together.
-& $firewallScript -Confirm:$false
-& $hostsScript -Mode Lan -ServerIp $lanIp -Confirm:$false
+& $reviewedDeployment.LanFirewallScript -Confirm:$false
+& $reviewedDeployment.HostsScript -Mode Lan -ServerIp $lanIp -Confirm:$false
 Invoke-Docker ($composePrefix + @('up', '-d', '--force-recreate', 'caddy', 'headscale')) 'Unable to rebind Caddy and Headscale STUN to the configured LAN address.'
+Assert-HeadscaleApiIsBlockedOnHost
+
+$activeDeploymentPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'StayActiveRemotes\EnrollmentController\active-deployment.json'
+$activeDeployment = [ordered]@{
+    SchemaVersion = 1
+    SourceRevision = $reviewedDeployment.SourceRevision
+    StageManifest = $reviewedDeployment.ManifestPath
+    ComposeFile = $reviewedDeployment.ComposeFile
+    EnvironmentFile = $reviewedDeployment.EnvironmentFile
+    KeycloakMapperTemplate = $reviewedDeployment.KeycloakMapperTemplate
+} | ConvertTo-Json -Compress
+Write-AtomicUtf8File $activeDeploymentPath $activeDeployment
+Protect-AdministratorOnlyPath $activeDeploymentPath
 
 Write-Host "The self-hosted control plane is now available to the local subnet at $lanIp on HTTPS and STUN only."
-Write-Host 'The EnrollmentBroker is enabled through the self-hosted Remotes menu; its Headscale API key stays in a protected local secret and is never displayed.'
+Write-Host 'The Windows enrollment controller is reachable only from Caddy over the WSL virtual interface; its Headscale API key remains in the dedicated service account Windows Credential Manager.'
 Write-Host 'Do not distribute enrollment keys or the operator password through chat or email.'

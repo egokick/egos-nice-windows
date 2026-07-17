@@ -441,14 +441,14 @@ internal sealed class RemoteSettingsForm : Form
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        _controlPlaneUrlTextBox = AddField(table, 0, "Headscale URL", preferences.ControlPlaneUrl, "https://headscale.example.com");
-        _remoteHubUrlTextBox = AddField(table, 1, "RemoteHub URL", preferences.RemoteHubUrl, "https://remotes.example.com");
-        _remoteHubOidcIssuerUrlTextBox = AddField(table, 2, "OIDC issuer URL", preferences.RemoteHubOidcIssuerUrl, "https://id.example.com/realms/remotes");
-        _remoteHubOidcClientIdTextBox = AddField(table, 3, "Fleet OIDC client", preferences.RemoteHubOidcClientId, "stayactive-remotes");
-        _remoteEnrollmentUrlTextBox = AddField(table, 4, "Enrollment broker URL", preferences.RemoteEnrollmentUrl, "https://remotes.example.com");
-        _remoteEnrollmentOidcClientIdTextBox = AddField(table, 5, "Enrollment OIDC client", preferences.RemoteEnrollmentOidcClientId, "stayactive-remotes-enrollment");
-        _adminConsoleUrlTextBox = AddField(table, 6, "Admin GUI URL", preferences.AdminConsoleUrl, "https://remotes.example.com/admin");
-        _meshCentralUrlTextBox = AddField(table, 7, "MeshCentral URL", preferences.MeshCentralUrl, "https://mesh.example.com");
+        _controlPlaneUrlTextBox = AddField(table, 0, "Headscale URL", preferences.ControlPlaneUrl, StayActiveRemoteDefaults.ControlPlaneUrl);
+        _remoteHubUrlTextBox = AddField(table, 1, "RemoteHub URL", preferences.RemoteHubUrl, StayActiveRemoteDefaults.RemoteHubUrl);
+        _remoteHubOidcIssuerUrlTextBox = AddField(table, 2, "OIDC issuer URL", preferences.RemoteHubOidcIssuerUrl, StayActiveRemoteDefaults.OidcIssuerUrl);
+        _remoteHubOidcClientIdTextBox = AddField(table, 3, "Fleet OIDC client", preferences.RemoteHubOidcClientId, StayActiveRemoteDefaults.FleetOidcClientId);
+        _remoteEnrollmentUrlTextBox = AddField(table, 4, "Enrollment broker URL", preferences.RemoteEnrollmentUrl, StayActiveRemoteDefaults.EnrollmentBrokerUrl);
+        _remoteEnrollmentOidcClientIdTextBox = AddField(table, 5, "Enrollment OIDC client", preferences.RemoteEnrollmentOidcClientId, StayActiveRemoteDefaults.EnrollmentOidcClientId);
+        _adminConsoleUrlTextBox = AddField(table, 6, "Admin GUI URL", preferences.AdminConsoleUrl, StayActiveRemoteDefaults.AdminConsoleUrl);
+        _meshCentralUrlTextBox = AddField(table, 7, "MeshCentral URL", preferences.MeshCentralUrl, StayActiveRemoteDefaults.MeshCentralUrl);
         _deviceDisplayNameTextBox = AddField(table, 8, "This computer name", preferences.DeviceDisplayName, Environment.MachineName);
         _locationTextBox = AddField(table, 9, "Coarse location", preferences.Location, "Optional, for example: Austin office");
 
@@ -504,7 +504,7 @@ internal sealed class RemoteSettingsForm : Form
         {
             MessageBox.Show(
                 this,
-                "Use absolute HTTPS URLs for self-hosted endpoints, do not use a Tailscale-hosted control-plane URL, and provide each configured OIDC client with its required companion settings.",
+                "Use absolute HTTPS URLs for self-hosted endpoints. Tailscale-hosted URLs are not allowed; provide each configured OIDC client with its required companion settings.",
                 "Invalid remote settings",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -542,9 +542,7 @@ internal sealed class RemoteSettingsForm : Form
             return true;
         }
 
-        return Uri.TryCreate(value, UriKind.Absolute, out var uri)
-            && uri.Scheme == Uri.UriSchemeHttps
-            && string.IsNullOrEmpty(uri.UserInfo);
+        return RemoteClientPreferences.IsSelfHostedEndpoint(value);
     }
 
     private static bool IsValidOidcConfiguration(RemoteClientPreferences preferences)

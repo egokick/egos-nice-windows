@@ -144,11 +144,8 @@ internal sealed class MeshCentralRemoteActionService : IRemoteActionService
 
     private static bool TryGetMeshCentralBaseUri(string configuredUrl, out Uri baseUri)
     {
-        if (Uri.TryCreate(configuredUrl, UriKind.Absolute, out var candidate)
-            && candidate.Scheme == Uri.UriSchemeHttps
-            && string.IsNullOrEmpty(candidate.UserInfo)
-            && string.IsNullOrEmpty(candidate.Query)
-            && string.IsNullOrEmpty(candidate.Fragment))
+        if (RemoteClientPreferences.IsSelfHostedEndpoint(configuredUrl)
+            && Uri.TryCreate(configuredUrl, UriKind.Absolute, out var candidate))
         {
             baseUri = candidate;
             return true;

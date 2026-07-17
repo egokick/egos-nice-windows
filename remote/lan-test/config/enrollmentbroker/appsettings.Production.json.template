@@ -1,4 +1,5 @@
 {
+  "urls": "__WINDOWS_ENROLLMENT_CONTROLLER_LISTEN_URL__",
   "EnrollmentBroker": {
     "Authentication": {
       "Authority": "https://id.stayactive.test/realms/stayactive",
@@ -9,12 +10,11 @@
       "AdministratorRole": "stayactive.enrollment.admin"
     },
     "Storage": {
-      "JournalPath": "/var/lib/stayactive-enrollment/audit.journal.jsonl",
-      "JournalHmacKeyFile": "/run/secrets/enrollmentbroker-journal-hmac-key"
+      "JournalPath": "__ENROLLMENT_CONTROLLER_JOURNAL_PATH__",
+      "JournalHmacKeyFile": "__ENROLLMENT_CONTROLLER_JOURNAL_HMAC_KEY_FILE__"
     },
     "Headscale": {
-      "ApiBaseUrl": "https://headscale.stayactive.test",
-      "ApiKeyFile": "/run/secrets/headscale-enrollment-api-key",
+      "ApiBaseUrl": "https://headscale-controller.stayactive.test:4443/",
       "UserId": __HEADSCALE_ENROLLMENT_USER_ID__,
       "LoginServer": "https://headscale.stayactive.test"
     }

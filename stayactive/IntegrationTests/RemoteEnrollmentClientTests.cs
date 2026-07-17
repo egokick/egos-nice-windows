@@ -43,6 +43,29 @@ public sealed class RemoteEnrollmentClientTests
         Assert.DoesNotContain(authKey, issued.Ticket.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("2026-07-16T18:14:29Z")]
+    [InlineData("2026-07-16T18:15:31Z")]
+    public async Task IssueAsync_RejectsTicketOutsideTheFixedFifteenMinuteLifetime(string expiresAtUtc)
+    {
+        var handler = new StubHttpMessageHandler(_ => JsonResponse(HttpStatusCode.Created, TicketEnvelope(
+            "device",
+            "issued",
+            expiresAtUtc,
+            "https://headscale.example.test",
+            "[\"tag:stayactive\"]",
+            "tskey-auth-test")));
+        using var client = new RemoteEnrollmentClient(
+            Preferences,
+            new FakeEnrollmentAccessTokenProvider("fresh-enrollment-token"),
+            new HttpClient(handler),
+            utcNow: () => FixedNow);
+
+        var exception = await Assert.ThrowsAsync<RemoteEnrollmentException>(
+            () => client.IssueAsync(RemoteEnrollmentKind.Device, CancellationToken.None));
+
+        Assert.Equal("The enrollment broker returned an invalid one-time enrollment response.", exception.Message);
+    }
     [Fact]
     public async Task IssueAsync_ExitNodeAcceptsOnlyBrokerFixedTags()
     {
@@ -85,6 +108,26 @@ public sealed class RemoteEnrollmentClientTests
         Assert.Equal(0, handler.CallCount);
     }
 
+    [Theory]
+    [InlineData("https://login.tailscale.com")]
+    [InlineData("https://login.tailscale.com.")]
+    public async Task IssueAsync_WhenBrokerUrlIsTailscaleHosted_DoesNotSignInOrSendAnything(string brokerUrl)
+    {
+        var tokens = new FakeEnrollmentAccessTokenProvider("must-not-be-used");
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("No request should be sent."));
+        using var client = new RemoteEnrollmentClient(
+            () => Preferences() with { RemoteEnrollmentUrl = brokerUrl },
+            tokens,
+            new HttpClient(handler),
+            utcNow: () => FixedNow);
+
+        var exception = await Assert.ThrowsAsync<RemoteEnrollmentException>(
+            () => client.IssueAsync(RemoteEnrollmentKind.Device, CancellationToken.None));
+
+        Assert.Equal("Configure an HTTPS URL for your self-hosted enrollment broker first.", exception.Message);
+        Assert.Equal(0, tokens.CallCount);
+        Assert.Equal(0, handler.CallCount);
+    }
     [Fact]
     public async Task GetStatusAsync_WhenServerReturnsAnAuthKey_FailsClosed()
     {
