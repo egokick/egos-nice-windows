@@ -1,0 +1,38 @@
+{
+  "isConfigured": true,
+  "groupFilters": [
+    "Fere",
+    "Savvie",
+    "Tom"
+  ],
+  "expandedGroups": [],
+  "hiddenTimelineChildren": [
+    "Savvie:2C:F0:5D:86:2F:7A",
+    "Tom:9C:C7:D3:E3:A3:06",
+    "Tom:6C:1F:F7:73:B8:47",
+    "Fere:08:BF:B8:74:1C:E0"
+  ],
+  "showIgnored": true,
+  "selected": [
+    "20:6E:F1:64:BA:3C",
+    "7C:2C:67:03:B4:6C",
+    "9C:9E:6E:BC:65:40",
+    "B4:17:A8:6E:75:AD",
+    "5E:F1:80:FE:D0:A0",
+    "08:BF:B8:74:1C:E0",
+    "CC:3B:FB:6E:4E:AC",
+    "F4:DD:06:80:4B:40",
+    "42:75:35:A2:D4:AC",
+    "6C:1F:F7:73:B8:47",
+    "C4:8B:66:69:7A:1D",
+    "20:6E:F1:61:6E:A8",
+    "B4:17:A8:6F:F2:63",
+    "5A:B3:9C:7F:CD:53",
+    "B6:AD:92:56:8D:78",
+    "2C:F0:5D:86:2F:7A",
+    "9C:C7:D3:E3:A3:06",
+    "78:42:1C:73:B4:C8"
+  ],
+  "rangeHours": 72,
+  "timelineOffsetHours": 4
+}

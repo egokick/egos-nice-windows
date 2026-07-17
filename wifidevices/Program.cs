@@ -48,6 +48,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 builder.Services.AddSingleton(_ => AppSettings.Load(Directory.GetCurrentDirectory(), AppContext.BaseDirectory));
 builder.Services.AddSingleton<DeviceHistoryStore>();
+builder.Services.AddSingleton<UiPreferencesStore>();
 builder.Services.AddSingleton(_ => FinanceSettings.Load(Directory.GetCurrentDirectory(), AppContext.BaseDirectory));
 builder.Services.AddSingleton<FinanceStore>();
 builder.Services.AddSingleton<FinanceRefreshCoordinator>();
@@ -95,6 +96,18 @@ app.MapGet("/api/history", async (
     var selectedMacs = ParseMacSet(macs);
     var history = await store.GetHistoryAsync(TimeSpan.FromHours(requestedHours), selectedMacs, cancellationToken);
     return Results.Json(history);
+});
+
+app.MapGet("/api/ui-preferences", (UiPreferencesStore store) =>
+    Results.Json(store.Get()));
+
+app.MapPut("/api/ui-preferences", async (
+    UiPreferencesRequest request,
+    UiPreferencesStore store,
+    CancellationToken cancellationToken) =>
+{
+    var preferences = await store.SaveAsync(request, cancellationToken);
+    return Results.Json(preferences);
 });
 
 app.MapPost("/api/devices/{mac}/name", async (
@@ -2482,6 +2495,103 @@ public sealed class DeviceHistoryStore
         !string.IsNullOrWhiteSpace(first) ? first : second;
 }
 
+public sealed class UiPreferencesStore
+{
+    private const int DefaultRangeHours = 168;
+    private const int MaximumRangeHours = 2160;
+    private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly string _path;
+    private UiPreferences _preferences;
+
+    public UiPreferencesStore()
+    {
+        var dataDirectory = Path.Combine(Directory.GetCurrentDirectory(), "data");
+        Directory.CreateDirectory(dataDirectory);
+        _path = Path.Combine(dataDirectory, "ui-preferences.json");
+        _preferences = Load();
+    }
+
+    public UiPreferences Get() => _preferences;
+
+    public async Task<UiPreferences> SaveAsync(UiPreferencesRequest request, CancellationToken cancellationToken)
+    {
+        var preferences = Normalize(request);
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            var json = JsonSerializer.Serialize(preferences, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            {
+                WriteIndented = true
+            });
+            var temporaryPath = _path + ".tmp";
+            await File.WriteAllTextAsync(temporaryPath, json, cancellationToken);
+            File.Move(temporaryPath, _path, true);
+            _preferences = preferences;
+            return preferences;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    private UiPreferences Load()
+    {
+        if (!File.Exists(_path))
+        {
+            return UiPreferences.Unconfigured;
+        }
+
+        try
+        {
+            var loaded = JsonSerializer.Deserialize<UiPreferences>(File.ReadAllText(_path), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            return loaded is null ? UiPreferences.Unconfigured : Normalize(loaded);
+        }
+        catch (JsonException)
+        {
+            return UiPreferences.Unconfigured;
+        }
+    }
+
+    private static UiPreferences Normalize(UiPreferencesRequest request) =>
+        Normalize(new UiPreferences(
+            true,
+            request.GroupFilters,
+            request.ExpandedGroups,
+            request.HiddenTimelineChildren,
+            request.ShowIgnored,
+            request.Selected,
+            request.RangeHours,
+            request.TimelineOffsetHours));
+
+    private static UiPreferences Normalize(UiPreferences preferences) => new(
+        preferences.IsConfigured,
+        NormalizeStrings(preferences.GroupFilters),
+        NormalizeStrings(preferences.ExpandedGroups),
+        NormalizeStrings(preferences.HiddenTimelineChildren),
+        preferences.ShowIgnored,
+        NormalizeMacs(preferences.Selected),
+        Math.Clamp(preferences.RangeHours, 6, MaximumRangeHours),
+        Math.Clamp(preferences.TimelineOffsetHours, 0, MaximumRangeHours));
+
+    private static IReadOnlyList<string> NormalizeStrings(IReadOnlyList<string>? values) =>
+        (values ?? Array.Empty<string>())
+            .Select(value => value.Trim())
+            .Where(value => value.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(100)
+            .ToList();
+
+    private static IReadOnlyList<string> NormalizeMacs(IReadOnlyList<string>? values) =>
+        (values ?? Array.Empty<string>())
+            .Select(MacAddress.Normalize)
+            .Where(value => value is not null)
+            .Select(value => value!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(500)
+            .ToList();
+}
+
 public static class DeviceExtractor
 {
     private static readonly Regex MacRegex = new(@"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b", RegexOptions.Compiled);
@@ -3665,5 +3775,25 @@ public sealed record DeviceGroupsRequest(IReadOnlyList<string>? Groups);
 public sealed record DeviceIgnoreRequest(bool Ignored);
 public sealed record GroupRequest(string? Name);
 public sealed record AssignGroupRequest(IReadOnlyList<string>? Macs);
+public sealed record UiPreferencesRequest(
+    IReadOnlyList<string>? GroupFilters,
+    IReadOnlyList<string>? ExpandedGroups,
+    IReadOnlyList<string>? HiddenTimelineChildren,
+    bool ShowIgnored,
+    IReadOnlyList<string>? Selected,
+    int RangeHours,
+    int TimelineOffsetHours);
+public sealed record UiPreferences(
+    bool IsConfigured,
+    IReadOnlyList<string>? GroupFilters,
+    IReadOnlyList<string>? ExpandedGroups,
+    IReadOnlyList<string>? HiddenTimelineChildren,
+    bool ShowIgnored,
+    IReadOnlyList<string>? Selected,
+    int RangeHours,
+    int TimelineOffsetHours)
+{
+    public static UiPreferences Unconfigured { get; } = new(false, Array.Empty<string>(), Array.Empty<string>(), Array.Empty<string>(), false, Array.Empty<string>(), 168, 0);
+}
 
 public sealed record HttpFetchResult(string Body, string? ContentType);

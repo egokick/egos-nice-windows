@@ -9,7 +9,7 @@ const appState = {
   expandedGroups: readStoredExpandedGroups(),
   hiddenTimelineChildren: readStoredHiddenTimelineChildren(),
   showIgnored: localStorage.getItem("wifiDevices:showIgnored") === "true",
-  selected: new Set(JSON.parse(localStorage.getItem("wifiDevices:selected") || "[]")),
+  selected: readStoredSelection(),
   rangeHours: normalizeRangeHours(Number(localStorage.getItem("wifiDevices:rangeHours") || "168")),
   timelineOffsetHours: 0,
   history: { samples: [], events: [], bounds: { firstSampleUtc: null, lastSampleUtc: null } },
@@ -17,12 +17,16 @@ const appState = {
   timelineScrollTimer: null
 };
 
+let preferencesSaveTimer = null;
+appState.timelineOffsetHours = normalizeTimelineOffset(Number(localStorage.getItem("wifiDevices:timelineOffsetHours") || "0"));
+
 const els = {
   pollSummary: document.querySelector("#pollSummary"),
   sourceStatus: document.querySelector("#sourceStatus"),
   pollAlert: document.querySelector("#pollAlert"),
   onlineCount: document.querySelector("#onlineCount"),
   knownCount: document.querySelector("#knownCount"),
+  exportSettings: document.querySelector("#exportSettings"),
   pollNow: document.querySelector("#pollNow"),
   selectAll: document.querySelector("#selectAll"),
   selectNone: document.querySelector("#selectNone"),
@@ -44,11 +48,6 @@ const els = {
   eventCount: document.querySelector("#eventCount")
 };
 
-appState.timelineOffsetHours = normalizeTimelineOffset(Number(localStorage.getItem("wifiDevices:timelineOffsetHours") || "0"));
-syncRangeControl();
-syncTimelineScrollControl();
-els.showIgnored.checked = appState.showIgnored;
-
 els.pollNow.addEventListener("click", async () => {
   els.pollNow.disabled = true;
   try {
@@ -57,6 +56,17 @@ els.pollNow.addEventListener("click", async () => {
   } finally {
     els.pollNow.disabled = false;
   }
+});
+
+els.exportSettings.addEventListener("click", () => {
+  const settings = JSON.stringify(preferencesPayload(), null, 2);
+  const blob = new Blob([settings], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "wifi-devices-settings.json";
+  link.click();
+  URL.revokeObjectURL(url);
 });
 
 els.selectAll.addEventListener("click", () => {
@@ -79,7 +89,7 @@ els.deviceSearch.addEventListener("input", renderDevices);
 
 els.showIgnored.addEventListener("change", () => {
   appState.showIgnored = els.showIgnored.checked;
-  localStorage.setItem("wifiDevices:showIgnored", String(appState.showIgnored));
+  persistUiPreferences();
   pruneSelection();
   renderDevices();
   loadHistory();
@@ -152,8 +162,26 @@ window.addEventListener("resize", () => {
   renderTimeline();
 });
 
-refreshAll();
-setInterval(refreshAll, 30000);
+initializeApp();
+
+async function initializeApp() {
+  try {
+    const preferences = await fetchJson("/api/ui-preferences");
+    if (preferences.isConfigured) {
+      applyUiPreferences(preferences);
+    } else {
+      await saveUiPreferences();
+    }
+  } catch (error) {
+    console.warn("Unable to load shared Wi-Fi preferences; continuing with local preferences.", error);
+  }
+
+  syncRangeControl();
+  syncTimelineScrollControl();
+  els.showIgnored.checked = appState.showIgnored;
+  await refreshAll();
+  setInterval(refreshAll, 30000);
+}
 
 function readStoredGroupFilters() {
   try {
@@ -171,8 +199,7 @@ function readStoredGroupFilters() {
 }
 
 function persistGroupFilters() {
-  localStorage.setItem("wifiDevices:groupFilters", JSON.stringify(appState.groupFilters));
-  localStorage.removeItem("wifiDevices:groupFilter");
+  persistUiPreferences();
 }
 
 function normalizeRangeHours(hours) {
@@ -187,8 +214,7 @@ function normalizeRangeHours(hours) {
 function setRangeHours(hours, reloadHistory) {
   appState.rangeHours = normalizeRangeHours(hours);
   appState.timelineOffsetHours = normalizeTimelineOffset(appState.timelineOffsetHours);
-  localStorage.setItem("wifiDevices:rangeHours", String(appState.rangeHours));
-  localStorage.setItem("wifiDevices:timelineOffsetHours", String(appState.timelineOffsetHours));
+  persistUiPreferences();
   syncRangeControl();
   syncTimelineScrollControl();
   if (reloadHistory) {
@@ -266,7 +292,7 @@ function timelineOffsetFromScrollValue(value) {
 
 function setTimelineOffset(hours, reloadHistory) {
   appState.timelineOffsetHours = normalizeTimelineOffset(hours);
-  localStorage.setItem("wifiDevices:timelineOffsetHours", String(appState.timelineOffsetHours));
+  persistUiPreferences();
   syncTimelineScrollControl();
   if (reloadHistory) {
     loadHistory();
@@ -307,7 +333,7 @@ function readStoredExpandedGroups() {
 }
 
 function persistExpandedGroups() {
-  localStorage.setItem("wifiDevices:expandedGroups", JSON.stringify([...appState.expandedGroups]));
+  persistUiPreferences();
 }
 
 function readStoredHiddenTimelineChildren() {
@@ -320,7 +346,7 @@ function readStoredHiddenTimelineChildren() {
 }
 
 function persistHiddenTimelineChildren() {
-  localStorage.setItem("wifiDevices:hiddenTimelineChildren", JSON.stringify([...appState.hiddenTimelineChildren]));
+  persistUiPreferences();
 }
 
 async function refreshAll() {
@@ -354,7 +380,7 @@ async function loadHistory() {
   const clampedOffset = normalizeTimelineOffset(appState.timelineOffsetHours);
   if (clampedOffset !== appState.timelineOffsetHours) {
     appState.timelineOffsetHours = clampedOffset;
-    localStorage.setItem("wifiDevices:timelineOffsetHours", String(appState.timelineOffsetHours));
+    persistUiPreferences();
     appState.history = await fetchJson(`/api/history?hours=${appState.rangeHours + appState.timelineOffsetHours}&macs=${macs}`);
   }
   renderHistory();
@@ -1002,7 +1028,66 @@ function pruneSelection() {
 }
 
 function persistSelection() {
-  localStorage.setItem("wifiDevices:selected", JSON.stringify([...appState.selected]));
+  persistUiPreferences();
+}
+
+function readStoredSelection() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("wifiDevices:selected") || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter(value => typeof value === "string" && value.trim()) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function applyUiPreferences(preferences) {
+  appState.groupFilters = Array.isArray(preferences.groupFilters) ? preferences.groupFilters : [];
+  appState.expandedGroups = new Set(Array.isArray(preferences.expandedGroups) ? preferences.expandedGroups : []);
+  appState.hiddenTimelineChildren = new Set(Array.isArray(preferences.hiddenTimelineChildren) ? preferences.hiddenTimelineChildren : []);
+  appState.showIgnored = Boolean(preferences.showIgnored);
+  appState.selected = new Set(Array.isArray(preferences.selected) ? preferences.selected : []);
+  appState.rangeHours = normalizeRangeHours(preferences.rangeHours);
+  appState.timelineOffsetHours = normalizeTimelineOffset(preferences.timelineOffsetHours);
+  writeLocalPreferences();
+}
+
+function preferencesPayload() {
+  return {
+    groupFilters: appState.groupFilters,
+    expandedGroups: [...appState.expandedGroups],
+    hiddenTimelineChildren: [...appState.hiddenTimelineChildren],
+    showIgnored: appState.showIgnored,
+    selected: [...appState.selected],
+    rangeHours: appState.rangeHours,
+    timelineOffsetHours: appState.timelineOffsetHours
+  };
+}
+
+function writeLocalPreferences() {
+  const preferences = preferencesPayload();
+  localStorage.setItem("wifiDevices:groupFilters", JSON.stringify(preferences.groupFilters));
+  localStorage.removeItem("wifiDevices:groupFilter");
+  localStorage.setItem("wifiDevices:expandedGroups", JSON.stringify(preferences.expandedGroups));
+  localStorage.setItem("wifiDevices:hiddenTimelineChildren", JSON.stringify(preferences.hiddenTimelineChildren));
+  localStorage.setItem("wifiDevices:showIgnored", String(preferences.showIgnored));
+  localStorage.setItem("wifiDevices:selected", JSON.stringify(preferences.selected));
+  localStorage.setItem("wifiDevices:rangeHours", String(preferences.rangeHours));
+  localStorage.setItem("wifiDevices:timelineOffsetHours", String(preferences.timelineOffsetHours));
+}
+
+function persistUiPreferences() {
+  writeLocalPreferences();
+  clearTimeout(preferencesSaveTimer);
+  preferencesSaveTimer = setTimeout(() => {
+    saveUiPreferences().catch(error => console.warn("Unable to save shared Wi-Fi preferences.", error));
+  }, 150);
+}
+
+async function saveUiPreferences() {
+  return fetchJson("/api/ui-preferences", {
+    method: "PUT",
+    body: JSON.stringify(preferencesPayload())
+  });
 }
 
 function selectedDevicesInOrder() {
