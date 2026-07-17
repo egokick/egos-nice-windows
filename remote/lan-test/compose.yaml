@@ -144,6 +144,28 @@ services:
       control:
         ipv4_address: "${KEYCLOAK_CONTROL_IP:?Set KEYCLOAK_CONTROL_IP}"
 
+  remotehub-ca:
+    # This one-shot root process receives only Caddy's public root certificate.
+    # It copies that public file into a named volume that the non-root API can
+    # read; Caddy's private CA data is never mounted here.
+    image: "${REMOTEHUB_RUNTIME_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+    restart: "no"
+    user: "0:0"
+    read_only: true
+    command: ["sh", "-ec", "cp -f /source/caddy-root.crt /shared/caddy-root.crt && chmod 0644 /shared/caddy-root.crt"]
+    volumes:
+      - type: bind
+        source: ./certs
+        target: /source
+        read_only: true
+      - type: volume
+        source: remotehub_ca
+        target: /shared
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
   remotehub:
     build:
       context: ../RemoteHub
@@ -177,11 +199,12 @@ services:
       - type: bind
         source: ./state/remotehub/journal
         target: /var/lib/stayactive-remotehub
-      # Start this service only after scripts/Start-LanTest.ps1 copies Caddy's
-      # public root CA. A missing file must never become a directory mount.
-      - type: bind
-        source: ./certs/caddy-root.crt
-        target: /run/stayactive/caddy-root.crt
+      # The one-shot remotehub-ca service copies only the public Caddy root
+      # into this volume with mode 0644. The API stays non-root and never sees
+      # Caddy's data directory or any private key.
+      - type: volume
+        source: remotehub_ca
+        target: /run/stayactive
         read_only: true
     cap_drop:
       - ALL
@@ -193,6 +216,8 @@ services:
         condition: service_started
       keycloak:
         condition: service_started
+      remotehub-ca:
+        condition: service_completed_successfully
     networks:
       control:
         ipv4_address: "${REMOTEHUB_CONTROL_IP:?Set REMOTEHUB_CONTROL_IP}"
@@ -206,3 +231,4 @@ networks:
 
 volumes:
   postgres_data:
+  remotehub_ca:

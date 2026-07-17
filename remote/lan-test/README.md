@@ -80,12 +80,14 @@ firewall rules, and rebinds Caddy from loopback to the configured private IP.
 ## Prepare the second laptop
 
 Copy only the public certs\caddy-root.crt file through a trusted out-of-band
-method. On the second laptop, place it anywhere readable, then run from an
-Administrator PowerShell window:
+method. On the server laptop, run Install-CaddyRoot.ps1 once to display the
+certificate SHA-256 fingerprint, then verify that fingerprint separately on
+the second laptop before trusting the copied file. In an Administrator
+PowerShell window on the second laptop:
 
 ~~~powershell
 .\scripts\Set-LanTestHosts.ps1 -Mode Lan -ServerIp 192.168.1.168
-.\scripts\Install-CaddyRoot.ps1 -CertificatePath C:\safe-path\caddy-root.crt
+.\scripts\Install-CaddyRoot.ps1 -CertificatePath C:\safe-path\caddy-root.crt -ExpectedCertificateSha256 <verified-64-hex-fingerprint>
 ~~~
 
 Install the supported open-source Tailscale client on both laptops. Generate

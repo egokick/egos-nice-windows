@@ -42,6 +42,7 @@ $environmentFile = Join-Path $lanRoot '.env'
 $composeFile = Join-Path $lanRoot 'compose.yaml'
 $policySource = Join-Path $lanRoot 'config\headscale\policy.hujson'
 $policyDestination = Join-Path $lanRoot 'generated\headscale\policy.hujson'
+$meshCentralConfigPath = Join-Path $lanRoot 'generated\meshcentral\config.json'
 $rootCertificatePath = Join-Path $lanRoot 'certs\caddy-root.crt'
 $firewallScript = Join-Path $PSScriptRoot 'Enable-LanTestFirewall.ps1'
 $hostsScript = Join-Path $PSScriptRoot 'Set-LanTestHosts.ps1'
@@ -85,7 +86,7 @@ if (-not (Test-Path -LiteralPath $environmentFile -PathType Leaf)) {
     throw 'LAN test is not initialized. Run Initialize-LanTest.ps1 first.'
 }
 
-foreach ($path in @($composeFile, $policySource, $policyDestination, $rootCertificatePath, $firewallScript, $hostsScript)) {
+foreach ($path in @($composeFile, $policySource, $policyDestination, $meshCentralConfigPath, $rootCertificatePath, $firewallScript, $hostsScript)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required LAN test file is missing: $path"
     }
@@ -94,8 +95,9 @@ foreach ($path in @($composeFile, $policySource, $policyDestination, $rootCertif
 $environmentLines = [System.IO.File]::ReadAllLines($environmentFile)
 $lanIp = Assert-PrivateIpv4 (Get-EnvironmentValue $environmentLines 'LAN_IP')
 $caddyBindAddress = Get-EnvironmentValue $environmentLines 'CADDY_BIND_ADDRESS'
-if ($caddyBindAddress -ne '127.0.0.1' -and $caddyBindAddress -ne $lanIp) {
-    throw 'CADDY_BIND_ADDRESS is neither the guarded bootstrap loopback address nor the configured LAN address.'
+$stunBindAddress = Get-EnvironmentValue $environmentLines 'STUN_BIND_ADDRESS'
+if ($caddyBindAddress -ne '127.0.0.1' -or $stunBindAddress -ne '127.0.0.1') {
+    throw 'Finalization requires both HTTPS and STUN to still be loopback-only. Refusing to proceed from a previously LAN-bound bootstrap state.'
 }
 
 $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($rootCertificatePath)
@@ -115,7 +117,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 try {
-    $headscaleUsers = @($userListOutput | Out-String | ConvertFrom-Json)
+    $parsedUsers = $userListOutput | Out-String | ConvertFrom-Json
+    $headscaleUsers = @($parsedUsers | Where-Object { $null -ne $_ })
 }
 catch {
     throw 'Headscale did not return a JSON user list; refusing to change the policy.'
@@ -128,24 +131,46 @@ if (-not ($headscaleUsers | Where-Object { $_.name -eq 'stayactive-admin' })) {
 Copy-Item -LiteralPath $policySource -Destination $policyDestination -Force
 Invoke-Docker ($composePrefix + @('restart', 'headscale')) 'Unable to apply the reviewed Headscale policy.'
 
-# Open the two narrowly scoped firewall rules before rebinding Caddy. Until
-# Caddy is restarted, its listener is still loopback-only.
-& $firewallScript -Confirm:$false
-& $hostsScript -Mode Lan -ServerIp $lanIp -Confirm:$false
+# The one-time administrator was created while Caddy was loopback-only. Turn
+# off all future account registration before any listener or firewall rule is
+# published to the LAN. The generated directory already has a restricted ACL.
+$meshCentralConfig = [System.IO.File]::ReadAllText($meshCentralConfigPath)
+if ($meshCentralConfig -match '"newAccounts"\s*:\s*true\b') {
+    $meshCentralConfig = [regex]::Replace($meshCentralConfig, '("newAccounts"\s*:\s*)true\b', '$1false', 1)
+}
+elseif ($meshCentralConfig -notmatch '"newAccounts"\s*:\s*false\b') {
+    throw 'MeshCentral configuration does not contain a boolean newAccounts setting.'
+}
 
+if ($meshCentralConfig -notmatch '"newAccounts"\s*:\s*false\b') {
+    throw 'Refusing to expose the LAN endpoint while MeshCentral account registration is enabled.'
+}
+
+$tempMeshCentralConfigPath = "$meshCentralConfigPath.pending"
+[System.IO.File]::WriteAllText($tempMeshCentralConfigPath, $meshCentralConfig, [System.Text.UTF8Encoding]::new($false))
+Move-Item -LiteralPath $tempMeshCentralConfigPath -Destination $meshCentralConfigPath -Force
+Invoke-Docker ($composePrefix + @('up', '-d', '--force-recreate', 'meshcentral')) 'Unable to restart MeshCentral with account registration disabled.'
+
+# Update the existing protected .env file in place. Do not replace it from the
+# parent directory, which would risk inheriting a broader ACL with secrets.
 $updatedEnvironmentLines = $environmentLines | ForEach-Object {
     if ($_ -like 'CADDY_BIND_ADDRESS=*') {
         "CADDY_BIND_ADDRESS=$lanIp"
+    }
+    elseif ($_ -like 'STUN_BIND_ADDRESS=*') {
+        "STUN_BIND_ADDRESS=$lanIp"
     }
     else {
         $_
     }
 }
-$tempEnvironmentFile = "$environmentFile.pending"
-[System.IO.File]::WriteAllLines($tempEnvironmentFile, $updatedEnvironmentLines, [System.Text.UTF8Encoding]::new($false))
-Move-Item -LiteralPath $tempEnvironmentFile -Destination $environmentFile -Force
+[System.IO.File]::WriteAllLines($environmentFile, $updatedEnvironmentLines, [System.Text.UTF8Encoding]::new($false))
 
-Invoke-Docker ($composePrefix + @('up', '-d', 'caddy')) 'Unable to rebind Caddy to the configured LAN address.'
+# Open the two narrowly scoped firewall rules while both service listeners are
+# still loopback-only, then publish HTTPS and STUN together.
+& $firewallScript -Confirm:$false
+& $hostsScript -Mode Lan -ServerIp $lanIp -Confirm:$false
+Invoke-Docker ($composePrefix + @('up', '-d', 'caddy', 'headscale')) 'Unable to rebind Caddy and Headscale STUN to the configured LAN address.'
 
 Write-Host "The self-hosted control plane is now available to the local subnet at $lanIp on HTTPS and STUN only."
 Write-Host 'Do not distribute enrollment keys or the operator password through chat or email.'

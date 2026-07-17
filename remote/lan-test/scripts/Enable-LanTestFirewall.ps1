@@ -32,7 +32,7 @@ if ($PSCmdlet.ShouldProcess($stunName, 'Allow local-subnet STUN traffic to Heads
     New-NetFirewallRule @common -DisplayName $stunName -Protocol UDP -LocalPort 3478 | Out-Null
 }
 
-$installed = Get-NetFirewallRule -DisplayName $httpsName, $stunName -ErrorAction SilentlyContinue
+$installed = @(Get-NetFirewallRule -DisplayName $httpsName, $stunName -ErrorAction SilentlyContinue)
 if ($installed.Count -ne 2) {
     throw 'The two managed LAN firewall rules were not both present after creation.'
 }

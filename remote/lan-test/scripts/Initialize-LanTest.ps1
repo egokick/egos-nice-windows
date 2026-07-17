@@ -270,14 +270,16 @@ Render-Template (Join-Path $lanRoot 'config\keycloak\stayactive-realm.json.templ
     '__OPERATOR_PASSWORD__' = $operatorPassword
 }
 
-Copy-Item -LiteralPath (Join-Path $lanRoot 'config\keycloak\configure-scope-mappings.sh.template') -Destination (Join-Path $paths.Generated 'keycloak\configure-scope-mappings.sh')
+$keycloakScopeMappings = [System.IO.File]::ReadAllText((Join-Path $lanRoot 'config\keycloak\configure-scope-mappings.sh.template')).Replace("`r`n", "`n").Replace("`r", "`n")
+Write-Utf8File (Join-Path $paths.Generated 'keycloak\configure-scope-mappings.sh') $keycloakScopeMappings
 
 $environmentLines = @(
     'COMPOSE_PROJECT_NAME=stayactive-remotes-lan-test',
     "LAN_IP=$lanIp",
-    # Caddy is loopback-only until the initial MeshCentral administrator exists.
+    # HTTPS and STUN remain loopback-only until the initial MeshCentral
+    # administrator exists and Finalize-LanTest.ps1 is explicitly confirmed.
     'CADDY_BIND_ADDRESS=127.0.0.1',
-    "STUN_BIND_ADDRESS=$lanIp",
+    'STUN_BIND_ADDRESS=127.0.0.1',
     'CONTROL_NETWORK_CIDR=172.30.60.0/24',
     'CADDY_CONTROL_IP=172.30.60.10',
     'HEADSCALE_CONTROL_IP=172.30.60.11',

@@ -51,7 +51,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 try {
-    $headscaleUsers = @($userList | Out-String | ConvertFrom-Json)
+    $parsedUsers = $userList | Out-String | ConvertFrom-Json
+    $headscaleUsers = @($parsedUsers | Where-Object { $null -ne $_ })
 }
 catch {
     throw 'Headscale did not return a JSON user list.'

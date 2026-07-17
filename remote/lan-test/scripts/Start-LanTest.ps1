@@ -108,6 +108,7 @@ if (-not $SkipRemoteHubBuild) {
 }
 $remoteHubArguments += 'remotehub'
 Invoke-Docker ($composePrefix + $remoteHubArguments) 'Unable to build and start RemoteHub.'
+Invoke-Docker ($composePrefix + @('exec', '-T', 'remotehub', 'sh', '-ec', 'test -r /run/stayactive/caddy-root.crt')) 'RemoteHub cannot read the public Caddy root certificate required for Keycloak TLS validation.'
 
 $runningServices = & docker @($composePrefix + @('ps', '--status', 'running', '--services'))
 if ($LASTEXITCODE -ne 0) {
