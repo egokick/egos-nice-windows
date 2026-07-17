@@ -16,6 +16,7 @@ services:
       HEADSCALE_FQDN: "${HEADSCALE_FQDN:?Set HEADSCALE_FQDN}"
       MESHCENTRAL_FQDN: "${MESHCENTRAL_FQDN:?Set MESHCENTRAL_FQDN}"
       REMOTEHUB_FQDN: "${REMOTEHUB_FQDN:?Set REMOTEHUB_FQDN}"
+      ENROLLMENTBROKER_CONTROL_IP: "${ENROLLMENTBROKER_CONTROL_IP:?Set ENROLLMENTBROKER_CONTROL_IP}"
     ports:
       - target: 80
         published: "${EDGE_HTTP_PUBLISHED_PORT:?Set EDGE_HTTP_PUBLISHED_PORT}"
@@ -145,6 +146,60 @@ services:
     networks:
       control:
         ipv4_address: "${REMOTEHUB_CONTROL_IP:?Set REMOTEHUB_CONTROL_IP}"
+
+  # EnrollmentBroker is the only workload that receives the Headscale API key.
+  # It remains separate from RemoteHub's inventory/audit boundary and exposes no
+  # host port; Caddy routes only its ticket API from the RemoteHub origin.
+  enrollmentbroker:
+    build:
+      context: ./EnrollmentBroker
+      dockerfile: ../EnrollmentBroker.Dockerfile
+      args:
+        DOTNET_SDK_IMAGE: "${ENROLLMENTBROKER_SDK_IMAGE:?Set ENROLLMENTBROKER_SDK_IMAGE to a vetted digest-pinned SDK image}"
+        DOTNET_RUNTIME_IMAGE: "${ENROLLMENTBROKER_RUNTIME_IMAGE:?Set ENROLLMENTBROKER_RUNTIME_IMAGE to a vetted digest-pinned ASP.NET runtime image}"
+        ENROLLMENTBROKER_SOURCE_REVISION: "${ENROLLMENTBROKER_SOURCE_REVISION:?Set ENROLLMENTBROKER_SOURCE_REVISION to the checked-out immutable source revision}"
+    image: "stayactive-enrollmentbroker:${ENROLLMENTBROKER_SOURCE_REVISION:?Set ENROLLMENTBROKER_SOURCE_REVISION}"
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:5090
+      DOTNET_EnableDiagnostics: "0"
+    expose:
+      - "5090"
+    volumes:
+      - type: bind
+        source: "${ENROLLMENTBROKER_CONFIG_FILE:?Set ENROLLMENTBROKER_CONFIG_FILE to the root-owned rendered production config}"
+        target: /app/appsettings.Production.json
+        read_only: true
+      - type: bind
+        source: "${ENROLLMENTBROKER_JOURNAL_DIR:?Set ENROLLMENTBROKER_JOURNAL_DIR}"
+        target: /var/lib/stayactive-enrollment
+      - type: bind
+        source: "${ENROLLMENTBROKER_API_KEY_FILE:?Set ENROLLMENTBROKER_API_KEY_FILE to the root-owned Headscale API-key secret}"
+        target: /run/secrets/headscale-enrollment-api-key
+        read_only: true
+      - type: bind
+        source: "${ENROLLMENTBROKER_JOURNAL_HMAC_KEY_FILE:?Set ENROLLMENTBROKER_JOURNAL_HMAC_KEY_FILE to the root-owned journal HMAC secret}"
+        target: /run/secrets/enrollmentbroker-journal-hmac-key
+        read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    depends_on:
+      caddy:
+        condition: service_started
+      headscale:
+        condition: service_healthy
+    networks:
+      control:
+        ipv4_address: "${ENROLLMENTBROKER_CONTROL_IP:?Set ENROLLMENTBROKER_CONTROL_IP}"
 
 networks:
   control:

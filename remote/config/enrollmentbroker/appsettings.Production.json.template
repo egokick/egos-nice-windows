@@ -1,0 +1,22 @@
+{
+  "EnrollmentBroker": {
+    "Authentication": {
+      "Authority": "__REPLACE_OIDC_AUTHORITY__",
+      "Audience": "stayactive-enrollment"
+    },
+    "Authorization": {
+      "EnrollmentWriteScope": "stayactive.enrollment.write",
+      "AdministratorRole": "stayactive.enrollment.admin"
+    },
+    "Storage": {
+      "JournalPath": "/var/lib/stayactive-enrollment/audit.journal.jsonl",
+      "JournalHmacKeyFile": "/run/secrets/enrollmentbroker-journal-hmac-key"
+    },
+    "Headscale": {
+      "ApiBaseUrl": "https://__REPLACE_HEADSCALE_FQDN__",
+      "ApiKeyFile": "/run/secrets/headscale-enrollment-api-key",
+      "UserId": __REPLACE_HEADSCALE_ENROLLMENT_USER_ID__,
+      "LoginServer": "https://__REPLACE_HEADSCALE_FQDN__"
+    }
+  }
+}

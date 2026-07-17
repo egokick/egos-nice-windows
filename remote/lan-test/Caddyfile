@@ -24,7 +24,24 @@ http://id.stayactive.test {
 
 headscale.stayactive.test {
     tls internal
-    reverse_proxy headscale:8080
+
+    # Headscale's REST API accepts a broadly privileged API key. Never expose
+    # that surface to LAN clients: only the isolated EnrollmentBroker container
+    # may reach it over Caddy's internally trusted HTTPS path.
+    @enrollmentBrokerHeadscaleApi {
+        path /api/v1/*
+        remote_ip 172.30.60.16
+    }
+    handle @enrollmentBrokerHeadscaleApi {
+        reverse_proxy headscale:8080
+    }
+    handle /api/v1/* {
+        respond "Not found" 404
+    }
+
+    handle {
+        reverse_proxy headscale:8080
+    }
 }
 
 meshcentral.stayactive.test {
@@ -34,7 +51,18 @@ meshcentral.stayactive.test {
 
 remotehub.stayactive.test {
     tls internal
-    reverse_proxy remotehub:5088
+
+    # This is the only broker ingress. The broker is intentionally a separate
+    # service from RemoteHub so the inventory API never receives a Headscale
+    # administrative credential.
+    @enrollmentTickets path /api/v1/enrollment-tickets /api/v1/enrollment-tickets/*
+    handle @enrollmentTickets {
+        reverse_proxy enrollmentbroker:5090
+    }
+
+    handle {
+        reverse_proxy remotehub:5088
+    }
 }
 
 id.stayactive.test {

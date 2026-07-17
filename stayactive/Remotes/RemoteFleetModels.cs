@@ -129,13 +129,17 @@ internal sealed record RemoteClientPreferences(
     string DeviceDisplayName,
     string Location,
     string RemoteHubOidcIssuerUrl = "",
-    string RemoteHubOidcClientId = "")
+    string RemoteHubOidcClientId = "",
+    string RemoteEnrollmentUrl = "",
+    string RemoteEnrollmentOidcClientId = "")
 {
     public bool IsConfigured => IsHttpsEndpoint(RemoteHubUrl);
 
     public bool HasControlPlane => IsSelfHostedControlPlane(ControlPlaneUrl);
 
     public bool HasMeshCentral => IsHttpsEndpoint(MeshCentralUrl);
+
+    public bool HasEnrollmentBroker => IsHttpsEndpoint(RemoteEnrollmentUrl);
 
     private static bool IsHttpsEndpoint(string value)
     {

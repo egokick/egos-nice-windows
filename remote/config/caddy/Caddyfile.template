@@ -6,7 +6,23 @@
 }
 
 {$HEADSCALE_FQDN} {
-	reverse_proxy headscale:8080
+	# Headscale API keys are administrative. Limit this route to the isolated
+	# EnrollmentBroker control-network address; ordinary clients still reach the
+	# Headscale coordination endpoints below.
+	@enrollmentBrokerHeadscaleApi {
+		path /api/v1/*
+		remote_ip {$ENROLLMENTBROKER_CONTROL_IP}
+	}
+	handle @enrollmentBrokerHeadscaleApi {
+		reverse_proxy headscale:8080
+	}
+	handle /api/v1/* {
+		respond "Not found" 404
+	}
+
+	handle {
+		reverse_proxy headscale:8080
+	}
 }
 
 {$MESHCENTRAL_FQDN} {
@@ -17,5 +33,14 @@
 # only through this operator-controlled HTTPS edge. The Kestrel port remains
 # un-published inside the Docker control network.
 {$REMOTEHUB_FQDN} {
-	reverse_proxy remotehub:5088
+	# Enrollment has an intentionally separate service identity and secret
+	# boundary. RemoteHub itself remains inventory/audit only.
+	@enrollmentTickets path /api/v1/enrollment-tickets /api/v1/enrollment-tickets/*
+	handle @enrollmentTickets {
+		reverse_proxy enrollmentbroker:5090
+	}
+
+	handle {
+		reverse_proxy remotehub:5088
+	}
 }

@@ -45,6 +45,31 @@ origin in the issuer's CORS policy for its discovery and token endpoints; the
 page holds the access token only in memory. Set the public client ID in the
 root-owned rendered RemoteHub production configuration, never a secret.
 
+## Remotes enrollment: separate native public client
+
+Register a third native public client named `stayactive-remotes-enrollment`.
+It must use Authorization Code with mandatory `S256` PKCE, no client secret,
+no implicit/hybrid/password/client-credentials grant, and no refresh token.
+For Keycloak, register exactly the native loopback root:
+
+```text
+Redirect URI: http://127.0.0.1/
+Scopes:       openid profile stayactive.enrollment.write
+Audience:     stayactive-enrollment
+```
+
+Do not grant or request `offline_access`. Map only the dedicated
+`stayactive.enrollment.write` scope and a flat multivalued `role` claim with
+`stayactive.enrollment.admin` to device owners approved to add a computer. The
+broker requires both values, and the StayActive **Remotes > Add device** flow
+must obtain a fresh interactive authorization for this client rather than
+reusing the tray's RemoteHub refresh token. This client must not be a browser
+origin and must not receive RemoteHub inventory-administration scopes.
+
+For the included LAN Keycloak realm, the idempotent
+`configure-scope-mappings.sh` migration creates this scope, mapper, role, and
+public client. Review the generated client and role assignment before exposing
+the LAN endpoint.
 ## Headscale OIDC (separate server-side integration)
 
 If Headscale OIDC is enabled, register its callback at

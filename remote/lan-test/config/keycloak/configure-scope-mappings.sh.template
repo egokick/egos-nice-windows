@@ -1,11 +1,16 @@
 #!/bin/sh
 # Runs inside the private Keycloak container after the imported realm exists.
-# It reads bootstrap credentials from the container environment; do not add
-# secrets to this file or echo shell commands.
+# It is intentionally idempotent: an existing LAN stack imports a realm only
+# once, so this script also adds the reviewed enrollment scope/client/role to a
+# previously created realm without recreating users or passwords.
 set -eu
 
 KCADM=/opt/keycloak/bin/kcadm.sh
 REALM=stayactive
+OPERATOR_USERNAME=stayactive-operator
+ENROLLMENT_SCOPE=stayactive.enrollment.write
+ENROLLMENT_ROLE=stayactive.enrollment.admin
+ENROLLMENT_CLIENT=stayactive-remotes-enrollment
 
 "$KCADM" config credentials \
   --server http://127.0.0.1:8080 \
@@ -28,6 +33,50 @@ get_role_id() {
   "$KCADM" get "roles/$1" -r "$REALM" --fields id --format csv --noquotes
 }
 
+get_client_id() {
+  requested_client_id="$1"
+  "$KCADM" get clients -r "$REALM" -q "clientId=$requested_client_id" --fields id,clientId --format csv --noquotes \
+    | while IFS=, read -r client_id client_name; do
+        if [ "$client_name" = "$requested_client_id" ]; then
+          printf '%s\n' "$client_id"
+          break
+        fi
+      done
+}
+
+get_user_id() {
+  requested_username="$1"
+  "$KCADM" get users -r "$REALM" -q "username=$requested_username" --fields id,username --format csv --noquotes \
+    | while IFS=, read -r user_id username; do
+        if [ "$username" = "$requested_username" ]; then
+          printf '%s\n' "$user_id"
+          break
+        fi
+      done
+}
+
+ensure_realm_role() {
+  role_name="$1"
+  if "$KCADM" get "roles/$role_name" -r "$REALM" >/dev/null 2>&1; then
+    return
+  fi
+
+  "$KCADM" create roles -r "$REALM" \
+    -s "name=$role_name" \
+    -s 'composite=false' \
+    -s 'clientRole=false' >/dev/null
+}
+
+ensure_client_scope() {
+  scope_name="$1"
+  if [ -n "$(get_scope_id "$scope_name")" ]; then
+    return
+  fi
+
+  body="{\"name\":\"$scope_name\",\"protocol\":\"openid-connect\",\"attributes\":{\"include.in.token.scope\":\"true\",\"display.on.consent.screen\":\"false\",\"consent.screen.text\":\"\"},\"protocolMappers\":[]}"
+  "$KCADM" create client-scopes -r "$REALM" -b "$body" >/dev/null
+}
+
 map_scope_to_role() {
   scope_name="$1"
   role_name="$2"
@@ -40,14 +89,98 @@ map_scope_to_role() {
 
   if "$KCADM" get "client-scopes/$scope_id/scope-mappings/realm" -r "$REALM" \
     | grep -F '"id" : "'"$role_id"'"' >/dev/null 2>&1; then
-    return 0
+    return
   fi
 
   body="[{\"id\":\"$role_id\",\"name\":\"$role_name\",\"composite\":false,\"clientRole\":false,\"containerId\":\"$REALM\"}]"
   "$KCADM" create "client-scopes/$scope_id/scope-mappings/realm" -r "$REALM" -b "$body" >/dev/null
 }
 
+ensure_enrollment_scope_mapper() {
+  scope_id="$(get_scope_id "$ENROLLMENT_SCOPE")"
+  if [ -z "$scope_id" ]; then
+    echo "Enrollment client scope was not found." >&2
+    exit 1
+  fi
+
+  mapper_name=flat-stayactive-enrollment-admin-role
+  if "$KCADM" get "client-scopes/$scope_id/protocol-mappers/models" -r "$REALM" \
+    | grep -F '"name" : "'"$mapper_name"'"' >/dev/null 2>&1; then
+    return
+  fi
+
+  body='{"name":"flat-stayactive-enrollment-admin-role","protocol":"openid-connect","protocolMapper":"oidc-usermodel-realm-role-mapper","consentRequired":false,"config":{"claim.name":"role","jsonType.label":"String","multivalued":"true","access.token.claim":"true","id.token.claim":"false","userinfo.token.claim":"false","introspection.token.claim":"true"}}'
+  "$KCADM" create "client-scopes/$scope_id/protocol-mappers/models" -r "$REALM" -b "$body" >/dev/null
+}
+
+ensure_enrollment_client() {
+  client_id="$(get_client_id "$ENROLLMENT_CLIENT")"
+  body='{"clientId":"stayactive-remotes-enrollment","name":"StayActive Windows enrollment","enabled":true,"protocol":"openid-connect","publicClient":true,"standardFlowEnabled":true,"implicitFlowEnabled":false,"directAccessGrantsEnabled":false,"serviceAccountsEnabled":false,"authorizationServicesEnabled":false,"fullScopeAllowed":false,"redirectUris":["http://127.0.0.1/"],"webOrigins":[],"attributes":{"pkce.code.challenge.method":"S256","use.refresh.tokens":"false"}}'
+  if [ -z "$client_id" ]; then
+    "$KCADM" create clients -r "$REALM" -b "$body" >/dev/null
+    client_id="$(get_client_id "$ENROLLMENT_CLIENT")"
+  else
+    "$KCADM" update "clients/$client_id" -r "$REALM" -b "$body" >/dev/null
+  fi
+
+  if [ -z "$client_id" ]; then
+    echo "Enrollment public client was not created." >&2
+    exit 1
+  fi
+
+  scope_id="$(get_scope_id "$ENROLLMENT_SCOPE")"
+  if [ -z "$scope_id" ]; then
+    echo "Enrollment client scope was not found." >&2
+    exit 1
+  fi
+
+  if ! "$KCADM" get "clients/$client_id/optional-client-scopes" -r "$REALM" \
+    | grep -F '"id" : "'"$scope_id"'"' >/dev/null 2>&1; then
+    "$KCADM" update "clients/$client_id/optional-client-scopes/$scope_id" -r "$REALM" -n >/dev/null
+  fi
+
+  mapper_name=stayactive-enrollment-audience
+  if ! "$KCADM" get "clients/$client_id/protocol-mappers/models" -r "$REALM" \
+    | grep -F '"name" : "'"$mapper_name"'"' >/dev/null 2>&1; then
+    mapper_body='{"name":"stayactive-enrollment-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","consentRequired":false,"config":{"included.custom.audience":"stayactive-enrollment","access.token.claim":"true","id.token.claim":"false","introspection.token.claim":"true"}}'
+    "$KCADM" create "clients/$client_id/protocol-mappers/models" -r "$REALM" -b "$mapper_body" >/dev/null
+  fi
+}
+
+ensure_user_realm_role() {
+  username="$1"
+  role_name="$2"
+  user_id="$(get_user_id "$username")"
+  if [ -z "$user_id" ]; then
+    echo "Required local operator user was not found." >&2
+    exit 1
+  fi
+
+  if "$KCADM" get "users/$user_id/role-mappings/realm" -r "$REALM" \
+    | grep -F '"name" : "'"$role_name"'"' >/dev/null 2>&1; then
+    return
+  fi
+
+  "$KCADM" add-roles -r "$REALM" --uid "$user_id" --rolename "$role_name" >/dev/null
+}
+
+ensure_realm_role remotehub-fleet-read
+ensure_realm_role remotehub-inventory-write
+ensure_realm_role remotehub-audit-read
+ensure_realm_role stayactive.remotehub.admin
+ensure_realm_role "$ENROLLMENT_ROLE"
+
+ensure_client_scope remotehub.fleet.read
+ensure_client_scope remotehub.inventory.write
+ensure_client_scope remotehub.audit.read
+ensure_client_scope remotehub.admin
+ensure_client_scope "$ENROLLMENT_SCOPE"
+
 map_scope_to_role remotehub.fleet.read remotehub-fleet-read
 map_scope_to_role remotehub.inventory.write remotehub-inventory-write
 map_scope_to_role remotehub.audit.read remotehub-audit-read
 map_scope_to_role remotehub.admin stayactive.remotehub.admin
+map_scope_to_role "$ENROLLMENT_SCOPE" "$ENROLLMENT_ROLE"
+ensure_enrollment_scope_mapper
+ensure_enrollment_client
+ensure_user_realm_role "$OPERATOR_USERNAME" "$ENROLLMENT_ROLE"

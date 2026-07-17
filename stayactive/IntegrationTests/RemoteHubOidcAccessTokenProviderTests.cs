@@ -63,6 +63,103 @@ public sealed class RemoteHubOidcAccessTokenProviderTests
     }
 
     [Fact]
+    public async Task SignInAsync_EnrollmentConfigurationUsesFreshPkceWithoutOfflineAccess()
+    {
+        var storage = new FakeTokenStorage();
+        var http = new FakeOidcHttpClient
+        {
+            DiscoveryResponse = DiscoveryResponse(),
+            TokenResponse = new RemoteHubOidcHttpResponse(
+                200,
+                """
+                {
+                  "access_token": "enrollment-access-token",
+                  "token_type": "Bearer",
+                  "expires_in": 300
+                }
+                """)
+        };
+        var listener = new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41236/"));
+        var browser = new FakeBrowser(uri =>
+        {
+            var query = ParseQuery(uri);
+            listener.Callback = new Uri(
+                listener.RedirectUri.AbsoluteUri +
+                "?code=enrollment-code&state=" + Uri.EscapeDataString(query["state"]));
+        });
+        Assert.True(RemoteHubOidcConfiguration.TryCreateEnrollment(
+            "https://issuer.example.test",
+            "stayactive-remotes-enrollment",
+            out var configuration));
+        using var provider = new RemoteHubOidcAccessTokenProvider(
+            () => configuration,
+            storage,
+            http,
+            browser,
+            new FakeLoopbackCallbackListenerFactory(listener),
+            requestTimeout: TimeSpan.FromSeconds(1),
+            authorizationTimeout: TimeSpan.FromSeconds(1),
+            utcNow: () => FixedNow);
+
+        await provider.SignInAsync(CancellationToken.None);
+
+        var query = ParseQuery(Assert.IsType<Uri>(browser.OpenedUri));
+        Assert.Equal(RemoteHubOidcConfiguration.EnrollmentRequiredScopes, query["scope"]);
+        Assert.Equal("login", query["prompt"]);
+        Assert.Equal("0", query["max_age"]);
+        Assert.DoesNotContain("offline_access", query["scope"], StringComparison.Ordinal);
+        Assert.Equal("S256", query["code_challenge_method"]);
+        Assert.Null(Assert.IsType<RemoteHubTokenSet>(storage.Value).RefreshToken);
+    }
+
+    [Fact]
+    public async Task SignInAsync_EnrollmentConfigurationRejectsRefreshToken()
+    {
+        var storage = new FakeTokenStorage();
+        var http = new FakeOidcHttpClient
+        {
+            DiscoveryResponse = DiscoveryResponse(),
+            TokenResponse = new RemoteHubOidcHttpResponse(
+                200,
+                """
+                {
+                  "access_token": "enrollment-access-token",
+                  "refresh_token": "unexpected-refresh-token",
+                  "token_type": "Bearer",
+                  "expires_in": 300
+                }
+                """)
+        };
+        var listener = new FakeLoopbackCallbackListener(new Uri("http://127.0.0.1:41237/"));
+        var browser = new FakeBrowser(uri =>
+        {
+            var query = ParseQuery(uri);
+            listener.Callback = new Uri(
+                listener.RedirectUri.AbsoluteUri +
+                "?code=enrollment-code&state=" + Uri.EscapeDataString(query["state"]));
+        });
+        Assert.True(RemoteHubOidcConfiguration.TryCreateEnrollment(
+            "https://issuer.example.test",
+            "stayactive-remotes-enrollment",
+            out var configuration));
+        using var provider = new RemoteHubOidcAccessTokenProvider(
+            () => configuration,
+            storage,
+            http,
+            browser,
+            new FakeLoopbackCallbackListenerFactory(listener),
+            requestTimeout: TimeSpan.FromSeconds(1),
+            authorizationTimeout: TimeSpan.FromSeconds(1),
+            utcNow: () => FixedNow);
+
+        var exception = await Assert.ThrowsAsync<RemoteHubOidcException>(
+            () => provider.SignInAsync(CancellationToken.None));
+
+        Assert.Equal("The self-hosted identity service returned an invalid sign-in response.", exception.Message);
+        Assert.Null(storage.Value);
+        Assert.DoesNotContain("unexpected-refresh-token", exception.ToString(), StringComparison.Ordinal);
+    }
+    [Fact]
     public async Task GetAccessTokenAsync_RefreshesAnExpiringTokenAndPreservesUnrotatedRefreshToken()
     {
         var storage = new FakeTokenStorage

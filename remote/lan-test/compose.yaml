@@ -222,6 +222,80 @@ services:
       control:
         ipv4_address: "${REMOTEHUB_CONTROL_IP:?Set REMOTEHUB_CONTROL_IP}"
 
+  # A deliberately separate, non-root service that can mint narrowly scoped
+  # Headscale enrollment tickets. It has no Docker socket, Headscale state, or
+  # RemoteHub inventory journal access. Finalize-LanTest.ps1 creates its two
+  # secret files only after the Headscale policy owner exists, so this service
+  # is intentionally not started during loopback-only bootstrap.
+  enrollmentbroker:
+    build:
+      context: ../EnrollmentBroker
+      dockerfile: ../EnrollmentBroker.Dockerfile
+      args:
+        # Existing initialized LAN stacks predate the broker variables. Use
+        # their reviewed RemoteHub base-image pins until Finalize writes the
+        # broker-specific provenance value; the service is not selected during
+        # bootstrap, so this does not build or start it prematurely.
+        DOTNET_SDK_IMAGE: "${REMOTEHUB_SDK_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+        DOTNET_RUNTIME_IMAGE: "${REMOTEHUB_RUNTIME_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+        ENROLLMENTBROKER_SOURCE_REVISION: "${ENROLLMENTBROKER_SOURCE_REVISION:-bootstrap-disabled}"
+    image: "stayactive-enrollmentbroker-lan:${ENROLLMENTBROKER_SOURCE_REVISION:-bootstrap-disabled}"
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:5090
+      DOTNET_EnableDiagnostics: "0"
+      SSL_CERT_FILE: /run/stayactive/caddy-root.crt
+    expose:
+      - "5090"
+    extra_hosts:
+      - "headscale.stayactive.test:${CADDY_CONTROL_IP:?Set CADDY_CONTROL_IP}"
+      - "id.stayactive.test:${CADDY_CONTROL_IP:?Set CADDY_CONTROL_IP}"
+    volumes:
+      - type: bind
+        source: ./generated/enrollmentbroker/appsettings.Production.json
+        target: /app/appsettings.Production.json
+        read_only: true
+      - type: bind
+        source: ./state/enrollmentbroker/journal
+        target: /var/lib/stayactive-enrollment
+      - type: bind
+        source: ./secrets/headscale-enrollment-api-key
+        target: /run/secrets/headscale-enrollment-api-key
+        read_only: true
+      - type: bind
+        source: ./secrets/enrollmentbroker-journal-hmac-key
+        target: /run/secrets/enrollmentbroker-journal-hmac-key
+        read_only: true
+      - type: volume
+        source: remotehub_ca
+        target: /run/stayactive
+        read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    depends_on:
+      caddy:
+        condition: service_started
+      headscale:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      remotehub-ca:
+        condition: service_completed_successfully
+    networks:
+      control:
+        # Keep this stable even for pre-broker .env files. Finalize verifies
+        # the value before starting the service.
+        ipv4_address: "${ENROLLMENTBROKER_CONTROL_IP:-172.30.60.16}"
+
 networks:
   control:
     driver: bridge

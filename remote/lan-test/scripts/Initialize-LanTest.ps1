@@ -229,6 +229,7 @@ foreach ($directory in @(
     (Join-Path $paths.Generated 'headscale'),
     (Join-Path $paths.Generated 'meshcentral'),
     (Join-Path $paths.Generated 'remotehub'),
+    (Join-Path $paths.Generated 'enrollmentbroker'),
     (Join-Path $paths.Generated 'keycloak'),
     (Join-Path $paths.State 'caddy\data'),
     (Join-Path $paths.State 'caddy\config'),
@@ -236,6 +237,7 @@ foreach ($directory in @(
     (Join-Path $paths.State 'meshcentral\data'),
     (Join-Path $paths.State 'meshcentral\files'),
     (Join-Path $paths.State 'remotehub\journal'),
+    (Join-Path $paths.State 'enrollmentbroker\journal'),
     $paths.Certificates,
     $paths.Secrets)) {
     [System.IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -265,6 +267,11 @@ Render-Template (Join-Path $lanRoot 'config\meshcentral\config.json.template') (
 
 Render-Template (Join-Path $lanRoot 'config\remotehub\appsettings.Production.json.template') (Join-Path $paths.Generated 'remotehub\appsettings.Production.json') @{ '__REMOTEHUB_JOURNAL_HMAC_KEY_BASE64__' = $remoteHubJournalHmacKey }
 
+# The broker is intentionally not runnable during loopback bootstrap. Its
+# positive Headscale user id and both protected secret files are created only
+# by Finalize-LanTest.ps1 after the policy owner exists.
+Render-Template (Join-Path $lanRoot 'config\enrollmentbroker\appsettings.Production.json.template') (Join-Path $paths.Generated 'enrollmentbroker\appsettings.Production.json') @{ '__HEADSCALE_ENROLLMENT_USER_ID__' = '0' }
+
 Render-Template (Join-Path $lanRoot 'config\keycloak\stayactive-realm.json.template') (Join-Path $paths.Generated 'keycloak\stayactive-realm.json') @{
     '__OPERATOR_USERNAME__' = $operatorUsername
     '__OPERATOR_PASSWORD__' = $operatorPassword
@@ -286,6 +293,7 @@ $environmentLines = @(
     'MESHCENTRAL_CONTROL_IP=172.30.60.12',
     'REMOTEHUB_CONTROL_IP=172.30.60.13',
     'KEYCLOAK_CONTROL_IP=172.30.60.14',
+    'ENROLLMENTBROKER_CONTROL_IP=172.30.60.16',
     'POSTGRES_CONTROL_IP=172.30.60.15',
     "CADDY_IMAGE=$($imagePins.CADDY_IMAGE)",
     "HEADSCALE_IMAGE=$($imagePins.HEADSCALE_IMAGE)",
@@ -295,6 +303,9 @@ $environmentLines = @(
     "REMOTEHUB_SDK_IMAGE=$($imagePins.REMOTEHUB_SDK_IMAGE)",
     "REMOTEHUB_RUNTIME_IMAGE=$($imagePins.REMOTEHUB_RUNTIME_IMAGE)",
     "REMOTEHUB_SOURCE_REVISION=$gitRevision",
+    "ENROLLMENTBROKER_SDK_IMAGE=$($imagePins.REMOTEHUB_SDK_IMAGE)",
+    "ENROLLMENTBROKER_RUNTIME_IMAGE=$($imagePins.REMOTEHUB_RUNTIME_IMAGE)",
+    "ENROLLMENTBROKER_SOURCE_REVISION=$gitRevision",
     'POSTGRES_DB=keycloak',
     'POSTGRES_USER=keycloak',
     "POSTGRES_PASSWORD=$postgresPassword",

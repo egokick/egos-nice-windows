@@ -7,8 +7,10 @@ operator-controlled Remotes control plane with:
   Tailscale DERP map;
 - MeshCentral for consented screen/file-management sessions;
 - RemoteHub for verified device-inventory policy and an append-only audit
-  journal; and
-- Caddy as the only TCP/TLS edge for the three operator-owned DNS names.
+  journal;
+- EnrollmentBroker, isolated from RemoteHub, for one-time Headscale enrollment
+  tickets; and
+- Caddy as the only TCP/TLS edge for the operator-owned DNS names.
 
 RemoteHub is an inventory and audit service, not a remote-command proxy. Its
 same-origin `/admin/` page can manage approved mappings, but cannot start a
@@ -41,11 +43,11 @@ journal HMAC key, or bearer token.
 
 | Variable group | Required values |
 | --- | --- |
-| Images and source | `CADDY_IMAGE`, `HEADSCALE_IMAGE`, `MESHCENTRAL_IMAGE`, `REMOTEHUB_SDK_IMAGE`, and `REMOTEHUB_RUNTIME_IMAGE` are vetted digest-pinned images. `REMOTEHUB_SOURCE_REVISION` is the full immutable revision of the checked-out RemoteHub source used to build the local image. |
+| Images and source | `CADDY_IMAGE`, `HEADSCALE_IMAGE`, `MESHCENTRAL_IMAGE`, `REMOTEHUB_SDK_IMAGE`, `REMOTEHUB_RUNTIME_IMAGE`, `ENROLLMENTBROKER_SDK_IMAGE`, and `ENROLLMENTBROKER_RUNTIME_IMAGE` are vetted digest-pinned images. `REMOTEHUB_SOURCE_REVISION` and `ENROLLMENTBROKER_SOURCE_REVISION` identify the immutable reviewed source used to build each local image. |
 | Public identity | `ACME_EMAIL`, `HEADSCALE_FQDN`, `MESHCENTRAL_FQDN`, `REMOTEHUB_FQDN`, and `HEADSCALE_PUBLIC_DERP_IPV4`. All DNS names and the DERP address must be owned by the operator. |
-| Private Docker control network | `CONTROL_NETWORK_CIDR`, `CADDY_CONTROL_IP`, `HEADSCALE_CONTROL_IP`, `MESHCENTRAL_CONTROL_IP`, and `REMOTEHUB_CONTROL_IP`: a non-overlapping RFC1918 network with fixed addresses. Templates must trust only `CADDY_CONTROL_IP` as their reverse proxy. |
-| Intentional host exposure | `EDGE_HTTP_BIND_ADDRESS`, `EDGE_HTTP_PUBLISHED_PORT`, `EDGE_HTTPS_BIND_ADDRESS`, `EDGE_HTTPS_PUBLISHED_PORT`, `DERP_STUN_BIND_ADDRESS`, and `DERP_STUN_PUBLISHED_PORT`. They start blank so the deployment fails instead of publishing a service by accident. |
-| Rendered files and state | Absolute root-owned paths for Caddy, Headscale, MeshCentral, plus `REMOTEHUB_CONFIG_FILE` and `REMOTEHUB_JOURNAL_DIR`. |
+| Private Docker control network | `CONTROL_NETWORK_CIDR`, `CADDY_CONTROL_IP`, `HEADSCALE_CONTROL_IP`, `MESHCENTRAL_CONTROL_IP`, `REMOTEHUB_CONTROL_IP`, and `ENROLLMENTBROKER_CONTROL_IP`: a non-overlapping RFC1918 network with fixed addresses. Caddy must trust the broker address only for the Headscale `/api/v1/*` route; all other sources receive `404`. |
+| Intentional host exposure | `EDGE_HTTP_BIND_ADDRESS`, `EDGE_HTTP_PUBLISHED_PORT`, `EDGE_HTTPS_BIND_ADDRESS`, `EDGE_HTTPS_PUBLISHED_PORT`, `DERP_STUN_BIND_ADDRESS`, and `DERP_STUN_PUBLISHED_PORT`. They start blank so the deployment fails instead of publishing a service by accident. EnrollmentBroker has no host-published port. |
+| Rendered files and state | Absolute root-owned paths for Caddy, Headscale, MeshCentral, RemoteHub, and `ENROLLMENTBROKER_CONFIG_FILE` / `ENROLLMENTBROKER_JOURNAL_DIR`. Also provide root-owned `ENROLLMENTBROKER_API_KEY_FILE` and `ENROLLMENTBROKER_JOURNAL_HMAC_KEY_FILE`; neither belongs in `.env`. |
 
 The RemoteHub Compose build context is only `remote/RemoteHub`. It deliberately
 does not send the parent deployment directory, its untracked `.env`, or
@@ -78,6 +80,32 @@ The sample keeps `JournalPath` fixed at
 writers. One RemoteHub instance owns one local persistent journal; corruption,
 truncation, or a missing/incorrect HMAC key causes it to refuse startup.
 
+## EnrollmentBroker configuration and credential boundary
+
+Render [`config/enrollmentbroker/appsettings.Production.json.template`](config/enrollmentbroker/appsettings.Production.json.template)
+to the root-owned `ENROLLMENTBROKER_CONFIG_FILE`. Replace its issuer, Headscale
+FQDN, and positive Headscale enrollment-user ID. The template deliberately
+points at two **file** paths: `/run/secrets/headscale-enrollment-api-key` and
+`/run/secrets/enrollmentbroker-journal-hmac-key`. Never substitute inline
+values.
+
+Create a separate Headscale management API key only for this service and mount
+it read-only from `ENROLLMENTBROKER_API_KEY_FILE`. Headscale 0.29 management
+keys are broadly capable, so its practical restriction is defense in depth:
+the host file is root-owned and readable only by the broker's UID/GID, and the non-root broker is the only container that
+receives it, it has no Docker socket or Headscale state mount, and Caddy allows
+`/api/v1/*` only when the TCP peer is `ENROLLMENTBROKER_CONTROL_IP`. Do not
+mount this secret into RemoteHub, Keycloak, Caddy, MeshCentral, a build context,
+or `.env`.
+
+Generate `ENROLLMENTBROKER_JOURNAL_HMAC_KEY_FILE` from at least 32 random bytes
+encoded as Base64. It authenticates the broker's durable ticket/audit journal
+at `/var/lib/stayactive-enrollment/audit.journal.jsonl`; preserve that key with
+the journal in encrypted backup. The broker rejects a missing, short, corrupt,
+or mismatched journal/key at startup. Like RemoteHub, it runs as UID/GID
+`65532`, is read-only, drops all capabilities, exposes only its private
+container port, and needs only its journal, the two read-only secret files, and
+the public TLS trust root.
 The container is read-only, drops all Linux capabilities, and runs as numeric
 UID/GID `65532`. On a rootful Docker host, create its journal directory with
 that identity and keep the rendered configuration root-owned but readable by
@@ -95,21 +123,22 @@ Use equivalent ownership/SELinux labels for rootless Docker or another runtime;
 do not relax the rendered file to world-readable simply to make the mount work.
 Back up the journal and its HMAC key separately and securely.
 
-## OIDC registration: two separate public clients
+## OIDC registration: three separate public clients
 
-RemoteHub validates issuer, audience, signature, expiry, scope (`scope` or
-`scp`), and caller identity (`sub` or `client_id`). Configure the operator-owned
-issuer to mint access tokens for the exact RemoteHub audience in the rendered
-configuration and to include the named scopes below. Tokens that call the Admin
+RemoteHub and EnrollmentBroker validate issuer, audience, signature, expiry,
+scope (`scope` or `scp`), and caller identity (`sub` or `client_id`). Configure
+the operator-owned issuer to mint access tokens only for the exact audience and
+scopes listed below. Tokens that call the Admin
 inventory or audit APIs must additionally carry the dedicated flat `role` claim
 `stayactive.remotehub.admin`; assign it only to approved operators. Do not use
 a shared client, a client secret, or an implicit/password/client-credentials
-grant for either browser/native public client.
+grant for any browser/native public client.
 
 | Client | Required registration and scopes | Browser/CORS and token handling |
 | --- | --- | --- |
 | StayActive Windows tray | A **native public client** using Authorization Code plus mandatory `S256` PKCE. Allow its loopback callback on `http://127.0.0.1:<dynamic-port>/` according to the provider's native-app loopback support; do not substitute a LAN callback. For Keycloak, register the exact root form `http://127.0.0.1/` (including the trailing slash), which permits the dynamic port but rejects child paths. Request exactly `openid profile remotehub.fleet.read offline_access`. | The tray exchanges the code locally and protects any refresh token with Windows DPAPI. It needs an access token with the RemoteHub audience and `remotehub.fleet.read`; it is not a browser origin, so browser CORS is not a replacement for the provider's native-public-client controls. |
 | RemoteHub Admin page | A **browser public client** using Authorization Code plus mandatory `S256` PKCE, with no client secret. Register exactly `https://<REMOTEHUB_FQDN>/admin/` as the redirect URI and exactly `https://<REMOTEHUB_FQDN>` as its web origin. Request `openid profile remotehub.inventory.write remotehub.audit.read remotehub.admin`; never grant or request `offline_access`. | Allow the exact Admin origin in the issuer's CORS policy for discovery/token requests. It needs an access token with the RemoteHub audience and the listed administrator scopes. The page keeps its access token only in memory and uses no refresh token. |
+| Remotes enrollment | A third **native public client**, `stayactive-remotes-enrollment`, using Authorization Code plus mandatory `S256` PKCE and the loopback root `http://127.0.0.1/`. Request exactly `openid profile stayactive.enrollment.write`; no refresh token and no `offline_access`. Mint the `stayactive-enrollment` audience and a flat `role` claim containing only `stayactive.enrollment.admin` for approved owners. | The tray must make this a fresh interactive authorization when the user chooses **Add device**. The broker requires both the dedicated scope and role, accepts tickets only for five to thirty minutes, and never persists the raw Headscale pre-authentication key. |
 
 The `RemoteHub__AdminSpa__ClientId` in the rendered configuration is the second
 client above. The Windows tray's issuer/client ID are configured in its Remotes
@@ -125,9 +154,10 @@ that confidential secret in a mounted secret file rather than `.env`.
 
 ## Build, review, and start
 
-1. Check out the exact reviewed source. Set `REMOTEHUB_SOURCE_REVISION` to the
-   full `git rev-parse HEAD` value for that checkout and ensure the RemoteHub
-   source has no local changes before building.
+1. Check out the exact reviewed source. Set `REMOTEHUB_SOURCE_REVISION` and
+   `ENROLLMENTBROKER_SOURCE_REVISION` to the full `git rev-parse HEAD` value
+   for that checkout and ensure both service source trees have no local changes
+   before building.
 2. Copy `.env.example` to `.env`, fill every required non-secret value, and
    confirm no secret appears in it. Point `REMOTEHUB_CONFIG_FILE` to the
    root-owned rendered file above and `REMOTEHUB_JOURNAL_DIR` to its prepared
@@ -141,9 +171,11 @@ that confidential secret in a mounted secret file rather than `.env`.
      --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
    ```
 
-   The inspected label must equal the reviewed source revision. Review the
-   resolved Compose output to confirm that `remotehub` has no `ports:` entry
-   and that only Caddy publishes TCP listeners.
+   Inspect both `stayactive-remotehub:<reviewed-source-revision>` and
+   `stayactive-enrollmentbroker:<reviewed-source-revision>`; each image label
+   must equal its reviewed source revision. Review the resolved Compose output to confirm that `remotehub` and
+   `enrollmentbroker` have no `ports:` entry and that only Caddy publishes TCP
+   listeners.
 
 4. After DNS, firewall, TLS, OIDC registration, and backup review, start the
    stack and validate the expected health endpoints:
@@ -171,7 +203,11 @@ scaffold.
 
 - Enrollment, device visibility, screen viewing, exit-node routing, and file
   operations must remain individually authorized, auditable, and revocable.
-  This infrastructure does not grant blanket remote access.
+  The broker uses a separate scope/role and an isolated key mount; this
+  infrastructure does not grant blanket remote access.
+- Direct requests to `https://<HEADSCALE_FQDN>/api/v1/*` must return `404` from
+  every source except the broker's fixed control-network address. Test this
+  after every Caddy or network change before issuing enrollment tickets.
 - Treat computer name, username, coarse location, screen content, and files as
   sensitive data. Collect location only by device-owner opt-in, not silent IP
   geolocation.

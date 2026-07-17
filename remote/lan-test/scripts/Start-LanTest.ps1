@@ -34,11 +34,27 @@ $composeFile = Join-Path $lanRoot 'compose.yaml'
 $rootCertificateSource = Join-Path $lanRoot 'state\caddy\data\caddy\pki\authorities\local\root.crt'
 $rootCertificateDestination = Join-Path $lanRoot 'certs\caddy-root.crt'
 $keycloakMapperPath = '/opt/keycloak/data/import/configure-scope-mappings.sh'
+$keycloakMapperTemplate = Join-Path $lanRoot 'config\keycloak\configure-scope-mappings.sh.template'
+$keycloakMapperDestination = Join-Path $lanRoot 'generated\keycloak\configure-scope-mappings.sh'
 
 function Invoke-Docker([string[]]$Arguments, [string]$FailureMessage) {
     & docker @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw $FailureMessage
+    }
+}
+
+function Get-HeadscaleUsers([string[]]$ComposePrefix) {
+    $userListOutput = & docker @($ComposePrefix + @('exec', '-T', 'headscale', 'headscale', 'users', 'list', '--output', 'json'))
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to list Headscale users while checking the enrollment broker precondition.'
+    }
+
+    try {
+        return @($userListOutput | Out-String | ConvertFrom-Json | Where-Object { $null -ne $_ })
+    }
+    catch {
+        throw 'Headscale did not return a JSON user list while checking the enrollment broker precondition.'
     }
 }
 
@@ -62,6 +78,16 @@ if (-not (Test-Path -LiteralPath $environmentFile -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $composeFile -PathType Leaf)) {
     throw "Required compose file is missing: $composeFile"
 }
+
+if (-not (Test-Path -LiteralPath $keycloakMapperTemplate -PathType Leaf)) {
+    throw "Required Keycloak mapping template is missing: $keycloakMapperTemplate"
+}
+
+# Realm import is one-time. Refresh this idempotent migration helper from the
+# reviewed template on every start so an existing bootstrap realm receives new
+# least-privilege scopes and clients without being recreated.
+$keycloakMapperContent = [System.IO.File]::ReadAllText($keycloakMapperTemplate).Replace("`r`n", "`n").Replace("`r", "`n")
+[System.IO.File]::WriteAllText($keycloakMapperDestination, $keycloakMapperContent, [System.Text.UTF8Encoding]::new($false))
 
 $composePrefix = @('compose', '--env-file', $environmentFile, '-f', $composeFile)
 
@@ -110,12 +136,42 @@ $remoteHubArguments += 'remotehub'
 Invoke-Docker ($composePrefix + $remoteHubArguments) 'Unable to build and start RemoteHub.'
 Invoke-Docker ($composePrefix + @('exec', '-T', 'remotehub', 'sh', '-ec', 'test -r /run/stayactive/caddy-root.crt')) 'RemoteHub cannot read the public Caddy root certificate required for Keycloak TLS validation.'
 
+# The broker is absent until Finalize-LanTest.ps1 has created its protected
+# secrets after the Headscale policy owner exists. Startup never creates or
+# rotates that API key. A present key is therefore an activation sentinel.
+$brokerConfigPath = Join-Path $lanRoot 'generated\enrollmentbroker\appsettings.Production.json'
+$brokerApiKeyPath = Join-Path $lanRoot 'secrets\headscale-enrollment-api-key'
+$brokerJournalKeyPath = Join-Path $lanRoot 'secrets\enrollmentbroker-journal-hmac-key'
+$brokerJournalDirectory = Join-Path $lanRoot 'state\enrollmentbroker\journal'
+$brokerActive = $false
+if (Test-Path -LiteralPath $brokerApiKeyPath -PathType Leaf) {
+    foreach ($requiredBrokerPath in @($brokerConfigPath, $brokerJournalKeyPath, $brokerJournalDirectory)) {
+        if (-not (Test-Path -LiteralPath $requiredBrokerPath)) {
+            throw "Enrollment broker activation is incomplete; required path is missing: $requiredBrokerPath"
+        }
+    }
+
+    $headscaleUsers = Get-HeadscaleUsers $composePrefix
+    if (-not ($headscaleUsers | Where-Object { $_.name -eq 'stayactive-admin' -and [string]$_.id -match '^[1-9][0-9]*$' })) {
+        throw 'Enrollment broker activation requires the stayactive-admin Headscale policy owner. Run Finalize-LanTest.ps1 first.'
+    }
+
+    Invoke-Docker ($composePrefix + @('up', '-d', 'enrollmentbroker')) 'Unable to start the isolated EnrollmentBroker.'
+    $brokerActive = $true
+}
+elseif (Test-Path -LiteralPath $brokerJournalKeyPath -PathType Leaf) {
+    throw 'Enrollment broker has a journal secret but no API-key secret; refusing to start a partial enrollment service.'
+}
+
 $runningServices = & docker @($composePrefix + @('ps', '--status', 'running', '--services'))
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to inspect the LAN stack after startup.'
 }
 
 $requiredServices = @('caddy', 'headscale', 'meshcentral', 'postgres', 'keycloak', 'remotehub')
+if ($brokerActive) {
+    $requiredServices += 'enrollmentbroker'
+}
 $missingServices = @($requiredServices | Where-Object { $_ -notin $runningServices })
 if ($missingServices.Count -gt 0) {
     throw "The LAN stack did not leave all required services running: $($missingServices -join ', ')."

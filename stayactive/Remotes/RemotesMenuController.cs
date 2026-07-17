@@ -11,6 +11,7 @@ internal sealed class RemotesMenuController : IDisposable
     private readonly IRemoteHubAccessTokenProvider _remoteHubTokenProvider;
     private readonly SynchronizationContext _uiContext;
     private readonly Action _openDashboard;
+    private readonly Action _openAddDevice;
     private readonly Action<string> _showError;
     private readonly ToolStripMenuItem _menuItem;
     private CancellationTokenSource? _refreshCancellation;
@@ -25,6 +26,7 @@ internal sealed class RemotesMenuController : IDisposable
         IRemoteHubAccessTokenProvider remoteHubTokenProvider,
         SynchronizationContext uiContext,
         Action openDashboard,
+        Action openAddDevice,
         Action<string> showError)
     {
         _fleetClient = fleetClient;
@@ -34,6 +36,7 @@ internal sealed class RemotesMenuController : IDisposable
         _remoteHubTokenProvider = remoteHubTokenProvider;
         _uiContext = uiContext;
         _openDashboard = openDashboard;
+        _openAddDevice = openAddDevice;
         _showError = showError;
         _menuItem = new ToolStripMenuItem("Remotes");
         _menuItem.DropDownOpening += (_, _) =>
@@ -139,6 +142,9 @@ internal sealed class RemotesMenuController : IDisposable
         refreshItem.Click += (_, _) => QueueRefresh();
         _menuItem.DropDownItems.Add(refreshItem);
 
+        var addDeviceItem = new ToolStripMenuItem("Add a device…");
+        addDeviceItem.Click += (_, _) => _openAddDevice();
+        _menuItem.DropDownItems.Add(addDeviceItem);
         var openDashboardItem = new ToolStripMenuItem("Open Remotes…");
         openDashboardItem.Click += (_, _) => _openDashboard();
         _menuItem.DropDownItems.Add(openDashboardItem);
@@ -173,10 +179,6 @@ internal sealed class RemotesMenuController : IDisposable
         }
 
         _menuItem.DropDownItems.Add(new ToolStripSeparator());
-        var pairingItem = new ToolStripMenuItem("Pair a computer…");
-        pairingItem.Click += (_, _) => _openDashboard();
-        _menuItem.DropDownItems.Add(pairingItem);
-
         var settingsItem = new ToolStripMenuItem("Remote settings…");
         settingsItem.Click += (_, _) => _openDashboard();
         _menuItem.DropDownItems.Add(settingsItem);

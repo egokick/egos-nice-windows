@@ -9,6 +9,7 @@ internal sealed class RemotesDashboardForm : Form
     private readonly IRemoteExitNodeController _exitNodeController;
     private readonly IRemoteAdminConsoleLauncher _adminConsoleLauncher;
     private readonly IRemoteHubAccessTokenProvider _remoteHubTokenProvider;
+    private readonly Action _openAddDevice;
     private readonly Func<RemoteClientPreferences> _getPreferences;
     private readonly Action<RemoteClientPreferences> _savePreferences;
     private readonly Label _connectionLabel;
@@ -26,13 +27,15 @@ internal sealed class RemotesDashboardForm : Form
         IRemoteAdminConsoleLauncher adminConsoleLauncher,
         IRemoteHubAccessTokenProvider remoteHubTokenProvider,
         Func<RemoteClientPreferences> getPreferences,
-        Action<RemoteClientPreferences> savePreferences)
+        Action<RemoteClientPreferences> savePreferences,
+        Action? openAddDevice = null)
     {
         _fleetClient = fleetClient;
         _remoteActionService = remoteActionService;
         _exitNodeController = exitNodeController;
         _adminConsoleLauncher = adminConsoleLauncher;
         _remoteHubTokenProvider = remoteHubTokenProvider;
+        _openAddDevice = openAddDevice ?? (() => { });
         _getPreferences = getPreferences;
         _savePreferences = savePreferences;
 
@@ -77,14 +80,14 @@ internal sealed class RemotesDashboardForm : Form
             Location = new Point(580, 18)
         };
         adminConsoleButton.Click += (_, _) => OpenAdminConsole();
-        var pairButton = new Button
+        var addDeviceButton = new Button
         {
-            Text = "Pair a computer…",
+            Text = "Add a device…",
             AutoSize = true,
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
             Location = new Point(708, 18)
         };
-        pairButton.Click += (_, _) => OpenSettings();
+        addDeviceButton.Click += (_, _) => _openAddDevice();
         var settingsButton = new Button
         {
             Text = "Settings…",
@@ -93,7 +96,7 @@ internal sealed class RemotesDashboardForm : Form
             Location = new Point(832, 18)
         };
         settingsButton.Click += (_, _) => OpenSettings();
-        header.Controls.AddRange(new Control[] { title, _connectionLabel, signInButton, adminConsoleButton, pairButton, settingsButton });
+        header.Controls.AddRange(new Control[] { title, _connectionLabel, signInButton, adminConsoleButton, addDeviceButton, settingsButton });
 
         var split = new SplitContainer
         {
@@ -409,6 +412,8 @@ internal sealed class RemoteSettingsForm : Form
     private readonly TextBox _remoteHubUrlTextBox;
     private readonly TextBox _remoteHubOidcIssuerUrlTextBox;
     private readonly TextBox _remoteHubOidcClientIdTextBox;
+    private readonly TextBox _remoteEnrollmentUrlTextBox;
+    private readonly TextBox _remoteEnrollmentOidcClientIdTextBox;
     private readonly TextBox _adminConsoleUrlTextBox;
     private readonly TextBox _meshCentralUrlTextBox;
     private readonly TextBox _deviceDisplayNameTextBox;
@@ -420,7 +425,7 @@ internal sealed class RemoteSettingsForm : Form
         _savePreferences = savePreferences;
         Text = "Self-hosted Remotes settings";
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(620, 480);
+        ClientSize = new Size(620, 560);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -429,7 +434,7 @@ internal sealed class RemoteSettingsForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 10,
+            RowCount = 12,
             Padding = new Padding(16),
             AutoSize = false
         };
@@ -439,11 +444,13 @@ internal sealed class RemoteSettingsForm : Form
         _controlPlaneUrlTextBox = AddField(table, 0, "Headscale URL", preferences.ControlPlaneUrl, "https://headscale.example.com");
         _remoteHubUrlTextBox = AddField(table, 1, "RemoteHub URL", preferences.RemoteHubUrl, "https://remotes.example.com");
         _remoteHubOidcIssuerUrlTextBox = AddField(table, 2, "OIDC issuer URL", preferences.RemoteHubOidcIssuerUrl, "https://id.example.com/realms/remotes");
-        _remoteHubOidcClientIdTextBox = AddField(table, 3, "OIDC public client", preferences.RemoteHubOidcClientId, "stayactive-remotes");
-        _adminConsoleUrlTextBox = AddField(table, 4, "Admin GUI URL", preferences.AdminConsoleUrl, "https://remotes.example.com/admin");
-        _meshCentralUrlTextBox = AddField(table, 5, "MeshCentral URL", preferences.MeshCentralUrl, "https://mesh.example.com");
-        _deviceDisplayNameTextBox = AddField(table, 6, "This computer name", preferences.DeviceDisplayName, Environment.MachineName);
-        _locationTextBox = AddField(table, 7, "Coarse location", preferences.Location, "Optional, for example: Austin office");
+        _remoteHubOidcClientIdTextBox = AddField(table, 3, "Fleet OIDC client", preferences.RemoteHubOidcClientId, "stayactive-remotes");
+        _remoteEnrollmentUrlTextBox = AddField(table, 4, "Enrollment broker URL", preferences.RemoteEnrollmentUrl, "https://remotes.example.com");
+        _remoteEnrollmentOidcClientIdTextBox = AddField(table, 5, "Enrollment OIDC client", preferences.RemoteEnrollmentOidcClientId, "stayactive-remotes-enrollment");
+        _adminConsoleUrlTextBox = AddField(table, 6, "Admin GUI URL", preferences.AdminConsoleUrl, "https://remotes.example.com/admin");
+        _meshCentralUrlTextBox = AddField(table, 7, "MeshCentral URL", preferences.MeshCentralUrl, "https://mesh.example.com");
+        _deviceDisplayNameTextBox = AddField(table, 8, "This computer name", preferences.DeviceDisplayName, Environment.MachineName);
+        _locationTextBox = AddField(table, 9, "Coarse location", preferences.Location, "Optional, for example: Austin office");
 
         var note = new Label
         {
@@ -451,7 +458,7 @@ internal sealed class RemoteSettingsForm : Form
             Dock = DockStyle.Fill,
             Text = "Only non-secret display and endpoint settings are stored here. Enrollment keys, certificates, and server API keys are never stored in this file."
         };
-        table.Controls.Add(note, 0, 8);
+        table.Controls.Add(note, 0, 10);
         table.SetColumnSpan(note, 2);
 
         var buttons = new FlowLayoutPanel
@@ -464,7 +471,7 @@ internal sealed class RemoteSettingsForm : Form
         var cancelButton = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true };
         buttons.Controls.Add(saveButton);
         buttons.Controls.Add(cancelButton);
-        table.Controls.Add(buttons, 0, 9);
+        table.Controls.Add(buttons, 0, 11);
         table.SetColumnSpan(buttons, 2);
 
         Controls.Add(table);
@@ -482,18 +489,22 @@ internal sealed class RemoteSettingsForm : Form
             _deviceDisplayNameTextBox.Text.Trim(),
             _locationTextBox.Text.Trim(),
             _remoteHubOidcIssuerUrlTextBox.Text.Trim(),
-            _remoteHubOidcClientIdTextBox.Text.Trim());
+            _remoteHubOidcClientIdTextBox.Text.Trim(),
+            _remoteEnrollmentUrlTextBox.Text.Trim(),
+            _remoteEnrollmentOidcClientIdTextBox.Text.Trim());
 
         if ((!string.IsNullOrWhiteSpace(preferences.ControlPlaneUrl)
                 && !RemoteClientPreferences.IsSelfHostedControlPlane(preferences.ControlPlaneUrl))
             || !IsSafeEndpoint(preferences.RemoteHubUrl)
             || !IsSafeEndpoint(preferences.AdminConsoleUrl)
             || !IsSafeEndpoint(preferences.MeshCentralUrl)
-            || !IsValidOidcConfiguration(preferences))
+            || !IsSafeEndpoint(preferences.RemoteEnrollmentUrl)
+            || !IsValidOidcConfiguration(preferences)
+            || !IsValidEnrollmentOidcConfiguration(preferences))
         {
             MessageBox.Show(
                 this,
-                "Use absolute HTTPS URLs for self-hosted endpoints, do not use a Tailscale-hosted control-plane URL, and provide both OIDC values together.",
+                "Use absolute HTTPS URLs for self-hosted endpoints, do not use a Tailscale-hosted control-plane URL, and provide each configured OIDC client with its required companion settings.",
                 "Invalid remote settings",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -545,5 +556,18 @@ internal sealed class RemoteSettingsForm : Form
                 preferences.RemoteHubOidcIssuerUrl,
                 preferences.RemoteHubOidcClientId,
                 out _);
+    }
+
+    private static bool IsValidEnrollmentOidcConfiguration(RemoteClientPreferences preferences)
+    {
+        var brokerEmpty = string.IsNullOrWhiteSpace(preferences.RemoteEnrollmentUrl);
+        var clientEmpty = string.IsNullOrWhiteSpace(preferences.RemoteEnrollmentOidcClientId);
+        return brokerEmpty && clientEmpty
+            || !brokerEmpty
+                && !clientEmpty
+                && RemoteHubOidcConfiguration.TryCreateEnrollment(
+                    preferences.RemoteHubOidcIssuerUrl,
+                    preferences.RemoteEnrollmentOidcClientId,
+                    out _);
     }
 }

@@ -21,7 +21,8 @@
       { "name": "remotehub-fleet-read", "composite": false, "clientRole": false },
       { "name": "remotehub-inventory-write", "composite": false, "clientRole": false },
       { "name": "remotehub-audit-read", "composite": false, "clientRole": false },
-      { "name": "stayactive.remotehub.admin", "composite": false, "clientRole": false }
+      { "name": "stayactive.remotehub.admin", "composite": false, "clientRole": false },
+      { "name": "stayactive.enrollment.admin", "composite": false, "clientRole": false }
     ]
   },
   "clientScopes": [
@@ -66,6 +67,32 @@
       "protocolMappers": [
         {
           "name": "flat-stayactive-remotehub-admin-role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "role",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "stayactive.enrollment.write",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      },
+      "protocolMappers": [
+        {
+          "name": "flat-stayactive-enrollment-admin-role",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-usermodel-realm-role-mapper",
           "consentRequired": false,
@@ -151,6 +178,41 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "stayactive-remotes-enrollment",
+      "name": "StayActive Windows enrollment",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": ["http://127.0.0.1/"],
+      "webOrigins": [],
+      "defaultClientScopes": ["profile"],
+      "optionalClientScopes": ["stayactive.enrollment.write"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "use.refresh.tokens": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "stayactive-enrollment-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "stayactive-enrollment",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [
@@ -170,6 +232,7 @@
         "remotehub-inventory-write",
         "remotehub-audit-read",
         "stayactive.remotehub.admin",
+        "stayactive.enrollment.admin",
         "offline_access"
       ]
     }

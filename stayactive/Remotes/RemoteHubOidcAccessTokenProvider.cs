@@ -30,30 +30,85 @@ internal interface IRemoteHubAccessTokenProvider
 internal sealed class RemoteHubOidcConfiguration
 {
     internal const string RequiredScopes = "openid profile remotehub.fleet.read offline_access";
+    internal const string EnrollmentRequiredScopes = "openid profile stayactive.enrollment.write";
 
-    private RemoteHubOidcConfiguration(Uri issuer, string clientId)
+    private RemoteHubOidcConfiguration(
+        Uri issuer,
+        string clientId,
+        string requestedScopes,
+        bool requireFreshAuthentication,
+        bool allowRefreshTokens)
     {
         Issuer = issuer;
         ClientId = clientId;
+        RequestedScopes = requestedScopes;
+        RequireFreshAuthentication = requireFreshAuthentication;
+        AllowRefreshTokens = allowRefreshTokens;
     }
 
     public Uri Issuer { get; }
 
     public string ClientId { get; }
 
+    // Scopes are selected by a fixed local flow, never entered in settings.
+    internal string RequestedScopes { get; }
+
+    // Ticket issuance must not silently reuse the fleet browser session.
+    internal bool RequireFreshAuthentication { get; }
+
+    // The enrollment flow has no need for offline access or refresh tokens.
+    internal bool AllowRefreshTokens { get; }
+
     public static bool TryCreate(
         string? issuer,
         string? clientId,
         out RemoteHubOidcConfiguration configuration)
     {
+        return TryCreate(
+            issuer,
+            clientId,
+            RequiredScopes,
+            requireFreshAuthentication: false,
+            allowRefreshTokens: true,
+            out configuration);
+    }
+
+    internal static bool TryCreateEnrollment(
+        string? issuer,
+        string? clientId,
+        out RemoteHubOidcConfiguration configuration)
+    {
+        return TryCreate(
+            issuer,
+            clientId,
+            EnrollmentRequiredScopes,
+            requireFreshAuthentication: true,
+            allowRefreshTokens: false,
+            out configuration);
+    }
+
+    private static bool TryCreate(
+        string? issuer,
+        string? clientId,
+        string requestedScopes,
+        bool requireFreshAuthentication,
+        bool allowRefreshTokens,
+        out RemoteHubOidcConfiguration configuration)
+    {
         configuration = null!;
         if (!RemoteHubOidcEndpointValidator.TryGetIssuer(issuer, out var issuerUri)
-            || !IsSafeClientId(clientId))
+            || !IsSafeClientId(clientId)
+            || !IsSafeScopes(requestedScopes))
         {
             return false;
         }
 
-        configuration = new RemoteHubOidcConfiguration(issuerUri, clientId!);
+        configuration = new RemoteHubOidcConfiguration(
+            issuerUri,
+            clientId!,
+            requestedScopes,
+            requireFreshAuthentication,
+            allowRefreshTokens);
         return true;
     }
 
@@ -61,6 +116,13 @@ internal sealed class RemoteHubOidcConfiguration
     {
         return !string.IsNullOrWhiteSpace(value)
             && value.Length <= 512
+            && !value.Any(char.IsControl);
+    }
+
+    private static bool IsSafeScopes(string value)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+            && value.Length <= 1024
             && !value.Any(char.IsControl);
     }
 }
@@ -621,11 +683,19 @@ internal sealed class RemoteHubOidcAccessTokenProvider : IRemoteHubAccessTokenPr
             ["response_type"] = "code",
             ["client_id"] = configuration.ClientId,
             ["redirect_uri"] = redirectUri.AbsoluteUri,
-            ["scope"] = RemoteHubOidcConfiguration.RequiredScopes,
+            ["scope"] = configuration.RequestedScopes,
             ["state"] = state,
             ["code_challenge"] = challenge,
             ["code_challenge_method"] = "S256"
         };
+        if (configuration.RequireFreshAuthentication)
+        {
+            // These force a new PKCE sign-in for ticket issuance and are not
+            // used by the lower-privilege fleet inventory client.
+            query["prompt"] = "login";
+            query["max_age"] = "0";
+        }
+
         var builder = new UriBuilder(authorizationEndpoint)
         {
             Query = string.Join("&", query.Select(pair =>
@@ -946,7 +1016,8 @@ internal static class RemoteHubTokenResponseParser
                 || !TryGetTokenString(root, "access_token", out var accessToken)
                 || !TryGetBearerTokenType(root)
                 || !TryGetExpiresIn(root, out var expiresIn)
-                || !TryGetOptionalTokenString(root, "refresh_token", out var returnedRefreshToken))
+                || !TryGetOptionalTokenString(root, "refresh_token", out var returnedRefreshToken)
+                || (!configuration.AllowRefreshTokens && returnedRefreshToken is not null))
             {
                 return false;
             }

@@ -55,6 +55,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly IRemoteActionService _remoteActionService;
     private readonly IRemoteExitNodeController _remoteExitNodeController;
     private readonly IRemoteAdminConsoleLauncher _remoteAdminConsoleLauncher;
+    private readonly IRemoteEnrollmentClient _remoteEnrollmentClient;
     private readonly RemotesMenuController _remotesMenuController;
 
     private AppSettings _settings;
@@ -81,6 +82,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _remoteActionService = new MeshCentralRemoteActionService(GetRemoteClientPreferences);
         _remoteExitNodeController = new TailscaleExitNodeController(GetRemoteClientPreferences);
         _remoteAdminConsoleLauncher = new RemoteAdminConsoleLauncher(GetRemoteClientPreferences);
+        _remoteEnrollmentClient = new RemoteEnrollmentClient(GetRemoteClientPreferences);
         _remotesMenuController = new RemotesMenuController(
             _remoteFleetClient,
             _remoteActionService,
@@ -89,6 +91,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _remoteHubAccessTokenProvider,
             _uiContext,
             OpenRemotesDashboard,
+            OpenAddRemoteDevice,
             ShowErrorBalloon);
         _userActivityMonitor.RealUserActivity += (_, _) => _uiContext.Post(_ => HandleRealUserActivity(), null);
         _activeIcon = TrayIconFactory.CreateEyeOpenIcon();
@@ -206,6 +209,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         SyncIdleSessionCancellation(idleSessionActive: false);
         _remotesDashboard?.Close();
         _remotesMenuController.Dispose();
+        _remoteEnrollmentClient.Dispose();
         _remoteHubAccessTokenProvider.Dispose();
         _activityController.Shutdown();
         _userActivityMonitor.Dispose();
@@ -721,7 +725,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
             settings.RemoteDeviceDisplayName,
             settings.RemoteLocation,
             settings.RemoteHubOidcIssuerUrl,
-            settings.RemoteHubOidcClientId);
+            settings.RemoteHubOidcClientId,
+            settings.RemoteEnrollmentUrl,
+            settings.RemoteEnrollmentOidcClientId);
     }
 
     private RemoteHubOidcConfiguration? GetRemoteHubOidcConfiguration()
@@ -747,6 +753,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             settings.RemoteLocation = preferences.Location;
             settings.RemoteHubOidcIssuerUrl = preferences.RemoteHubOidcIssuerUrl;
             settings.RemoteHubOidcClientId = preferences.RemoteHubOidcClientId;
+            settings.RemoteEnrollmentUrl = preferences.RemoteEnrollmentUrl;
+            settings.RemoteEnrollmentOidcClientId = preferences.RemoteEnrollmentOidcClientId;
         });
         _remotesMenuController.RefreshCachedUi();
         _remotesMenuController.QueueRefresh();
@@ -768,9 +776,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _remoteAdminConsoleLauncher,
             _remoteHubAccessTokenProvider,
             GetRemoteClientPreferences,
-            SaveRemoteClientPreferences);
+            SaveRemoteClientPreferences,
+            OpenAddRemoteDevice);
         _remotesDashboard.FormClosed += (_, _) => _remotesDashboard = null;
         _remotesDashboard.Show();
+    }
+
+    private void OpenAddRemoteDevice()
+    {
+        using var form = new AddRemoteDeviceForm(_remoteEnrollmentClient);
+        if (_remotesDashboard is { IsDisposed: false } dashboard)
+        {
+            form.ShowDialog(dashboard);
+        }
+        else
+        {
+            form.ShowDialog();
+        }
     }
 
     private static ToolStripControlHost CreateControlHost(Control control)
@@ -820,6 +842,12 @@ internal sealed class AppSettings
 
     public string RemoteHubOidcClientId { get; set; } = string.Empty;
 
+    // Broker URL and public OIDC client only. The one-time command, enrollment
+    // key, certificates, and Headscale API key are never stored in settings.
+    public string RemoteEnrollmentUrl { get; set; } = string.Empty;
+
+    public string RemoteEnrollmentOidcClientId { get; set; } = string.Empty;
+
     public AppSettings Clone()
     {
         return new AppSettings
@@ -838,7 +866,9 @@ internal sealed class AppSettings
             RemoteDeviceDisplayName = RemoteDeviceDisplayName,
             RemoteLocation = RemoteLocation,
             RemoteHubOidcIssuerUrl = RemoteHubOidcIssuerUrl,
-            RemoteHubOidcClientId = RemoteHubOidcClientId
+            RemoteHubOidcClientId = RemoteHubOidcClientId,
+            RemoteEnrollmentUrl = RemoteEnrollmentUrl,
+            RemoteEnrollmentOidcClientId = RemoteEnrollmentOidcClientId
         };
     }
 }
