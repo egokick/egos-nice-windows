@@ -1,0 +1,23 @@
+// Apply only after scripts/Start-LanTest.ps1 has created stayactive-admin.
+// All enrolled endpoints must have tag:stayactive. The chosen exit laptop also
+// needs tag:stayactive-exit; its default route remains manually approved.
+{
+  "tagOwners": {
+    "tag:stayactive": ["stayactive-admin@"],
+    "tag:stayactive-exit": ["stayactive-admin@"],
+  },
+
+  "grants": [
+    {
+      "src": ["tag:stayactive"],
+      "dst": ["tag:stayactive"],
+      "ip": ["*"],
+    },
+    {
+      "src": ["tag:stayactive"],
+      "dst": ["autogroup:internet"],
+      "via": ["tag:stayactive-exit"],
+      "ip": ["*"],
+    },
+  ],
+}

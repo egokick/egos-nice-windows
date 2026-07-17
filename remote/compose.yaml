@@ -1,0 +1,163 @@
+# TEMPLATE ONLY. This file deliberately has no runnable defaults.
+# Copy .env.example to an untracked .env, render all configuration templates to
+# root-owned paths, review `docker compose --env-file .env config`, then deploy.
+#
+# No Headscale or MeshCentral port is published directly. Caddy is the only TCP
+# edge, and the embedded Headscale STUN listener is the only direct UDP edge.
+name: stayactive-remotes-template
+
+services:
+  caddy:
+    image: "${CADDY_IMAGE:?Set CADDY_IMAGE to a vetted digest-pinned image}"
+    restart: unless-stopped
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      ACME_EMAIL: "${ACME_EMAIL:?Set ACME_EMAIL}"
+      HEADSCALE_FQDN: "${HEADSCALE_FQDN:?Set HEADSCALE_FQDN}"
+      MESHCENTRAL_FQDN: "${MESHCENTRAL_FQDN:?Set MESHCENTRAL_FQDN}"
+      REMOTEHUB_FQDN: "${REMOTEHUB_FQDN:?Set REMOTEHUB_FQDN}"
+      # Rendered by the Windows controller deployment scripts. This address is
+      # reachable from Caddy but the controller's Headscale credential is not.
+      WINDOWS_ENROLLMENT_CONTROLLER_IP: "${WINDOWS_ENROLLMENT_CONTROLLER_IP:?Set WINDOWS_ENROLLMENT_CONTROLLER_IP to the generated Windows controller address}"
+    ports:
+      - target: 80
+        published: "${EDGE_HTTP_PUBLISHED_PORT:?Set EDGE_HTTP_PUBLISHED_PORT}"
+        host_ip: "${EDGE_HTTP_BIND_ADDRESS:?Set EDGE_HTTP_BIND_ADDRESS}"
+        protocol: tcp
+      - target: 443
+        published: "${EDGE_HTTPS_PUBLISHED_PORT:?Set EDGE_HTTPS_PUBLISHED_PORT}"
+        host_ip: "${EDGE_HTTPS_BIND_ADDRESS:?Set EDGE_HTTPS_BIND_ADDRESS}"
+        protocol: tcp
+      # The controller accesses Headscale's administrative REST surface here.
+      # Never make this listener configurable as a LAN/public edge.
+      - target: 4443
+        published: 4443
+        host_ip: "127.0.0.1"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: "${CADDYFILE:?Set CADDYFILE to the rendered Caddyfile}"
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - type: bind
+        source: "${CADDY_DATA_DIR:?Set CADDY_DATA_DIR}"
+        target: /data
+      - type: bind
+        source: "${CADDY_CONFIG_DIR:?Set CADDY_CONFIG_DIR}"
+        target: /config
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        ipv4_address: "${CADDY_CONTROL_IP:?Set CADDY_CONTROL_IP}"
+
+  headscale:
+    image: "${HEADSCALE_IMAGE:?Set HEADSCALE_IMAGE to a vetted digest-pinned image}"
+    restart: unless-stopped
+    command: ["serve"]
+    read_only: true
+    tmpfs:
+      - /var/run/headscale
+      - /tmp
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    ports:
+      - target: 3478
+        published: "${DERP_STUN_PUBLISHED_PORT:?Set DERP_STUN_PUBLISHED_PORT}"
+        host_ip: "${DERP_STUN_BIND_ADDRESS:?Set DERP_STUN_BIND_ADDRESS}"
+        protocol: udp
+    volumes:
+      - type: bind
+        source: "${HEADSCALE_CONFIG_FILE:?Set HEADSCALE_CONFIG_FILE to the rendered config.yaml}"
+        target: /etc/headscale/config.yaml
+        read_only: true
+      - type: bind
+        source: "${HEADSCALE_POLICY_FILE:?Set HEADSCALE_POLICY_FILE to the rendered policy.hujson}"
+        target: /etc/headscale/policy.hujson
+        read_only: true
+      - type: bind
+        source: "${HEADSCALE_STATE_DIR:?Set HEADSCALE_STATE_DIR}"
+        target: /var/lib/headscale
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        ipv4_address: "${HEADSCALE_CONTROL_IP:?Set HEADSCALE_CONTROL_IP}"
+
+  meshcentral:
+    image: "${MESHCENTRAL_IMAGE:?Set MESHCENTRAL_IMAGE to a vetted digest-pinned image}"
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DYNAMIC_CONFIG: "false"
+      CONFIG_FILE: /opt/meshcentral/meshcentral-data/config.json
+    volumes:
+      - type: bind
+        source: "${MESHCENTRAL_STATE_DIR:?Set MESHCENTRAL_STATE_DIR}"
+        target: /opt/meshcentral/meshcentral-data
+      - type: bind
+        source: "${MESHCENTRAL_CONFIG_FILE:?Set MESHCENTRAL_CONFIG_FILE to the rendered config.json}"
+        target: /opt/meshcentral/meshcentral-data/config.json
+        read_only: true
+      - type: bind
+        source: "${MESHCENTRAL_FILES_DIR:?Set MESHCENTRAL_FILES_DIR}"
+        target: /opt/meshcentral/meshcentral-files
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        ipv4_address: "${MESHCENTRAL_CONTROL_IP:?Set MESHCENTRAL_CONTROL_IP}"
+
+  # RemoteHub is inventory/audit policy only. It has no published port: Caddy
+  # is its sole ingress on the private control network.
+  remotehub:
+    build:
+      # Keep the Docker build context to the service source tree. This prevents
+      # the untracked deployment .env and rendered secrets from reaching the
+      # builder even when they sit beside this Compose file.
+      context: ./RemoteHub
+      dockerfile: ../RemoteHub.Dockerfile
+      args:
+        DOTNET_SDK_IMAGE: "${REMOTEHUB_SDK_IMAGE:?Set REMOTEHUB_SDK_IMAGE to a vetted digest-pinned SDK image}"
+        DOTNET_RUNTIME_IMAGE: "${REMOTEHUB_RUNTIME_IMAGE:?Set REMOTEHUB_RUNTIME_IMAGE to a vetted digest-pinned ASP.NET runtime image}"
+        REMOTEHUB_SOURCE_REVISION: "${REMOTEHUB_SOURCE_REVISION:?Set REMOTEHUB_SOURCE_REVISION to the checked-out immutable source revision}"
+    image: "stayactive-remotehub:${REMOTEHUB_SOURCE_REVISION:?Set REMOTEHUB_SOURCE_REVISION}"
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:5088
+      DOTNET_EnableDiagnostics: "0"
+    expose:
+      - "5088"
+    volumes:
+      - type: bind
+        source: "${REMOTEHUB_CONFIG_FILE:?Set REMOTEHUB_CONFIG_FILE to the root-owned rendered production config}"
+        target: /app/appsettings.Production.json
+        read_only: true
+      - type: bind
+        source: "${REMOTEHUB_JOURNAL_DIR:?Set REMOTEHUB_JOURNAL_DIR}"
+        target: /var/lib/stayactive-remotehub
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    networks:
+      control:
+        ipv4_address: "${REMOTEHUB_CONTROL_IP:?Set REMOTEHUB_CONTROL_IP}"
+
+networks:
+  control:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${CONTROL_NETWORK_CIDR:?Set CONTROL_NETWORK_CIDR}"

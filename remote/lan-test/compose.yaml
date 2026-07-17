@@ -1,0 +1,248 @@
+# LAN test only. This stack is intentionally separate from ../compose.yaml,
+# which remains the public-production template. Do not publish any service
+# except Caddy HTTPS and Headscale's embedded STUN port.
+name: stayactive-remotes-lan-test
+
+services:
+  caddy:
+    image: "${CADDY_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+    restart: unless-stopped
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    ports:
+      - "${CADDY_BIND_ADDRESS:?Set CADDY_BIND_ADDRESS}:443:443/tcp"
+      # The Windows enrollment controller is the only consumer of this
+      # administrative Headscale API listener. Keep it host-loopback only.
+      - "127.0.0.1:4443:4443/tcp"
+    environment:
+      # Deployment scripts replace this fail-closed bootstrap value with the
+      # generated Windows controller address (for example,
+      # host.docker.internal).
+      WINDOWS_ENROLLMENT_CONTROLLER_IP: "${WINDOWS_ENROLLMENT_CONTROLLER_IP:-127.0.0.1}"
+    volumes:
+      - type: bind
+        # Finalize-LanTest.ps1 replaces this bootstrap default with an
+        # administrator-only staged Caddyfile under ProgramData. Never let a
+        # post-finalization restart fall back to a mutable working-tree file.
+        source: "${STAYACTIVE_CADDYFILE:-./Caddyfile}"
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - type: bind
+        source: ./state/caddy/data
+        target: /data
+      - type: bind
+        source: ./state/caddy/config
+        target: /config
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        ipv4_address: "${CADDY_CONTROL_IP:?Set CADDY_CONTROL_IP}"
+        aliases:
+          - headscale.stayactive.test
+          - meshcentral.stayactive.test
+          - remotehub.stayactive.test
+          - id.stayactive.test
+
+  headscale:
+    image: "${HEADSCALE_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+    restart: unless-stopped
+    command: ["serve"]
+    read_only: true
+    tmpfs:
+      - /var/run/headscale
+      - /tmp
+    ports:
+      - "${STUN_BIND_ADDRESS:?Set STUN_BIND_ADDRESS}:3478:3478/udp"
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    volumes:
+      - type: bind
+        # Finalize-LanTest.ps1 replaces these bootstrap defaults with the
+        # reviewed, administrator-only Headscale config and policy staged
+        # before a controller API key can be created.
+        source: "${STAYACTIVE_HEADSCALE_CONFIG:-./generated/headscale/config.yaml}"
+        target: /etc/headscale/config.yaml
+        read_only: true
+      - type: bind
+        source: "${STAYACTIVE_HEADSCALE_POLICY:-./generated/headscale/policy.hujson}"
+        target: /etc/headscale/policy.hujson
+        read_only: true
+      - type: bind
+        source: ./state/headscale
+        target: /var/lib/headscale
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        ipv4_address: "${HEADSCALE_CONTROL_IP:?Set HEADSCALE_CONTROL_IP}"
+
+  meshcentral:
+    image: "${MESHCENTRAL_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DYNAMIC_CONFIG: "false"
+      CONFIG_FILE: /opt/meshcentral/meshcentral-data/config.json
+    extra_hosts:
+      - "meshcentral.stayactive.test:${CADDY_CONTROL_IP:?Set CADDY_CONTROL_IP}"
+    volumes:
+      - type: bind
+        source: ./state/meshcentral/data
+        target: /opt/meshcentral/meshcentral-data
+      - type: bind
+        source: ./generated/meshcentral/config.json
+        target: /opt/meshcentral/meshcentral-data/config.json
+        read_only: true
+      - type: bind
+        source: ./state/meshcentral/files
+        target: /opt/meshcentral/meshcentral-files
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        ipv4_address: "${MESHCENTRAL_CONTROL_IP:?Set MESHCENTRAL_CONTROL_IP}"
+
+  postgres:
+    image: "${POSTGRES_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:?Set POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER:?Set POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        ipv4_address: "${POSTGRES_CONTROL_IP:?Set POSTGRES_CONTROL_IP}"
+
+  keycloak:
+    image: "${KEYCLOAK_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+    restart: unless-stopped
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}"
+      KC_DB_USERNAME: "${POSTGRES_USER:?Set POSTGRES_USER}"
+      KC_DB_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${KC_BOOTSTRAP_ADMIN_USERNAME:?Set KC_BOOTSTRAP_ADMIN_USERNAME}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KC_BOOTSTRAP_ADMIN_PASSWORD:?Set KC_BOOTSTRAP_ADMIN_PASSWORD}"
+      KC_HOSTNAME: https://id.stayactive.test
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_PROXY_TRUSTED_ADDRESSES: "${CADDY_CONTROL_IP:?Set CADDY_CONTROL_IP}"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./generated/keycloak
+        target: /opt/keycloak/data/import
+        read_only: true
+    mem_limit: 1g
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        ipv4_address: "${KEYCLOAK_CONTROL_IP:?Set KEYCLOAK_CONTROL_IP}"
+
+  remotehub-ca:
+    # This one-shot root process receives only Caddy's public root certificate.
+    # It copies that public file into a named volume that the non-root API can
+    # read; Caddy's private CA data is never mounted here.
+    image: "${REMOTEHUB_RUNTIME_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+    restart: "no"
+    user: "0:0"
+    read_only: true
+    command: ["sh", "-ec", "cp -f /source/caddy-root.crt /shared/caddy-root.crt && chmod 0644 /shared/caddy-root.crt"]
+    volumes:
+      - type: bind
+        source: ./certs
+        target: /source
+        read_only: true
+      - type: volume
+        source: remotehub_ca
+        target: /shared
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+  remotehub:
+    build:
+      context: ../RemoteHub
+      dockerfile: ../RemoteHub.Dockerfile
+      args:
+        DOTNET_SDK_IMAGE: "${REMOTEHUB_SDK_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+        DOTNET_RUNTIME_IMAGE: "${REMOTEHUB_RUNTIME_IMAGE:?Run scripts/Initialize-LanTest.ps1 first}"
+        REMOTEHUB_SOURCE_REVISION: "${REMOTEHUB_SOURCE_REVISION:?Commit the reviewed source before initializing}"
+    image: "stayactive-remotehub-lan:${REMOTEHUB_SOURCE_REVISION:?Commit the reviewed source before initializing}"
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:5088
+      DOTNET_EnableDiagnostics: "0"
+      # .NET/OpenSSL uses this private CA file for Keycloak discovery/JWKS.
+      SSL_CERT_FILE: /run/stayactive/caddy-root.crt
+    expose:
+      - "5088"
+    extra_hosts:
+      - "id.stayactive.test:${CADDY_CONTROL_IP:?Set CADDY_CONTROL_IP}"
+    volumes:
+      - type: bind
+        source: ./generated/remotehub/appsettings.Production.json
+        target: /app/appsettings.Production.json
+        read_only: true
+      - type: bind
+        source: ./state/remotehub/journal
+        target: /var/lib/stayactive-remotehub
+      # The one-shot remotehub-ca service copies only the public Caddy root
+      # into this volume with mode 0644. The API stays non-root and never sees
+      # Caddy's data directory or any private key.
+      - type: volume
+        source: remotehub_ca
+        target: /run/stayactive
+        read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    depends_on:
+      caddy:
+        condition: service_started
+      keycloak:
+        condition: service_started
+      remotehub-ca:
+        condition: service_completed_successfully
+    networks:
+      control:
+        ipv4_address: "${REMOTEHUB_CONTROL_IP:?Set REMOTEHUB_CONTROL_IP}"
+
+networks:
+  control:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${CONTROL_NETWORK_CIDR:?Set CONTROL_NETWORK_CIDR}"
+
+volumes:
+  postgres_data:
+  remotehub_ca:

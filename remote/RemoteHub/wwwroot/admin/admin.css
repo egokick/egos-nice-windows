@@ -1,0 +1,74 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #10151f;
+  color: #e9eef8;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; min-width: 320px; }
+
+button, input { font: inherit; }
+
+button {
+  border: 1px solid #5f83e9;
+  border-radius: 0.45rem;
+  background: #4f73dc;
+  color: white;
+  cursor: pointer;
+  padding: 0.6rem 0.85rem;
+}
+
+button:hover:not(:disabled) { background: #5f83e9; }
+button:disabled { cursor: not-allowed; opacity: 0.56; }
+button.secondary { background: transparent; border-color: #64748b; color: #dbe6fb; }
+button.secondary:hover:not(:disabled) { background: #263248; }
+
+.shell { margin: 0 auto; max-width: 1440px; padding: 2rem; }
+.page-header, .toolbar, .card-heading, .session-controls { display: flex; gap: 1rem; }
+.page-header, .toolbar, .card-heading { align-items: flex-start; justify-content: space-between; }
+.session-controls { align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.session-state { color: #aebbd1; font-size: 0.9rem; max-width: 20rem; text-align: right; }
+.eyebrow { color: #9bb5ff; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.12em; margin: 0 0 0.45rem; }
+h1, h2 { margin: 0; }
+h1 { font-size: clamp(1.7rem, 3vw, 2.45rem); }
+h2 { font-size: 1.08rem; }
+.lede, .card p, .hint, .field-help { color: #aebbd1; }
+.lede { line-height: 1.5; margin: 0.6rem 0 0; max-width: 63rem; }
+.status { border-left: 3px solid transparent; margin: 1.25rem 0; min-height: 1.25rem; padding: 0.45rem 0.7rem; }
+.status[data-kind="error"] { background: #45212b; border-left-color: #ed7190; color: #ffdbe3; }
+.status[data-kind="success"] { background: #143e35; border-left-color: #57d3b6; color: #d4fff4; }
+.status[data-kind="info"] { background: #1b2942; border-left-color: #75a3ff; color: #dbe8ff; }
+.toolbar { margin-bottom: 1rem; }
+.hint { font-size: 0.88rem; line-height: 1.45; max-width: 42rem; }
+.grid { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1.35fr) minmax(20rem, 0.85fr); }
+.card { background: #182130; border: 1px solid #334155; border-radius: 0.7rem; padding: 1.1rem; }
+.card p { font-size: 0.9rem; line-height: 1.45; margin: 0.35rem 0 1rem; }
+.audit-card { margin-top: 1rem; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; min-width: 100%; width: 100%; }
+th, td { border-bottom: 1px solid #2e3b50; padding: 0.65rem; text-align: left; vertical-align: top; }
+th { color: #aebbd1; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+td { font-size: 0.9rem; }
+tbody tr:last-child td { border-bottom: 0; }
+td .row-action { padding: 0.35rem 0.55rem; }
+form { display: grid; gap: 0.85rem; }
+label, fieldset { display: grid; gap: 0.38rem; }
+label { color: #dbe6fb; font-size: 0.9rem; }
+input:not([type="checkbox"]) { background: #0f1723; border: 1px solid #516077; border-radius: 0.35rem; color: #f5f8ff; min-width: 0; padding: 0.52rem; }
+input:disabled { background: #17202e; color: #8b99ad; }
+fieldset { border: 1px solid #415069; border-radius: 0.45rem; margin: 0; padding: 0.75rem; }
+legend { color: #b9c8e3; font-size: 0.86rem; padding: 0 0.25rem; }
+.checkbox-line { align-items: center; display: flex; gap: 0.5rem; }
+.field-help { font-size: 0.78rem; line-height: 1.3; }
+.form-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; }
+.sr-only { height: 1px; margin: -1px; overflow: hidden; position: absolute; width: 1px; clip: rect(0, 0, 0, 0); }
+
+@media (max-width: 900px) {
+  .shell { padding: 1rem; }
+  .page-header, .toolbar { align-items: stretch; flex-direction: column; }
+  .session-controls { justify-content: flex-start; }
+  .session-state { max-width: none; text-align: left; }
+  .grid { grid-template-columns: 1fr; }
+}

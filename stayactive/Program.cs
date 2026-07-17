@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using Microsoft.Win32;
+using StayActive.Remotes;
 
 namespace StayActive;
 
@@ -49,9 +50,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ActivitySessionController _activityController;
     private readonly IUserActivityMonitor _userActivityMonitor;
     private readonly WorkVmService _workVmService;
+    private readonly RemoteHubOidcAccessTokenProvider _remoteHubAccessTokenProvider;
+    private readonly IRemoteFleetClient _remoteFleetClient;
+    private readonly IRemoteActionService _remoteActionService;
+    private readonly IRemoteExitNodeController _remoteExitNodeController;
+    private readonly IRemoteAdminConsoleLauncher _remoteAdminConsoleLauncher;
+    private readonly IRemoteEnrollmentClient _remoteEnrollmentClient;
+    private readonly RemotesMenuController _remotesMenuController;
 
     private AppSettings _settings;
     private WorkVmStatus? _workVmStatus;
+    private RemotesDashboardForm? _remotesDashboard;
     private CancellationTokenSource? _idleSessionCancellation;
     private CancellationTokenSource? _runnerCancellation;
     private Task? _runnerTask;
@@ -66,6 +75,24 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _activityController = new ActivitySessionController(new SystemIdleMonitor(), new SystemMonitorBrightnessService());
         _userActivityMonitor = new UserActivityMonitor();
         _workVmService = new WorkVmService();
+        _remoteHubAccessTokenProvider = new RemoteHubOidcAccessTokenProvider(GetRemoteHubOidcConfiguration);
+        _remoteFleetClient = new ManagedRemoteFleetClient(
+            new HeadscaleTailscaleFleetClient(GetRemoteClientPreferences),
+            new RemoteHubFleetClient(GetRemoteClientPreferences, _remoteHubAccessTokenProvider));
+        _remoteActionService = new MeshCentralRemoteActionService(GetRemoteClientPreferences);
+        _remoteExitNodeController = new TailscaleExitNodeController(GetRemoteClientPreferences);
+        _remoteAdminConsoleLauncher = new RemoteAdminConsoleLauncher(GetRemoteClientPreferences);
+        _remoteEnrollmentClient = new RemoteEnrollmentClient(GetRemoteClientPreferences);
+        _remotesMenuController = new RemotesMenuController(
+            _remoteFleetClient,
+            _remoteActionService,
+            _remoteExitNodeController,
+            _remoteAdminConsoleLauncher,
+            _remoteHubAccessTokenProvider,
+            _uiContext,
+            OpenRemotesDashboard,
+            OpenAddRemoteDevice,
+            ShowErrorBalloon);
         _userActivityMonitor.RealUserActivity += (_, _) => _uiContext.Post(_ => HandleRealUserActivity(), null);
         _activeIcon = TrayIconFactory.CreateEyeOpenIcon();
         _inactiveIcon = TrayIconFactory.CreateEyeClosedIcon();
@@ -133,6 +160,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             RefreshUi();
             QueueWorkVmStatusRefresh();
+            _remotesMenuController.QueueRefresh();
         };
         _contextMenu.RegisterStickyItem(_activeMenuItem);
         _contextMenu.RegisterStickyItem(_jiggleMouseMenuItem);
@@ -150,6 +178,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _contextMenu.Items.Add(_idleThresholdHost);
         _contextMenu.Items.Add(_editTextMenuItem);
         _contextMenu.Items.Add(_openAgentChannelMenuItem);
+        _contextMenu.Items.Add(new ToolStripSeparator());
+        _contextMenu.Items.Add(_remotesMenuController.MenuItem);
         _contextMenu.Items.Add(new ToolStripSeparator());
         _contextMenu.Items.Add(_openWorkVmMenuItem);
         _contextMenu.Items.Add(_switchBluetoothToVmMenuItem);
@@ -170,12 +200,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
         EnsureStartupPreference();
         ApplyRunnerState();
         QueueWorkVmStatusRefresh();
+        _remotesMenuController.QueueRefresh();
     }
 
     protected override void ExitThreadCore()
     {
         StopRunner();
         SyncIdleSessionCancellation(idleSessionActive: false);
+        _remotesDashboard?.Close();
+        _remotesMenuController.Dispose();
+        _remoteEnrollmentClient.Dispose();
+        _remoteHubAccessTokenProvider.Dispose();
         _activityController.Shutdown();
         _userActivityMonitor.Dispose();
         _notifyIcon.Visible = false;
@@ -646,6 +681,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _idleThresholdControl.TotalSeconds = settings.EnableAfterInactivitySeconds;
         _idleThresholdHost.Visible = settings.EnableAfterInactivityEnabled;
         RefreshWorkVmMenuItems();
+        _remotesMenuController.RefreshCachedUi();
 
         var effectiveActive = _activityController.IsEffectivelyActive(settings);
         _notifyIcon.Icon = effectiveActive ? _activeIcon : _inactiveIcon;
@@ -678,6 +714,87 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.ShowBalloonTip(2500, "StayActive", message, ToolTipIcon.Error);
     }
 
+    private RemoteClientPreferences GetRemoteClientPreferences()
+    {
+        var settings = GetSettingsSnapshot();
+        return new RemoteClientPreferences(
+            settings.RemoteControlPlaneUrl,
+            settings.RemoteHubUrl,
+            settings.RemoteAdminConsoleUrl,
+            settings.RemoteMeshCentralUrl,
+            settings.RemoteDeviceDisplayName,
+            settings.RemoteLocation,
+            settings.RemoteHubOidcIssuerUrl,
+            settings.RemoteHubOidcClientId,
+            settings.RemoteEnrollmentUrl,
+            settings.RemoteEnrollmentOidcClientId);
+    }
+
+    private RemoteHubOidcConfiguration? GetRemoteHubOidcConfiguration()
+    {
+        var preferences = GetRemoteClientPreferences();
+        return RemoteHubOidcConfiguration.TryCreate(
+            preferences.RemoteHubOidcIssuerUrl,
+            preferences.RemoteHubOidcClientId,
+            out var configuration)
+            ? configuration
+            : null;
+    }
+
+    private void SaveRemoteClientPreferences(RemoteClientPreferences preferences)
+    {
+        UpdateSettings(settings =>
+        {
+            settings.RemoteControlPlaneUrl = preferences.ControlPlaneUrl;
+            settings.RemoteHubUrl = preferences.RemoteHubUrl;
+            settings.RemoteAdminConsoleUrl = preferences.AdminConsoleUrl;
+            settings.RemoteMeshCentralUrl = preferences.MeshCentralUrl;
+            settings.RemoteDeviceDisplayName = preferences.DeviceDisplayName;
+            settings.RemoteLocation = preferences.Location;
+            settings.RemoteHubOidcIssuerUrl = preferences.RemoteHubOidcIssuerUrl;
+            settings.RemoteHubOidcClientId = preferences.RemoteHubOidcClientId;
+            settings.RemoteEnrollmentUrl = preferences.RemoteEnrollmentUrl;
+            settings.RemoteEnrollmentOidcClientId = preferences.RemoteEnrollmentOidcClientId;
+        });
+        _remotesMenuController.RefreshCachedUi();
+        _remotesMenuController.QueueRefresh();
+    }
+
+    private void OpenRemotesDashboard()
+    {
+        if (_remotesDashboard is { IsDisposed: false })
+        {
+            _remotesDashboard.BringToFront();
+            _remotesDashboard.Activate();
+            return;
+        }
+
+        _remotesDashboard = new RemotesDashboardForm(
+            _remoteFleetClient,
+            _remoteActionService,
+            _remoteExitNodeController,
+            _remoteAdminConsoleLauncher,
+            _remoteHubAccessTokenProvider,
+            GetRemoteClientPreferences,
+            SaveRemoteClientPreferences,
+            OpenAddRemoteDevice);
+        _remotesDashboard.FormClosed += (_, _) => _remotesDashboard = null;
+        _remotesDashboard.Show();
+    }
+
+    private void OpenAddRemoteDevice()
+    {
+        using var form = new AddRemoteDeviceForm(_remoteEnrollmentClient);
+        if (_remotesDashboard is { IsDisposed: false } dashboard)
+        {
+            form.ShowDialog(dashboard);
+        }
+        else
+        {
+            form.ShowDialog();
+        }
+    }
+
     private static ToolStripControlHost CreateControlHost(Control control)
     {
         return new ToolStripControlHost(control)
@@ -706,6 +823,55 @@ internal sealed class AppSettings
 
     public int EnableAfterInactivitySeconds { get; set; } = 300;
 
+    // These are non-secret UI/configuration values only. Enrollment keys,
+    // certificates, and server API keys belong in the Windows certificate
+    // store or a protected service secret store, never in settings.json.
+    public string RemoteControlPlaneUrl { get; set; } = StayActiveRemoteDefaults.ControlPlaneUrl;
+
+    public string RemoteHubUrl { get; set; } = StayActiveRemoteDefaults.RemoteHubUrl;
+
+    public string RemoteAdminConsoleUrl { get; set; } = StayActiveRemoteDefaults.AdminConsoleUrl;
+
+    public string RemoteMeshCentralUrl { get; set; } = StayActiveRemoteDefaults.MeshCentralUrl;
+
+    public string RemoteDeviceDisplayName { get; set; } = string.Empty;
+
+    public string RemoteLocation { get; set; } = string.Empty;
+
+    public string RemoteHubOidcIssuerUrl { get; set; } = StayActiveRemoteDefaults.OidcIssuerUrl;
+
+    public string RemoteHubOidcClientId { get; set; } = StayActiveRemoteDefaults.FleetOidcClientId;
+
+    // Broker URL and public OIDC client only. The one-time command, enrollment
+    // key, certificates, and Headscale API key are never stored in settings.
+    public string RemoteEnrollmentUrl { get; set; } = StayActiveRemoteDefaults.EnrollmentBrokerUrl;
+
+    public string RemoteEnrollmentOidcClientId { get; set; } = StayActiveRemoteDefaults.EnrollmentOidcClientId;
+
+    internal void ApplySelfHostedRemoteDefaultsIfUnconfigured()
+    {
+        if (!string.IsNullOrWhiteSpace(RemoteControlPlaneUrl)
+            || !string.IsNullOrWhiteSpace(RemoteHubUrl)
+            || !string.IsNullOrWhiteSpace(RemoteAdminConsoleUrl)
+            || !string.IsNullOrWhiteSpace(RemoteMeshCentralUrl)
+            || !string.IsNullOrWhiteSpace(RemoteHubOidcIssuerUrl)
+            || !string.IsNullOrWhiteSpace(RemoteHubOidcClientId)
+            || !string.IsNullOrWhiteSpace(RemoteEnrollmentUrl)
+            || !string.IsNullOrWhiteSpace(RemoteEnrollmentOidcClientId))
+        {
+            return;
+        }
+
+        RemoteControlPlaneUrl = StayActiveRemoteDefaults.ControlPlaneUrl;
+        RemoteHubUrl = StayActiveRemoteDefaults.RemoteHubUrl;
+        RemoteAdminConsoleUrl = StayActiveRemoteDefaults.AdminConsoleUrl;
+        RemoteMeshCentralUrl = StayActiveRemoteDefaults.MeshCentralUrl;
+        RemoteHubOidcIssuerUrl = StayActiveRemoteDefaults.OidcIssuerUrl;
+        RemoteHubOidcClientId = StayActiveRemoteDefaults.FleetOidcClientId;
+        RemoteEnrollmentUrl = StayActiveRemoteDefaults.EnrollmentBrokerUrl;
+        RemoteEnrollmentOidcClientId = StayActiveRemoteDefaults.EnrollmentOidcClientId;
+    }
+
     public AppSettings Clone()
     {
         return new AppSettings
@@ -716,7 +882,17 @@ internal sealed class AppSettings
             TypeTextEnabled = TypeTextEnabled,
             DimScreenWhenActiveEnabled = DimScreenWhenActiveEnabled,
             EnableAfterInactivityEnabled = EnableAfterInactivityEnabled,
-            EnableAfterInactivitySeconds = EnableAfterInactivitySeconds
+            EnableAfterInactivitySeconds = EnableAfterInactivitySeconds,
+            RemoteControlPlaneUrl = RemoteControlPlaneUrl,
+            RemoteHubUrl = RemoteHubUrl,
+            RemoteAdminConsoleUrl = RemoteAdminConsoleUrl,
+            RemoteMeshCentralUrl = RemoteMeshCentralUrl,
+            RemoteDeviceDisplayName = RemoteDeviceDisplayName,
+            RemoteLocation = RemoteLocation,
+            RemoteHubOidcIssuerUrl = RemoteHubOidcIssuerUrl,
+            RemoteHubOidcClientId = RemoteHubOidcClientId,
+            RemoteEnrollmentUrl = RemoteEnrollmentUrl,
+            RemoteEnrollmentOidcClientId = RemoteEnrollmentOidcClientId
         };
     }
 }
@@ -808,7 +984,9 @@ internal static class SettingsStore
                 return new AppSettings();
             }
 
-            return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
+            var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
+            settings.ApplySelfHostedRemoteDefaultsIfUnconfigured();
+            return settings;
         }
         catch
         {

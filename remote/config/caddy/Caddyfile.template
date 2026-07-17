@@ -1,0 +1,54 @@
+# TEMPLATE ONLY. Caddy expands {$...} from the environment supplied by Compose.
+# The operator must populate the matching values in the untracked .env file.
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+{$HEADSCALE_FQDN} {
+	# The public/LAN coordination listener never exposes Headscale's
+	# administrative REST API. The Windows controller has a separate
+	# host-loopback-only listener below.
+	handle /api/v1/* {
+		respond "Not found" 404
+	}
+
+	handle {
+		reverse_proxy headscale:8080
+	}
+}
+
+# Compose publishes this listener only at 127.0.0.1:4443. The Windows
+# controller installer adds the loopback-only hosts entry and trusts the Caddy
+# local CA before using this administrative API surface.
+https://headscale-controller.stayactive.test:4443 {
+	tls internal
+
+	handle /api/v1/* {
+		reverse_proxy headscale:8080
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}
+{$MESHCENTRAL_FQDN} {
+	reverse_proxy meshcentral:4430
+}
+
+# The RemoteHub API and its same-origin, OIDC-PKCE Admin page are reachable
+# only through this operator-controlled HTTPS edge. The Kestrel port remains
+# un-published inside the Docker control network.
+{$REMOTEHUB_FQDN} {
+	# Deployment scripts render this Windows controller address. It runs under
+	# the dedicated service identity and retains the Headscale key outside
+	# Docker; RemoteHub remains inventory/audit only.
+	@enrollmentTickets path /api/v1/enrollment-tickets /api/v1/enrollment-tickets/*
+	handle @enrollmentTickets {
+		reverse_proxy {$WINDOWS_ENROLLMENT_CONTROLLER_IP}:5091
+	}
+
+	handle {
+		reverse_proxy remotehub:5088
+	}
+}

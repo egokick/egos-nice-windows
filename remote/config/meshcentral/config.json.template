@@ -1,0 +1,40 @@
+{
+  "settings": {
+    "cert": "__REPLACE_MESHCENTRAL_FQDN__",
+    "port": 4430,
+    "portBind": "0.0.0.0",
+    "aliasPort": 443,
+    "redirPort": 0,
+    "WANonly": true,
+    "exactPorts": true,
+    "tlsOffload": "__REPLACE_CADDY_CONTROL_IP__",
+    "trustedProxy": "__REPLACE_CADDY_CONTROL_IP__",
+    "sessionKey": "__REPLACE_FROM_SECRET_MANAGER__",
+    "dbRecordsEncryptKey": "__REPLACE_FROM_SECRET_MANAGER__",
+    "sessionTime": 30,
+    "sessionSameSite": "strict",
+    "cookieIpCheck": "strict",
+    "allowLoginToken": false,
+    "allowFraming": false,
+    "webRTC": false,
+    "selfUpdate": false,
+    "plugins": {
+      "enabled": false
+    },
+    "agentSignLock": true,
+    "lockAgentDownload": true,
+    "publicPushNotifications": false,
+    "desktopMultiplex": false,
+    "agentLogDump": false,
+    "agentCoreDump": false,
+    "webPageLengthRandomization": true
+  },
+  "domains": {
+    "": {
+      "title": "StayActive Remotes",
+      "newAccounts": false,
+      "localSessionRecording": false,
+      "minify": true
+    }
+  }
+}

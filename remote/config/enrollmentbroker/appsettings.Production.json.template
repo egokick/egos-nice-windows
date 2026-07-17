@@ -1,0 +1,22 @@
+{
+  "urls": "__WINDOWS_ENROLLMENT_CONTROLLER_LISTEN_URL__",
+  "EnrollmentBroker": {
+    "Authentication": {
+      "Authority": "__REPLACE_OIDC_AUTHORITY__",
+      "Audience": "stayactive-enrollment"
+    },
+    "Authorization": {
+      "EnrollmentWriteScope": "stayactive.enrollment.write",
+      "AdministratorRole": "stayactive.enrollment.admin"
+    },
+    "Storage": {
+      "JournalPath": "__ENROLLMENT_CONTROLLER_JOURNAL_PATH__",
+      "JournalHmacKeyFile": "__ENROLLMENT_CONTROLLER_JOURNAL_HMAC_KEY_FILE__"
+    },
+    "Headscale": {
+      "ApiBaseUrl": "https://headscale-controller.stayactive.test:4443/",
+      "UserId": __REPLACE_HEADSCALE_ENROLLMENT_USER_ID__,
+      "LoginServer": "https://__REPLACE_HEADSCALE_FQDN__"
+    }
+  }
+}

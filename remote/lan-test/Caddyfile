@@ -1,0 +1,82 @@
+{
+    admin off
+}
+
+# The only cleartext handler is Headscale's connectivity probe. Port 80 is not
+# published by compose; all real client traffic uses internal-CA HTTPS on 443.
+http://headscale.stayactive.test {
+    @generate204 path /generate_204
+    respond @generate204 204
+    redir https://{host}{uri} permanent
+}
+
+http://meshcentral.stayactive.test {
+    redir https://{host}{uri} permanent
+}
+
+http://remotehub.stayactive.test {
+    redir https://{host}{uri} permanent
+}
+
+http://id.stayactive.test {
+    redir https://{host}{uri} permanent
+}
+
+headscale.stayactive.test {
+    tls internal
+
+    # Headscale's REST API accepts a broadly privileged API key. It is never
+    # reachable through the LAN listener; the Windows controller uses the
+    # distinct host-loopback listener below.
+    handle /api/v1/* {
+        respond "Not found" 404
+    }
+
+    handle {
+        reverse_proxy headscale:8080
+    }
+}
+
+# Compose publishes this site only as 127.0.0.1:4443. Deployment scripts must
+# install the matching loopback-only hosts entry and trust Caddy's local CA for
+# the Windows controller service before it can call the administrative API.
+https://headscale-controller.stayactive.test:4443 {
+    tls internal
+
+    handle /api/v1/* {
+        reverse_proxy headscale:8080
+    }
+
+    handle {
+        respond "Not found" 404
+    }
+}
+
+meshcentral.stayactive.test {
+    tls internal
+    reverse_proxy meshcentral:4430
+}
+
+remotehub.stayactive.test {
+    tls internal
+
+    # Deployment scripts provide the generated Windows controller address. It
+    # owns the Headscale credential outside Docker; no container can read it.
+    @enrollmentTickets path /api/v1/enrollment-tickets /api/v1/enrollment-tickets/*
+    handle @enrollmentTickets {
+        reverse_proxy {$WINDOWS_ENROLLMENT_CONTROLLER_IP}:5091
+    }
+
+    handle {
+        reverse_proxy remotehub:5088
+    }
+}
+
+id.stayactive.test {
+    tls internal
+    reverse_proxy keycloak:8080 {
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Port 443
+    }
+}

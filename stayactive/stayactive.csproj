@@ -13,5 +13,8 @@
     <Compile Remove="IntegrationTests\**\*.cs" />
     <EmbeddedResource Remove="IntegrationTests\**\*" />
     <None Remove="IntegrationTests\**\*" />
+    <Compile Remove="RemoteUiPreview\**\*.cs" />
+    <EmbeddedResource Remove="RemoteUiPreview\**\*" />
+    <None Remove="RemoteUiPreview\**\*" />
   </ItemGroup>
 </Project>

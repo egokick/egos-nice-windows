@@ -1,0 +1,9 @@
+{
+  "CADDY_IMAGE": "caddy@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb",
+  "HEADSCALE_IMAGE": "headscale/headscale@sha256:d337f1be4a9155b330aa9077bf6c82d24ff0581b8e69390ebc6d7c623bb339ce",
+  "MESHCENTRAL_IMAGE": "ghcr.io/ylianst/meshcentral@sha256:7a619610e187fece8d3a15b3ac9448412d32baa1a9e63c1922b328eaeea17f10",
+  "KEYCLOAK_IMAGE": "quay.io/keycloak/keycloak@sha256:9b0330756022422149aa6502eb2def8cd47c6e1b000c7c65cdb13e7c0133e992",
+  "POSTGRES_IMAGE": "postgres@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929",
+  "REMOTEHUB_SDK_IMAGE": "mcr.microsoft.com/dotnet/sdk@sha256:ed034a8bf0b24ded0cbbac07e17825d8e9ebfe21e308191d0f7421eaf5ad4664",
+  "REMOTEHUB_RUNTIME_IMAGE": "mcr.microsoft.com/dotnet/aspnet@sha256:1fa23fc4872d95fd71c2833ebe65d7e84a43b2d51a31d119516852f13d9505a7"
+}

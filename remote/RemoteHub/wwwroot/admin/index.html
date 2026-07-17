@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>StayActive RemoteHub Admin</title>
+  <link rel="stylesheet" href="./admin.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">SELF-HOSTED CONTROL PLANE</p>
+        <h1>RemoteHub Admin</h1>
+        <p class="lede">Manage verified Remotes inventory and review its audit history. This page cannot start remote sessions, transfer files, route traffic, or relay Bluetooth credentials.</p>
+      </div>
+      <div class="session-controls">
+        <span id="session-state" class="session-state">Loading secure sign-in configuration…</span>
+        <button id="sign-in" type="button">Sign in</button>
+        <button id="sign-out" type="button" class="secondary" hidden>Local sign out</button>
+      </div>
+    </header>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <section id="admin-panel" hidden>
+      <div class="toolbar">
+        <button id="refresh" type="button" class="secondary">Refresh inventory and audit</button>
+        <span class="hint">Changes require an exact current version and are recorded in the append-only audit journal.</span>
+      </div>
+
+      <div class="grid">
+        <section class="card inventory-card" aria-labelledby="inventory-heading">
+          <div class="card-heading">
+            <div>
+              <h2 id="inventory-heading">Inventory</h2>
+              <p>Verified and pending device mappings. Select a row to edit it.</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Headscale node</th>
+                  <th scope="col">Owner</th>
+                  <th scope="col">Location</th>
+                  <th scope="col">Verified</th>
+                  <th scope="col">Version</th>
+                  <th scope="col"><span class="sr-only">Edit</span></th>
+                </tr>
+              </thead>
+              <tbody id="inventory-rows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card editor-card" aria-labelledby="editor-heading">
+          <h2 id="editor-heading">Inventory mapping</h2>
+          <p>Only voluntarily supplied display names and coarse locations may be saved.</p>
+          <form id="inventory-form" novalidate>
+            <label>
+              Headscale node ID
+              <input id="node-id" name="node-id" autocomplete="off" maxlength="128" required>
+            </label>
+            <label>
+              Expected current version
+              <input id="expected-version" name="expected-version" type="number" min="0" step="1" value="0" required>
+              <span class="field-help">Use 0 to create. Selecting a row fills its current version.</span>
+            </label>
+
+            <fieldset>
+              <legend>Owner display name</legend>
+              <label class="checkbox-line"><input id="owner-opt-in" type="checkbox"> The device owner has opted in</label>
+              <label>
+                Display name
+                <input id="owner-name" autocomplete="off" maxlength="128" disabled>
+              </label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Coarse location</legend>
+              <label class="checkbox-line"><input id="location-opt-in" type="checkbox"> The device owner has opted in</label>
+              <label>
+                City or region only
+                <input id="coarse-location" autocomplete="off" maxlength="160" placeholder="e.g. Austin, TX" disabled>
+              </label>
+            </fieldset>
+
+            <label>
+              MeshCentral node ID
+              <input id="meshcentral-node-id" autocomplete="off" maxlength="256">
+              <span class="field-help">Required for Screen View or file capabilities. This page does not invoke them.</span>
+            </label>
+
+            <label class="checkbox-line"><input id="verified" type="checkbox"> Device mapping is verified</label>
+
+            <fieldset>
+              <legend>Allowed capabilities</legend>
+              <label class="checkbox-line"><input type="checkbox" name="capability" value="ExitNode"> Exit node policy</label>
+              <label class="checkbox-line"><input type="checkbox" name="capability" value="ScreenView"> Screen View policy</label>
+              <label class="checkbox-line"><input type="checkbox" name="capability" value="SendFile"> Send File policy</label>
+              <label class="checkbox-line"><input type="checkbox" name="capability" value="RequestFile"> Request File policy</label>
+            </fieldset>
+
+            <div class="form-actions">
+              <button id="save" type="submit">Save inventory mapping</button>
+              <button id="new-mapping" type="button" class="secondary">New mapping</button>
+            </div>
+          </form>
+        </section>
+      </div>
+
+      <section class="card audit-card" aria-labelledby="audit-heading">
+        <div class="card-heading">
+          <div>
+            <h2 id="audit-heading">Recent audit events</h2>
+            <p>Inventory creation and updates are immutable, HMAC-chained journal events.</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">When (UTC)</th>
+                <th scope="col">Event</th>
+                <th scope="col">Node</th>
+                <th scope="col">Actor</th>
+                <th scope="col">Version</th>
+              </tr>
+            </thead>
+            <tbody id="audit-rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script type="module" src="./admin.js"></script>
+</body>
+</html>
