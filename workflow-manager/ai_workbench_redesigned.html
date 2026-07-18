@@ -576,6 +576,43 @@
     .tab-status { margin-left: 6px; padding: 1px 6px; border-radius: 99px; background: var(--surface-3); color: var(--text-3); font-size: 9px; font-weight: 800; text-transform: uppercase; }
     .tab-status.on { background: var(--purple-soft); color: #d4c5ff; }
 
+    .home-fab {
+      position: fixed; z-index: 160; left: 0; bottom: 0; width: 48px; height: 48px; min-height: 48px; padding: 0;
+      display: grid; place-items: center; border-radius: 0 14px 0 0; border-color: #536786; background: #17223a; color: #dce5ff;
+      box-shadow: 0 12px 30px rgba(0,0,0,.38);
+    }
+    .home-fab:hover:not(:disabled) { background: #22304d; border-color: #7c9cff; color: #fff; }
+    .home-fab svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+    .character-home { display: none; min-height: 100vh; padding: 30px 34px 78px; background: radial-gradient(circle at 18% -8%, #1a2440 0, transparent 34%), var(--bg); }
+    body.character-home-mode .shell { display: none; }
+    body.character-home-mode .character-home { display: block; }
+    .character-home-inner { width: min(1420px, 100%); margin: 0 auto; }
+    .character-home-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+    .character-eyebrow { color: var(--blue); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    .character-home h1 { margin: 5px 0 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.035em; }
+    .character-home-copy { max-width: 620px; margin: 9px 0 0; color: var(--text-2); }
+    .character-add { flex: none; }
+    .character-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+    .character-card { position: relative; min-width: 0; min-height: 238px; padding: 15px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(150deg, #171c27, #11151d); box-shadow: 0 8px 24px rgba(0,0,0,.16); }
+    .character-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: transparent; }
+    .character-card.ready::before { background: var(--blue); }
+    .character-card.dragging { opacity: .45; }
+    .character-card.drag-over { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(124,156,255,.2); }
+    .character-open { width: 100%; min-height: 0; height: 100%; padding: 0; display: grid; grid-template-rows: auto 1fr auto; gap: 14px; border: 0; border-radius: 0; background: transparent; text-align: left; color: inherit; }
+    .character-open:hover:not(:disabled) { border: 0; background: transparent; }
+    .character-avatar { width: 72px; height: 72px; display: grid; place-items: center; overflow: hidden; border: 1px solid #46526a; border-radius: 50%; background: radial-gradient(circle at 32% 26%, #2b3855, #171d2b); color: #b9c7ec; font-size: 31px; font-weight: 760; }
+    .character-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .character-open-title { align-self: end; min-width: 0; }
+    .character-name { display: block; overflow: hidden; color: var(--text); font-size: 16px; font-weight: 760; text-overflow: ellipsis; white-space: nowrap; }
+    .character-description { display: -webkit-box; margin-top: 5px; overflow: hidden; color: var(--text-3); font-size: 12px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+    .character-empty-copy { color: var(--text-3); font-size: 12px; }
+    .character-workspace { display: inline-flex; align-items: center; gap: 6px; color: #aab9df; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .055em; }
+    .character-workspace::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
+    .character-edit { position: absolute; z-index: 1; top: 12px; right: 12px; width: 31px; min-height: 31px; padding: 0; display: grid; place-items: center; border-radius: 8px; background: rgba(16,20,28,.88); color: var(--text-2); }
+    .character-sentinel { height: 1px; margin-top: 28px; }
+    .character-empty-note { margin-top: 12px; color: var(--text-3); font-size: 12px; text-align: center; }
+
     .modal {
       position: fixed; z-index: 110; inset: 50% auto auto 50%; transform: translate(-50%,-47%) scale(.98);
       width: min(540px, calc(100vw - 28px)); max-height: calc(100vh - 40px); overflow: hidden;
@@ -621,6 +658,8 @@
       .runs-card, .detail-card { min-height: 0; flex: none; }
       .run-split-divider { display: none; }
       .detail-card { margin-top: 16px; overflow: hidden; }
+      .character-home { padding: 24px 18px 82px; }
+      .character-grid { grid-template-columns: repeat(3, minmax(0,1fr)); }
     }
     @media (max-width: 720px) {
       .main { padding: 10px; }
@@ -682,6 +721,12 @@
       .run-split:not(.mobile-detail-mode) .detail-card { display: none; }
       .run-split.mobile-detail-mode .runs-card { display: none; }
       .run-split.mobile-detail-mode .detail-card { display: block; margin-top: 0; }
+      .character-home-head { align-items: flex-start; flex-direction: column; }
+      .character-add { width: 100%; }
+      .character-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 11px; }
+      .character-card { min-height: 210px; padding: 13px; }
+      .character-avatar { width: 62px; height: 62px; font-size: 27px; }
+      .home-fab { width: 46px; height: 46px; min-height: 46px; }
     }
     @media (max-width: 430px) {
       .context-select { max-width: 118px; }
@@ -752,6 +797,17 @@
     </main>
   </div>
 
+  <section class="character-home" id="characterHome" aria-label="Characters">
+    <div class="character-home-inner">
+      <header class="character-home-head">
+        <button type="button" class="btn-primary character-add" data-action="addBlankCharacter">Add character</button>
+      </header>
+      <div class="character-grid" id="characterGrid" aria-live="polite"></div>
+      <div class="character-sentinel" id="characterSentinel" aria-hidden="true"></div>
+      <div class="character-empty-note">More blank character sheets appear as you scroll.</div>
+    </div>
+  </section>
+
   <div class="backdrop" id="sidebarBackdrop" data-action="toggleSidebar"></div>
 
   <div class="backdrop" id="drawerBackdrop" data-action="requestCloseWorkflow"></div>
@@ -770,6 +826,7 @@
   </section>
 
   <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="false"></div>
+  <button type="button" class="home-fab" data-action="showCharacterHome" aria-label="Open character home" title="Character home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 10.8 12 3.9l8.5 6.9v9.1a1.2 1.2 0 0 1-1.2 1.2h-3.9v-6.2H8.6v6.2H4.7a1.2 1.2 0 0 1-1.2-1.2z"/></svg></button>
 
   <script>
     'use strict';
@@ -1322,8 +1379,16 @@ Diagnose whether lost points belong to the generator${hasVerifier ? ', the verif
       return workflow.autoImprove;
     }
 
+    const seededCharacters = [
+      { id:'yaptalk-sales', name:'Yaptalk Sales Guy', image:'', description:'A relentlessly helpful sales character who turns incoming interest into clear next steps and crisp follow-ups.', workspaceId:'my-app', created:true },
+      ...Array.from({length:11},(_,index) => ({ id:`blank-character-${index + 1}`, name:'', image:'', description:'', workspaceId:`blank-workspace-${index + 1}`, created:false }))
+    ];
+
     const initialState = {
       version: 1,
+      screen: 'workspace',
+      activeCharacterId: 'yaptalk-sales',
+      characters: seededCharacters,
       workflows: seedWorkflows,
       runs: seedRuns,
       selectedRunId: 'run-commit-verified',
@@ -1404,6 +1469,17 @@ Diagnose whether lost points belong to the generator${hasVerifier ? ', the verif
         });
         if (!parsed.workflowSort) parsed.workflowSort = 'custom';
         if (!Array.isArray(parsed.directories)) parsed.directories = deepClone(initialState.directories);
+        if (!Array.isArray(parsed.characters) || !parsed.characters.length) parsed.characters = deepClone(seededCharacters);
+        parsed.characters = parsed.characters.map((character,index) => ({
+          id: character.id || `blank-character-${index + 1}`,
+          name: String(character.name || ''),
+          image: String(character.image || ''),
+          description: String(character.description || ''),
+          workspaceId: character.workspaceId || (index === 0 ? 'my-app' : `blank-workspace-${index + 1}`),
+          created: character.created === true || Boolean(character.name)
+        }));
+        if (!['workspace','characters'].includes(parsed.screen)) parsed.screen = 'workspace';
+        if (!parsed.activeCharacterId || !parsed.characters.some(character => character.id === parsed.activeCharacterId)) parsed.activeCharacterId = parsed.characters.find(character => character.workspaceId === parsed.currentRepo)?.id || parsed.characters[0]?.id || null;
         if (['review','rejected'].includes(parsed.view)) parsed.view = 'all';
         if (['review','rejected'].includes(parsed.settings?.defaultView)) parsed.settings.defaultView = 'all';
         if (!parsed.selectedWorkflowId) parsed.selectedWorkflowId = parsed.runs.find(run => run.id === parsed.selectedRunId)?.workflowId || null;
@@ -1431,6 +1507,89 @@ Diagnose whether lost points belong to the generator${hasVerifier ? ', the verif
     function selectedRun() { return runById(state.selectedRunId); }
     function directoryPathFor(id) { return state.directories.find(directory => directory.id === id)?.path || id; }
     function currentDirectoryPath() { return directoryPathFor(state.currentRepo); }
+    function characterById(id) { return state.characters.find(character => character.id === id); }
+    function activeCharacter() { return characterById(state.activeCharacterId); }
+    function characterWorkspacePath(character) {
+      const safe = String(character?.name || 'character-workspace').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'character-workspace';
+      return `C:\\workspaces\\${safe}`;
+    }
+    function makeBlankCharacter() {
+      const id = uid('character');
+      return { id, name:'', image:'', description:'', workspaceId:`workspace-${id}`, created:false };
+    }
+    function ensureCharacterWorkspace(character) {
+      if (!character) return;
+      if (!state.directories.some(directory => directory.id === character.workspaceId)) state.directories.push({ id:character.workspaceId, path:characterWorkspacePath(character) });
+    }
+    function characterAvatarMarkup(character) {
+      const image = String(character.image || '').trim();
+      return image ? `<img src="${esc(image)}" alt="${esc(character.name || 'Character')} profile image">` : '?';
+    }
+    function renderCharacterHome() {
+      const grid = byId('characterGrid');
+      if (!grid) return;
+      grid.innerHTML = state.characters.map(character => {
+        const ready = Boolean(character.created && character.name.trim());
+        const description = ready ? (character.description.trim() || 'No description added yet.') : 'Blank character sheet';
+        return `<article class="character-card ${ready ? 'ready' : 'blank'}" draggable="true" data-character-id="${esc(character.id)}">
+          <button type="button" class="character-open" data-action="${ready ? 'enterCharacterWorkspace' : 'editCharacter'}" data-id="${esc(character.id)}" aria-label="${ready ? `Open ${character.name} workspace` : 'Create character'}">
+            <span class="character-avatar">${characterAvatarMarkup(character)}</span>
+            <span class="character-open-title"><span class="character-name">${ready ? esc(character.name) : 'Unnamed character'}</span><span class="character-description">${esc(description)}</span></span>
+            <span class="character-workspace">${ready ? 'Open workspace' : 'Create profile'}</span>
+          </button>
+          <button type="button" class="character-edit" data-action="editCharacter" data-id="${esc(character.id)}" aria-label="Edit ${ready ? esc(character.name) : 'blank character'}" title="Edit character">•••</button>
+        </article>`;
+      }).join('');
+      const homeButton = document.querySelector('[data-action="showCharacterHome"]');
+      if (homeButton) homeButton.setAttribute('aria-current', state.screen === 'characters' ? 'page' : 'false');
+    }
+    function addBlankCharacter(openEditor = true) {
+      const character = makeBlankCharacter();
+      state.characters.push(character);
+      persist();
+      renderCharacterHome();
+      if (openEditor) openCharacterEditor(character.id);
+    }
+    function openCharacterEditor(characterId) {
+      const character = characterById(characterId); if (!character) return;
+      const isNew = !character.created;
+      openModal(isNew ? 'Create character' : 'Edit character', `<div class="form-grid"><div class="form-group full"><label for="characterName">Character name</label><input id="characterName" class="field" value="${esc(character.name)}" placeholder="e.g. Support guide"><div class="validation" id="characterNameError"></div></div><div class="form-group full"><label for="characterImage">Character image</label><input id="characterImage" class="field" value="${esc(character.image)}" placeholder="https://example.com/character.png"><div class="field-help">Leave blank to use the default ? profile image.</div></div><div class="form-group full"><label for="characterDescription">Description</label><textarea id="characterDescription" class="textarea" placeholder="What does this character do?">${esc(character.description)}</textarea></div></div>`, `<button type="button" data-action="closeModal">Cancel</button><button type="button" class="btn-primary" data-action="saveCharacter" data-id="${esc(character.id)}">${isNew ? 'Create character' : 'Save character'}</button>`, {kind:'character-editor',characterId});
+    }
+    function saveCharacter(characterId) {
+      const character = characterById(characterId); if (!character) return;
+      const name = byId('characterName')?.value.trim() || '';
+      if (!name) { byId('characterNameError').textContent = 'Character name is required.'; byId('characterName')?.focus(); return; }
+      character.name = name;
+      character.image = byId('characterImage')?.value.trim() || '';
+      character.description = byId('characterDescription')?.value.trim() || '';
+      character.created = true;
+      ensureCharacterWorkspace(character);
+      persist(); closeModal(); renderCharacterHome(); toast('Character saved', `${character.name} now has an independent workflow workspace.`);
+    }
+    function enterCharacterWorkspace(characterId) {
+      const character = characterById(characterId); if (!character) return;
+      if (!character.created || !character.name.trim()) return openCharacterEditor(characterId);
+      ensureCharacterWorkspace(character);
+      state.activeCharacterId = character.id;
+      state.currentRepo = character.workspaceId;
+      state.currentBranch = character.workspaceId === 'my-app' ? 'feature/login' : 'main';
+      state.screen = 'workspace';
+      state.workflowFilter = null; state.triggerFilter = 'all'; state.runSearch = ''; state.workflowSearch = ''; state.view = 'all'; state.activeTab = 'summary';
+      renderAll(); toast('Character workspace opened', `${character.name} is now the active workspace.`);
+    }
+    function showCharacterHome() {
+      if (editorState && editorIsDirty()) { toast('Save or discard workflow changes first','The character home will keep the active workspace intact.'); return; }
+      if (byId('workflowDrawer').classList.contains('open')) closeWorkflowEditor();
+      if (byId('modal').classList.contains('open')) closeModal();
+      state.screen = 'characters'; renderAll(); window.scrollTo({ top: 0, behavior: 'auto' });
+    }
+    function appendCharacterSheetsIfNeeded() {
+      if (state.screen !== 'characters') return;
+      const nearEnd = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 420;
+      if (!nearEnd) return;
+      state.characters.push(...Array.from({length:8}, () => makeBlankCharacter()));
+      persist(); renderCharacterHome();
+    }
 
     const statusMeta = {
       running: { label: 'Running', className: 'running' },
@@ -1571,6 +1730,13 @@ Diagnose whether lost points belong to the generator${hasVerifier ? ', the verif
 
     function renderAll(options = {}) {
       document.body.dataset.density = state.settings.density;
+      document.body.classList.toggle('character-home-mode', state.screen === 'characters');
+      if (state.screen === 'characters') {
+        renderCharacterHome();
+        if (!options.skipPersist) persist();
+        window.scrollTo({ top: 0, behavior: 'auto' });
+        return;
+      }
       const directorySelect = byId('directorySelect');
       directorySelect.innerHTML = state.directories.map(directory => `<option value="${esc(directory.id)}">${esc(directory.path)}</option>`).join('');
       directorySelect.value = state.currentRepo;
@@ -2894,6 +3060,11 @@ Operating constraints:
 
     function handleAction(action, element) {
       const id=element.dataset.id;
+      if(action==='showCharacterHome')return showCharacterHome();
+      if(action==='addBlankCharacter')return addBlankCharacter(true);
+      if(action==='editCharacter')return openCharacterEditor(id);
+      if(action==='saveCharacter')return saveCharacter(id);
+      if(action==='enterCharacterWorkspace')return enterCharacterWorkspace(id);
       if(action==='toggleSidebar')return toggleSidebar();
       if(action==='setView'){state.view=element.dataset.view;state.workflowFilter=null;state.activeTab='summary';renderAll();return;}
       if(action==='selectWorkflow'){state.selectedWorkflowId=id;state.workflowFilter=state.workflowFilter===id?null:id;state.view='all';state.activeTab='summary';renderAll();return;}
@@ -2977,12 +3148,48 @@ Operating constraints:
       handleAction(element.dataset.action,element);
     });
 
+    let draggedCharacterId = null;
+    document.addEventListener('dragstart',event=>{
+      const card = event.target.closest?.('.character-card[data-character-id]');
+      if (!card || state.screen !== 'characters') return;
+      draggedCharacterId = card.dataset.characterId;
+      card.classList.add('dragging');
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', draggedCharacterId);
+    });
+    document.addEventListener('dragover',event=>{
+      const card = event.target.closest?.('.character-card[data-character-id]');
+      if (!card || !draggedCharacterId || card.dataset.characterId === draggedCharacterId) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('.character-card.drag-over').forEach(node => node.classList.remove('drag-over'));
+      card.classList.add('drag-over');
+    });
+    document.addEventListener('drop',event=>{
+      const card = event.target.closest?.('.character-card[data-character-id]');
+      if (!card || !draggedCharacterId) return;
+      event.preventDefault();
+      const from = state.characters.findIndex(character => character.id === draggedCharacterId);
+      const to = state.characters.findIndex(character => character.id === card.dataset.characterId);
+      if (from >= 0 && to >= 0 && from !== to) {
+        const [character] = state.characters.splice(from,1);
+        state.characters.splice(to,0,character);
+        persist(); renderCharacterHome();
+      }
+      draggedCharacterId = null;
+    });
+    document.addEventListener('dragend',()=>{
+      draggedCharacterId = null;
+      document.querySelectorAll('.character-card.dragging,.character-card.drag-over').forEach(node => node.classList.remove('dragging','drag-over'));
+    });
+    window.addEventListener('scroll',()=>{ requestAnimationFrame(appendCharacterSheetsIfNeeded); }, {passive:true});
+
     document.addEventListener('change',event=>{
       const target=event.target;
       if(target.dataset.action==='changeRepo'){
         state.currentRepo=target.value;state.currentBranch={ 'my-app':'feature/login','payments-api':'main','design-system':'release/next' }[target.value]||'main';state.view=state.settings.defaultView;state.workflowFilter=null;state.triggerFilter='all';state.runSearch='';state.activeTab='summary';renderAll();return;
       }
-      if(target.dataset.action==='changeDirectory'){state.currentRepo=target.value;state.currentBranch={ 'my-app':'feature/login','payments-api':'main','design-system':'release/next' }[target.value]||'main';state.workflowFilter=null;state.view=state.settings.defaultView;state.triggerFilter='all';state.runSearch='';state.activeTab='summary';renderAll();return;}
+      if(target.dataset.action==='changeDirectory'){state.currentRepo=target.value;state.activeCharacterId=state.characters.find(character=>character.workspaceId===target.value)?.id||state.activeCharacterId;state.currentBranch={ 'my-app':'feature/login','payments-api':'main','design-system':'release/next' }[target.value]||'main';state.workflowFilter=null;state.view=state.settings.defaultView;state.triggerFilter='all';state.runSearch='';state.activeTab='summary';renderAll();return;}
       if(target.dataset.action==='changeTriggerFilter'){state.triggerFilter=target.value;state.activeTab='summary';renderAll();return;}
       if(target.dataset.action==='changeRunStatusFilter'){state.view=target.value;state.activeTab='summary';renderAll();return;}
       if(target.dataset.action==='changeWorkflowSort'){state.workflowSort=target.value;renderWorkflows();persist();return;}

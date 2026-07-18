@@ -7,6 +7,7 @@ Minimal Windows tray app that toggles:
 - Windows startup for the app itself via a tray toggle
 - Automatic timed switching between light and dark mode
 - Monitor brightness from the tray menu when the display exposes brightness control
+- Software dimming below the display's hardware minimum
 
 ## Run
 
@@ -21,6 +22,7 @@ Right-click the tray icon for:
 - `Switch to ...`
 - `Run at Windows startup`
 - `Brightness` slider
+- `Extra dimming` slider
 - `Timed Light/Dark`
 - `Exit`
 
@@ -32,6 +34,8 @@ When `Timed Light/Dark` is enabled, the right-click tray menu expands with:
 The app saves that schedule and checks once per minute whether the current system time should be light or dark mode.
 
 Brightness control uses DDC/CI for external monitors when available and falls back to WMI for built-in panels. If Windows cannot control brightness for the current display, the slider shows as unavailable.
+
+Extra dimming places a black, click-through compositor overlay over each active display after hardware brightness has reached its minimum. The overlay does not take focus or intercept mouse and keyboard input, works independently of HDR and display-driver gamma-ramp limits, and is removed when extra dimming is turned off or the app exits.
 
 ## Publish
 

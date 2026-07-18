@@ -40,9 +40,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripSeparator _brightnessSeparatorMenuItem;
     private readonly BrightnessSliderControl _brightnessSliderControl;
     private readonly ToolStripControlHost _brightnessSliderHost;
+    private readonly DimmingSliderControl _dimmingSliderControl;
+    private readonly ToolStripControlHost _dimmingSliderHost;
+    private readonly SoftwareDimmingService _softwareDimmingService;
     private readonly Icon _lightIcon;
     private readonly Icon _darkIcon;
     private readonly System.Windows.Forms.Timer _scheduleTimer;
+    private readonly System.Windows.Forms.Timer _displaySettingsTimer;
     private readonly SynchronizationContext _uiContext;
     private readonly object _brightnessUpdateLock = new();
 
@@ -87,6 +91,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _brightnessSliderControl.BrightnessChanged += (_, _) => QueueBrightnessUpdate(_brightnessSliderControl.Brightness);
         _brightnessSliderHost = CreateSliderHost(_brightnessSliderControl);
 
+        _softwareDimmingService = new SoftwareDimmingService();
+        _dimmingSliderControl = new DimmingSliderControl(_settings.ExtraDimmingPercent);
+        _dimmingSliderControl.DimmingChanged += (_, _) => ApplyExtraDimming(_dimmingSliderControl.DimmingPercent);
+        _dimmingSliderHost = CreateSliderHost(_dimmingSliderControl);
+
         var exitMenuItem = new ToolStripMenuItem("Exit");
         exitMenuItem.Click += (_, _) => ExitThread();
 
@@ -98,7 +107,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = new ContextMenuStrip()
         };
 
-        _notifyIcon.ContextMenuStrip.Opening += (_, _) => RefreshMenuText(refreshBrightness: true);
+        _notifyIcon.ContextMenuStrip.Opening += (_, _) => RefreshMenuText(refreshBrightness: true, refreshDimming: true);
         _notifyIcon.ContextMenuStrip.Items.Add(_toggleMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_startupMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_timedModeMenuItem);
@@ -107,6 +116,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.ContextMenuStrip.Items.Add(_darkSliderHost);
         _notifyIcon.ContextMenuStrip.Items.Add(_brightnessSeparatorMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_brightnessSliderHost);
+        _notifyIcon.ContextMenuStrip.Items.Add(_dimmingSliderHost);
         _notifyIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         _notifyIcon.ContextMenuStrip.Items.Add(exitMenuItem);
         _notifyIcon.MouseClick += NotifyIconOnMouseClick;
@@ -118,8 +128,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _scheduleTimer.Tick += (_, _) => ApplyTimedThemeIfEnabled(showBalloon: false);
         _scheduleTimer.Start();
 
+        _displaySettingsTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 1000
+        };
+        _displaySettingsTimer.Tick += (_, _) =>
+        {
+            _displaySettingsTimer.Stop();
+            ApplyExtraDimming(_settings.ExtraDimmingPercent, saveSetting: false, showError: false);
+        };
+
+        SystemEvents.DisplaySettingsChanged += SystemEventsOnDisplaySettingsChanged;
+
         ApplyTimedThemeIfEnabled(showBalloon: false);
         RefreshBrightnessControl();
+        ApplyExtraDimming(_settings.ExtraDimmingPercent, saveSetting: false);
         RefreshMenuText();
     }
 
@@ -127,6 +150,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _scheduleTimer.Stop();
         _scheduleTimer.Dispose();
+        _displaySettingsTimer.Stop();
+        _displaySettingsTimer.Dispose();
+        SystemEvents.DisplaySettingsChanged -= SystemEventsOnDisplaySettingsChanged;
+        _softwareDimmingService.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _lightIcon.Dispose();
@@ -233,7 +260,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RefreshMenuText();
     }
 
-    private void RefreshMenuText(bool refreshBrightness = false)
+    private void RefreshMenuText(bool refreshBrightness = false, bool refreshDimming = false)
     {
         var isLightMode = ThemeService.IsLightModeEnabled();
         _toggleMenuItem.Text = isLightMode ? "Switch to dark mode" : "Switch to light mode";
@@ -260,6 +287,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (refreshBrightness)
         {
             RefreshBrightnessControl();
+        }
+
+        if (refreshDimming)
+        {
+            ApplyExtraDimming(_settings.ExtraDimmingPercent, saveSetting: false, showError: false);
         }
     }
 
@@ -312,6 +344,37 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _brightnessSliderControl.SetUnavailable();
+    }
+
+    private void ApplyExtraDimming(int dimmingPercent, bool saveSetting = true, bool showError = true)
+    {
+        dimmingPercent = Math.Clamp(dimmingPercent, 0, 90);
+        if (!_softwareDimmingService.TrySetDimming(dimmingPercent))
+        {
+            _dimmingSliderControl.SetUnavailable();
+            if (showError)
+            {
+                ShowErrorBalloon("Software dimming could not create an overlay for the current display configuration.");
+            }
+
+            return;
+        }
+
+        _dimmingSliderControl.SetAvailable(dimmingPercent);
+        _settings.ExtraDimmingPercent = dimmingPercent;
+        if (saveSetting)
+        {
+            SettingsStore.Save(_settings);
+        }
+    }
+
+    private void SystemEventsOnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        _uiContext.Post(_ =>
+        {
+            _displaySettingsTimer.Stop();
+            _displaySettingsTimer.Start();
+        }, null);
     }
 
     private void QueueBrightnessUpdate(int brightness)
@@ -525,6 +588,83 @@ internal sealed class BrightnessSliderControl : UserControl
     private void UpdateValueLabel()
     {
         _valueLabel.Text = _trackBar.Enabled ? $"{_trackBar.Value}%" : "Unavailable";
+    }
+}
+
+internal sealed class DimmingSliderControl : UserControl
+{
+    private readonly Label _valueLabel;
+    private readonly TrackBar _trackBar;
+
+    public DimmingSliderControl(int dimmingPercent)
+    {
+        Size = new Size(280, 78);
+        Margin = Padding.Empty;
+        Padding = Padding.Empty;
+        BackColor = SystemColors.Control;
+        DoubleBuffered = true;
+
+        var titleLabel = new Label
+        {
+            AutoSize = true,
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            Location = new Point(10, 8),
+            Text = "Extra dimming"
+        };
+
+        _valueLabel = new Label
+        {
+            AutoSize = true,
+            Location = new Point(184, 10)
+        };
+
+        _trackBar = new TrackBar
+        {
+            Minimum = 0,
+            Maximum = 90,
+            TickFrequency = 10,
+            LargeChange = 10,
+            SmallChange = 1,
+            AutoSize = false,
+            Bounds = new Rectangle(10, 30, 260, 36),
+            Value = Math.Clamp(dimmingPercent, 0, 90)
+        };
+        _trackBar.Scroll += (_, _) =>
+        {
+            UpdateValueLabel();
+            DimmingChanged?.Invoke(this, EventArgs.Empty);
+        };
+
+        Controls.Add(titleLabel);
+        Controls.Add(_valueLabel);
+        Controls.Add(_trackBar);
+        UpdateValueLabel();
+    }
+
+    public event EventHandler? DimmingChanged;
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int DimmingPercent => _trackBar.Value;
+
+    public void SetAvailable(int dimmingPercent)
+    {
+        _trackBar.Enabled = true;
+        _trackBar.Value = Math.Clamp(dimmingPercent, 0, 90);
+        UpdateValueLabel();
+    }
+
+    public void SetUnavailable()
+    {
+        _trackBar.Enabled = false;
+        _valueLabel.Text = "Unavailable";
+    }
+
+    private void UpdateValueLabel()
+    {
+        _valueLabel.Text = _trackBar.Enabled
+            ? _trackBar.Value == 0 ? "Off" : $"{_trackBar.Value}%"
+            : "Unavailable";
     }
 }
 
@@ -783,10 +923,13 @@ internal sealed class AppSettings
 
     public int DarkHour { get; set; } = 19;
 
+    public int ExtraDimmingPercent { get; set; }
+
     public void Normalize()
     {
         LightHour = NormalizeHour(LightHour);
         DarkHour = NormalizeHour(DarkHour);
+        ExtraDimmingPercent = Math.Clamp(ExtraDimmingPercent, 0, 90);
     }
 
     private static int NormalizeHour(int hour)
