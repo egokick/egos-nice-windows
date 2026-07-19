@@ -15,6 +15,7 @@ internal sealed class LibraryBrowserState
     private readonly Queue<string> _recentMessages = new();
     private HashSet<string> _downloadedVideoIds = new(StringComparer.Ordinal);
     private List<string> _syncTargetVideoIds = [];
+    private List<PendingVideo> _pendingSyncVideos = [];
     private Dictionary<string, int> _watchLaterOrderByVideoId = new(StringComparer.Ordinal);
     private bool _isBusy;
     private string _status;
@@ -156,18 +157,21 @@ internal sealed class LibraryBrowserState
         }
     }
 
-    public void SetSyncTargetIds(IReadOnlyList<string> syncTargetVideoIds)
+    public void SetSyncTargets(IReadOnlyList<SyncService.WatchLaterVideo> syncTargets)
     {
-        var normalizedVideoIds = NormalizeOrderedVideoIds(syncTargetVideoIds);
+        var normalizedTargets = NormalizeSyncTargets(syncTargets);
+        var normalizedVideoIds = normalizedTargets.Select(target => target.VideoId).ToList();
         lock (_syncRoot)
         {
-            if (HasSameOrderedVideoIds(_syncTargetVideoIds, normalizedVideoIds))
+            if (HasSameSyncTargets(_pendingSyncVideos, normalizedTargets))
             {
                 _updatedAtUtc = DateTimeOffset.UtcNow;
                 return;
             }
 
             _syncTargetVideoIds = normalizedVideoIds;
+            _pendingSyncVideos = normalizedTargets;
+            _libraryVersion++;
             _updatedAtUtc = DateTimeOffset.UtcNow;
         }
     }
@@ -183,7 +187,17 @@ internal sealed class LibraryBrowserState
             }
 
             _syncTargetVideoIds = [];
+            _pendingSyncVideos = [];
+            _libraryVersion++;
             _updatedAtUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
+    public IReadOnlyList<PendingVideo> GetPendingSyncVideosSnapshot()
+    {
+        lock (_syncRoot)
+        {
+            return _pendingSyncVideos.ToList();
         }
     }
 
@@ -350,24 +364,20 @@ internal sealed class LibraryBrowserState
         return normalized;
     }
 
-    private static List<string> NormalizeOrderedVideoIds(IEnumerable<string> videoIds)
+    private static List<PendingVideo> NormalizeSyncTargets(IEnumerable<SyncService.WatchLaterVideo> syncTargets)
     {
-        var normalized = new List<string>();
+        var normalized = new List<PendingVideo>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var videoId in videoIds)
+        foreach (var target in syncTargets)
         {
-            if (string.IsNullOrWhiteSpace(videoId))
+            var videoId = target.VideoId?.Trim();
+            if (string.IsNullOrWhiteSpace(videoId) || !seen.Add(videoId))
             {
                 continue;
             }
 
-            var trimmedVideoId = videoId.Trim();
-            if (!seen.Add(trimmedVideoId))
-            {
-                continue;
-            }
-
-            normalized.Add(trimmedVideoId);
+            var title = string.IsNullOrWhiteSpace(target.Title) ? "Untitled video" : target.Title.Trim();
+            normalized.Add(new PendingVideo(videoId, title));
         }
 
         return normalized;
@@ -380,25 +390,12 @@ internal sealed class LibraryBrowserState
         return left.SetEquals(right);
     }
 
-    private static bool HasSameOrderedVideoIds(
-        IReadOnlyList<string> left,
-        IReadOnlyList<string> right)
-    {
-        if (left.Count != right.Count)
-        {
-            return false;
-        }
+    private static bool HasSameSyncTargets(
+        IReadOnlyList<PendingVideo> left,
+        IReadOnlyList<PendingVideo> right) =>
+        left.Count == right.Count && left.SequenceEqual(right);
 
-        for (var index = 0; index < left.Count; index++)
-        {
-            if (!string.Equals(left[index], right[index], StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    internal readonly record struct PendingVideo(string VideoId, string Title);
 
     internal readonly record struct SyncScopeCounts(
         int? DownloadedCount,

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="180" viewBox="0 0 360 180">
+  <rect width="360" height="180" rx="24" fill="#101722"/>
+  <g transform="translate(30 25)">
+    <circle cx="65" cy="65" r="56" fill="#182333" stroke="#ff8a26" stroke-width="9"/>
+    <path d="M73 18 37 72h25L50 114l48-61H72z" fill="#ffd45c" stroke="#fff5cb" stroke-width="3" stroke-linejoin="round"/>
+    <text x="65" y="153" text-anchor="middle" font-family="Segoe UI, sans-serif" font-weight="700" font-size="18" fill="#ffb360">HIGH</text>
+  </g>
+  <g transform="translate(200 25)">
+    <circle cx="65" cy="65" r="56" fill="#182333" stroke="#36d399" stroke-width="9"/>
+    <path d="M31 81C36 40 69 27 101 31c-3 37-23 66-59 68-9-1-14-8-11-18z" fill="#3fdfa5"/>
+    <path d="M38 94c11-22 28-36 52-51M52 74l-2-18M66 61l16 2" fill="none" stroke="#effff8" stroke-width="5" stroke-linecap="round"/>
+    <text x="65" y="153" text-anchor="middle" font-family="Segoe UI, sans-serif" font-weight="700" font-size="18" fill="#65e6b8">LOW</text>
+  </g>
+</svg>

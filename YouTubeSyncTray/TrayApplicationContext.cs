@@ -596,18 +596,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
             });
             var watchLaterOrderProgress = new Progress<IReadOnlyList<string>>(orderedVideoIds =>
             {
-                var persistedOrder = _watchLaterOrderStore.MergeTopRange(syncAccountScope.FolderName, orderedVideoIds);
+                var persistedOrder = _watchLaterOrderStore.Save(syncAccountScope.FolderName, orderedVideoIds);
                 if (MatchesLibrarySelection(syncSettings, _settings))
                 {
                     SetWatchLaterOrder(persistedOrder);
                     SetSyncAuthReady();
                 }
             });
-            var syncTargetProgress = new Progress<IReadOnlyList<string>>(targetVideoIds =>
+            var syncTargetProgress = new Progress<IReadOnlyList<SyncService.WatchLaterVideo>>(targetVideos =>
             {
                 if (MatchesLibrarySelection(syncSettings, _settings))
                 {
-                    SetSyncTargetIds(targetVideoIds);
+                    SetSyncTargets(targetVideos);
                 }
             });
             var summary = await TrackShutdownTask(_syncService.SyncRecentAsync(
@@ -634,7 +634,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
             var status = BuildSyncStatus(summary, automaticSyncPaused);
             TrayLog.Write(_paths, $"RunSyncAsync completed. Status: {status}");
             SetBusy(false, status);
-            QueueWatchLaterOrderRefresh();
             if (showSuccessBalloon)
             {
                 ShowInfoBalloon(status);
@@ -841,7 +840,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     internal static bool ShouldPauseAutomaticSync(SyncService.SyncSummary summary) =>
-        summary.MissingAfterSyncCount == 0;
+        summary.TargetCount > 0 && summary.MissingAfterSyncCount == 0;
+
+    internal static bool ShouldPersistWatchLaterOrder(IReadOnlyCollection<string> orderedVideoIds) =>
+        orderedVideoIds.Count > 0;
 
     internal static string BuildSyncStatus(SyncService.SyncSummary summary, bool automaticSyncPaused = false)
     {
@@ -1695,9 +1697,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _libraryState.ClearWatchLaterOrder();
     }
 
-    private void SetSyncTargetIds(IReadOnlyList<string> syncTargetVideoIds)
+    private void SetSyncTargets(IReadOnlyList<SyncService.WatchLaterVideo> targetVideos)
     {
-        _libraryState.SetSyncTargetIds(syncTargetVideoIds);
+        _libraryState.SetSyncTargets(targetVideos);
     }
 
     private void ClearSyncTargetIds()
@@ -1842,6 +1844,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             var orderedVideoIds = await TrackShutdownTask(
                 _syncService.GetWatchLaterOrderedIdsAsync(settings, _shutdownCts.Token));
+            if (!ShouldPersistWatchLaterOrder(orderedVideoIds))
+            {
+                TrayLog.Write(_paths, "Background Watch Later order refresh returned no videos; preserving the last-known-good order.");
+                return;
+            }
+
             var accountScope = _accountScopeResolver.Resolve(settings);
             var persistedOrder = _watchLaterOrderStore.Save(accountScope.FolderName, orderedVideoIds);
             if (MatchesLibrarySelection(settings, _settings))

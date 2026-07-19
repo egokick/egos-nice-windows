@@ -604,13 +604,12 @@ internal sealed class YouTubeAccountDiscoveryService
         {
             try
             {
-                if (!File.Exists(path))
+                if (!AtomicFile.TryReadJson<PersistedCache>(path, out var persisted))
                 {
                     continue;
                 }
 
-                var persisted = JsonSerializer.Deserialize<PersistedCache>(File.ReadAllText(path));
-                if (persisted is null || !MatchesPersistedCache(persisted, browser, profile, browserAuthUserIndex))
+                if (!MatchesPersistedCache(persisted, browser, profile, browserAuthUserIndex))
                 {
                     continue;
                 }
@@ -643,7 +642,7 @@ internal sealed class YouTubeAccountDiscoveryService
                 cacheKey.PreferredAuthUserIndex,
                 DateTimeOffset.UtcNow,
                 accounts.ToArray());
-            File.WriteAllText(path, JsonSerializer.Serialize(persisted));
+            AtomicFile.WriteAllText(path, JsonSerializer.Serialize(persisted));
         }
         catch
         {

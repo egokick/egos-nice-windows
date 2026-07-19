@@ -59,6 +59,7 @@ internal sealed class AppSettings
     }
 }
 
+
 internal static class SettingsStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -76,12 +77,11 @@ internal static class SettingsStore
     {
         try
         {
-            if (!File.Exists(SettingsPath))
+            if (!AtomicFile.TryReadJson<AppSettings>(SettingsPath, out var settings))
             {
                 return new AppSettings();
             }
 
-            var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
             settings.Normalize();
             return settings;
         }
@@ -95,7 +95,7 @@ internal static class SettingsStore
     {
         settings.Normalize();
         Directory.CreateDirectory(SettingsDirectory);
-        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, JsonOptions));
+        AtomicFile.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, JsonOptions));
     }
 }
 

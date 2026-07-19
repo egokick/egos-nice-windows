@@ -21,6 +21,26 @@ public sealed class TrayApplicationContextTests
     }
 
     [Fact]
+    public void ShouldPauseAutomaticSync_ReturnsFalse_WhenNoTargetsWereValidated()
+    {
+        var summary = CreateSummary(targetCount: 0, downloadedCount: 0, alreadyPresentCount: 0, missingAfterSyncCount: 0);
+
+        Assert.False(TrayApplicationContext.ShouldPauseAutomaticSync(summary));
+    }
+
+    [Fact]
+    public void ShouldPersistWatchLaterOrder_ReturnsFalse_WhenRefreshIsEmpty()
+    {
+        Assert.False(TrayApplicationContext.ShouldPersistWatchLaterOrder([]));
+    }
+
+    [Fact]
+    public void ShouldPersistWatchLaterOrder_ReturnsTrue_WhenRefreshHasVideos()
+    {
+        Assert.True(TrayApplicationContext.ShouldPersistWatchLaterOrder(["newest", "older"]));
+    }
+
+    [Fact]
     public void BuildSyncStatus_AppendsPauseNotice_WhenAutomaticSyncIsPaused()
     {
         var summary = CreateSummary(targetCount: 4, downloadedCount: 0, alreadyPresentCount: 4, missingAfterSyncCount: 0);

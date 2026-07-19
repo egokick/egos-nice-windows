@@ -80,12 +80,11 @@ internal sealed class WatchLaterOrderStore
     private Dictionary<string, long> LoadRanks(string scopeFolderName)
     {
         var path = GetPath(scopeFolderName);
-        if (!File.Exists(path))
+        if (!AtomicFile.TryReadJson<OrderFile>(path, out var file, _jsonOptions))
         {
             return new Dictionary<string, long>(StringComparer.Ordinal);
         }
 
-        var file = JsonSerializer.Deserialize<OrderFile>(File.ReadAllText(path), _jsonOptions) ?? new OrderFile();
         var normalizedRanks = NormalizeRanks(file.VideoRanks);
         if (normalizedRanks.Count > 0)
         {
@@ -106,7 +105,7 @@ internal sealed class WatchLaterOrderStore
             VideoRanks = new Dictionary<string, long>(ranks, StringComparer.Ordinal)
         };
 
-        File.WriteAllText(
+        AtomicFile.WriteAllText(
             GetPath(scopeFolderName),
             JsonSerializer.Serialize(file, _jsonOptions));
     }

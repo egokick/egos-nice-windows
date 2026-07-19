@@ -1314,6 +1314,7 @@ function createCard(video) {
     <div class="thumb-shell">
       <button class="thumb-button" type="button" aria-label="">
         <img class="thumbnail placeholder" alt="">
+        <span class="pending-thumbnail-label hidden">Pending download</span>
       </button>
       <div class="thumbnail-progress hidden" aria-hidden="true">
         <span class="thumbnail-progress-fill"></span>
@@ -1355,15 +1356,25 @@ function createCard(video) {
 
 function updateCard(card, video) {
   card.dataset.videoId = video.videoId;
+  const isPendingDownload = Boolean(video.isPendingDownload);
+  card.classList.toggle("is-pending-download", isPendingDownload);
   const uploaderName = (video.uploaderName || "").trim();
   card.dataset.search = `${video.title} ${uploaderName} ${video.displayIndex}`.toLowerCase();
 
   const selector = card.querySelector(".video-selector");
+  if (isPendingDownload) {
+    state.selectedIds.delete(video.videoId);
+  }
   selector.checked = state.selectedIds.has(video.videoId);
+  selector.disabled = isPendingDownload;
+  selector.classList.toggle("hidden", isPendingDownload);
   card.classList.toggle("selected", selector.checked);
 
   const thumbButton = card.querySelector(".thumb-button");
-  thumbButton.setAttribute("aria-label", "Play " + video.title);
+  thumbButton.disabled = isPendingDownload;
+  thumbButton.setAttribute("aria-label", isPendingDownload ? `${video.title}: pending download` : "Play " + video.title);
+  const pendingLabel = card.querySelector(".pending-thumbnail-label");
+  pendingLabel.classList.toggle("hidden", !isPendingDownload);
 
   card.querySelector(".index-pill").textContent = video.displayIndex;
   card.querySelector(".video-title").textContent = video.title;
@@ -1377,7 +1388,12 @@ function updateCard(card, video) {
   }
 
   const image = card.querySelector(".thumbnail");
-  if (image.dataset.src !== video.thumbnailUrl) {
+  if (isPendingDownload) {
+    image.removeAttribute("src");
+    image.dataset.src = "";
+    image.alt = "";
+    image.classList.add("placeholder");
+  } else if (image.dataset.src !== video.thumbnailUrl) {
     image.dataset.src = video.thumbnailUrl;
     image.classList.add("placeholder");
     image.src = video.thumbnailUrl;
@@ -1568,7 +1584,7 @@ async function persistPlaybackProgressSnapshot(snapshot, options = {}) {
 
 async function playVideo(videoId) {
   const video = state.videos.get(videoId);
-  if (!video) {
+  if (!video || video.isPendingDownload) {
     return;
   }
 

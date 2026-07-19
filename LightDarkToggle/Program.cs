@@ -10,7 +10,7 @@ namespace LightDarkToggle;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         using var mutex = new Mutex(true, "LightDarkToggle.Singleton", out var createdNew);
         if (!createdNew)
@@ -109,6 +109,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _notifyIcon.ContextMenuStrip.Opening += (_, _) => RefreshMenuText(refreshBrightness: true, refreshDimming: true);
         _notifyIcon.ContextMenuStrip.Items.Add(_toggleMenuItem);
+        _notifyIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         _notifyIcon.ContextMenuStrip.Items.Add(_startupMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_timedModeMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_timedSeparatorMenuItem);
@@ -139,7 +140,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
 
         SystemEvents.DisplaySettingsChanged += SystemEventsOnDisplaySettingsChanged;
-
         ApplyTimedThemeIfEnabled(showBalloon: false);
         RefreshBrightnessControl();
         ApplyExtraDimming(_settings.ExtraDimmingPercent, saveSetting: false);

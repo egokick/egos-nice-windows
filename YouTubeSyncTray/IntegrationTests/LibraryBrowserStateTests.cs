@@ -27,4 +27,25 @@ public sealed class LibraryBrowserStateTests
         Assert.Null(counts.TargetCount);
         Assert.Null(counts.FailedCount);
     }
+
+    [Fact]
+    public void SetSyncTargets_ExposesUndownloadedVideoTitles_AndAdvancesTheLibraryVersion()
+    {
+        var state = new LibraryBrowserState([]);
+        var initialVersion = state.GetSnapshot(new AppSettings()).LibraryVersion;
+
+        state.SetSyncTargets(
+        [
+            new SyncService.WatchLaterVideo("pending01", "First pending video"),
+            new SyncService.WatchLaterVideo("pending02", "Second pending video")
+        ]);
+
+        Assert.Equal(
+            [
+                new LibraryBrowserState.PendingVideo("pending01", "First pending video"),
+                new LibraryBrowserState.PendingVideo("pending02", "Second pending video")
+            ],
+            state.GetPendingSyncVideosSnapshot());
+        Assert.True(state.GetSnapshot(new AppSettings()).LibraryVersion > initialVersion);
+    }
 }

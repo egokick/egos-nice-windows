@@ -1097,6 +1097,7 @@ select.settings-input {
 }
 
 .thumb-button {
+  position: relative;
   display: block;
   width: 100%;
   padding: 0;
@@ -1135,6 +1136,24 @@ select.settings-input {
 
 .thumbnail.placeholder {
   opacity: 0;
+}
+
+.video-card.is-pending-download .thumb-button {
+  cursor: default;
+}
+
+.pending-thumbnail-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: var(--text-soft);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
 }
 
 .index-pill {

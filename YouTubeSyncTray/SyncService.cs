@@ -83,12 +83,8 @@ internal sealed class SyncService
             settings.Normalize();
             var auth = await EnsureAuthAsync(settings, cancellationToken);
             auth = await PrepareManagedChromiumAuthAsync(settings, auth, progress: null, cancellationToken);
-            return await GetWatchLaterIdsAsync(
-                settings,
-                cancellationToken,
-                auth,
-                playlistItemsRange: null,
-                newestFirst: true);
+            var snapshot = await GetWatchLaterSnapshotAsync(settings, auth, cancellationToken);
+            return BuildMostRecentFirstWatchLaterIds(snapshot.Videos.Select(video => video.VideoId).ToList());
         }
         finally
         {
@@ -103,38 +99,41 @@ internal sealed class SyncService
     {
         settings.Normalize();
 
+        return (await GetWatchLaterSnapshotAsync(settings, auth, cancellationToken)).TotalCount;
+    }
+
+    private async Task<WatchLaterSnapshot> GetWatchLaterSnapshotAsync(
+        AppSettings settings,
+        AuthConfig auth,
+        CancellationToken cancellationToken)
+    {
+        settings.Normalize();
         var watchLaterUrl = BuildWatchLaterUrl(settings);
         var result = await RunYtDlpWithRetryAsync(
             settings,
             auth,
-            $"--flat-playlist --dump-single-json \"{watchLaterUrl}\"",
+            $"{BuildYouTubeExtractorArguments()} --flat-playlist --dump-single-json \"{watchLaterUrl}\"",
             cancellationToken);
 
         if (result.ExitCode != 0)
         {
             var effectiveAuth = _refreshedAuth ?? auth;
             throw new InvalidOperationException(BuildYtDlpFailureMessage(
-                "Could not fetch Watch Later total.",
+                "Could not inspect the current Watch Later playlist.",
                 effectiveAuth,
                 result));
         }
 
-        var jsonLine = result.StdOut
-            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-            .LastOrDefault(line => line.TrimStart().StartsWith("{", StringComparison.Ordinal));
-
-        if (string.IsNullOrWhiteSpace(jsonLine))
+        var snapshot = ParseWatchLaterSnapshotJson(result.StdOut);
+        if (!snapshot.HasValue)
         {
-            throw new InvalidOperationException("yt-dlp did not return playlist metadata.");
+            throw new InvalidOperationException("yt-dlp did not return valid Watch Later playlist metadata.");
         }
 
-        using var document = JsonDocument.Parse(jsonLine);
-        if (document.RootElement.TryGetProperty("playlist_count", out var countProperty) && countProperty.TryGetInt32(out var count))
-        {
-            return count;
-        }
-
-        throw new InvalidOperationException("Playlist count was not present in yt-dlp output.");
+        TrayLog.Write(
+            _paths,
+            $"Watch Later snapshot returned {snapshot.Value.Videos.Count} entries and total {snapshot.Value.TotalCount}.");
+        return snapshot.Value;
     }
 
     public async Task<SyncSummary> SyncRecentAsync(
@@ -143,7 +142,7 @@ internal sealed class SyncService
         CancellationToken cancellationToken,
         IProgress<int>? watchLaterTotalProgress = null,
         IProgress<IReadOnlyList<string>>? watchLaterOrderProgress = null,
-        IProgress<IReadOnlyList<string>>? syncTargetProgress = null)
+        IProgress<IReadOnlyList<WatchLaterVideo>>? syncTargetProgress = null)
     {
         await _operationGate.WaitAsync(cancellationToken);
         try
@@ -168,7 +167,7 @@ internal sealed class SyncService
         CancellationToken cancellationToken,
         IProgress<int>? watchLaterTotalProgress,
         IProgress<IReadOnlyList<string>>? watchLaterOrderProgress,
-        IProgress<IReadOnlyList<string>>? syncTargetProgress)
+        IProgress<IReadOnlyList<WatchLaterVideo>>? syncTargetProgress)
     {
         settings.Normalize();
         TrayLog.Write(_paths, $"SyncRecentAsync started. Requested count: {settings.DownloadCount}");
@@ -177,17 +176,10 @@ internal sealed class SyncService
         var accountScope = _accountScopeResolver.Resolve(settings);
         var clampedCount = Math.Clamp(settings.DownloadCount, 1, 5000);
         var watchLaterUrl = BuildWatchLaterUrl(settings);
-        progress?.Report("Refreshing Watch Later total...");
-        int? watchLaterTotalCount = null;
-        try
-        {
-            watchLaterTotalCount = await GetWatchLaterTotalAsync(settings, auth, cancellationToken);
-            watchLaterTotalProgress?.Report(watchLaterTotalCount.Value);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            TrayLog.Write(_paths, $"Could not refresh Watch Later total during sync: {ex.Message}");
-        }
+        progress?.Report("Refreshing the Watch Later snapshot...");
+        var watchLaterSnapshot = await GetWatchLaterSnapshotAsync(settings, auth, cancellationToken);
+        var watchLaterTotalCount = watchLaterSnapshot.TotalCount;
+        watchLaterTotalProgress?.Report(watchLaterTotalCount);
 
         progress?.Report("Checking downloaded videos before probing Watch Later...");
         var existingItemsBefore = _libraryCatalogStore.LoadOrScan(accountScope.FolderName, accountScope.DownloadsPath);
@@ -196,21 +188,19 @@ internal sealed class SyncService
             .ToHashSet(StringComparer.Ordinal);
         _knownLibraryScopeStore.UpdateScopeInventory(accountScope, existingIdsBefore.Count);
         TrayLog.Write(_paths, $"Existing on-disk video count before sync: {existingIdsBefore.Count}");
-        progress?.Report("Inspecting the most recent Watch Later items...");
-        var targetIds = await GetTargetWatchLaterIdsAsync(
-            settings,
-            clampedCount,
-            existingIdsBefore,
-            cancellationToken,
-            auth,
-            progress);
-        syncTargetProgress?.Report(targetIds);
-        if (targetIds.Count > 0)
+        var completeWatchLaterOrder = BuildMostRecentFirstWatchLaterIds(
+            watchLaterSnapshot.Videos.Select(video => video.VideoId).ToList());
+        if (completeWatchLaterOrder.Count > 0)
         {
-            watchLaterOrderProgress?.Report(BuildMostRecentFirstWatchLaterIds(targetIds));
+            watchLaterOrderProgress?.Report(completeWatchLaterOrder);
         }
 
-        var targetRangeCount = Math.Max(1, Math.Min(clampedCount, targetIds.Count));
+        var targetVideos = watchLaterSnapshot.Videos
+            .Take(clampedCount)
+            .ToList();
+        syncTargetProgress?.Report(targetVideos);
+        var targetIds = targetVideos.Select(video => video.VideoId).ToList();
+
         TrayLog.Write(_paths, $"Target id count: {targetIds.Count}");
         if (targetIds.Count == 0)
         {
@@ -234,22 +224,35 @@ internal sealed class SyncService
         TrayLog.Write(_paths, $"Missing target count before sync: {missingTargetIds.Count}. Archive entries repaired: {repairedArchiveCount}");
         progress?.Report($"{missingTargetIds.Count} of {targetIds.Count} Watch Later videos are not on disk. Starting yt-dlp...");
 
-        var args = new StringBuilder();
-        args.Append(BuildYouTubeExtractorArguments());
-        args.Append(" --progress --newline");
-        args.Append(BuildRetryArguments());
-        args.Append(" --retry-sleep http:exp=1:20 --retry-sleep fragment:exp=1:20");
-        args.Append(" --sleep-requests 1 --sleep-interval 2 --max-sleep-interval 8 --concurrent-fragments 4");
-        args.Append($" --playlist-items 1:{targetRangeCount}");
-        args.Append($" --download-archive \"{accountScope.ArchivePath}\"");
-        args.Append($" --paths home:\"{accountScope.DownloadsPath}\" --paths temp:\"{accountScope.DownloadsPath}\"");
-        args.Append(" --output \"%(playlist_index)03d - %(title).200B [%(id)s].%(ext)s\"");
-        args.Append(" --windows-filenames --continue --part --no-overwrites --no-mtime --write-info-json --write-thumbnail");
-        args.Append(BuildSubtitleDownloadArguments());
-        args.Append(BuildHighestQualityFormatArguments());
-        args.Append($" \"{watchLaterUrl}\"");
+        var targetBatchPath = Path.Combine(_paths.TempPath, $"sync-targets-{Guid.NewGuid():N}.txt");
+        AtomicFile.WriteAllText(
+            targetBatchPath,
+            string.Join(Environment.NewLine, targetIds.Select(BuildVideoUrl)) + Environment.NewLine,
+            retainJsonBackup: false);
 
-        var result = await RunYtDlpWithRetryAsync(settings, auth, args.ToString(), cancellationToken, progress);
+        ProcessResult result;
+        try
+        {
+            var args = new StringBuilder();
+            args.Append(BuildYouTubeExtractorArguments());
+            args.Append(" --progress --newline");
+            args.Append(BuildRetryArguments());
+            args.Append(" --retry-sleep http:exp=1:20 --retry-sleep fragment:exp=1:20");
+            args.Append(" --sleep-requests 1 --sleep-interval 2 --max-sleep-interval 8 --concurrent-fragments 4");
+            args.Append($" --batch-file \"{targetBatchPath}\"");
+            args.Append($" --download-archive \"{accountScope.ArchivePath}\"");
+            args.Append($" --paths home:\"{accountScope.DownloadsPath}\" --paths temp:\"{accountScope.DownloadsPath}\"");
+            args.Append(" --output \"%(title).200B [%(id)s].%(ext)s\"");
+            args.Append(" --windows-filenames --continue --part --no-overwrites --no-mtime --write-info-json --write-thumbnail");
+            args.Append(BuildSubtitleDownloadArguments());
+            args.Append(BuildHighestQualityFormatArguments());
+
+            result = await RunYtDlpWithRetryAsync(settings, auth, args.ToString(), cancellationToken, progress);
+        }
+        finally
+        {
+            TryDeleteFile(targetBatchPath);
+        }
         TrayLog.Write(_paths, $"yt-dlp sync exit code: {result.ExitCode}");
         string? nonFatalIssue = null;
         string? nonFatalIssueDetail = null;
@@ -359,15 +362,19 @@ internal sealed class SyncService
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
         var backupRoot = Path.Combine(_paths.TempPath, "redownload-backups", Guid.NewGuid().ToString("N"));
         List<RedownloadBackup> backups = [];
+        var backupCompleted = false;
+        var canDeleteBackupRoot = false;
 
         try
         {
             progress?.Report($"Preparing {normalizedIds.Count} video(s) for redownload...");
-            backups = BackupExistingVideoBundles(
+            BackupExistingVideoBundles(
                 normalizedIds
                     .Where(existingItemsById.ContainsKey)
                     .Select(id => existingItemsById[id]),
-                backupRoot);
+                backupRoot,
+                backups);
+            backupCompleted = true;
             RemoveArchiveEntries(accountScope.ArchivePath, normalizedIds);
 
             var args = new StringBuilder();
@@ -442,20 +449,49 @@ internal sealed class SyncService
             }
 
             TrayLog.Write(_paths, $"Redownload finished. Requested: {normalizedIds.Count}, downloaded: {downloadedIds.Count}, failed: {failedIds.Count}");
+            canDeleteBackupRoot = true;
             return new RedownloadSummary(
                 RequestedCount: normalizedIds.Count,
                 RedownloadedCount: downloadedIds.Count,
                 FailedCount: failedIds.Count,
                 NonFatalIssue: nonFatalIssue);
         }
-        catch
+        catch (Exception operationException)
         {
-            RestoreMissingBackups(accountScope, backups);
+            try
+            {
+                if (backupCompleted)
+                {
+                    RestoreMissingBackups(accountScope, backups);
+                }
+                else
+                {
+                    // Backup creation itself failed. Restore every move recorded so far,
+                    // including sidecars for a video whose media file never moved.
+                    RestoreBackups(backups);
+                }
+
+                canDeleteBackupRoot = true;
+            }
+            catch (Exception restoreException)
+            {
+                TrayLog.Write(
+                    _paths,
+                    $"Redownload failed and backup restoration also failed. Backups retained at {backupRoot}. Restore error: {restoreException}");
+                throw new AggregateException(
+                    $"Redownload failed and the previous files could not be fully restored. Recoverable backups were retained at {backupRoot}.",
+                    operationException,
+                    restoreException);
+            }
+
             throw;
         }
         finally
         {
-            TryDeleteDirectory(backupRoot);
+            if (canDeleteBackupRoot)
+            {
+                TryDeleteDirectory(backupRoot);
+            }
         }
     }
 
@@ -1082,12 +1118,18 @@ internal sealed class SyncService
         }
 
         return combined
-            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Any(LooksLikeAuthFailureLine);
     }
 
     private static bool LooksLikeAuthFailureLine(string line)
     {
+        if (!line.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase)
+            && !line.StartsWith("WARNING:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         if (line.Contains("Private video", StringComparison.OrdinalIgnoreCase)
             || line.Contains("requested content is not available", StringComparison.OrdinalIgnoreCase)
             || line.Contains("Video unavailable", StringComparison.OrdinalIgnoreCase)
@@ -1103,10 +1145,21 @@ internal sealed class SyncService
             || line.Contains("confirm you're not a bot", StringComparison.OrdinalIgnoreCase)
             || line.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase)
             || line.Contains("This video may be inappropriate", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("cookies", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("cookie database", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("failed to decrypt", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("dpapi", StringComparison.OrdinalIgnoreCase)
+            || LooksLikeCookieFailureLine(line);
+    }
+
+    private static bool LooksLikeCookieFailureLine(string line)
+    {
+        return line.Contains("failed to decrypt cookies", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("failed to decrypt cookie", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("dpapi cookie", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("failed to load cookies", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("failed to read cookies", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("unable to load cookies", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("unable to read cookies", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("cookies are expired", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("cookies have expired", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("cookies are invalid", StringComparison.OrdinalIgnoreCase)
             || line.Contains("could not copy chrome cookie database", StringComparison.OrdinalIgnoreCase)
             || line.Contains("could not copy edge cookie database", StringComparison.OrdinalIgnoreCase);
     }
@@ -1130,106 +1183,112 @@ internal sealed class SyncService
         }
     }
 
-    private async Task<List<string>> GetTargetWatchLaterIdsAsync(
-        AppSettings settings,
-        int downloadCount,
-        IReadOnlySet<string> existingVideoIds,
-        CancellationToken cancellationToken,
-        AuthConfig auth,
-        IProgress<string>? progress)
+    internal static WatchLaterSnapshot? ParseWatchLaterSnapshotJson(string output)
     {
-        List<string> lastIds = [];
-        foreach (var rangeEnd in BuildWatchLaterProbeRanges(downloadCount))
+        if (string.IsNullOrWhiteSpace(output))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            progress?.Report($"Inspecting the most recent {rangeEnd} Watch Later item(s)...");
-            TrayLog.Write(_paths, $"Inspecting Watch Later range 1:{rangeEnd}.");
-            var ids = await GetWatchLaterIdsAsync(settings, cancellationToken, auth, $"1:{rangeEnd}");
-            lastIds = ids;
-            if (ShouldStopWatchLaterProbe(rangeEnd, ids.Count))
-            {
-                return ids;
-            }
-
-            if (ids.Any(id => !existingVideoIds.Contains(id)))
-            {
-                TrayLog.Write(_paths, $"Found missing Watch Later items within range 1:{rangeEnd}.");
-            }
+            return null;
         }
 
-        return lastIds;
+        var jsonLine = output
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .LastOrDefault(line => line.StartsWith("{", StringComparison.Ordinal));
+        if (string.IsNullOrWhiteSpace(jsonLine))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(jsonLine);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var videos = new List<WatchLaterVideo>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            if (root.TryGetProperty("entries", out var entries) && entries.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var entry in entries.EnumerateArray())
+                {
+                    var video = ParseWatchLaterVideoElement(entry);
+                    if (video.HasValue && seen.Add(video.Value.VideoId))
+                    {
+                        videos.Add(video.Value);
+                    }
+                }
+            }
+
+            var totalCount = root.TryGetProperty("playlist_count", out var countProperty)
+                && countProperty.TryGetInt32(out var parsedCount)
+                ? Math.Max(parsedCount, 0)
+                : videos.Count;
+            totalCount = Math.Max(totalCount, videos.Count);
+            return new WatchLaterSnapshot(totalCount, videos);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
-    internal static bool ShouldStopWatchLaterProbe(int rangeEnd, int returnedCount) =>
-        returnedCount == 0 || returnedCount < rangeEnd;
-
-    internal static IReadOnlyList<int> BuildWatchLaterProbeRanges(int downloadCount)
+    internal static WatchLaterVideo? ParseWatchLaterVideoJson(string line)
     {
-        var clampedCount = Math.Clamp(downloadCount, 1, 5000);
-        var ranges = new List<int>();
-        foreach (var candidate in new[] { 10, 50, 100, 250, 500, 1000, 2000, 5000 })
+        if (string.IsNullOrWhiteSpace(line))
         {
-            if (candidate >= clampedCount)
-            {
-                break;
-            }
-
-            ranges.Add(candidate);
+            return null;
         }
 
-        if (ranges.Count == 0 || ranges[^1] != clampedCount)
+        try
         {
-            ranges.Add(clampedCount);
+            using var document = JsonDocument.Parse(line);
+            return ParseWatchLaterVideoElement(document.RootElement);
         }
-
-        return ranges;
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
-    private async Task<List<string>> GetWatchLaterIdsAsync(
-        AppSettings settings,
-        CancellationToken cancellationToken,
-        AuthConfig auth,
-        string? playlistItemsRange,
-        bool newestFirst = false)
+    private static WatchLaterVideo? ParseWatchLaterVideoElement(JsonElement root)
     {
-        var watchLaterUrl = BuildWatchLaterUrl(settings);
-        var playlistItemsArg = string.IsNullOrWhiteSpace(playlistItemsRange)
-            ? string.Empty
-            : $" --playlist-items {playlistItemsRange}";
-        var result = await RunYtDlpWithRetryAsync(
-            new AppSettings
-            {
-                DownloadCount = settings.DownloadCount,
-                BrowserCookies = auth.Browser,
-                BrowserProfile = auth.Profile,
-                SelectedBrowserAccountKey = settings.SelectedBrowserAccountKey,
-                SelectedYouTubeAccountKey = settings.SelectedYouTubeAccountKey
-            },
-            auth,
-            $"{BuildYouTubeExtractorArguments()} --flat-playlist{playlistItemsArg} --print \"%(id)s\" \"{watchLaterUrl}\"",
-            cancellationToken);
-
-        if (result.ExitCode != 0)
+        string? videoId;
+        string? title;
+        if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() >= 2)
         {
-            var effectiveAuth = _refreshedAuth ?? auth;
-            throw new InvalidOperationException(BuildYtDlpFailureMessage(
-                "Could not inspect the current Watch Later items.",
-                effectiveAuth,
-                result));
+            videoId = root[0].ValueKind == JsonValueKind.String ? root[0].GetString()?.Trim() : null;
+            title = root[1].ValueKind == JsonValueKind.String ? root[1].GetString()?.Trim() : null;
+        }
+        else if (root.ValueKind == JsonValueKind.Object)
+        {
+            videoId = root.TryGetProperty("id", out var idProperty) && idProperty.ValueKind == JsonValueKind.String
+                ? idProperty.GetString()?.Trim()
+                : null;
+            title = root.TryGetProperty("title", out var titleProperty) && titleProperty.ValueKind == JsonValueKind.String
+                ? titleProperty.GetString()?.Trim()
+                : null;
+        }
+        else
+        {
+            return null;
         }
 
-        var ids = result.StdOut
-            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(line => line.Length >= 6 && !line.StartsWith("[", StringComparison.Ordinal))
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-        if (newestFirst)
+        if (string.IsNullOrWhiteSpace(videoId) || videoId.Length < 6)
         {
-            ids = [.. BuildMostRecentFirstWatchLaterIds(ids)];
+            return null;
         }
 
-        TrayLog.Write(_paths, $"GetWatchLaterIdsAsync returned {ids.Count} ids.");
-        return ids;
+        return new WatchLaterVideo(videoId, string.IsNullOrWhiteSpace(title) ? "Untitled video" : title);
+    }
+
+    private static IReadOnlyList<WatchLaterVideo> BuildMostRecentFirstWatchLaterVideos(
+        IReadOnlyList<WatchLaterVideo> ytDlpOrderedVideos)
+    {
+        var orderedIds = BuildMostRecentFirstWatchLaterIds(ytDlpOrderedVideos.Select(video => video.VideoId).ToList());
+        var titlesById = ytDlpOrderedVideos.ToDictionary(video => video.VideoId, video => video.Title, StringComparer.Ordinal);
+        return orderedIds.Select(videoId => new WatchLaterVideo(videoId, titlesById[videoId])).ToList();
     }
 
     internal static IReadOnlyList<string> BuildMostRecentFirstWatchLaterIds(IReadOnlyList<string> ytDlpOrderedIds)
@@ -1275,11 +1334,11 @@ internal sealed class SyncService
     private static string BuildVideoUrl(string videoId) =>
         $"https://www.youtube.com/watch?v={Uri.EscapeDataString(videoId)}";
 
-    private static List<RedownloadBackup> BackupExistingVideoBundles(
+    private static void BackupExistingVideoBundles(
         IEnumerable<VideoItem> items,
-        string backupRoot)
+        string backupRoot,
+        ICollection<RedownloadBackup> backups)
     {
-        var backups = new List<RedownloadBackup>();
         foreach (var item in items)
         {
             var sourcePaths = GetBundleFilePaths(item);
@@ -1288,26 +1347,33 @@ internal sealed class SyncService
                 continue;
             }
 
-            var itemBackupRoot = Path.Combine(backupRoot, item.VideoId);
-            Directory.CreateDirectory(itemBackupRoot);
-            var backedUpFiles = new List<RedownloadBackupFile>();
-            foreach (var sourcePath in sourcePaths)
-            {
-                var destinationPath = Path.Combine(itemBackupRoot, Path.GetFileName(sourcePath));
-                var suffix = 1;
-                while (File.Exists(destinationPath))
-                {
-                    destinationPath = Path.Combine(itemBackupRoot, $"{suffix++}_{Path.GetFileName(sourcePath)}");
-                }
+            BackupFileBundle(item.VideoId, sourcePaths, backupRoot, backups);
+        }
+    }
 
-                File.Move(sourcePath, destinationPath);
-                backedUpFiles.Add(new RedownloadBackupFile(sourcePath, destinationPath));
+    internal static void BackupFileBundle(
+        string videoId,
+        IReadOnlyList<string> sourcePaths,
+        string backupRoot,
+        ICollection<RedownloadBackup> backups)
+    {
+        var itemBackupRoot = Path.Combine(backupRoot, videoId);
+        Directory.CreateDirectory(itemBackupRoot);
+        var backedUpFiles = new List<RedownloadBackupFile>();
+        backups.Add(new RedownloadBackup(videoId, backedUpFiles));
+        foreach (var sourcePath in sourcePaths)
+        {
+            var destinationPath = Path.Combine(itemBackupRoot, Path.GetFileName(sourcePath));
+            var suffix = 1;
+            while (File.Exists(destinationPath))
+            {
+                destinationPath = Path.Combine(itemBackupRoot, $"{suffix++}_{Path.GetFileName(sourcePath)}");
             }
 
-            backups.Add(new RedownloadBackup(item.VideoId, backedUpFiles));
+            var backupFile = new RedownloadBackupFile(sourcePath, destinationPath);
+            backedUpFiles.Add(backupFile);
+            File.Move(sourcePath, destinationPath);
         }
-
-        return backups;
     }
 
     private void RestoreMissingBackups(
@@ -1342,7 +1408,7 @@ internal sealed class SyncService
         _knownLibraryScopeStore.UpdateScopeInventory(accountScope, restoredItems.Count, DateTimeOffset.UtcNow);
     }
 
-    private static void RestoreBackups(IEnumerable<RedownloadBackup> backups)
+    internal static void RestoreBackups(IEnumerable<RedownloadBackup> backups)
     {
         foreach (var backup in backups)
         {
@@ -1481,6 +1547,23 @@ internal sealed class SyncService
         }
     }
 
+    private static void TryDeleteFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(path);
+        }
+        catch
+        {
+            // Best-effort cleanup for a unique temporary target batch.
+        }
+    }
+
     private static int RemoveArchiveEntries(string archivePath, IEnumerable<string> videoIds)
     {
         if (!File.Exists(archivePath))
@@ -1598,6 +1681,10 @@ internal sealed class SyncService
         string? NonFatalIssueDetail,
         string? LogPath);
 
+    internal readonly record struct WatchLaterVideo(string VideoId, string Title);
+
+    internal readonly record struct WatchLaterSnapshot(int TotalCount, IReadOnlyList<WatchLaterVideo> Videos);
+
     internal readonly record struct RedownloadSummary(
         int RequestedCount,
         int RedownloadedCount,
@@ -1606,7 +1693,7 @@ internal sealed class SyncService
 
     internal readonly record struct NonFatalSyncIssue(string Summary, string? Detail);
 
-    private readonly record struct RedownloadBackupFile(string SourcePath, string BackupPath);
+    internal readonly record struct RedownloadBackupFile(string SourcePath, string BackupPath);
 
-    private readonly record struct RedownloadBackup(string VideoId, IReadOnlyList<RedownloadBackupFile> Files);
+    internal readonly record struct RedownloadBackup(string VideoId, IReadOnlyList<RedownloadBackupFile> Files);
 }

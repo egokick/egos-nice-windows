@@ -187,12 +187,11 @@ internal sealed class LibraryVideoStateStore
         var path = GetStatePath(scopeFolderName);
         try
         {
-            if (!File.Exists(path))
+            if (!AtomicFile.TryReadJson<VideoStateFile>(path, out var file))
             {
                 return new VideoStateFile();
             }
 
-            var file = JsonSerializer.Deserialize<VideoStateFile>(File.ReadAllText(path)) ?? new VideoStateFile();
             Normalize(file);
             return file;
         }
@@ -206,7 +205,7 @@ internal sealed class LibraryVideoStateStore
     {
         Normalize(file);
         Directory.CreateDirectory(_stateRootPath);
-        File.WriteAllText(
+        AtomicFile.WriteAllText(
             GetStatePath(scopeFolderName),
             JsonSerializer.Serialize(file, _jsonOptions));
     }

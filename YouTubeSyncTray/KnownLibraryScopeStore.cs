@@ -219,12 +219,11 @@ internal sealed class KnownLibraryScopeStore
     {
         try
         {
-            if (!File.Exists(_storePath))
+            if (!AtomicFile.TryReadJson<ScopeStoreFile>(_storePath, out var file, _jsonOptions))
             {
                 return new ScopeStoreFile();
             }
 
-            var file = JsonSerializer.Deserialize<ScopeStoreFile>(File.ReadAllText(_storePath), _jsonOptions) ?? new ScopeStoreFile();
             Normalize(file);
             RefreshAvailability(file);
             return file;
@@ -239,7 +238,7 @@ internal sealed class KnownLibraryScopeStore
     {
         Normalize(file);
         Directory.CreateDirectory(Path.GetDirectoryName(_storePath)!);
-        File.WriteAllText(_storePath, JsonSerializer.Serialize(file, _jsonOptions));
+        AtomicFile.WriteAllText(_storePath, JsonSerializer.Serialize(file, _jsonOptions));
     }
 
     private static void Normalize(ScopeStoreFile file)

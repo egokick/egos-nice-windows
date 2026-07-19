@@ -63,12 +63,11 @@ internal sealed class LibraryCatalogStore
         try
         {
             var path = GetCatalogPath(scopeFolderName);
-            if (!File.Exists(path))
+            if (!AtomicFile.TryReadJson<CatalogFile>(path, out var file, _jsonOptions))
             {
                 return [];
             }
 
-            var file = JsonSerializer.Deserialize<CatalogFile>(File.ReadAllText(path), _jsonOptions) ?? new CatalogFile();
             var items = file.Videos
                 .Where(item => item is not null)
                 .Select(item => item!.ToVideoItem())
@@ -101,7 +100,7 @@ internal sealed class LibraryCatalogStore
             Videos = items.Select(CatalogVideoItem.FromVideoItem).ToList()
         };
 
-        File.WriteAllText(
+        AtomicFile.WriteAllText(
             GetCatalogPath(scopeFolderName),
             JsonSerializer.Serialize(file, _jsonOptions));
     }

@@ -581,7 +581,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         _state.SetVideoIds(items.Select(item => item.VideoId).ToList());
         _knownLibraryScopeStore.UpdateScopeInventory(accountScope, items.Count);
 
-        return items
+        var downloadedVideos = items
             .Select(item =>
             {
                 var videoState = videoStates.TryGetValue(item.VideoId, out var state)
@@ -593,14 +593,38 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                     item.UploaderName,
                     item.GetDisplayIndex(watchLaterOrder),
                     $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/thumbnail?v={GetThumbnailRevision(item)}",
-                    $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/stream",
-                    $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/captions",
+                    $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/stream?v={GetFileRevisionToken(item.VideoPath)}",
+                    $"/api/videos/{Uri.EscapeDataString(item.VideoId)}/captions?v={GetCaptionSetRevision(item.CaptionTracks)}",
                     videoState.PlaybackPositionSeconds,
                     videoState.PlaybackProgress,
                     videoState.IsWatched,
-                    videoState.IsHidden);
+                    videoState.IsHidden,
+                    IsPendingDownload: false);
             })
             .ToList();
+
+        var downloadedIds = downloadedVideos
+            .Select(video => video.VideoId)
+            .ToHashSet(StringComparer.Ordinal);
+        var pendingVideos = _state.GetPendingSyncVideosSnapshot()
+            .Where(video => !downloadedIds.Contains(video.VideoId))
+            .Select(video => new LibraryVideoDto(
+                video.VideoId,
+                video.Title,
+                string.Empty,
+                watchLaterOrder.TryGetValue(video.VideoId, out var playlistIndex) && playlistIndex > 0
+                    ? playlistIndex.ToString("000")
+                    : "---",
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                null,
+                null,
+                false,
+                false,
+                IsPendingDownload: true));
+
+        return downloadedVideos.Concat(pendingVideos).ToList();
     }
 
     private async Task<IResult> GetThumbnailAsync(HttpContext context, string videoId, CancellationToken cancellationToken)
@@ -653,7 +677,7 @@ internal sealed class LibraryWebServer : IAsyncDisposable
                     track.TrackKey,
                     track.Label,
                     track.LanguageCode,
-                    $"/api/videos/{Uri.EscapeDataString(videoId)}/captions/{Uri.EscapeDataString(track.TrackKey)}/file"))
+                    $"/api/videos/{Uri.EscapeDataString(videoId)}/captions/{Uri.EscapeDataString(track.TrackKey)}/file?v={GetFileRevisionToken(track.SourcePath)}"))
                 .ToList(),
             _jsonOptions);
     }
@@ -827,6 +851,31 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         {
             return DateTime.UtcNow.Ticks;
         }
+    }
+
+    internal static string GetFileRevisionToken(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists
+                ? $"{info.Length:x}-{info.LastWriteTimeUtc.Ticks:x}"
+                : "missing";
+        }
+        catch
+        {
+            return "unknown";
+        }
+    }
+
+    private static string GetCaptionSetRevision(IReadOnlyList<VideoCaptionTrack> tracks)
+    {
+        var seed = string.Join(
+            "|",
+            tracks
+                .OrderBy(track => track.TrackKey, StringComparer.OrdinalIgnoreCase)
+                .Select(track => $"{track.TrackKey}:{GetFileRevisionToken(track.SourcePath)}"));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(seed)))[..16].ToLowerInvariant();
     }
 
     private static string GetVideoContentType(string path)
@@ -1185,7 +1234,8 @@ internal sealed class LibraryWebServer : IAsyncDisposable
         double? PlaybackPositionSeconds,
         double? PlaybackProgress,
         bool IsWatched,
-        bool IsHidden);
+        bool IsHidden,
+        bool IsPendingDownload);
 
     private sealed record CaptionTrackDto(
         string TrackKey,

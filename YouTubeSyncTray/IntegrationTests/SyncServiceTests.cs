@@ -49,28 +49,52 @@ public sealed class SyncServiceTests
         Assert.DoesNotContain("10", arguments, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData(1, new[] { 1 })]
-    [InlineData(10, new[] { 10 })]
-    [InlineData(25, new[] { 10, 25 })]
-    [InlineData(100, new[] { 10, 50, 100 })]
-    [InlineData(150, new[] { 10, 50, 100, 150 })]
-    [InlineData(5000, new[] { 10, 50, 100, 250, 500, 1000, 2000, 5000 })]
-    public void BuildWatchLaterProbeRanges_ExpandsFromRecentItems(int downloadCount, int[] expected)
+    [Fact]
+    public void ParseWatchLaterVideoJson_ReadsIdAndTitleWithoutDelimiterAmbiguity()
     {
-        Assert.Equal(expected, SyncService.BuildWatchLaterProbeRanges(downloadCount));
+        var video = SyncService.ParseWatchLaterVideoJson(
+            """["abc123XYZ","A title with\ttabs | pipes and unicode ✓"]""");
+
+        Assert.Equal("abc123XYZ", video?.VideoId);
+        Assert.Equal("A title with\ttabs | pipes and unicode ✓", video?.Title);
     }
 
     [Theory]
-    [InlineData(10, 10, false)]
-    [InlineData(50, 10, true)]
-    [InlineData(50, 0, true)]
-    public void ShouldStopWatchLaterProbe_OnlyStopsForEmptyOrShortRanges(
-        int rangeEnd,
-        int returnedCount,
-        bool expected)
+    [InlineData("WARNING: retrying")]
+    [InlineData("{not-json}")]
+    [InlineData("{\"title\":\"Missing ID\"}")]
+    public void ParseWatchLaterVideoJson_IgnoresNonVideoOutput(string output)
     {
-        Assert.Equal(expected, SyncService.ShouldStopWatchLaterProbe(rangeEnd, returnedCount));
+        Assert.Null(SyncService.ParseWatchLaterVideoJson(output));
+    }
+
+    [Fact]
+    public void ParseWatchLaterSnapshotJson_ProvidesTotalOrderTitlesAndDeduplicatedTargets()
+    {
+        const string output = """
+            WARNING: a harmless diagnostic before the JSON
+            {"playlist_count":4,"entries":[{"id":"newest01","title":"Newest"},{"id":"middle01","title":"How to Sign in"},{"id":"middle01","title":"Duplicate"},{"id":"oldest01","title":"Oldest"}]}
+            """;
+
+        var snapshot = SyncService.ParseWatchLaterSnapshotJson(output);
+
+        Assert.Equal(4, snapshot?.TotalCount);
+        Assert.Equal(
+            [
+                new SyncService.WatchLaterVideo("newest01", "Newest"),
+                new SyncService.WatchLaterVideo("middle01", "How to Sign in"),
+                new SyncService.WatchLaterVideo("oldest01", "Oldest")
+            ],
+            snapshot?.Videos);
+    }
+
+    [Fact]
+    public void ParseWatchLaterSnapshotJson_FallsBackToEntryCountWhenPlaylistCountIsMissing()
+    {
+        var snapshot = SyncService.ParseWatchLaterSnapshotJson(
+            "{\"entries\":[{\"id\":\"video001\",\"title\":\"One\"},{\"id\":\"video002\",\"title\":\"Two\"}]}");
+
+        Assert.Equal(2, snapshot?.TotalCount);
     }
 
     [Theory]
@@ -86,6 +110,36 @@ public sealed class SyncServiceTests
     public void LooksLikeAuthFailureOutput_DoesNotMatchOrdinaryProgress()
     {
         Assert.False(SyncService.LooksLikeAuthFailureOutput("[download]  52.4% of 123.45MiB at 3.41MiB/s ETA 00:16"));
+    }
+
+    [Theory]
+    [InlineData("{\"title\":\"A documentary about browser cookies\"}")]
+    [InlineData("[download] Destination: Cookies and Cream [abc123].mp4")]
+    [InlineData("[info] Successfully loaded 42 cookies")]
+    [InlineData("[info] Cookie Database Explained")]
+    public void LooksLikeAuthFailureOutput_DoesNotMatchOrdinaryCookieMentions(string output)
+    {
+        Assert.False(SyncService.LooksLikeAuthFailureOutput(output));
+    }
+
+    [Theory]
+    [InlineData("[\"abc123XYZ\",\"How to Sign in to a New Laptop\"]")]
+    [InlineData("[download] Destination: Please Sign In [abc123XYZ].mp4")]
+    [InlineData("[info] A documentary: confirm you're not a bot")]
+    [InlineData("{\"title\":\"This playlist does not exist: an investigation\"}")]
+    public void LooksLikeAuthFailureOutput_DoesNotMatchAuthPhrasesInTitlesOrProgress(string output)
+    {
+        Assert.False(SyncService.LooksLikeAuthFailureOutput(output));
+    }
+
+    [Theory]
+    [InlineData("ERROR: Failed to load cookies from C:\\temp\\cookies.txt")]
+    [InlineData("ERROR: unable to read cookies")]
+    [InlineData("ERROR: cookies have expired")]
+    [InlineData("ERROR: could not copy chrome cookie database")]
+    public void LooksLikeAuthFailureOutput_MatchesSpecificCookieFailures(string output)
+    {
+        Assert.True(SyncService.LooksLikeAuthFailureOutput(output));
     }
 
     [Fact]
@@ -167,5 +221,49 @@ public sealed class SyncServiceTests
             "Some videos were skipped because YouTube rejected yt-dlp's media download URLs even though the playlist metadata was accessible.",
             issue.Summary);
         Assert.Equal("ERROR: unable to download video data: HTTP Error 403: Forbidden", issue.Detail);
+    }
+
+    [Fact]
+    public void BackupFileBundle_TracksPartialMovesSoTheyCanBeRestored()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"YouTubeSyncTrayTests-{Guid.NewGuid():N}");
+        var downloadsRoot = Path.Combine(testRoot, "downloads");
+        var backupRoot = Path.Combine(testRoot, "backup");
+        var firstPath = Path.Combine(downloadsRoot, "video123.mp4");
+        var lockedPath = Path.Combine(downloadsRoot, "video123.info.json");
+        Directory.CreateDirectory(downloadsRoot);
+        File.WriteAllText(firstPath, "original video");
+        File.WriteAllText(lockedPath, "original metadata");
+        var backups = new List<SyncService.RedownloadBackup>();
+
+        try
+        {
+            using (var lockedFile = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                Assert.ThrowsAny<IOException>(() =>
+                    SyncService.BackupFileBundle(
+                        "video123",
+                        [firstPath, lockedPath],
+                        backupRoot,
+                        backups));
+            }
+
+            Assert.False(File.Exists(firstPath));
+            Assert.True(File.Exists(lockedPath));
+            Assert.Single(backups);
+            Assert.Equal(2, backups[0].Files.Count);
+
+            SyncService.RestoreBackups(backups);
+
+            Assert.Equal("original video", File.ReadAllText(firstPath));
+            Assert.Equal("original metadata", File.ReadAllText(lockedPath));
+        }
+        finally
+        {
+            if (Directory.Exists(testRoot))
+            {
+                Directory.Delete(testRoot, recursive: true);
+            }
+        }
     }
 }

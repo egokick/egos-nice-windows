@@ -27,19 +27,19 @@ internal sealed class CookieExportMetadataStore
     {
         var metadata = new CookieExportMetadata(browser, NormalizeProfile(profile), DateTimeOffset.UtcNow);
         Directory.CreateDirectory(Path.GetDirectoryName(_paths.CookiesMetadataPath)!);
-        File.WriteAllText(_paths.CookiesMetadataPath, JsonSerializer.Serialize(metadata));
+        AtomicFile.WriteAllText(_paths.CookiesMetadataPath, JsonSerializer.Serialize(metadata));
     }
 
     public CookieExportMetadata? Load()
     {
         try
         {
-            if (!File.Exists(_paths.CookiesMetadataPath))
+            if (!AtomicFile.TryReadJson<CookieExportMetadata>(_paths.CookiesMetadataPath, out var metadata))
             {
                 return null;
             }
 
-            return JsonSerializer.Deserialize<CookieExportMetadata>(File.ReadAllText(_paths.CookiesMetadataPath));
+            return metadata;
         }
         catch
         {
