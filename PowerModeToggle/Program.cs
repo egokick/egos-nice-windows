@@ -15,13 +15,38 @@ internal static class Program
             return;
         }
 
+#if DESKTOP_POWER_TOGGLE
+        if (args.Length == 2
+            && string.Equals(args[0], "--probe-power-state", StringComparison.OrdinalIgnoreCase))
+        {
+            var state = PowerProfileService.ReadState();
+            File.WriteAllText(args[1], JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
+
+        if (args.Length == 3
+            && string.Equals(args[0], "--apply-power-profile", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!Enum.TryParse<LaptopPowerMode>(args[1], ignoreCase: true, out var requestedMode))
+            {
+                throw new ArgumentException($"Unknown power profile '{args[1]}'.", nameof(args));
+            }
+
+            using var broker = new PowerProfileBroker();
+            var result = broker.ApplyAsync(requestedMode).GetAwaiter().GetResult();
+            File.WriteAllText(args[2], JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+            Environment.ExitCode = result.Success ? 0 : 1;
+            return;
+        }
+#endif
+
         if (args.Length == 2 && string.Equals(args[0], "--render-icon-preview", StringComparison.OrdinalIgnoreCase))
         {
             TrayIconFactory.RenderPreview(args[1]);
             return;
         }
 
-        using var mutex = new Mutex(true, "PowerModeToggle.Singleton", out var createdNew);
+        using var mutex = new Mutex(true, AppIdentity.SingletonMutex, out var createdNew);
         if (!createdNew)
         {
             return;
@@ -112,7 +137,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             Icon = _lowPowerIcon,
             Visible = true,
-            Text = "PowerModeToggle: LOW power",
+            Text = $"{AppIdentity.DisplayName}: LOW power",
             ContextMenuStrip = menu
         };
         _notifyIcon.MouseClick += (_, e) =>
@@ -208,8 +233,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             SettingsStore.Save(_settings);
             _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
             ShowInfo(_startupMenuItem.Checked
-                ? "PowerModeToggle will start when you sign in."
-                : "PowerModeToggle will no longer start when you sign in.");
+                ? $"{AppIdentity.DisplayName} will start when you sign in."
+                : $"{AppIdentity.DisplayName} will no longer start when you sign in.");
         }
         catch (Exception ex)
         {
@@ -319,8 +344,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     if (result.Success)
                     {
                         ShowInfo(targetMode == LaptopPowerMode.HighPower
-                            ? $"{reason}: High power enabled (120 Hz, Performance)."
-                            : $"{reason}: Low power enabled (60 Hz, Eco/Silent)." );
+                            ? $"{reason}: High power enabled ({AppIdentity.HighProfileDescription})."
+                            : $"{reason}: Low power enabled ({AppIdentity.LowProfileDescription})." );
                     }
                     else
                     {
@@ -357,8 +382,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             : "Switching to LOW power...";
         _switchMenuItem.Enabled = false;
         _notifyIcon.Text = targetMode == LaptopPowerMode.HighPower
-            ? "PowerModeToggle: switching to HIGH"
-            : "PowerModeToggle: switching to LOW";
+            ? $"{AppIdentity.DisplayName}: switching to HIGH"
+            : $"{AppIdentity.DisplayName}: switching to LOW";
     }
 
     private void StartSwitchingAnimation(LaptopPowerMode targetMode)
@@ -413,8 +438,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _notifyIcon.Icon = highPower ? _highPowerIcon : _lowPowerIcon;
         }
         _notifyIcon.Text = highPower
-            ? "PowerModeToggle: HIGH power (click for LOW)"
-            : "PowerModeToggle: LOW power (click for HIGH)";
+            ? $"{AppIdentity.DisplayName}: HIGH power (click for LOW)"
+            : $"{AppIdentity.DisplayName}: LOW power (click for HIGH)";
         RefreshPowerSourceText();
     }
 
@@ -430,19 +455,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void ShowInfo(string message)
     {
-        _notifyIcon.ShowBalloonTip(1800, "PowerModeToggle", message, ToolTipIcon.Info);
+        _notifyIcon.ShowBalloonTip(1800, AppIdentity.DisplayName, message, ToolTipIcon.Info);
     }
 
     private void ShowError(string message)
     {
-        _notifyIcon.ShowBalloonTip(3500, "PowerModeToggle", message, ToolTipIcon.Error);
+        _notifyIcon.ShowBalloonTip(3500, AppIdentity.DisplayName, message, ToolTipIcon.Error);
     }
 }
 
 internal static class StartupService
 {
     private const string RunRegistryPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string AppName = "PowerModeToggle";
+    private const string AppName = AppIdentity.DisplayName;
 
     public static bool IsRunAtStartupEnabled()
     {
@@ -480,7 +505,7 @@ internal static class SettingsStore
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly string SettingsDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "PowerModeToggle");
+        AppIdentity.SettingsFolder);
     private static readonly string SettingsPath = Path.Combine(SettingsDirectory, "settings.json");
 
     public static AppSettings Load()

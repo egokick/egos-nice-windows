@@ -13,7 +13,7 @@ namespace PowerModeToggle;
 internal sealed class PowerProfileBroker : IDisposable
 {
     private readonly SemaphoreSlim _requestLock = new(1, 1);
-    private readonly string _pipeName = $"PowerModeToggle.PowerProfile.{Environment.ProcessId}.{Guid.NewGuid():N}";
+    private readonly string _pipeName = $"{AppIdentity.PowerHelperPipePrefix}.{Environment.ProcessId}.{Guid.NewGuid():N}";
 
     private NamedPipeServerStream? _pipe;
     private StreamReader? _reader;
@@ -131,7 +131,7 @@ internal sealed class PowerProfileBroker : IDisposable
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
 
         var executablePath = Environment.ProcessPath
-                             ?? throw new InvalidOperationException("The PowerModeToggle executable path is unavailable.");
+                             ?? throw new InvalidOperationException($"The {AppIdentity.DisplayName} executable path is unavailable.");
 
         try
         {
