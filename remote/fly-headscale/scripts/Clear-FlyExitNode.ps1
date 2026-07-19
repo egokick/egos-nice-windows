@@ -13,7 +13,8 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Tailscale refused to disable the exit node.'
 }
 $prefs = ((& $tailscale debug prefs 2>$null) -join [Environment]::NewLine) | ConvertFrom-Json
-if (-not [string]::IsNullOrWhiteSpace([string]$prefs.ExitNodeIP)) {
+if (-not [string]::IsNullOrWhiteSpace([string]$prefs.ExitNodeID) -or
+    -not [string]::IsNullOrWhiteSpace([string]$prefs.ExitNodeIP)) {
     throw 'The exit node remains enabled.'
 }
 Write-Host 'Exit-node routing is disabled.'
