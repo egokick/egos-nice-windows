@@ -1,0 +1,19 @@
+{
+	admin off
+	auto_https disable_redirects
+}
+
+https://headscale.stayactive.test {
+	# The private CA key is created and retained only on the encrypted Fly
+	# volume. Client setup pins the exported public root certificate by SHA-256.
+	tls internal
+
+	@administrative path /api /api/* /metrics /metrics/* /debug /debug/*
+	handle @administrative {
+		respond "Not found" 404
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8080
+	}
+}

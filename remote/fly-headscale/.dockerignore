@@ -1,0 +1,13 @@
+client/
+README.md
+*.user
+bin/
+obj/
+.secrets/
+**/.secrets/
+**/.env
+**/.env.*
+**/*.key
+**/*.p12
+**/*.pfx
+**/*private*
