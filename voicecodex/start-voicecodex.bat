@@ -1,4 +1,5 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-dotnet run --project voicecodex.csproj
+if not defined DOTNET_EXE set "DOTNET_EXE=dotnet"
+"%DOTNET_EXE%" run --project voicecodex.csproj

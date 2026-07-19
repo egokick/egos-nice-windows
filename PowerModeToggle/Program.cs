@@ -15,7 +15,17 @@ internal static class Program
             return;
         }
 
-#if DESKTOP_POWER_TOGGLE
+        if (args.Length == 2
+            && string.Equals(args[0], "--probe-machine-profile", StringComparison.OrdinalIgnoreCase))
+        {
+            File.WriteAllText(
+                args[1],
+                JsonSerializer.Serialize(
+                    PowerProfileService.Machine,
+                    new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
+
         if (args.Length == 2
             && string.Equals(args[0], "--probe-power-state", StringComparison.OrdinalIgnoreCase))
         {
@@ -38,7 +48,6 @@ internal static class Program
             Environment.ExitCode = result.Success ? 0 : 1;
             return;
         }
-#endif
 
         if (args.Length == 2 && string.Equals(args[0], "--render-icon-preview", StringComparison.OrdinalIgnoreCase))
         {
@@ -83,6 +92,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     public TrayApplicationContext()
     {
+        StartupService.MigrateExistingEntry();
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = SettingsStore.Load();
         _currentMode = _settings.LastHighPowerMode ? LaptopPowerMode.HighPower : LaptopPowerMode.LowPower;
@@ -426,17 +436,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.Text = highPower
             ? $"{AppIdentity.DisplayName}: HIGH power (click for LOW)"
             : $"{AppIdentity.DisplayName}: LOW power (click for HIGH)";
-        RefreshPowerSourceText();
-    }
-
-    private void RefreshPowerSourceText()
-    {
-        _powerSourceMenuItem.Text = _lastPowerSource switch
-        {
-            PowerLineStatus.Online => "Power source: Plugged in",
-            PowerLineStatus.Offline => "Power source: Battery",
-            _ => "Power source: Unknown"
-        };
     }
 
     private void ShowInfo(string message)
@@ -454,6 +453,21 @@ internal static class StartupService
 {
     private const string RunRegistryPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string AppName = AppIdentity.DisplayName;
+    private const string LegacyDesktopAppName = "PowerModeToggleDesktop";
+
+    public static void MigrateExistingEntry()
+    {
+        using var key = Registry.CurrentUser.CreateSubKey(RunRegistryPath);
+        var legacyValue = key.GetValue(LegacyDesktopAppName) as string;
+        var unifiedValue = key.GetValue(AppName) as string;
+        if (string.IsNullOrWhiteSpace(legacyValue) && string.IsNullOrWhiteSpace(unifiedValue))
+        {
+            return;
+        }
+
+        key.SetValue(AppName, $"\"{Application.ExecutablePath}\"", RegistryValueKind.String);
+        key.DeleteValue(LegacyDesktopAppName, throwOnMissingValue: false);
+    }
 
     public static bool IsRunAtStartupEnabled()
     {

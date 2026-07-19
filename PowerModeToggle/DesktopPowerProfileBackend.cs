@@ -7,13 +7,7 @@ using Microsoft.Win32;
 
 namespace PowerModeToggle;
 
-internal enum LaptopPowerMode
-{
-    LowPower,
-    HighPower
-}
-
-internal sealed record PowerProfileState(
+internal sealed record DesktopPowerProfileState(
     int? RefreshRateHz,
     int? MonitorBrightnessPercent,
     double? NvidiaPowerLimitWatts,
@@ -64,12 +58,7 @@ internal sealed record PowerProfileState(
     }
 }
 
-internal sealed record PowerProfileApplyResult(LaptopPowerMode Mode, PowerProfileState State, IReadOnlyList<string> Errors)
-{
-    public bool Success => Errors.Count == 0;
-}
-
-internal static class PowerProfileService
+internal static class DesktopPowerProfileBackend
 {
     public static PowerProfileApplyResult Apply(LaptopPowerMode mode)
     {
@@ -101,7 +90,7 @@ internal static class PowerProfileService
         // DDC/CI handles can briefly disappear while Windows changes the
         // display timing, so set brightness before changing refresh rate.
         ApplyStep("Monitor brightness", () => MonitorBrightnessService.SetPrimaryMonitorBrightnessPercent(highPower ? 100 : 35));
-        ApplyStep("Display refresh rate", () => DisplayRefreshRateService.SetPrimaryDisplayRefreshRate(highPower ? 165 : 60));
+        ApplyStep("Display refresh rate", () => DesktopDisplayRefreshRateService.SetPrimaryDisplayRefreshRate(highPower ? 165 : 60));
 
         if (highPower)
         {
@@ -114,10 +103,10 @@ internal static class PowerProfileService
             errors.Add($"Verification: the desktop did not remain fully in {mode} ({state.ToSummary()}).");
         }
 
-        return new PowerProfileApplyResult(mode, state, errors);
+        return new PowerProfileApplyResult(mode, PowerProfileState.FromDesktop(state), errors);
     }
 
-    public static PowerProfileState ReadState()
+    public static DesktopPowerProfileState ReadState()
     {
         int? refreshRate = null;
         int? brightness = null;
@@ -126,7 +115,7 @@ internal static class PowerProfileService
 
         try
         {
-            refreshRate = DisplayRefreshRateService.TryGetPrimaryDisplayRefreshRate();
+            refreshRate = DesktopDisplayRefreshRateService.TryGetPrimaryDisplayRefreshRate();
         }
         catch
         {
@@ -156,7 +145,7 @@ internal static class PowerProfileService
         {
         }
 
-        return new PowerProfileState(
+        return new DesktopPowerProfileState(
             refreshRate,
             brightness,
             gpu?.CurrentLimitWatts,
@@ -166,10 +155,10 @@ internal static class PowerProfileService
             planName);
     }
 
-    private static PowerProfileState WaitForRequestedState(LaptopPowerMode mode, TimeSpan timeout)
+    private static DesktopPowerProfileState WaitForRequestedState(LaptopPowerMode mode, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
-        PowerProfileState state;
+        DesktopPowerProfileState state;
         do
         {
             state = ReadState();
@@ -243,7 +232,7 @@ internal static class DesktopWindowsPowerService
             "/changename",
             guid.ToString("D"),
             planName,
-            "Managed by PowerModeToggleDesktop. Built-in Windows plans are not modified.");
+            "Managed by PowerModeToggle. Built-in Windows plans are not modified.");
         return new PowerPlan(guid, planName);
     }
 
@@ -492,7 +481,7 @@ internal static class NvidiaPowerService
     }
 }
 
-internal static class DisplayRefreshRateService
+internal static class DesktopDisplayRefreshRateService
 {
     private const int CurrentSettings = -1;
     private const int ChangeSuccessful = 0;

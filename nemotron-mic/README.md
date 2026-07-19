@@ -2,7 +2,7 @@
 
 This is a local, GPU-accelerated console microphone transcriber using `nvidia/nemotron-3.5-asr-streaming-0.6b`.
 
-Run `start-nemotron-mic.bat`. The first launch downloads NVIDIA's model, then shows incremental text from the default microphone. Press `Ctrl+C` to stop.
+Run `start.bat`. It installs Python 3.12 and the app-local virtual environment when needed. The first launch then downloads NVIDIA's model and shows incremental text from the default microphone. Press `Ctrl+C` to stop.
 
 The app uses about 1.2 GB of VRAM. Close or unload a large Ollama chat model first for the most GPU headroom.
 

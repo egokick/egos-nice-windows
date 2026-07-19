@@ -1,14 +1,35 @@
 # PowerModeToggle
 
-A focused Windows tray app for the ASUS laptop power profiles already proven in `LightDarkToggle`.
+One Windows tray app that detects the current machine and selects its matching power-profile backend. It deliberately refuses to change power settings on unrecognized hardware.
 
-- Left-click the tray icon to toggle between High and Low power.
-- Right-click and enable **Auto Switch When Plugged In** to use High power on AC and Low power on battery.
-- Right-click **Start With Windows** to enable or disable sign-in startup.
-- The orange lightning icon means High power; the green leaf icon means Low power.
+Supported machines:
 
-The app enables Windows startup on its first launch. It remembers later changes to both checkboxes in `%LOCALAPPDATA%\PowerModeToggle\settings.json`.
+- The ASUS laptop: uses the existing Armoury Crate/ASUS firmware, Windows plan, Windows power-mode, and 60/120 Hz controls.
+- The GIGABYTE Z790 EAGLE AX desktop with an Intel Core i9-14900K: uses the desktop Windows plans, CPU policy, RTX 4090 power limit, DDC/CI brightness, and 60/165 Hz controls.
 
-Power profile changes may request administrator approval once per app session. The elevated helper is then reused for later manual or automatic switches during that session.
+The desktop profiles are:
 
-Run `start.bat` to build the Release configuration and launch the tray app.
+| Setting | Low power | High power |
+| --- | --- | --- |
+| Windows plan | `PowerModeToggleDesktop Low` | `PowerModeToggleDesktop High` |
+| CPU minimum / maximum state | 5% / 80% | 5% / 100% |
+| CPU energy preference | 95% efficiency | 5% efficiency |
+| Hybrid CPU scheduling | Prefer efficient cores | Automatic |
+| CPU boost | Disabled | Aggressive |
+| RTX 4090 power limit | 150 W | 450 W |
+| Primary display | 60 Hz | 165 Hz |
+| Monitor brightness | 35% | 100% |
+
+Left-click the tray icon to toggle. The right-click menu contains status, **Auto Switch When Plugged In**, **Start With Windows**, and **Exit**. The orange lightning icon means High power; the green leaf means Low power.
+
+The app preserves the laptop settings in `%LOCALAPPDATA%\PowerModeToggle` and the desktop settings in `%LOCALAPPDATA%\PowerModeToggleDesktop`. On the desktop, it also migrates the old `PowerModeToggleDesktop` startup entry to the unified executable.
+
+Power changes may request administrator approval once per app session. The elevated helper is reused for subsequent switches.
+
+Run `start.bat` to publish a self-contained, single-file x64 .NET 10 Release build and launch the unified app. The launcher checks for a 10.x SDK and installs it per-user with Microsoft's official `dotnet-install.ps1` when it is missing. Diagnostic commands:
+
+```text
+PowerModeToggle.exe --probe-machine-profile <output.json>
+PowerModeToggle.exe --probe-power-state <output.json>
+PowerModeToggle.exe --apply-power-profile LowPower|HighPower <output.json>
+```
