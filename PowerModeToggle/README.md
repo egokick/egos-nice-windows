@@ -26,7 +26,7 @@ The app preserves the laptop settings in `%LOCALAPPDATA%\PowerModeToggle` and th
 
 Power changes may request administrator approval once per app session. The elevated helper is reused for subsequent switches.
 
-Run `start.bat` to publish a self-contained, single-file x64 Release build and launch the unified app. Diagnostic commands:
+Run `start.bat` to publish a self-contained, single-file x64 .NET 10 Release build and launch the unified app. The launcher checks for a 10.x SDK and installs it per-user with Microsoft's official `dotnet-install.ps1` when it is missing. Diagnostic commands:
 
 ```text
 PowerModeToggle.exe --probe-machine-profile <output.json>

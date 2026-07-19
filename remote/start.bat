@@ -8,7 +8,18 @@ if not exist ".env" (
     exit /b 1
 )
 
-docker compose --env-file .env up -d
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\scripts\ensure-docker-desktop.ps1"
+if errorlevel 1 (
+    popd
+    exit /b 1
+)
+
+set "DOCKER_EXE=docker"
+if exist "%ProgramFiles%\Docker\Docker\resources\bin\docker.exe" set "DOCKER_EXE=%ProgramFiles%\Docker\Docker\resources\bin\docker.exe"
+if exist "%LOCALAPPDATA%\Programs\Docker\Docker\resources\bin\docker.exe" set "DOCKER_EXE=%LOCALAPPDATA%\Programs\Docker\Docker\resources\bin\docker.exe"
+if exist "%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin\docker.exe" set "DOCKER_EXE=%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin\docker.exe"
+
+"%DOCKER_EXE%" compose --env-file .env up -d
 set "RESULT=%ERRORLEVEL%"
 popd
 exit /b %RESULT%

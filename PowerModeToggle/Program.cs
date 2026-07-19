@@ -92,7 +92,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     public TrayApplicationContext()
     {
-        StartupService.MigrateLegacyDesktopEntry();
+        StartupService.MigrateExistingEntry();
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = SettingsStore.Load();
         _currentMode = _settings.LastHighPowerMode ? LaptopPowerMode.HighPower : LaptopPowerMode.LowPower;
@@ -455,20 +455,17 @@ internal static class StartupService
     private const string AppName = AppIdentity.DisplayName;
     private const string LegacyDesktopAppName = "PowerModeToggleDesktop";
 
-    public static void MigrateLegacyDesktopEntry()
+    public static void MigrateExistingEntry()
     {
         using var key = Registry.CurrentUser.CreateSubKey(RunRegistryPath);
         var legacyValue = key.GetValue(LegacyDesktopAppName) as string;
-        if (string.IsNullOrWhiteSpace(legacyValue))
+        var unifiedValue = key.GetValue(AppName) as string;
+        if (string.IsNullOrWhiteSpace(legacyValue) && string.IsNullOrWhiteSpace(unifiedValue))
         {
             return;
         }
 
-        if (key.GetValue(AppName) is not string)
-        {
-            key.SetValue(AppName, $"\"{Application.ExecutablePath}\"", RegistryValueKind.String);
-        }
-
+        key.SetValue(AppName, $"\"{Application.ExecutablePath}\"", RegistryValueKind.String);
         key.DeleteValue(LegacyDesktopAppName, throwOnMissingValue: false);
     }
 

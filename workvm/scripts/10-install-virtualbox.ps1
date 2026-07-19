@@ -37,7 +37,14 @@ if ($existing) {
 }
 
 if (-not (Test-IsAdmin)) {
-    Write-Error "VirtualBox installs host drivers and requires elevated PowerShell. Re-run this script as Administrator."
+    Write-Host "VirtualBox installs host drivers and requires administrator approval."
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    if ($Silent) {
+        $arguments += " -Silent"
+    }
+
+    $elevated = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+    exit $elevated.ExitCode
 }
 
 $winget = Get-Command winget -ErrorAction SilentlyContinue

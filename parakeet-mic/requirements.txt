@@ -3,4 +3,5 @@ sounddevice>=0.5
 numpy>=1.26,<2
 scipy==1.13.1
 pytorch-lightning==2.4.0
+torch==2.4.1
 cuda-python>=12.3,<13
