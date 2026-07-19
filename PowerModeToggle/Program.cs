@@ -36,10 +36,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _statusMenuItem;
-    private readonly ToolStripMenuItem _switchMenuItem;
     private readonly ToolStripMenuItem _autoSwitchMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
-    private readonly ToolStripMenuItem _powerSourceMenuItem;
     private readonly Icon _highPowerIcon;
     private readonly Icon _lowPowerIcon;
     private readonly Icon[] _switchingToHighIcons;
@@ -75,9 +73,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Font = new Font("Segoe UI", 9f, FontStyle.Bold)
         };
 
-        _switchMenuItem = new ToolStripMenuItem();
-        _switchMenuItem.Click += (_, _) => TogglePowerMode();
-
         _autoSwitchMenuItem = new ToolStripMenuItem("Auto Switch When Plugged In")
         {
             CheckOnClick = true,
@@ -91,19 +86,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _startupMenuItem.Click += (_, _) => ToggleStartup();
 
-        _powerSourceMenuItem = new ToolStripMenuItem { Enabled = false };
-
         var exitMenuItem = new ToolStripMenuItem("Exit");
         exitMenuItem.Click += (_, _) => ExitThread();
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusMenuItem);
-        menu.Items.Add(_switchMenuItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_autoSwitchMenuItem);
         menu.Items.Add(_startupMenuItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(_powerSourceMenuItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitMenuItem);
         menu.Opening += (_, _) => RefreshUi(readHardwareState: true);
@@ -259,7 +249,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _lastPowerSource = powerSource;
         }
 
-        RefreshPowerSourceText();
         if (!_settings.AutoSwitchWhenPluggedIn || (!forceApply && !sourceChanged))
         {
             return;
@@ -355,7 +344,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _statusMenuItem.Text = targetMode == LaptopPowerMode.HighPower
             ? "Switching to HIGH power..."
             : "Switching to LOW power...";
-        _switchMenuItem.Enabled = false;
         _notifyIcon.Text = targetMode == LaptopPowerMode.HighPower
             ? "PowerModeToggle: switching to HIGH"
             : "PowerModeToggle: switching to LOW";
@@ -404,8 +392,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         var highPower = _currentMode == LaptopPowerMode.HighPower;
         _statusMenuItem.Text = highPower ? "HIGH POWER - ACTIVE" : "LOW POWER - ACTIVE";
-        _switchMenuItem.Text = highPower ? "Switch to Low Power" : "Switch to High Power";
-        _switchMenuItem.Enabled = !_modeChangeRunning;
         _autoSwitchMenuItem.Checked = _settings.AutoSwitchWhenPluggedIn;
         _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
         if (!_modeChangeRunning)
@@ -415,17 +401,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.Text = highPower
             ? "PowerModeToggle: HIGH power (click for LOW)"
             : "PowerModeToggle: LOW power (click for HIGH)";
-        RefreshPowerSourceText();
-    }
-
-    private void RefreshPowerSourceText()
-    {
-        _powerSourceMenuItem.Text = _lastPowerSource switch
-        {
-            PowerLineStatus.Online => "Power source: Plugged in",
-            PowerLineStatus.Offline => "Power source: Battery",
-            _ => "Power source: Unknown"
-        };
     }
 
     private void ShowInfo(string message)
