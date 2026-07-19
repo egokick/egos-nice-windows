@@ -3,7 +3,7 @@ setlocal
 
 set "APP_DIR=%~dp0"
 set "PROJECT=%APP_DIR%PowerModeToggle.csproj"
-set "APP=%APP_DIR%bin\Release\net10.0-windows\PowerModeToggle.exe"
+set "APP=%APP_DIR%bin\Release\net9.0-windows\win-x64\publish\PowerModeToggle.exe"
 set "DOTNET_CLI_HOME=%APP_DIR%..\.dotnet"
 set "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1"
 set "DOTNET_EXE=dotnet"
@@ -12,7 +12,9 @@ if exist "%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe" set "DOTNET_EXE=%LOCALAPPD
 tasklist /FI "IMAGENAME eq PowerModeToggle.exe" 2>NUL | find /I "PowerModeToggle.exe" >NUL
 if not errorlevel 1 exit /b 0
 
-"%DOTNET_EXE%" build "%PROJECT%" -c Release
+taskkill /IM PowerModeToggleDesktop.exe /F >NUL 2>NUL
+
+"%DOTNET_EXE%" publish "%PROJECT%" -c Release
 if errorlevel 1 exit /b 1
 
 if not exist "%APP%" (

@@ -8,7 +8,7 @@ namespace PowerModeToggle;
 
 /// <summary>
 /// Keeps the tray process unelevated while a same-user helper performs the
-/// privileged Armoury Crate service and machine power-profile changes.
+/// privileged machine-specific power-profile changes.
 /// </summary>
 internal sealed class PowerProfileBroker : IDisposable
 {
