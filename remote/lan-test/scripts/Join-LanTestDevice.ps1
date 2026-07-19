@@ -12,7 +12,13 @@ param(
 
     [switch]$AdvertiseExitNode,
 
-    [switch]$InstallTailscale
+    [switch]$InstallTailscale,
+
+    [switch]$PublicPinned,
+
+    [switch]$ForceReenroll,
+
+    [Security.SecureString]$EnrollmentKey
 )
 
 Set-StrictMode -Version Latest
@@ -59,33 +65,130 @@ function Install-TailscaleIfRequested {
         throw 'winget is unavailable. Install the supported Tailscale Windows client, then rerun this script.'
     }
 
-    & $winget.Source install --exact --id Tailscale.Tailscale --accept-package-agreements --accept-source-agreements
+    & $winget.Source install `
+        --exact `
+        --id Tailscale.Tailscale `
+        --silent `
+        --disable-interactivity `
+        --custom 'TS_NOLAUNCH=1' `
+        --accept-package-agreements `
+        --accept-source-agreements 1>$null 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw 'Unable to install the Tailscale client.'
     }
 
-    $installed = Resolve-TailscaleExecutable
-    if ($null -eq $installed) {
-        throw 'Tailscale was installed but its executable is not available yet. Open a new Administrator PowerShell window and rerun this script.'
+    $deadline = [DateTime]::UtcNow.AddSeconds(90)
+    $installed = $null
+    $installedService = $null
+    do {
+        $installed = Resolve-TailscaleExecutable
+        $installedService = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
+        if ($null -ne $installed -and $null -ne $installedService) {
+            break
+        }
+        Start-Sleep -Seconds 2
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    if ($null -eq $installed -or $null -eq $installedService) {
+        throw 'Tailscale installation completed but its executable and service did not become available within 90 seconds.'
     }
 
     return $installed
 }
 
-function Read-OneTimeJoinCommand {
-    Write-Host 'Paste the one-time command shown by StayActive Remotes > Add device. It will not be echoed or written to PowerShell history by this script.'
-    $secureCommand = $null
+function Ensure-TailscaleServiceRunning {
+    [Environment]::SetEnvironmentVariable('TS_NO_LOGS_NO_SUPPORT', 'true', [EnvironmentVariableTarget]::Machine)
+    $service = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
+    if ($null -eq $service) {
+        throw 'The Tailscale Windows service is not installed.'
+    }
+    if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+        Start-Service -Name Tailscale -ErrorAction Stop
+    }
+    $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+}
+
+function Restart-TailscaleServiceAndDisableSupportLogs {
+    [Environment]::SetEnvironmentVariable('TS_NO_LOGS_NO_SUPPORT', 'true', [EnvironmentVariableTarget]::Machine)
+    Restart-Service -Name Tailscale -Force -ErrorAction Stop
+    (Get-Service -Name Tailscale).WaitForStatus(
+        [System.ServiceProcess.ServiceControllerStatus]::Running,
+        [TimeSpan]::FromSeconds(30))
+}
+
+function Set-TailscaleMachinePolicy([bool]$ShouldAdvertiseExitNode) {
+    $policyPath = 'HKLM:\SOFTWARE\Policies\Tailscale'
+    $null = New-Item -Path $policyPath -Force
+    $values = @{
+        LoginURL = 'https://headscale.stayactive.test'
+        UseTailscaleDNSSettings = 'always'
+        UnattendedMode = 'always'
+        InstallUpdates = 'never'
+        AdminConsole = 'hide'
+        OnboardingFlow = 'hide'
+        AdvertiseExitNode = if ($ShouldAdvertiseExitNode) { 'always' } else { 'never' }
+    }
+    foreach ($entry in $values.GetEnumerator()) {
+        $null = New-ItemProperty -Path $policyPath -Name $entry.Key -Value $entry.Value -PropertyType String -Force
+    }
+}
+
+function Get-TailscaleStatus([string]$Executable) {
+    $statusJson = & $Executable status --json 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($statusJson -join [Environment]::NewLine))) {
+        return $null
+    }
+    try {
+        return (($statusJson -join [Environment]::NewLine) | ConvertFrom-Json)
+    }
+    catch {
+        throw 'Tailscale returned an invalid status response.'
+    }
+}
+
+function Assert-ReenrollmentSafe([string]$Executable, [bool]$AllowReenroll) {
+    $status = Get-TailscaleStatus $Executable
+    if ($null -eq $status) {
+        return
+    }
+
+    $hasIdentity = -not [string]::IsNullOrWhiteSpace([string]$status.Self.ID) -or
+        (([string]$status.Self.PublicKey) -notmatch '^nodekey:0+$' -and -not [string]::IsNullOrWhiteSpace([string]$status.Self.PublicKey))
+    if (($status.BackendState -eq 'Running' -or $hasIdentity) -and -not $AllowReenroll) {
+        throw 'This laptop is already enrolled in a Tailscale or Headscale network. Rerun with -ForceReenroll only if replacing that configuration is intentional.'
+    }
+
+    if ($AllowReenroll -and ($status.BackendState -eq 'Running' -or $hasIdentity)) {
+        & $Executable logout 1>$null 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to leave the existing Tailscale or Headscale network.'
+        }
+    }
+}
+
+function Read-OneTimeJoinCommand([Security.SecureString]$SuppliedEnrollmentKey) {
+    $secureCommand = $SuppliedEnrollmentKey
     $pointer = [IntPtr]::Zero
     try {
-        $secureCommand = Read-Host -AsSecureString 'One-time join command'
+        if ($null -eq $secureCommand) {
+            Write-Host 'Paste the one-time command shown by StayActive Remotes > Add device. It will not be echoed or written to PowerShell history by this script.'
+            $secureCommand = Read-Host -AsSecureString 'One-time join command'
+        }
         $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureCommand)
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+        $plainValue = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+        if ($null -ne $SuppliedEnrollmentKey) {
+            if ($plainValue -notmatch '^[A-Za-z0-9_-]{16,4096}$') {
+                throw 'The supplied one-time enrollment key is invalid.'
+            }
+            return "tailscale up --login-server https://headscale.stayactive.test --auth-key $plainValue"
+        }
+        return $plainValue
     }
     finally {
         if ($pointer -ne [IntPtr]::Zero) {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
         }
-        if ($null -ne $secureCommand) {
+        if ($null -ne $secureCommand -and $null -eq $SuppliedEnrollmentKey) {
             $secureCommand.Dispose()
         }
     }
@@ -123,14 +226,22 @@ function Invoke-TailscaleJoin(
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    $startInfo.ArgumentList.Add('up')
-    $startInfo.ArgumentList.Add('--login-server')
-    $startInfo.ArgumentList.Add($LoginServer)
-    $startInfo.ArgumentList.Add('--auth-key')
-    $startInfo.ArgumentList.Add($AuthKey)
+    # Windows PowerShell 5.1 does not expose ProcessStartInfo.ArgumentList.
+    # Every dynamic value below has already been restricted to a fixed HTTPS
+    # origin or an alphanumeric one-time key, so a direct argument string is
+    # safe and does not invoke a command shell.
+    $arguments = @(
+        'up',
+        '--reset',
+        '--login-server', $LoginServer,
+        '--auth-key', $AuthKey,
+        '--unattended',
+        '--accept-dns=true'
+    )
     if ($ShouldAdvertiseExitNode) {
-        $startInfo.ArgumentList.Add('--advertise-exit-node')
+        $arguments += '--advertise-exit-node'
     }
+    $startInfo.Arguments = $arguments -join ' '
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
@@ -141,7 +252,10 @@ function Invoke-TailscaleJoin(
 
         $standardOutput = $process.StandardOutput.ReadToEndAsync()
         $standardError = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        if (-not $process.WaitForExit(120000)) {
+            try { $process.Kill() } catch { }
+            throw 'Tailscale enrollment did not finish within two minutes.'
+        }
         # Do not display process output: it is not needed for the happy path and
         # a future client must not be able to reflect a supplied one-time key.
         $null = $standardOutput.GetAwaiter().GetResult()
@@ -155,7 +269,113 @@ function Invoke-TailscaleJoin(
     }
 }
 
+function Set-TailscalePrivacyPreferences([string]$Executable) {
+    & $Executable set `
+        --accept-dns=true `
+        --update-check=false `
+        --auto-update=false `
+        --report-posture=false `
+        --ssh=false `
+        --webclient=false 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to apply the self-hosted Tailscale client privacy settings.'
+    }
+}
+
+function Clear-JoinSecretFromClipboard([string]$JoinCommand, [string]$AuthKey) {
+    try {
+        $clipboard = Get-Clipboard -Raw -ErrorAction Stop
+        $containsCommand = -not [string]::IsNullOrEmpty($JoinCommand) -and $clipboard.Contains($JoinCommand)
+        $containsKey = -not [string]::IsNullOrEmpty($AuthKey) -and $clipboard.Contains($AuthKey)
+        if (-not [string]::IsNullOrEmpty($clipboard) -and ($containsCommand -or $containsKey)) {
+            Set-Clipboard -Value ''
+        }
+    }
+    catch {
+        # Clipboard access is best effort. Enrollment never writes the secret
+        # to a file, settings, output, or PowerShell history.
+    }
+}
+
+function Assert-TailscaleJoin(
+    [string]$Executable,
+    [bool]$ShouldAdvertiseExitNode) {
+    $status = Get-TailscaleStatus $Executable
+    if ($null -eq $status -or $status.BackendState -ne 'Running') {
+        throw 'Tailscale did not reach the Running state after enrollment.'
+    }
+
+    $prefsJson = & $Executable debug prefs 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to verify the enrolled Tailscale preferences.'
+    }
+    $prefs = (($prefsJson -join [Environment]::NewLine) | ConvertFrom-Json)
+    if ([string]$prefs.ControlURL -ne 'https://headscale.stayactive.test') {
+        throw 'Tailscale is not using the self-hosted StayActive Headscale control plane.'
+    }
+    if (-not [bool]$prefs.CorpDNS) {
+        throw 'Tailscale DNS handling is disabled; exit-node DNS could leak to the local network.'
+    }
+    if ([bool]$prefs.AutoUpdate.Check -or [bool]$prefs.AutoUpdate.Apply -or [bool]$prefs.PostureChecking) {
+        throw 'Tailscale client update preferences or posture reporting are unexpectedly enabled.'
+    }
+    if ([Environment]::GetEnvironmentVariable('TS_NO_LOGS_NO_SUPPORT', [EnvironmentVariableTarget]::Machine) -ne 'true') {
+        throw 'Tailscale support-log transmission is not disabled at machine scope.'
+    }
+    $policy = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Tailscale' -ErrorAction Stop
+    $expectedAdvertisePolicy = if ($ShouldAdvertiseExitNode) { 'always' } else { 'never' }
+    if (
+        [string]$policy.LoginURL -ne 'https://headscale.stayactive.test' -or
+        [string]$policy.UseTailscaleDNSSettings -ne 'always' -or
+        [string]$policy.AdvertiseExitNode -ne $expectedAdvertisePolicy) {
+        throw 'The Windows machine policy does not pin this client to its assigned self-hosted role.'
+    }
+    if ($ShouldAdvertiseExitNode -and (
+            @($prefs.AdvertiseRoutes) -notcontains '0.0.0.0/0' -or
+            @($prefs.AdvertiseRoutes) -notcontains '::/0')) {
+        throw 'Tailscale joined but is not advertising both IPv4 and IPv6 default routes.'
+    }
+
+    return $status
+}
+
+function Assert-HeadscalePublicBoundary([bool]$IsPublicPinned) {
+    if (-not $IsPublicPinned) {
+        return
+    }
+
+    $health = Invoke-WebRequest -Uri 'https://headscale.stayactive.test/health' -UseBasicParsing -TimeoutSec 15
+    if ($health.StatusCode -ne 200) {
+        throw 'The public self-hosted Headscale health endpoint is unavailable.'
+    }
+
+    $apiStatus = $null
+    try {
+        $response = Invoke-WebRequest -Uri 'https://headscale.stayactive.test/api/v1/users' -UseBasicParsing -TimeoutSec 15
+        $apiStatus = [int]$response.StatusCode
+    }
+    catch [System.Net.WebException] {
+        if ($null -ne $_.Exception.Response) {
+            $apiStatus = [int]$_.Exception.Response.StatusCode
+        }
+    }
+    if ($apiStatus -ne 404) {
+        throw 'The public Headscale administrative API boundary is not closed.'
+    }
+}
+
 Assert-Administrator
+$existingTailscale = Resolve-TailscaleExecutable
+if ($null -eq $existingTailscale) {
+    # A fresh MSI can otherwise launch its default hosted onboarding UI before
+    # enrollment. Pin the URL/role and support-log opt-out before installation;
+    # existing clients are deliberately not changed until the safety check.
+    Set-TailscaleMachinePolicy $AdvertiseExitNode
+    [Environment]::SetEnvironmentVariable('TS_NO_LOGS_NO_SUPPORT', 'true', [EnvironmentVariableTarget]::Machine)
+}
+$tailscale = Install-TailscaleIfRequested -Requested:$InstallTailscale
+Ensure-TailscaleServiceRunning
+Assert-ReenrollmentSafe $tailscale $ForceReenroll
 
 $hostsScript = Join-Path $PSScriptRoot 'Set-LanTestHosts.ps1'
 $certificateScript = Join-Path $PSScriptRoot 'Install-CaddyRoot.ps1'
@@ -163,27 +383,52 @@ if (-not (Test-Path -LiteralPath $hostsScript -PathType Leaf) -or -not (Test-Pat
     throw 'This checkout is missing the required StayActive LAN setup scripts.'
 }
 
-& $hostsScript -Mode Lan -ServerIp $ServerIp -Confirm:$false
+$hostsMode = if ($PublicPinned) { 'PublicPinned' } else { 'Lan' }
+& $hostsScript -Mode $hostsMode -ServerIp $ServerIp -Confirm:$false
 & $certificateScript -CertificatePath $CertificatePath -ExpectedCertificateSha256 $ExpectedCertificateSha256 -Confirm:$false
+Assert-HeadscalePublicBoundary $PublicPinned
 
-$tailscale = Install-TailscaleIfRequested -Requested:$InstallTailscale
+Set-TailscaleMachinePolicy $AdvertiseExitNode
+Restart-TailscaleServiceAndDisableSupportLogs
 $joinCommand = $null
 $join = $null
+$status = $null
 try {
-    $joinCommand = Read-OneTimeJoinCommand
+    $joinCommand = Read-OneTimeJoinCommand $EnrollmentKey
     $join = Parse-OneTimeJoinCommand $joinCommand
     Invoke-TailscaleJoin $tailscale $join.Server $join.Key $AdvertiseExitNode
+    Set-TailscalePrivacyPreferences $tailscale
+    Clear-JoinSecretFromClipboard $joinCommand $join.Key
+    $status = Assert-TailscaleJoin $tailscale $AdvertiseExitNode
 }
 finally {
     if ($null -ne $join) {
+        Clear-JoinSecretFromClipboard ([string]$joinCommand) ([string]$join.Key)
         $join.Key = $null
+    }
+    elseif (-not [string]::IsNullOrEmpty([string]$joinCommand)) {
+        # A malformed paste can still contain a genuine enrollment key. Clear
+        # the exact pasted value even when strict parsing rejected it.
+        Clear-JoinSecretFromClipboard ([string]$joinCommand) ''
     }
     $joinCommand = $null
 }
 
 if ($AdvertiseExitNode) {
+    & powercfg.exe /change standby-timeout-ac 0 1>$null 2>$null
+    $standbyExitCode = $LASTEXITCODE
+    & powercfg.exe /change hibernate-timeout-ac 0 1>$null 2>$null
+    $hibernateExitCode = $LASTEXITCODE
+    if ($standbyExitCode -ne 0 -or $hibernateExitCode -ne 0) {
+        Write-Warning 'The VPN joined, but Windows power settings could not be updated. Keep this laptop awake manually.'
+    }
     Write-Host 'This laptop joined the self-hosted Headscale network and is advertising its default route. On the controller laptop, approve that route before selecting it as an exit node.'
+    Write-Host 'Leave this laptop plugged in, awake, connected to the internet, and with its lid open.'
 }
 else {
     Write-Host 'This laptop joined the self-hosted Headscale network. It is ready to select an approved exit node.'
+}
+
+if ($null -ne $status) {
+    Write-Host "Self-hosted VPN address: $(@($status.Self.TailscaleIPs) -join ', ')"
 }
