@@ -22,6 +22,10 @@ The desktop profiles are:
 
 Left-click the tray icon to toggle. The right-click menu contains status, **Auto Switch When Plugged In**, **Start With Windows**, and **Exit**. The orange lightning icon means High power; the green leaf means Low power.
 
+The menu also shows estimated High- and Low-mode watt usage, the current estimated saving rate, and cumulative watt-hours saved while Low/Eco mode is active. On the supported desktop, the estimate uses the Windows Intel RAPL CPU-package energy counter plus the RTX GPU's cumulative NVIDIA NVML energy counter. On the laptop while discharging, it uses the whole-system battery discharge rate. Measurements from different source sets are never compared.
+
+Power estimates warm up for a few seconds. A new machine or telemetry source must be observed in High mode for about 20 seconds before Low-mode savings can be calculated. Learned High and Low baselines and the lifetime estimated watt-hours are stored in the machine-specific settings folder. The desktop figure covers the CPU package and NVIDIA GPU, not PSU conversion losses, motherboard devices, or the separately powered monitor.
+
 The app preserves the laptop settings in `%LOCALAPPDATA%\PowerModeToggle` and the desktop settings in `%LOCALAPPDATA%\PowerModeToggleDesktop`. On the desktop, it also migrates the old `PowerModeToggleDesktop` startup entry to the unified executable.
 
 Power changes may request administrator approval once per app session. The elevated helper is reused for subsequent switches.
@@ -32,4 +36,6 @@ Run `start.bat` to publish a self-contained, single-file x64 .NET 10 Release bui
 PowerModeToggle.exe --probe-machine-profile <output.json>
 PowerModeToggle.exe --probe-power-state <output.json>
 PowerModeToggle.exe --apply-power-profile LowPower|HighPower <output.json>
+PowerModeToggle.exe --probe-power-telemetry <output.json>
+PowerModeToggle.exe --self-test-power-savings <output.json>
 ```

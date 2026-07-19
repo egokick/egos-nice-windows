@@ -55,6 +55,26 @@ internal static class Program
             return;
         }
 
+        if (args.Length == 2
+            && string.Equals(args[0], "--probe-power-telemetry", StringComparison.OrdinalIgnoreCase))
+        {
+            using var telemetry = new PowerTelemetryService(PowerProfileService.Machine.Profile);
+            _ = telemetry.Sample();
+            Thread.Sleep(TimeSpan.FromSeconds(2));
+            var sample = telemetry.Sample();
+            File.WriteAllText(args[1], JsonSerializer.Serialize(sample, new JsonSerializerOptions { WriteIndented = true }));
+            Environment.ExitCode = sample.EstimatedUsageWatts is null ? 1 : 0;
+            return;
+        }
+
+        if (args.Length == 2
+            && string.Equals(args[0], "--self-test-power-savings", StringComparison.OrdinalIgnoreCase))
+        {
+            var result = PowerSavingsSelfTest.Run();
+            File.WriteAllText(args[1], JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
+
         using var mutex = new Mutex(true, AppIdentity.SingletonMutex, out var createdNew);
         if (!createdNew)
         {
@@ -70,6 +90,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _statusMenuItem;
+    private readonly ToolStripMenuItem _highUsageMenuItem;
+    private readonly ToolStripMenuItem _lowUsageMenuItem;
+    private readonly ToolStripMenuItem _savingRateMenuItem;
+    private readonly ToolStripMenuItem _energySavedMenuItem;
+    private readonly ToolStripMenuItem _measurementMenuItem;
     private readonly ToolStripMenuItem _autoSwitchMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
     private readonly Icon _highPowerIcon;
@@ -77,7 +102,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon[] _switchingToHighIcons;
     private readonly Icon[] _switchingToLowIcons;
     private readonly PowerProfileBroker _powerProfileBroker;
+    private readonly PowerTelemetryService _powerTelemetryService;
+    private readonly PowerSavingsEstimator _powerSavingsEstimator;
     private readonly System.Windows.Forms.Timer _powerSourceTimer;
+    private readonly System.Windows.Forms.Timer _powerTelemetryTimer;
     private readonly System.Windows.Forms.Timer _switchingIconTimer;
     private readonly SynchronizationContext _uiContext;
 
@@ -89,6 +117,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private Icon[]? _activeSwitchingIcons;
     private int _switchingIconFrame;
     private bool _modeChangeRunning;
+    private PowerSavingsSnapshot? _powerSavingsSnapshot;
+    private DateTimeOffset _lastPowerSavingsSaveUtc = DateTimeOffset.MinValue;
 
     public TrayApplicationContext()
     {
@@ -97,6 +127,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settings = SettingsStore.Load();
         _currentMode = _settings.LastHighPowerMode ? LaptopPowerMode.HighPower : LaptopPowerMode.LowPower;
         _powerProfileBroker = new PowerProfileBroker();
+        _powerTelemetryService = new PowerTelemetryService(PowerProfileService.Machine.Profile);
+        _powerSavingsEstimator = new PowerSavingsEstimator(
+            _settings.TotalEstimatedEnergySavedWh,
+            _settings.PowerUsageBaselines);
         _highPowerIcon = TrayIconFactory.CreateHighPowerIcon();
         _lowPowerIcon = TrayIconFactory.CreateLowPowerIcon();
         _switchingToHighIcons = TrayIconFactory.CreateSwitchingIcons(Color.FromArgb(255, 133, 38));
@@ -107,6 +141,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Enabled = false,
             Font = new Font("Segoe UI", 9f, FontStyle.Bold)
         };
+
+        _highUsageMenuItem = CreateTelemetryMenuItem("Estimated HIGH usage: warming up...");
+        _lowUsageMenuItem = CreateTelemetryMenuItem("Estimated LOW usage: warming up...");
+        _savingRateMenuItem = CreateTelemetryMenuItem("Estimated saving now: learning...");
+        _energySavedMenuItem = CreateTelemetryMenuItem("Energy saved in ECO: 0.000 Wh");
+        _measurementMenuItem = CreateTelemetryMenuItem("Measurement: detecting sensors...");
 
         _autoSwitchMenuItem = new ToolStripMenuItem("Auto Switch When Plugged In")
         {
@@ -126,6 +166,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusMenuItem);
+        menu.Items.Add(_highUsageMenuItem);
+        menu.Items.Add(_lowUsageMenuItem);
+        menu.Items.Add(_savingRateMenuItem);
+        menu.Items.Add(_energySavedMenuItem);
+        menu.Items.Add(_measurementMenuItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_autoSwitchMenuItem);
         menu.Items.Add(_startupMenuItem);
@@ -161,9 +206,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _powerSourceTimer.Tick += (_, _) => CheckForPowerSourceChange(forceApply: false);
         _powerSourceTimer.Start();
 
+        _powerTelemetryTimer = new System.Windows.Forms.Timer
+        {
+            Interval = (int)TimeSpan.FromSeconds(2).TotalMilliseconds
+        };
+        _powerTelemetryTimer.Tick += (_, _) => SamplePowerTelemetry();
+        _powerTelemetryTimer.Start();
+
         SystemEvents.PowerModeChanged += SystemEventsOnPowerModeChanged;
 
         RefreshUi(readHardwareState: true);
+        SamplePowerTelemetry();
         ConfigureStartupOnFirstLaunch();
         CheckForPowerSourceChange(forceApply: _settings.AutoSwitchWhenPluggedIn);
     }
@@ -175,6 +228,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _switchingIconTimer.Dispose();
         _powerSourceTimer.Stop();
         _powerSourceTimer.Dispose();
+        _powerTelemetryTimer.Stop();
+        _powerTelemetryTimer.Dispose();
+        SavePowerSavings(force: true);
+        _powerTelemetryService.Dispose();
         _powerProfileBroker.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
@@ -191,6 +248,142 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         base.ExitThreadCore();
+    }
+
+    private static ToolStripMenuItem CreateTelemetryMenuItem(string text)
+    {
+        return new ToolStripMenuItem(text)
+        {
+            Enabled = false
+        };
+    }
+
+    private void SamplePowerTelemetry()
+    {
+        try
+        {
+            var reading = _powerTelemetryService.Sample();
+            if (_modeChangeRunning)
+            {
+                _measurementMenuItem.Text = $"Measurement paused while switching ({reading.SourceDescription})";
+                return;
+            }
+
+            _powerSavingsSnapshot = _powerSavingsEstimator.Update(_currentMode, reading);
+            SavePowerSavings(force: false);
+            RefreshPowerTelemetryUi();
+        }
+        catch (Exception ex)
+        {
+            _measurementMenuItem.Text = $"Measurement unavailable: {Shorten(ex.Message, 60)}";
+        }
+    }
+
+    private void SavePowerSavings(bool force)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var state = _powerSavingsEstimator.GetPersistentState();
+        _settings.TotalEstimatedEnergySavedWh = state.TotalEnergySavedWh;
+        _settings.PowerUsageBaselines = state.Baselines;
+
+        if (!force && now - _lastPowerSavingsSaveUtc < TimeSpan.FromSeconds(30))
+        {
+            return;
+        }
+
+        SettingsStore.Save(_settings);
+        _lastPowerSavingsSaveUtc = now;
+    }
+
+    private void RefreshPowerTelemetryUi()
+    {
+        if (_powerSavingsSnapshot is not { } snapshot)
+        {
+            return;
+        }
+
+        var highIsCurrent = snapshot.Mode == LaptopPowerMode.HighPower;
+        var lowIsCurrent = snapshot.Mode == LaptopPowerMode.LowPower;
+        _highUsageMenuItem.Text = FormatUsage(
+            "HIGH",
+            snapshot.EstimatedHighUsageWatts,
+            highIsCurrent,
+            snapshot.HighBaselineAvailable,
+            highIsCurrent ? snapshot.BaselineSamples : 0,
+            snapshot.RequiredBaselineSamples);
+        _lowUsageMenuItem.Text = FormatUsage(
+            "LOW",
+            snapshot.EstimatedLowUsageWatts,
+            lowIsCurrent,
+            snapshot.LowBaselineAvailable,
+            lowIsCurrent ? snapshot.BaselineSamples : 0,
+            snapshot.RequiredBaselineSamples);
+
+        if (snapshot.Mode == LaptopPowerMode.LowPower && !snapshot.HighBaselineAvailable)
+        {
+            _savingRateMenuItem.Text = "Estimated saving now: learn HIGH for ~20 seconds first";
+        }
+        else
+        {
+            _savingRateMenuItem.Text = snapshot.EstimatedSavingWatts is { } savingWatts
+                ? $"Estimated saving now: ~{savingWatts:0.0} W"
+                : "Estimated saving now: learning comparison...";
+        }
+
+        _energySavedMenuItem.Text =
+            $"Energy saved in ECO: {FormatEnergy(snapshot.EcoSessionEnergySavedWh)} session; " +
+            $"{FormatEnergy(snapshot.TotalEnergySavedWh)} total";
+        _measurementMenuItem.Text = $"Measurement: {snapshot.SourceDescription}";
+        RefreshNotifyText();
+    }
+
+    private static string FormatUsage(
+        string mode,
+        double? watts,
+        bool isCurrent,
+        bool baselineAvailable,
+        int baselineSamples,
+        int requiredBaselineSamples)
+    {
+        if (watts is { } value)
+        {
+            return $"Estimated {mode} usage: ~{value:0.0} W ({(isCurrent ? "current" : "learned")})";
+        }
+
+        if (isCurrent)
+        {
+            return $"Estimated {mode} usage: warming up sensors...";
+        }
+
+        var collected = baselineAvailable ? requiredBaselineSamples : Math.Min(baselineSamples, requiredBaselineSamples);
+        return $"Estimated {mode} usage: learning ({collected}/{requiredBaselineSamples} samples)";
+    }
+
+    private static string FormatEnergy(double wattHours)
+    {
+        return wattHours < 1
+            ? $"{wattHours:0.000} Wh"
+            : $"{wattHours:0.00} Wh";
+    }
+
+    private void RefreshNotifyText()
+    {
+        var highPower = _currentMode == LaptopPowerMode.HighPower;
+        var mode = highPower ? "HIGH" : "LOW";
+        var currentUsage = _powerSavingsSnapshot?.CurrentUsageWatts is { } watts
+            ? $" ~{watts:0} W"
+            : string.Empty;
+        var saved = !highPower && _powerSavingsSnapshot is { } snapshot
+            ? $" | {FormatEnergy(snapshot.EcoSessionEnergySavedWh)} saved"
+            : string.Empty;
+        var action = highPower ? "click for LOW" : "click for HIGH";
+        var text = $"{AppIdentity.DisplayName}: {mode}{currentUsage}{saved} ({action})";
+        _notifyIcon.Text = Shorten(text, 127);
+    }
+
+    private static string Shorten(string value, int maximumLength)
+    {
+        return value.Length <= maximumLength ? value : value[..maximumLength];
     }
 
     private void TogglePowerMode()
@@ -433,9 +626,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _notifyIcon.Icon = highPower ? _highPowerIcon : _lowPowerIcon;
         }
-        _notifyIcon.Text = highPower
-            ? $"{AppIdentity.DisplayName}: HIGH power (click for LOW)"
-            : $"{AppIdentity.DisplayName}: LOW power (click for HIGH)";
+        RefreshNotifyText();
     }
 
     private void ShowInfo(string message)
@@ -498,6 +689,10 @@ internal sealed class AppSettings
     public bool StartupPreferenceInitialized { get; set; }
 
     public bool LastHighPowerMode { get; set; }
+
+    public double TotalEstimatedEnergySavedWh { get; set; }
+
+    public Dictionary<string, PowerUsageBaseline> PowerUsageBaselines { get; set; } = new(StringComparer.Ordinal);
 }
 
 internal static class SettingsStore
