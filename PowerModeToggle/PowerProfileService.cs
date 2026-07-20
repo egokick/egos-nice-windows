@@ -12,6 +12,7 @@ internal enum HardwareProfile
 {
     Unsupported,
     AsusLaptop,
+    HpOmenLaptop,
     GigabyteDesktop
 }
 
@@ -47,6 +48,15 @@ internal sealed record PowerProfileState(
     {
         return new PowerProfileState(
             HardwareProfile.GigabyteDesktop,
+            state.DetectedMode,
+            state.ToSummary(),
+            state);
+    }
+
+    public static PowerProfileState FromHpOmen(HpOmenPowerProfileState state)
+    {
+        return new PowerProfileState(
+            HardwareProfile.HpOmenLaptop,
             state.DetectedMode,
             state.ToSummary(),
             state);
@@ -125,6 +135,22 @@ internal static class MachineProfileDetector
                 processorName);
         }
 
+        var isTargetHpOmen = Contains(manufacturer, "HP")
+                             && Contains(productName, "OMEN by HP Gaming Laptop 16-wd0")
+                             && string.Equals(
+                                 baseBoardProduct,
+                                 "8BA9",
+                                 StringComparison.OrdinalIgnoreCase);
+        if (isTargetHpOmen)
+        {
+            return new MachineIdentity(
+                HardwareProfile.HpOmenLaptop,
+                manufacturer,
+                productName,
+                baseBoardProduct,
+                processorName);
+        }
+
         var isAsusHardware = Contains(manufacturer, "ASUS")
                              || Contains(manufacturer, "ASUSTeK")
                              || Contains(baseBoardManufacturer, "ASUS")
@@ -180,6 +206,7 @@ internal static class PowerProfileService
         return Machine.Profile switch
         {
             HardwareProfile.AsusLaptop => LaptopPowerProfileBackend.Apply(mode),
+            HardwareProfile.HpOmenLaptop => HpOmenPowerProfileBackend.Apply(mode),
             HardwareProfile.GigabyteDesktop => DesktopPowerProfileBackend.Apply(mode),
             _ => new PowerProfileApplyResult(
                 mode,
@@ -193,6 +220,7 @@ internal static class PowerProfileService
         return Machine.Profile switch
         {
             HardwareProfile.AsusLaptop => PowerProfileState.FromLaptop(LaptopPowerProfileBackend.ReadState()),
+            HardwareProfile.HpOmenLaptop => PowerProfileState.FromHpOmen(HpOmenPowerProfileBackend.ReadState()),
             HardwareProfile.GigabyteDesktop => PowerProfileState.FromDesktop(DesktopPowerProfileBackend.ReadState()),
             _ => PowerProfileState.Unsupported(Machine)
         };

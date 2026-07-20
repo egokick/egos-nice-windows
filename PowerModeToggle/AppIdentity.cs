@@ -12,6 +12,7 @@ internal static class AppIdentity
     {
         HardwareProfile.GigabyteDesktop => "165 Hz, 450 W GPU, performance CPU, 100% brightness",
         HardwareProfile.AsusLaptop => "120 Hz, Performance",
+        HardwareProfile.HpOmenLaptop => "maximum refresh rate, OMEN Performance, Windows Best performance",
         _ => "unsupported hardware"
     };
 
@@ -19,6 +20,7 @@ internal static class AppIdentity
     {
         HardwareProfile.GigabyteDesktop => "60 Hz, 150 W GPU, efficient CPU, 35% brightness",
         HardwareProfile.AsusLaptop => "60 Hz, Eco/Silent",
+        HardwareProfile.HpOmenLaptop => "60 Hz, OMEN Eco, Windows Best power efficiency",
         _ => "unsupported hardware"
     };
 

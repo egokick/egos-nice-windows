@@ -5,7 +5,16 @@ One Windows tray app that detects the current machine and selects its matching p
 Supported machines:
 
 - The ASUS laptop: uses the existing Armoury Crate/ASUS firmware, Windows plan, Windows power-mode, and 60/120 Hz controls.
+- The HP `OMEN by HP Gaming Laptop 16-wd0xxx` with system board `8BA9`: uses the HP OMEN firmware mode, Windows power-mode, and display refresh-rate controls. Detection requires both the model family and board ID, so other HP systems are left untouched.
 - The GIGABYTE Z790 EAGLE AX desktop with an Intel Core i9-14900K: uses the desktop Windows plans, CPU policy, RTX 4090 power limit, DDC/CI brightness, and 60/165 Hz controls.
+
+The HP OMEN profiles are:
+
+| Setting | Low power | High power |
+| --- | --- | --- |
+| HP firmware mode | OMEN Eco | OMEN Performance |
+| Windows power mode | Best power efficiency | Best performance |
+| Primary display | 60 Hz | Highest mode available at the current resolution (165 Hz on this laptop) |
 
 The desktop profiles are:
 
@@ -26,7 +35,7 @@ The menu also shows estimated High- and Low-mode watt usage, the current estimat
 
 Power estimates warm up for a few seconds. A new machine or telemetry source must be observed in High mode for about 20 seconds before Low-mode savings can be calculated. Learned High and Low baselines and the lifetime estimated watt-hours are stored in the machine-specific settings folder. The desktop figure covers the CPU package and NVIDIA GPU, not PSU conversion losses, motherboard devices, or the separately powered monitor.
 
-The app preserves the laptop settings in `%LOCALAPPDATA%\PowerModeToggle` and the desktop settings in `%LOCALAPPDATA%\PowerModeToggleDesktop`. On the desktop, it also migrates the old `PowerModeToggleDesktop` startup entry to the unified executable.
+The app preserves the laptop settings in `%LOCALAPPDATA%\PowerModeToggle` and the desktop settings in `%LOCALAPPDATA%\PowerModeToggleDesktop`. On the HP OMEN, the last firmware mode successfully accepted by the BIOS is also recorded under `HKCU\Software\PowerModeToggle\HpOmen` so status detection can include the firmware setting. On the desktop, it also migrates the old `PowerModeToggleDesktop` startup entry to the unified executable.
 
 Power changes may request administrator approval once per app session. The elevated helper is reused for subsequent switches.
 

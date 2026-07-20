@@ -257,7 +257,7 @@ internal sealed class PowerTelemetryService : IDisposable
     public PowerTelemetryService(HardwareProfile profile)
     {
         _profile = profile;
-        if (profile is HardwareProfile.GigabyteDesktop or HardwareProfile.AsusLaptop)
+        if (profile is HardwareProfile.GigabyteDesktop or HardwareProfile.AsusLaptop or HardwareProfile.HpOmenLaptop)
         {
             if (WindowsRaplEnergySource.TryCreate() is { } rapl)
             {
@@ -270,7 +270,7 @@ internal sealed class PowerTelemetryService : IDisposable
             }
         }
 
-        if (profile == HardwareProfile.AsusLaptop)
+        if (profile is HardwareProfile.AsusLaptop or HardwareProfile.HpOmenLaptop)
         {
             _batterySource = new BatteryDischargeSource();
         }

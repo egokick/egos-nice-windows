@@ -556,6 +556,16 @@ internal static class WindowsPowerService
         }
     }
 
+    public static void SetPowerMode(bool highPower)
+    {
+        var powerMode = highPower ? BestPerformance : BestPowerEfficiency;
+        var modeResult = PowerSetActiveOverlayScheme(powerMode);
+        if (modeResult != 0)
+        {
+            throw new Win32Exception((int)modeResult, "Could not change the Windows power mode.");
+        }
+    }
+
     public static string? TryGetActivePlanName()
     {
         try
@@ -674,6 +684,48 @@ internal static class DisplayRefreshRateService
             return EnumDisplaySettingsEx(deviceName, CurrentSettings, ref mode, 0)
                 ? mode.DisplayFrequency
                 : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static int? TryGetHighestPrimaryDisplayRefreshRate()
+    {
+        try
+        {
+            var deviceName = Screen.PrimaryScreen?.DeviceName;
+            if (string.IsNullOrWhiteSpace(deviceName))
+            {
+                return null;
+            }
+
+            var current = CreateDeviceMode();
+            if (!EnumDisplaySettingsEx(deviceName, CurrentSettings, ref current, 0))
+            {
+                return null;
+            }
+
+            int? highest = null;
+            for (var modeNumber = 0; ; modeNumber++)
+            {
+                var candidate = CreateDeviceMode();
+                if (!EnumDisplaySettingsEx(deviceName, modeNumber, ref candidate, 0))
+                {
+                    break;
+                }
+
+                if (candidate.PelsWidth == current.PelsWidth
+                    && candidate.PelsHeight == current.PelsHeight
+                    && candidate.BitsPerPixel == current.BitsPerPixel
+                    && candidate.DisplayFrequency > 0)
+                {
+                    highest = Math.Max(highest ?? 0, candidate.DisplayFrequency);
+                }
+            }
+
+            return highest;
         }
         catch
         {
