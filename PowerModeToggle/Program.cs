@@ -446,7 +446,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         try
         {
-            StartupService.SetRunAtStartup(enable: true);
+            // Startup is opt-in through this app's tray menu or the suite Admin Panel.
             _settings.StartupPreferenceInitialized = true;
             SettingsStore.Save(_settings);
         }
@@ -665,7 +665,11 @@ internal static class StartupService
         using var key = Registry.CurrentUser.OpenSubKey(RunRegistryPath, writable: false);
         var value = key?.GetValue(AppName) as string;
         return !string.IsNullOrWhiteSpace(value)
-               && string.Equals(value.Trim().Trim('"'), Application.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+               && (string.Equals(
+                       value.Trim().Trim('"'),
+                       Application.ExecutablePath,
+                       StringComparison.OrdinalIgnoreCase)
+                   || value.Contains(@"\PowerModeToggle\start.bat", StringComparison.OrdinalIgnoreCase));
     }
 
     public static void SetRunAtStartup(bool enable)

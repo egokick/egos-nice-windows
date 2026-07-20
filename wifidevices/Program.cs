@@ -229,7 +229,6 @@ app.MapFallback(async context =>
 
 if (OperatingSystem.IsWindows() && !args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase))
 {
-    StartupRegistration.EnsureRegistered(DefaultLocalUrl);
     await RunWithTrayAsync(app, DefaultLocalUrl);
 }
 else

@@ -322,3 +322,22 @@
 {"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
 {"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"B6:AD:92:56:8D:78","online":false,"ipAddress":"192.168.1.178","source":"Remote router (192.168.1.254)","hostName":"Apple iPhone"}
 {"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"E0:2B:E9:F7:48:A6","online":true,"ipAddress":"192.168.1.167","source":"Remote router (192.168.1.254)","hostName":"DESKTOP-P3N2172"}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"70:70:AA:E9:8A:4C","online":true,"ipAddress":"192.168.1.77","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"78:E1:03:7A:69:61","online":true,"ipAddress":"192.168.1.78","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:11:32:51:C8:71","online":true,"ipAddress":"192.168.1.79","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"F0:6E:0B:DA:C0:A9","online":true,"ipAddress":"192.168.1.98","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"18:C0:4D:29:7D:48","online":true,"ipAddress":"192.168.1.110","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"64:E7:D8:CE:5E:6C","online":true,"ipAddress":"192.168.1.127","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"64:16:66:8A:9D:50","online":true,"ipAddress":"192.168.1.135","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"A4:77:33:D4:63:10","online":true,"ipAddress":"192.168.1.155","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"40:F4:C9:AB:0C:78","online":true,"ipAddress":"192.168.1.164","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"EC:B5:FA:24:59:17","online":true,"ipAddress":"192.168.1.165","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"DC:4F:22:2B:0C:DD","online":true,"ipAddress":"192.168.1.199","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"54:3A:D6:86:0F:DC","online":true,"ipAddress":"192.168.1.205","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"8C:53:E6:BC:44:43","online":true,"ipAddress":"192.168.1.214","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"3A:8A:D0:DB:AC:B1","online":true,"ipAddress":"192.168.1.232","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"3C:58:36:03:0E:64","online":true,"ipAddress":"192.168.1.254","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:15:5D:A0:4C:F0","online":true,"ipAddress":"172.21.244.31","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:50:56:10:1A:20","online":false,"ipAddress":"100.68.0.31","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:50:56:10:1A:30","online":false,"ipAddress":"100.68.0.40","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:50:56:10:2A:20","online":false,"ipAddress":"100.68.0.32","source":"Windows ARP/ping","hostName":null}

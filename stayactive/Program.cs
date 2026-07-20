@@ -910,7 +910,7 @@ internal static class StartupService
             return;
         }
 
-        SetRunAtStartup(true);
+        // Startup is opt-in through this app's tray menu or the suite Admin Panel.
         settings.StartupInitialized = true;
         SettingsStore.Save(settings);
     }
@@ -924,7 +924,8 @@ internal static class StartupService
             return false;
         }
 
-        return string.Equals(value.Trim('"'), Application.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(value.Trim('"'), Application.ExecutablePath, StringComparison.OrdinalIgnoreCase)
+               || value.Contains(@"\stayactive\start.bat", StringComparison.OrdinalIgnoreCase);
     }
 
     public static void SetRunAtStartup(bool enable)

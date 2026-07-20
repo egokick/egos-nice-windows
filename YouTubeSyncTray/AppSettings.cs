@@ -113,7 +113,8 @@ internal static class StartupService
             return false;
         }
 
-        return string.Equals(value.Trim('"'), Application.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(value.Trim('"'), Application.ExecutablePath, StringComparison.OrdinalIgnoreCase)
+               || value.Contains(@"\YouTubeSyncTray\start.bat", StringComparison.OrdinalIgnoreCase);
     }
 
     public static void SetRunAtStartup(bool enable)
