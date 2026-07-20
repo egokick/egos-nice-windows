@@ -33,7 +33,7 @@ internal sealed record RemoteDevice(
     string? MeshCentralNodeId = null)
 {
     public string LocationDisplay => string.IsNullOrWhiteSpace(Location)
-        ? "Location not shared"
+        ? "Location not set"
         : Location;
 }
 
@@ -73,13 +73,14 @@ internal static class RemoteMenuModelBuilder
     {
         ArgumentNullException.ThrowIfNull(snapshot);
 
+        var onlineCount = snapshot.Devices.Count(device => device.IsOnline);
         var connectionText = snapshot.ConnectionState switch
         {
-            RemoteFleetConnectionState.NotConfigured => "Self-hosted remotes: not configured",
-            RemoteFleetConnectionState.Connecting => $"{snapshot.ControlPlaneDisplayName}: connecting…",
-            RemoteFleetConnectionState.Connected => $"{snapshot.ControlPlaneDisplayName}: connected · {snapshot.Devices.Count(device => device.IsOnline)} online",
-            RemoteFleetConnectionState.Degraded => $"{snapshot.ControlPlaneDisplayName}: degraded · {snapshot.StatusMessage}",
-            _ => $"{snapshot.ControlPlaneDisplayName}: disconnected · {snapshot.StatusMessage}"
+            RemoteFleetConnectionState.NotConfigured => "Private network: setup needed",
+            RemoteFleetConnectionState.Connecting => "Private network: connecting…",
+            RemoteFleetConnectionState.Connected or RemoteFleetConnectionState.Degraded =>
+                $"Private network: connected • {onlineCount} online",
+            _ => "Private network: disconnected"
         };
 
         var devices = snapshot.Devices
@@ -94,10 +95,10 @@ internal static class RemoteMenuModelBuilder
 
         var activeExitNode = devices.FirstOrDefault(device => device.IsActiveExitNode)?.Device;
         var internetRouteText = activeExitNode is not null
-            ? $"Internet route: {activeExitNode.DeviceName}"
-            : snapshot.HasUnmanagedActiveExitNode
-                ? "Internet route: an unmanaged exit node"
-                : "Internet route: Direct";
+            ? $"Internet VPN: ON through {activeExitNode.DeviceName}"
+            : snapshot.HasUnmanagedActiveExitNode || snapshot.ActiveExitNodeId is not null
+                ? "Internet VPN: ON through another exit"
+                : "Internet VPN: OFF";
 
         return new RemoteMenuModel(
             connectionText,
@@ -117,7 +118,12 @@ internal static class RemoteMenuModelBuilder
     {
         var status = device.IsOnline ? "Online" : "Offline";
         var verification = device.IsVerified ? string.Empty : " · Unverified";
-        return $"{device.DeviceName} · {device.OwnerDisplayName} · {device.LocationDisplay} · {status}{verification}";
+        var owner = string.IsNullOrWhiteSpace(device.OwnerDisplayName)
+            || string.Equals(device.OwnerDisplayName, "Tagged Devices", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(device.OwnerDisplayName, "Headscale user", StringComparison.OrdinalIgnoreCase)
+                ? "Not set"
+                : device.OwnerDisplayName;
+        return $"{device.DeviceName} · User: {owner} · Location: {device.LocationDisplay} · {status}{verification}";
     }
 }
 

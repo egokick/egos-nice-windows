@@ -5,11 +5,15 @@ namespace StayActive.RemoteUiPreview;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        using var fleetClient = new PreviewRemoteFleetClient();
+        var startDirect = args.Any(argument => string.Equals(argument, "--off", StringComparison.OrdinalIgnoreCase));
+        var degraded = args.Any(argument => string.Equals(argument, "--degraded", StringComparison.OrdinalIgnoreCase));
+        using var sourceFleetClient = new PreviewRemoteFleetClient(startDirect, degraded);
+        var displayOverrides = new Dictionary<string, RemoteDeviceDisplayOverride>(StringComparer.Ordinal);
+        using var fleetClient = new LocalDisplayRemoteFleetClient(sourceFleetClient, () => displayOverrides);
         var preferences = new RemoteClientPreferences(
             "https://headscale.example.test",
             "https://remotes.example.test",
@@ -17,23 +21,43 @@ internal static class Program
             "https://mesh.example.test",
             "HQ-Laptop",
             "Chicago office");
-        Application.Run(new RemotesDashboardForm(
+        using var form = new RemotesDashboardForm(
             fleetClient,
             new MeshCentralRemoteActionService(() => preferences, new PreviewUriLauncher()),
-            new PreviewExitNodeController(),
+            new PreviewExitNodeController(sourceFleetClient),
             new RemoteAdminConsoleLauncher(() => preferences, new PreviewUriLauncher()),
             new PreviewRemoteHubTokenProvider(),
             () => preferences,
-            _ => { }));
+            _ => { },
+            saveDeviceDisplayOverride: (deviceId, displayOverride) =>
+            {
+                if (displayOverride.IsEmpty)
+                {
+                    displayOverrides.Remove(deviceId);
+                }
+                else
+                {
+                    displayOverrides[deviceId] = displayOverride;
+                }
+            });
+        if (args.Any(argument => string.Equals(argument, "--minimum", StringComparison.OrdinalIgnoreCase)))
+        {
+            form.Size = form.MinimumSize;
+        }
+        Application.Run(form);
     }
 }
 
 internal sealed class PreviewRemoteFleetClient : IRemoteFleetClient
 {
-    private readonly RemoteFleetSnapshot _snapshot = new(
-        RemoteFleetConnectionState.Connected,
+    private RemoteFleetSnapshot _snapshot;
+
+    public PreviewRemoteFleetClient(bool startDirect, bool degraded)
+    {
+        _snapshot = new RemoteFleetSnapshot(
+        degraded ? RemoteFleetConnectionState.Degraded : RemoteFleetConnectionState.Connected,
         "Private fleet",
-        "Ready",
+        degraded ? "RemoteHub is unavailable. VPN presence is still current." : "Ready",
         new[]
         {
             new RemoteDevice(
@@ -44,13 +68,15 @@ internal sealed class PreviewRemoteFleetClient : IRemoteFleetClient
                 true,
                 true,
                 DateTimeOffset.UtcNow,
-                RemoteCapability.ExitNode
-                    | RemoteCapability.ScreenView
-                    | RemoteCapability.SendFile
-                    | RemoteCapability.RequestFile
-                    | RemoteCapability.LocalAuthenticatorApproval,
+                degraded
+                    ? RemoteCapability.ExitNode
+                    : RemoteCapability.ExitNode
+                        | RemoteCapability.ScreenView
+                        | RemoteCapability.SendFile
+                        | RemoteCapability.RequestFile
+                        | RemoteCapability.LocalAuthenticatorApproval,
                 "100.64.0.10",
-                "node//austin-pc"),
+                degraded ? null : "node//austin-pc"),
             new RemoteDevice(
                 "london-laptop",
                 "London-Laptop",
@@ -72,8 +98,9 @@ internal sealed class PreviewRemoteFleetClient : IRemoteFleetClient
                 DateTimeOffset.UtcNow,
                 RemoteCapability.None)
         },
-        "austin-pc",
+        startDirect ? null : "austin-pc",
         DateTimeOffset.UtcNow);
+    }
 
     public RemoteFleetSnapshot GetCachedSnapshot()
     {
@@ -89,6 +116,15 @@ internal sealed class PreviewRemoteFleetClient : IRemoteFleetClient
     public void Dispose()
     {
     }
+
+    public void SetActiveExit(string? deviceId)
+    {
+        _snapshot = _snapshot with
+        {
+            ActiveExitNodeId = deviceId,
+            RefreshedAt = DateTimeOffset.UtcNow
+        };
+    }
 }
 
 internal sealed class PreviewUriLauncher : IExternalUriLauncher
@@ -98,7 +134,7 @@ internal sealed class PreviewUriLauncher : IExternalUriLauncher
     }
 }
 
-internal sealed class PreviewExitNodeController : IRemoteExitNodeController
+internal sealed class PreviewExitNodeController(PreviewRemoteFleetClient fleetClient) : IRemoteExitNodeController
 {
     public RemoteActionAvailability GetAvailability(RemoteDevice device)
     {
@@ -122,11 +158,13 @@ internal sealed class PreviewExitNodeController : IRemoteExitNodeController
         bool allowLocalNetworkAccess,
         CancellationToken cancellationToken)
     {
+        fleetClient.SetActiveExit(device.Id);
         return Task.FromResult(RemoteActionResult.Success("Preview only."));
     }
 
     public Task<RemoteActionResult> ClearExitNodeAsync(CancellationToken cancellationToken)
     {
+        fleetClient.SetActiveExit(null);
         return Task.FromResult(RemoteActionResult.Success("Preview only."));
     }
 }

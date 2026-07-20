@@ -200,8 +200,8 @@ internal sealed class RemotesMenuController : IDisposable
         else
         {
             AddActionItem(item, menuDevice.Device, "View screen...", RemoteWebAction.ViewScreen);
-            AddActionItem(item, menuDevice.Device, "Send file...", RemoteWebAction.SendFile);
-            AddActionItem(item, menuDevice.Device, "Request a file...", RemoteWebAction.RequestFile);
+            AddActionItem(item, menuDevice.Device, "Send files...", RemoteWebAction.SendFile);
+            AddActionItem(item, menuDevice.Device, "Get files...", RemoteWebAction.RequestFile);
 
             if (menuDevice.Device.Capabilities.HasFlag(RemoteCapability.ExitNode))
             {
@@ -250,12 +250,17 @@ internal sealed class RemotesMenuController : IDisposable
             ? _exitNodeController.GetClearAvailability()
             : _exitNodeController.GetAvailability(menuDevice.Device);
         var text = menuDevice.IsActiveExitNode
-            ? "Turn off internet routing"
-            : "Route internet traffic through this computer...";
+            ? "VPN ON - turn off"
+            : "Use this computer for Internet VPN";
         var item = new ToolStripMenuItem(text)
         {
             Enabled = availability.IsAvailable,
-            ToolTipText = availability.Reason
+            Checked = menuDevice.IsActiveExitNode,
+            ToolTipText = availability.IsAvailable
+                ? menuDevice.IsActiveExitNode
+                    ? "Restore this computer's normal internet connection."
+                    : $"Websites and downloads will use {menuDevice.Device.DeviceName}'s internet connection."
+                : availability.Reason
         };
         item.Click += async (_, _) =>
         {
@@ -265,10 +270,7 @@ internal sealed class RemotesMenuController : IDisposable
                 return;
             }
 
-            if (ConfirmUseExitNode(menuDevice.Device))
-            {
-                await UseExitNodeAsync(menuDevice.Device);
-            }
+            await UseExitNodeAsync(menuDevice.Device);
         };
         parent.DropDownItems.Add(item);
 
@@ -281,10 +283,13 @@ internal sealed class RemotesMenuController : IDisposable
     private void AddClearExitNodeItem(ToolStripMenuItem parent)
     {
         var availability = _exitNodeController.GetClearAvailability();
-        var item = new ToolStripMenuItem("Turn off internet routing")
+        var item = new ToolStripMenuItem("VPN ON - turn off")
         {
             Enabled = availability.IsAvailable,
-            ToolTipText = availability.Reason
+            Checked = true,
+            ToolTipText = availability.IsAvailable
+                ? "Restore this computer's normal internet connection."
+                : availability.Reason
         };
         item.Click += async (_, _) => await ClearExitNodeAsync();
         parent.DropDownItems.Add(item);
@@ -360,17 +365,6 @@ internal sealed class RemotesMenuController : IDisposable
 
     private async Task ClearExitNodeAsync()
     {
-        var confirmation = MessageBox.Show(
-            "Stop routing this computer's internet traffic through the selected remote computer and restore direct routing?",
-            "Turn off internet routing",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Warning,
-            MessageBoxDefaultButton.Button2);
-        if (confirmation != DialogResult.Yes)
-        {
-            return;
-        }
-
         var result = await _exitNodeController.ClearExitNodeAsync(CancellationToken.None);
         if (!result.Succeeded)
         {
@@ -378,20 +372,6 @@ internal sealed class RemotesMenuController : IDisposable
         }
 
         QueueRefresh();
-    }
-
-    private static bool ConfirmUseExitNode(RemoteDevice device)
-    {
-        var confirmation = MessageBox.Show(
-            $"Route all internet traffic through {device.DeviceName}?\n\n" +
-            $"Non-overlay traffic from this computer will leave through {device.DeviceName}'s public network connection. " +
-            "Its owner can see connection metadata and any traffic that is not end-to-end encrypted by the destination. " +
-            "Access to this computer's local network will remain disabled while this route is active.",
-            "Route internet traffic",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Warning,
-            MessageBoxDefaultButton.Button2);
-        return confirmation == DialogResult.Yes;
     }
 
     private static ToolStripMenuItem CreateDisabledItem(string text)

@@ -12,6 +12,7 @@ internal sealed class RemotesDashboardForm : Form
     private readonly Action _openAddDevice;
     private readonly Func<RemoteClientPreferences> _getPreferences;
     private readonly Action<RemoteClientPreferences> _savePreferences;
+    private readonly Action<string, RemoteDeviceDisplayOverride> _saveDeviceDisplayOverride;
     private readonly Label _connectionLabel;
     private readonly Label _internetRouteLabel;
     private readonly Label _fleetSummaryLabel;
@@ -19,23 +20,37 @@ internal sealed class RemotesDashboardForm : Form
     private readonly ListView _deviceList;
     private readonly Label _detailsTitleLabel;
     private readonly Label _detailsLabel;
-    private readonly Button _routeButton;
+    private readonly CheckBox _routeToggle;
+    private readonly Button _turnOffVpnButton;
     private readonly Button _viewScreenButton;
     private readonly Button _sendFileButton;
     private readonly Button _requestFileButton;
     private readonly Label _routeHelpLabel;
     private readonly Label _remoteHelpLabel;
+    private readonly TextBox _computerNameTextBox;
+    private readonly TextBox _ownerLabelTextBox;
+    private readonly TextBox _locationTextBox;
+    private readonly TextBox _vpnAddressTextBox;
+    private readonly Button _saveLabelsButton;
+    private readonly Button _resetLabelsButton;
     private readonly Label _footerLabel;
     private readonly Button _refreshButton;
     private readonly ToolTip _toolTip = new();
+    private readonly ContextMenuStrip _moreMenu = new();
     private readonly CancellationTokenSource _lifetimeCancellation = new();
+    private readonly Dictionary<string, RemoteDeviceDisplayOverride> _labelDrafts = new(StringComparer.Ordinal);
     private RemoteMenuModel? _currentModel;
     private RemoteFleetSnapshot _currentSnapshot = RemoteFleetSnapshot.NotConfigured;
     private string? _selectedDeviceId;
     private string? _noticeText;
+    private string? _routeErrorText;
     private bool _renderingDeviceList;
     private bool _refreshInProgress;
     private bool _routeChangeInProgress;
+    private bool _routeChangeTurningOff;
+    private string? _routeChangeTargetName;
+    private bool _updatingLabelFields;
+    private bool _labelFieldsDirty;
     private bool _ownedResourcesDisposed;
 
     public RemotesDashboardForm(
@@ -46,7 +61,8 @@ internal sealed class RemotesDashboardForm : Form
         IRemoteHubAccessTokenProvider remoteHubTokenProvider,
         Func<RemoteClientPreferences> getPreferences,
         Action<RemoteClientPreferences> savePreferences,
-        Action? openAddDevice = null)
+        Action? openAddDevice = null,
+        Action<string, RemoteDeviceDisplayOverride>? saveDeviceDisplayOverride = null)
     {
         _fleetClient = fleetClient;
         _remoteActionService = remoteActionService;
@@ -56,12 +72,13 @@ internal sealed class RemotesDashboardForm : Form
         _openAddDevice = openAddDevice ?? (() => { });
         _getPreferences = getPreferences;
         _savePreferences = savePreferences;
+        _saveDeviceDisplayOverride = saveDeviceDisplayOverride ?? ((_, _) => { });
 
         Text = "StayActive Remotes";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(1024, 620);
-        Size = new Size(1180, 720);
-        Font = new Font("Segoe UI", 9F);
+        MinimumSize = new Size(920, 540);
+        Size = new Size(1220, 780);
+        Font = new Font("Segoe UI", 10F);
         AutoScaleMode = AutoScaleMode.Dpi;
         KeyPreview = true;
 
@@ -69,8 +86,8 @@ internal sealed class RemotesDashboardForm : Form
         {
             Name = "RemotesHeader",
             Dock = DockStyle.Top,
-            Height = 108,
-            Padding = new Padding(18, 12, 18, 10),
+            Height = 92,
+            Padding = new Padding(20, 12, 20, 10),
             ColumnCount = 2,
             RowCount = 1,
             BackColor = SystemColors.ControlLightLight
@@ -82,17 +99,16 @@ internal sealed class RemotesDashboardForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             Margin = Padding.Empty
         };
-        headerStatus.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
-        headerStatus.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
-        headerStatus.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
+        headerStatus.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
+        headerStatus.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         var title = new Label
         {
             Name = "RemotesTitle",
             AutoSize = true,
-            Font = new Font(Font.FontFamily, 15F, FontStyle.Bold),
+            Font = new Font(Font.FontFamily, 18F, FontStyle.Bold),
             Text = "Remotes"
         };
         _connectionLabel = new Label
@@ -100,19 +116,11 @@ internal sealed class RemotesDashboardForm : Form
             Name = "ConnectionStatusLabel",
             AutoEllipsis = true,
             Dock = DockStyle.Fill,
-            Text = "Loading self-hosted VPN status..."
-        };
-        _internetRouteLabel = new Label
-        {
-            Name = "InternetRouteStatusLabel",
-            AutoEllipsis = true,
-            Dock = DockStyle.Fill,
-            Font = new Font(Font, FontStyle.Bold),
-            Text = "Internet route: checking..."
+            ForeColor = SystemColors.GrayText,
+            Text = "Checking your private network..."
         };
         headerStatus.Controls.Add(title, 0, 0);
         headerStatus.Controls.Add(_connectionLabel, 0, 1);
-        headerStatus.Controls.Add(_internetRouteLabel, 0, 2);
 
         var headerActions = new FlowLayoutPanel
         {
@@ -122,33 +130,39 @@ internal sealed class RemotesDashboardForm : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false,
-            Padding = new Padding(8, 11, 0, 0),
+            Padding = new Padding(8, 14, 0, 0),
             Margin = Padding.Empty
         };
-        var settingsButton = CreateHeaderButton("Settings...", "SettingsButton");
-        settingsButton.Click += (_, _) => OpenSettings();
-        var adminConsoleButton = CreateHeaderButton("Administration...", "AdminConsoleButton");
-        adminConsoleButton.Click += (_, _) => OpenAdminConsole();
-        var signInButton = CreateHeaderButton("RemoteHub sign in...", "SignInButton");
-        signInButton.Click += async (_, _) => await SignInToRemoteHubAsync();
-        var addDeviceButton = CreateHeaderButton("Add device...", "AddDeviceButton");
+        var signInMenuItem = _moreMenu.Items.Add("Remote access sign in...");
+        signInMenuItem.Name = "SignInMenuItem";
+        signInMenuItem.Click += async (_, _) => await SignInToRemoteHubAsync();
+        var adminMenuItem = _moreMenu.Items.Add("Administration...");
+        adminMenuItem.Name = "AdminConsoleMenuItem";
+        adminMenuItem.Click += (_, _) => OpenAdminConsole();
+        _moreMenu.Items.Add(new ToolStripSeparator());
+        var settingsMenuItem = _moreMenu.Items.Add("Settings...");
+        settingsMenuItem.Name = "SettingsMenuItem";
+        settingsMenuItem.Click += (_, _) => OpenSettings();
+        var moreButton = CreateHeaderButton("More  ▾", "MoreButton");
+        moreButton.ContextMenuStrip = _moreMenu;
+        moreButton.Click += (_, _) => _moreMenu.Show(moreButton, new Point(0, moreButton.Height));
+        var addDeviceButton = CreateHeaderButton("+ Add computer", "AddDeviceButton");
         addDeviceButton.Click += (_, _) => _openAddDevice();
         _refreshButton = new Button
         {
             Name = "RefreshButton",
             Text = "Refresh",
             AutoSize = true,
+            MinimumSize = new Size(88, 36),
             Margin = new Padding(6, 3, 0, 3)
         };
         _refreshButton.Click += async (_, _) => await RefreshFleetAsync();
         _toolTip.SetToolTip(_refreshButton, "Refresh VPN presence and self-hosted remote-management metadata (F5).");
         headerActions.Controls.AddRange(new Control[]
         {
-            settingsButton,
-            adminConsoleButton,
-            signInButton,
-            addDeviceButton,
-            _refreshButton
+            moreButton,
+            _refreshButton,
+            addDeviceButton
         });
         header.Controls.Add(headerStatus, 0, 0);
         header.Controls.Add(headerActions, 1, 0);
@@ -157,10 +171,10 @@ internal sealed class RemotesDashboardForm : Form
         {
             Name = "RemotesSplitContainer",
             Dock = DockStyle.Fill,
-            Size = new Size(1140, 560),
-            SplitterDistance = 455,
-            Panel1MinSize = 340,
-            Panel2MinSize = 430,
+            Size = new Size(1180, 650),
+            SplitterDistance = 420,
+            Panel1MinSize = 290,
+            Panel2MinSize = 460,
             FixedPanel = FixedPanel.Panel1
         };
 
@@ -169,24 +183,25 @@ internal sealed class RemotesDashboardForm : Form
             Name = "DeviceList",
             Dock = DockStyle.Fill,
             FullRowSelect = true,
-            GridLines = true,
+            GridLines = false,
             HideSelection = false,
             MultiSelect = false,
-            View = View.Details
+            View = View.Tile,
+            TileSize = new Size(360, 78),
+            BorderStyle = BorderStyle.FixedSingle,
+            Activation = ItemActivation.OneClick
         };
-        _deviceList.Columns.Add("Computer", 125);
-        _deviceList.Columns.Add("Owner / user", 95);
-        _deviceList.Columns.Add("Location", 95);
-        _deviceList.Columns.Add("Status", 65);
-        _deviceList.Columns.Add("VPN", 65);
+        _deviceList.Columns.Add("Computer");
+        _deviceList.Columns.Add("Labels");
+        _deviceList.Columns.Add("Status");
         _deviceList.SelectedIndexChanged += (_, _) => RenderDetails();
-        _deviceList.SizeChanged += (_, _) => ResizeDeviceColumns();
+        _deviceList.SizeChanged += (_, _) => ResizeDeviceTiles();
 
         _searchTextBox = new TextBox
         {
             Name = "DeviceSearchTextBox",
             Dock = DockStyle.Fill,
-            PlaceholderText = "Search computers, owner labels, or locations...",
+            PlaceholderText = "Search computers...",
             Margin = new Padding(0, 0, 0, 8)
         };
         _searchTextBox.TextChanged += (_, _) => RenderDeviceList();
@@ -204,24 +219,24 @@ internal sealed class RemotesDashboardForm : Form
             Dock = DockStyle.Fill,
             ColumnCount = 1,
             RowCount = 4,
-            Padding = new Padding(12)
+            Padding = new Padding(12, 10, 12, 12)
         };
-        devicePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
         devicePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        devicePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        devicePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        devicePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         devicePanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         devicePanel.Controls.Add(new Label
         {
-            Name = "DeviceSearchLabel",
-            Text = "Search",
+            Name = "ComputersHeadingLabel",
+            Text = "Your computers",
             AutoSize = true,
-            Font = new Font(Font, FontStyle.Bold),
+            Font = new Font(Font.FontFamily, 13F, FontStyle.Bold),
             Anchor = AnchorStyles.Left
         }, 0, 0);
         devicePanel.Controls.Add(_searchTextBox, 0, 1);
         devicePanel.Controls.Add(_fleetSummaryLabel, 0, 2);
         devicePanel.Controls.Add(_deviceList, 0, 3);
-        split.Panel1.Padding = new Padding(12);
+        split.Panel1.Padding = new Padding(8);
         split.Panel1.Controls.Add(devicePanel);
 
         var detailsPanel = new Panel
@@ -238,7 +253,7 @@ internal sealed class RemotesDashboardForm : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             Margin = Padding.Empty
         };
         detailsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -249,10 +264,12 @@ internal sealed class RemotesDashboardForm : Form
         _detailsTitleLabel = new Label
         {
             Name = "SelectedDeviceTitleLabel",
-            AutoSize = true,
+            AutoSize = false,
+            AutoEllipsis = true,
+            Height = 42,
             Dock = DockStyle.Fill,
-            Font = new Font(Font.FontFamily, 13F, FontStyle.Bold),
-            Margin = new Padding(0, 0, 0, 10),
+            Font = new Font(Font.FontFamily, 15F, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 12),
             Text = "Select a computer"
         };
         _detailsLabel = new Label
@@ -260,48 +277,164 @@ internal sealed class RemotesDashboardForm : Form
             Name = "SelectedDeviceDetailsLabel",
             AutoSize = true,
             Dock = DockStyle.Fill,
-            Margin = new Padding(0, 0, 0, 14),
-            Text = "Select a computer to see its VPN identity, owner label, location, address, last-seen time, and available controls."
+            ForeColor = SystemColors.GrayText,
+            Margin = new Padding(0, 6, 0, 2),
+            Text = "Select a computer to see its connection details."
         };
 
         var routeGroup = new GroupBox
         {
             Name = "InternetRoutingGroup",
-            Text = "Internet routing (VPN exit)",
+            Text = "Internet VPN",
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(12),
+            Padding = new Padding(14),
             Margin = new Padding(0, 0, 0, 12)
         };
         var routeLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            ColumnCount = 1,
+            ColumnCount = 2,
             RowCount = 2
         };
+        routeLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        routeLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         routeLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         routeLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var routeActions = new FlowLayoutPanel
+        _internetRouteLabel = new Label
+        {
+            Name = "InternetRouteStatusLabel",
+            AutoSize = false,
+            AutoEllipsis = true,
+            Height = 42,
+            Dock = DockStyle.Fill,
+            Font = new Font(Font.FontFamily, 16F, FontStyle.Bold),
+            Margin = new Padding(0, 3, 12, 4),
+            Text = "Checking VPN status..."
+        };
+        _routeToggle = new CheckBox
+        {
+            Name = "VpnToggle",
+            Appearance = Appearance.Button,
+            AutoCheck = false,
+            CheckAlign = ContentAlignment.MiddleCenter,
+            TextAlign = ContentAlignment.MiddleCenter,
+            FlatStyle = FlatStyle.Flat,
+            UseVisualStyleBackColor = false,
+            Font = new Font(Font, FontStyle.Bold),
+            MinimumSize = new Size(146, 54),
+            AutoSize = false,
+            Size = new Size(146, 54),
+            Enabled = false,
+            AccessibleRole = AccessibleRole.CheckButton,
+            TabStop = true,
+            Text = "VPN OFF",
+            Margin = new Padding(12, 0, 0, 0)
+        };
+        _routeToggle.FlatAppearance.CheckedBackColor = Color.FromArgb(46, 125, 50);
+        _routeToggle.FlatAppearance.MouseOverBackColor = Color.FromArgb(220, 226, 232);
+        _turnOffVpnButton = new Button
+        {
+            Name = "TurnOffVpnButton",
+            Text = "Turn VPN off",
+            AutoSize = false,
+            Size = new Size(146, 34),
+            Visible = false,
+            AccessibleName = "Turn Internet VPN off",
+            Margin = new Padding(12, 6, 0, 0)
+        };
+        _routeHelpLabel = CreateHelpLabel(
+            "Select a computer to use its internet connection.",
+            "RouteHelpLabel");
+        _routeToggle.Click += async (_, _) => await RouteSelectedAsync();
+        _turnOffVpnButton.Click += async (_, _) => await RouteSelectedAsync(forceClear: true);
+        routeLayout.Controls.Add(_internetRouteLabel, 0, 0);
+        routeLayout.SetColumnSpan(_internetRouteLabel, 2);
+        routeLayout.Controls.Add(_routeHelpLabel, 0, 1);
+        var routeControls = new FlowLayoutPanel
+        {
+            Name = "VpnControls",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Margin = Padding.Empty
+        };
+        routeControls.Controls.Add(_routeToggle);
+        routeControls.Controls.Add(_turnOffVpnButton);
+        routeLayout.Controls.Add(routeControls, 1, 1);
+        routeGroup.Controls.Add(routeLayout);
+
+        var aboutGroup = new GroupBox
+        {
+            Name = "AboutComputerGroup",
+            Text = "About this computer",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(14),
+            Margin = new Padding(0, 0, 0, 12)
+        };
+        var aboutLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = true
+            ColumnCount = 2,
+            RowCount = 7,
+            Margin = Padding.Empty
         };
-        _routeButton = CreateActionButton("Use as internet exit", "RouteButton", 190);
-        _routeHelpLabel = CreateHelpLabel("Select a computer to see whether it can be used as an internet exit.", "RouteHelpLabel");
-        _routeButton.Click += async (_, _) => await RouteSelectedAsync();
-        routeActions.Controls.Add(_routeButton);
-        routeLayout.Controls.Add(routeActions, 0, 0);
-        routeLayout.Controls.Add(_routeHelpLabel, 0, 1);
-        routeGroup.Controls.Add(routeLayout);
+        aboutLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
+        aboutLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var row = 0; row < aboutLayout.RowCount; row++)
+        {
+            aboutLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
+        _computerNameTextBox = CreateDetailsTextBox("ComputerNameTextBox", readOnly: true);
+        _ownerLabelTextBox = CreateDetailsTextBox("OwnerLabelTextBox", readOnly: false);
+        _ownerLabelTextBox.PlaceholderText = "Optional";
+        _ownerLabelTextBox.MaxLength = RemoteDeviceDisplayOverride.MaxLabelLength;
+        _locationTextBox = CreateDetailsTextBox("LocationTextBox", readOnly: false);
+        _locationTextBox.PlaceholderText = "Optional";
+        _locationTextBox.MaxLength = RemoteDeviceDisplayOverride.MaxLabelLength;
+        _vpnAddressTextBox = CreateDetailsTextBox("VpnAddressTextBox", readOnly: true);
+        _ownerLabelTextBox.TextChanged += (_, _) => MarkLabelsDirty();
+        _locationTextBox.TextChanged += (_, _) => MarkLabelsDirty();
+        AddDetailsRow(aboutLayout, 0, "PC name", _computerNameTextBox);
+        AddDetailsRow(aboutLayout, 1, "User label", _ownerLabelTextBox);
+        AddDetailsRow(aboutLayout, 2, "Location", _locationTextBox);
+        AddDetailsRow(aboutLayout, 3, "VPN address", _vpnAddressTextBox);
+        var labelButtons = new FlowLayoutPanel
+        {
+            Name = "LabelEditButtons",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            Margin = new Padding(0, 4, 0, 0)
+        };
+        _saveLabelsButton = CreateActionButton("Save labels", "SaveLabelsButton", 110);
+        _saveLabelsButton.Enabled = false;
+        _saveLabelsButton.Click += (_, _) => SaveSelectedLabels();
+        _resetLabelsButton = CreateActionButton("Reset labels", "ResetLabelsButton", 110);
+        _resetLabelsButton.Enabled = false;
+        _resetLabelsButton.Click += (_, _) => ResetSelectedLabels();
+        labelButtons.Controls.AddRange(new Control[] { _saveLabelsButton, _resetLabelsButton });
+        aboutLayout.Controls.Add(labelButtons, 1, 4);
+        var labelHelp = CreateHelpLabel(
+            "User and location are optional labels saved only on this PC. Computer name and VPN address come from your private network and are read-only.",
+            "LabelHelpLabel");
+        aboutLayout.Controls.Add(labelHelp, 0, 5);
+        aboutLayout.SetColumnSpan(labelHelp, 2);
+        aboutLayout.Controls.Add(_detailsLabel, 0, 6);
+        aboutLayout.SetColumnSpan(_detailsLabel, 2);
+        aboutGroup.Controls.Add(aboutLayout);
 
         var remoteAccessGroup = new GroupBox
         {
             Name = "RemoteAccessGroup",
-            Text = "Screen and files",
+            Text = "Remote access",
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -325,9 +458,9 @@ internal sealed class RemotesDashboardForm : Form
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = true
         };
-        _viewScreenButton = CreateActionButton("View screen", "ViewScreenButton", 110);
-        _sendFileButton = CreateActionButton("Send file", "SendFileButton", 100);
-        _requestFileButton = CreateActionButton("Request a file", "RequestFileButton", 115);
+        _viewScreenButton = CreateActionButton("View screen", "ViewScreenButton", 112);
+        _sendFileButton = CreateActionButton("Send files", "SendFileButton", 106);
+        _requestFileButton = CreateActionButton("Get files", "RequestFileButton", 106);
         _viewScreenButton.Click += (_, _) => OpenSelectedAction(RemoteWebAction.ViewScreen);
         _sendFileButton.Click += (_, _) => OpenSelectedAction(RemoteWebAction.SendFile);
         _requestFileButton.Click += (_, _) => OpenSelectedAction(RemoteWebAction.RequestFile);
@@ -338,7 +471,7 @@ internal sealed class RemotesDashboardForm : Form
             _requestFileButton
         });
         _remoteHelpLabel = CreateHelpLabel(
-            "Screen and file controls require your self-hosted MeshCentral server and an authorized device mapping.",
+            "Screen and file tools use your self-hosted RemoteHub and MeshCentral services.",
             "RemoteActionsHelpLabel");
         remoteAccessLayout.Controls.Add(remoteActionFlow, 0, 0);
         remoteAccessLayout.Controls.Add(_remoteHelpLabel, 0, 1);
@@ -351,14 +484,14 @@ internal sealed class RemotesDashboardForm : Form
             Dock = DockStyle.Fill,
             ForeColor = SystemColors.GrayText,
             Margin = new Padding(0, 4, 0, 0),
-            Text = "Self-hosted only: screen and file controls use MeshCentral, with no hosted fallback. " +
-                   "Bluetooth adapter and passkey relaying are not available in this build."
+            Text = "Remote tools use only your self-hosted services. Bluetooth passkey relay is not available yet."
         };
         detailsLayout.Controls.Add(_detailsTitleLabel, 0, 0);
-        detailsLayout.Controls.Add(_detailsLabel, 0, 1);
-        detailsLayout.Controls.Add(routeGroup, 0, 2);
+        detailsLayout.Controls.Add(routeGroup, 0, 1);
+        detailsLayout.Controls.Add(aboutGroup, 0, 2);
         detailsLayout.Controls.Add(remoteAccessGroup, 0, 3);
         detailsLayout.Controls.Add(safetyLabel, 0, 4);
+        detailsLayout.Controls.Add(new Panel { Height = 1, Dock = DockStyle.Fill }, 0, 5);
         detailsPanel.Controls.Add(detailsLayout);
         detailsPanel.SizeChanged += (_, _) =>
         {
@@ -394,6 +527,7 @@ internal sealed class RemotesDashboardForm : Form
                 Close();
             }
         };
+        FormClosing += RemotesDashboardForm_FormClosing;
         RefreshFromSnapshot();
         Shown += async (_, _) => await RefreshFleetAsync();
     }
@@ -407,10 +541,21 @@ internal sealed class RemotesDashboardForm : Form
 
         _currentSnapshot = _fleetClient.GetCachedSnapshot();
         _currentModel = RemoteMenuModelBuilder.Build(_currentSnapshot);
-        _connectionLabel.Text = _currentModel.ConnectionText;
-        _internetRouteLabel.Text = _currentModel.InternetRouteText;
-        var routeIsActive = _currentSnapshot.ActiveExitNodeId is not null || _currentSnapshot.HasUnmanagedActiveExitNode;
-        _internetRouteLabel.ForeColor = routeIsActive ? Color.DarkGreen : SystemColors.ControlText;
+        var onlineCount = _currentSnapshot.Devices.Count(device => device.IsOnline);
+        _connectionLabel.Text = _currentSnapshot.ConnectionState switch
+        {
+            RemoteFleetConnectionState.Connected or RemoteFleetConnectionState.Degraded =>
+                $"Private network connected  •  {onlineCount} computer{(onlineCount == 1 ? string.Empty : "s")} online",
+            RemoteFleetConnectionState.Connecting => "Private network connecting...",
+            RemoteFleetConnectionState.NotConfigured => "Private network needs setup",
+            _ => "Private network disconnected"
+        };
+        _connectionLabel.ForeColor = _currentSnapshot.ConnectionState switch
+        {
+            RemoteFleetConnectionState.Connected or RemoteFleetConnectionState.Degraded => Color.DarkGreen,
+            RemoteFleetConnectionState.Connecting => Color.DarkGoldenrod,
+            _ => Color.Firebrick
+        };
         _toolTip.SetToolTip(_connectionLabel, _currentSnapshot.StatusMessage);
         RenderDeviceList();
         UpdateFooter();
@@ -427,11 +572,12 @@ internal sealed class RemotesDashboardForm : Form
         _refreshInProgress = true;
         _refreshButton.Enabled = false;
         _refreshButton.Text = "Refreshing...";
-        _connectionLabel.Text = "Refreshing the self-hosted VPN and remote inventory...";
+        _connectionLabel.Text = "Checking your private network...";
         try
         {
             await _fleetClient.RefreshAsync(cancellationToken);
             _noticeText = null;
+            _routeErrorText = null;
         }
         catch (OperationCanceledException)
         {
@@ -479,14 +625,15 @@ internal sealed class RemotesDashboardForm : Form
                     Name = "Device_" + device.Device.Id,
                     Tag = device
                 };
-                item.SubItems.Add(FormatOwnerLabel(device.Device.OwnerDisplayName));
-                item.SubItems.Add(FormatLocation(device.Device.Location));
-                item.SubItems.Add(device.Device.IsOnline ? "Online" : "Offline");
-                item.SubItems.Add(device.IsActiveExitNode
-                    ? "Active"
+                item.SubItems.Add(
+                    $"User: {FormatOwnerLabel(device.Device.OwnerDisplayName)}  •  Location: {FormatLocation(device.Device.Location)}");
+                item.SubItems.Add(
+                    $"{(device.Device.IsOnline ? "Online" : "Offline")}  •  " +
+                    (device.IsActiveExitNode
+                    ? "VPN in use"
                     : device.Device.Capabilities.HasFlag(RemoteCapability.ExitNode)
-                        ? device.Device.IsOnline && device.Device.IsVerified ? "Ready" : "Unavailable"
-                        : "No");
+                        ? device.Device.IsOnline && device.Device.IsVerified ? "VPN ready" : "VPN unavailable"
+                        : "No VPN routing"));
                 _deviceList.Items.Add(item);
                 if (string.Equals(device.Device.Id, selectedId, StringComparison.Ordinal))
                 {
@@ -514,7 +661,7 @@ internal sealed class RemotesDashboardForm : Form
         _fleetSummaryLabel.Text = visibleDevices.Length == _currentModel.Devices.Count
             ? $"{visibleDevices.Length} computer{(visibleDevices.Length == 1 ? string.Empty : "s")} - {onlineCount} online"
             : $"Showing {visibleDevices.Length} of {_currentModel.Devices.Count} computers - {onlineCount} online";
-        ResizeDeviceColumns();
+        ResizeDeviceTiles();
         RenderDetails();
     }
 
@@ -532,28 +679,26 @@ internal sealed class RemotesDashboardForm : Form
             _detailsTitleLabel.Text = _currentModel?.Devices.Count == 0
                 ? "No remote computers found"
                 : "Select a computer";
+            _toolTip.SetToolTip(_detailsTitleLabel, _detailsTitleLabel.Text);
             _detailsLabel.Text = _currentModel?.Devices.Count == 0
-                ? "No other StayActive computers are currently enrolled in this self-hosted VPN. Use Add device to enroll one."
+                ? "No other StayActive computers are enrolled yet. Choose + Add computer to connect one."
                 : "No computer matches the current search, or no computer is selected.";
+            PopulateDeviceFields(null, force: true);
             SetActionButtons(null);
             return;
         }
 
+        var selectionChanged = !string.Equals(_selectedDeviceId, selected.Device.Id, StringComparison.Ordinal);
         _selectedDeviceId = selected.Device.Id;
         var device = selected.Device;
-        _detailsTitleLabel.Text = selected.IsActiveExitNode
-            ? $"{device.DeviceName} - active internet exit"
-            : device.DeviceName;
+        _detailsTitleLabel.Text = $"{device.DeviceName}  •  {(device.IsOnline ? "Online" : "Offline")}";
+        _toolTip.SetToolTip(_detailsTitleLabel, _detailsTitleLabel.Text);
         _detailsLabel.Text =
-                             $"Status: {(device.IsOnline ? "Online" : "Offline")}\r\n" +
-                             $"VPN identity: {(device.IsVerified ? "Enrolled and trusted by Headscale" : "Not verified")}\r\n" +
-                             $"Owner / user label: {FormatOwnerLabel(device.OwnerDisplayName)}\r\n" +
-                             $"Location: {FormatLocation(device.Location)}\r\n" +
-                             $"VPN address: {FormatValue(device.TailnetIp, "Not reported")}\r\n" +
-                             $"Last seen: {FormatLastSeen(device)}\r\n" +
-                             $"Capabilities: {FormatCapabilities(device.Capabilities)}\r\n" +
-                             $"Remote management: {(string.IsNullOrWhiteSpace(device.MeshCentralNodeId) ? "Not linked to MeshCentral" : "Linked to self-hosted MeshCentral")}\r\n\r\n" +
-                             "Owner/user and location are opt-in labels. StayActive does not silently read the remote Windows account or infer physical location from its IP address.";
+                             $"Last seen: {FormatLastSeen(device)}  •  " +
+                             $"Identity: {(device.IsVerified ? "Verified" : "Not verified")}  •  " +
+                             $"Remote access: {(string.IsNullOrWhiteSpace(device.MeshCentralNodeId) ? "Not set up" : "Linked")}\r\n" +
+                             $"Available tools: {FormatCapabilities(device.Capabilities)}";
+        PopulateDeviceFields(device, force: selectionChanged || !_labelFieldsDirty);
         SetActionButtons(selected);
     }
 
@@ -607,6 +752,8 @@ internal sealed class RemotesDashboardForm : Form
             Name = name,
             Text = text,
             AutoSize = true,
+            MinimumSize = new Size(96, 36),
+            Padding = new Padding(10, 0, 10, 0),
             Margin = new Padding(6, 3, 0, 3)
         };
     }
@@ -617,11 +764,203 @@ internal sealed class RemotesDashboardForm : Form
         {
             Name = name,
             AutoSize = true,
-            MinimumSize = new Size(minimumWidth, 0),
+            MinimumSize = new Size(minimumWidth, 36),
             Enabled = false,
             Text = text,
             Margin = new Padding(0, 0, 8, 8)
         };
+    }
+
+    private static TextBox CreateDetailsTextBox(string name, bool readOnly)
+    {
+        return new TextBox
+        {
+            Name = name,
+            Dock = DockStyle.Fill,
+            ReadOnly = readOnly,
+            BackColor = readOnly ? SystemColors.Control : SystemColors.Window,
+            ForeColor = SystemColors.ControlText,
+            Margin = new Padding(0, 2, 0, 5),
+            AccessibleRole = AccessibleRole.Text,
+            AccessibleDescription = readOnly
+                ? "Read-only value from your private network. You can select and copy it."
+                : "Editable label saved only on this computer."
+        };
+    }
+
+    private static void AddDetailsRow(TableLayoutPanel layout, int row, string labelText, Control field)
+    {
+        var label = new Label
+        {
+            Name = field.Name + "Label",
+            AutoSize = true,
+            Text = labelText,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 6, 10, 5)
+        };
+        layout.Controls.Add(label, 0, row);
+        layout.Controls.Add(field, 1, row);
+    }
+
+    private void MarkLabelsDirty()
+    {
+        if (_updatingLabelFields)
+        {
+            return;
+        }
+
+        _labelFieldsDirty = true;
+        if (!string.IsNullOrWhiteSpace(_selectedDeviceId))
+        {
+            _labelDrafts[_selectedDeviceId] = new RemoteDeviceDisplayOverride(
+                _ownerLabelTextBox.Text,
+                _locationTextBox.Text);
+        }
+        _saveLabelsButton.Enabled = GetSelectedDevice() is not null;
+    }
+
+    private void PopulateDeviceFields(RemoteDevice? device, bool force)
+    {
+        var hasDevice = device is not null;
+        _computerNameTextBox.Enabled = hasDevice;
+        _ownerLabelTextBox.Enabled = hasDevice;
+        _locationTextBox.Enabled = hasDevice;
+        _vpnAddressTextBox.Enabled = hasDevice;
+        _resetLabelsButton.Enabled = hasDevice;
+        if (!force)
+        {
+            return;
+        }
+
+        _updatingLabelFields = true;
+        try
+        {
+            RemoteDeviceDisplayOverride? draft = null;
+            var hasDraft = device is not null
+                && _labelDrafts.TryGetValue(device.Id, out draft);
+            _computerNameTextBox.Text = device?.DeviceName ?? string.Empty;
+            _ownerLabelTextBox.Text = device is null
+                ? string.Empty
+                : hasDraft
+                    ? draft!.OwnerOrUserLabel ?? string.Empty
+                    : FormatEditableOwnerLabel(device.OwnerDisplayName);
+            _locationTextBox.Text = device is null
+                ? string.Empty
+                : hasDraft
+                    ? draft!.Location ?? string.Empty
+                    : device.Location?.Trim() ?? string.Empty;
+            _vpnAddressTextBox.Text = device is null ? string.Empty : FormatValue(device.TailnetIp, "Not reported");
+            _labelFieldsDirty = hasDraft;
+            _saveLabelsButton.Enabled = hasDraft;
+        }
+        finally
+        {
+            _updatingLabelFields = false;
+        }
+    }
+
+    private void SaveSelectedLabels()
+    {
+        var selected = GetSelectedDevice();
+        if (selected is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _saveDeviceDisplayOverride(
+                selected.Device.Id,
+                new RemoteDeviceDisplayOverride(_ownerLabelTextBox.Text, _locationTextBox.Text));
+        }
+        catch
+        {
+            _noticeText = "Labels could not be saved. Your edits are still here so you can try again.";
+            UpdateFooter();
+            return;
+        }
+        _labelDrafts.Remove(selected.Device.Id);
+        _labelFieldsDirty = false;
+        _noticeText = "Labels saved on this computer.";
+        if (!string.IsNullOrWhiteSpace(_searchTextBox.Text))
+        {
+            _searchTextBox.Clear();
+        }
+        RefreshFromSnapshot();
+    }
+
+    private void ResetSelectedLabels()
+    {
+        var selected = GetSelectedDevice();
+        if (selected is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _saveDeviceDisplayOverride(selected.Device.Id, new RemoteDeviceDisplayOverride());
+        }
+        catch
+        {
+            _noticeText = "Labels could not be reset. Try again.";
+            UpdateFooter();
+            return;
+        }
+        _labelDrafts.Remove(selected.Device.Id);
+        _labelFieldsDirty = false;
+        _noticeText = "Local labels reset.";
+        if (!string.IsNullOrWhiteSpace(_searchTextBox.Text))
+        {
+            _searchTextBox.Clear();
+        }
+        RefreshFromSnapshot();
+    }
+
+    private void RemotesDashboardForm_FormClosing(object? sender, FormClosingEventArgs eventArgs)
+    {
+        if (_labelDrafts.Count == 0
+            || eventArgs.CloseReason is CloseReason.WindowsShutDown
+                or CloseReason.ApplicationExitCall
+                or CloseReason.TaskManagerClosing)
+        {
+            return;
+        }
+
+        var decision = MessageBox.Show(
+            this,
+            "You have unsaved user or location labels. Save them before closing Remotes?",
+            "Unsaved labels",
+            MessageBoxButtons.YesNoCancel,
+            MessageBoxIcon.Question,
+            MessageBoxDefaultButton.Button1);
+        if (decision == DialogResult.Cancel)
+        {
+            eventArgs.Cancel = true;
+            return;
+        }
+
+        if (decision == DialogResult.No)
+        {
+            _labelDrafts.Clear();
+            return;
+        }
+
+        try
+        {
+            foreach (var draft in _labelDrafts.ToArray())
+            {
+                _saveDeviceDisplayOverride(draft.Key, draft.Value);
+            }
+            _labelDrafts.Clear();
+            _labelFieldsDirty = false;
+        }
+        catch
+        {
+            eventArgs.Cancel = true;
+            _noticeText = "Labels could not be saved. The Remotes window will stay open so your edits are not lost.";
+            UpdateFooter();
+        }
     }
 
     private static Label CreateHelpLabel(string text, string name)
@@ -640,26 +979,106 @@ internal sealed class RemotesDashboardForm : Form
     private void SetActionButtons(RemoteMenuDevice? selected)
     {
         var device = selected?.Device;
-        var exitAvailability = selected is null
+        var activeDevice = _currentModel?.Devices.FirstOrDefault(candidate => candidate.IsActiveExitNode)?.Device;
+        var hasUnknownActiveVpn = _currentSnapshot.HasUnmanagedActiveExitNode
+            || (_currentSnapshot.ActiveExitNodeId is not null && activeDevice is null);
+        var hasActiveVpn = activeDevice is not null || hasUnknownActiveVpn;
+        var selectedIsActive = selected?.IsActiveExitNode == true;
+        var clearAvailability = hasActiveVpn
+            ? _exitNodeController.GetClearAvailability()
+            : new RemoteActionAvailability(false, "VPN is already off.");
+        var exitAvailability = hasUnknownActiveVpn
+            ? clearAvailability
+            : selected is null
             ? new RemoteActionAvailability(false, "Select a computer first.")
-            : selected.IsActiveExitNode
-                ? _exitNodeController.GetClearAvailability()
+            : selectedIsActive
+                ? clearAvailability
                 : _exitNodeController.GetAvailability(selected.Device);
-        _routeButton.Text = selected?.IsActiveExitNode == true
-            ? "Stop using as internet exit"
-            : "Use as internet exit";
-        _routeButton.Enabled = exitAvailability.IsAvailable && !_routeChangeInProgress;
-        _routeButton.AccessibleDescription = exitAvailability.Reason;
-        _toolTip.SetToolTip(_routeButton, exitAvailability.IsAvailable ? _routeButton.Text : exitAvailability.Reason);
-        _routeHelpLabel.Text = selected is null
-            ? "Select a computer to see whether it can be used as an internet exit."
-            : selected.IsActiveExitNode
-                ? selected.Device.IsOnline
-                    ? $"Internet traffic is configured to leave through {selected.Device.DeviceName}, which is online. Local-network bypass is disabled."
-                    : $"{selected.Device.DeviceName} remains configured as the internet exit but is offline. Internet access may be unavailable until it reconnects or you stop using it."
+
+        if (_routeChangeInProgress)
+        {
+            _internetRouteLabel.Text = "CHANGING VPN...";
+            _internetRouteLabel.ForeColor = Color.DarkSlateBlue;
+            _routeToggle.Text = _routeChangeTurningOff ? "DISCONNECTING..." : "CONNECTING...";
+            _routeHelpLabel.Text = _routeChangeTurningOff
+                ? "Restoring this computer's normal internet connection."
+                : $"Connecting through {_routeChangeTargetName ?? "the selected computer"}.";
+        }
+        else if (activeDevice is { IsOnline: true })
+        {
+            _internetRouteLabel.Text = $"VPN ON through {activeDevice.DeviceName}";
+            _internetRouteLabel.ForeColor = Color.DarkGreen;
+            _routeToggle.Text = selectedIsActive ? "VPN ON" : hasActiveVpn ? "SWITCH VPN" : "VPN OFF";
+            _routeHelpLabel.Text = selectedIsActive
+                ? $"Websites and downloads are using {activeDevice.DeviceName}'s internet connection. Select VPN ON to turn it off."
+                : selected is null
+                    ? $"Websites and downloads are using {activeDevice.DeviceName}'s internet connection. Select Turn VPN off to restore direct access."
+                    : exitAvailability.IsAvailable
+                        ? $"Currently using {activeDevice.DeviceName}. Select SWITCH VPN to use {selected.Device.DeviceName} instead, or turn VPN off."
+                        : $"Currently using {activeDevice.DeviceName}. {FriendlyExitReason(selected.Device, exitAvailability.Reason)} You can still turn VPN off.";
+        }
+        else if (activeDevice is not null)
+        {
+            _internetRouteLabel.Text = "VPN NEEDS ATTENTION";
+            _internetRouteLabel.ForeColor = Color.DarkGoldenrod;
+            _routeToggle.Text = selectedIsActive ? "VPN ON" : "SWITCH VPN";
+            _routeHelpLabel.Text = selectedIsActive
+                ? $"{activeDevice.DeviceName} is still selected for VPN but is offline. Turn VPN off to restore direct internet access."
+                : $"{activeDevice.DeviceName} is selected for VPN but is offline. Turn VPN off to restore direct internet access.";
+        }
+        else if (hasUnknownActiveVpn)
+        {
+            _internetRouteLabel.Text = "VPN ON through another exit";
+            _internetRouteLabel.ForeColor = Color.DarkGreen;
+            _routeToggle.Text = "VPN ON";
+            _routeHelpLabel.Text = "Another VPN exit is active. Select VPN ON to turn it off and restore direct internet access.";
+        }
+        else
+        {
+            _internetRouteLabel.Text = "VPN OFF";
+            _internetRouteLabel.ForeColor = SystemColors.ControlText;
+            _routeToggle.Text = "VPN OFF";
+            _routeHelpLabel.Text = selected is null
+                ? "Your websites and downloads are using this computer's normal internet connection. Select a computer to turn VPN on."
                 : exitAvailability.IsAvailable
-                    ? $"Use {selected.Device.DeviceName}'s public connection for websites and downloads. Local-network bypass will remain disabled."
-                    : exitAvailability.Reason;
+                    ? $"Your internet connection is direct. Turn VPN on to use {selected.Device.DeviceName}'s internet connection."
+                    : $"Your internet connection is direct. {FriendlyExitReason(selected.Device, exitAvailability.Reason)}";
+        }
+
+        _routeToggle.Checked = selectedIsActive || hasUnknownActiveVpn;
+        _routeToggle.Enabled = exitAvailability.IsAvailable && !_routeChangeInProgress;
+        _turnOffVpnButton.Visible = activeDevice is not null && !selectedIsActive && !_routeChangeInProgress;
+        _turnOffVpnButton.Enabled = clearAvailability.IsAvailable && !_routeChangeInProgress;
+        _turnOffVpnButton.AccessibleDescription = _turnOffVpnButton.Enabled
+            ? "Restore this computer's normal internet connection."
+            : clearAvailability.Reason;
+        _toolTip.SetToolTip(_turnOffVpnButton, _turnOffVpnButton.AccessibleDescription);
+        _routeToggle.AccessibleName = hasUnknownActiveVpn
+            ? "Internet VPN through another exit"
+            : selected is null
+            ? "Internet VPN"
+            : $"Use {selected.Device.DeviceName} for internet VPN";
+        _routeToggle.AccessibleDescription = _routeHelpLabel.Text;
+        var toggleBackColor = _routeChangeInProgress
+            ? Color.LightSteelBlue
+            : hasUnknownActiveVpn
+                ? Color.FromArgb(46, 125, 50)
+                : selectedIsActive
+                    ? selected?.Device.IsOnline == true ? Color.FromArgb(46, 125, 50) : Color.DarkGoldenrod
+                : Color.FromArgb(235, 238, 242);
+        _routeToggle.BackColor = toggleBackColor;
+        _routeToggle.FlatAppearance.CheckedBackColor = toggleBackColor;
+        _routeToggle.FlatAppearance.MouseOverBackColor = ControlPaint.Light(toggleBackColor, 0.08F);
+        var useWhiteToggleText = !_routeChangeInProgress
+            && (hasUnknownActiveVpn || selected is { IsActiveExitNode: true, Device: { IsOnline: true } });
+        _routeToggle.ForeColor = useWhiteToggleText ? Color.White : SystemColors.ControlText;
+        if (!string.IsNullOrWhiteSpace(_routeErrorText))
+        {
+            _routeHelpLabel.Text += Environment.NewLine + "Couldn't change VPN: " + _routeErrorText;
+            _routeToggle.AccessibleDescription = _routeHelpLabel.Text;
+        }
+        _toolTip.SetToolTip(_internetRouteLabel, _internetRouteLabel.Text);
+        _toolTip.SetToolTip(_routeToggle, _routeHelpLabel.Text);
 
         var screenAvailability = SetActionButton(_viewScreenButton, device, RemoteWebAction.ViewScreen);
         var sendAvailability = SetActionButton(_sendFileButton, device, RemoteWebAction.SendFile);
@@ -671,10 +1090,34 @@ internal sealed class RemotesDashboardForm : Form
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         _remoteHelpLabel.Text = unavailableReasons.Length == 0
-            ? "Ready. These actions open only your self-hosted MeshCentral server; its consent and permission policies still apply."
+            ? "Ready. These actions open only your self-hosted remote-access service."
             : _currentSnapshot.ConnectionState == RemoteFleetConnectionState.Degraded
-                ? "VPN control is available, but screen and file control are not set up: " + _currentSnapshot.StatusMessage
-                : string.Join(Environment.NewLine, unavailableReasons);
+                ? "Screen and file tools need RemoteHub and MeshCentral setup. Open More > Remote access sign in."
+                : device is { IsOnline: false }
+                    ? "This computer is offline. Screen and file tools will be available after it reconnects."
+                    : device is { IsVerified: false }
+                        ? "Remote access is disabled until this computer is verified."
+                        : "Screen and file tools are not set up for this computer yet.";
+    }
+
+    private static string FriendlyExitReason(RemoteDevice device, string fallback)
+    {
+        if (!device.IsOnline)
+        {
+            return "Can't connect: this computer is offline.";
+        }
+
+        if (!device.IsVerified)
+        {
+            return "Can't connect: this computer has not been verified.";
+        }
+
+        if (!device.Capabilities.HasFlag(RemoteCapability.ExitNode))
+        {
+            return "VPN routing is not enabled on this computer.";
+        }
+
+        return string.IsNullOrWhiteSpace(fallback) ? "VPN is unavailable for this computer." : fallback;
     }
 
     private RemoteActionAvailability SetActionButton(Button button, RemoteDevice? device, RemoteWebAction action)
@@ -703,7 +1146,7 @@ internal sealed class RemotesDashboardForm : Form
         }
     }
 
-    private async Task RouteSelectedAsync()
+    private async Task RouteSelectedAsync(bool forceClear = false)
     {
         if (_routeChangeInProgress || IsDisposed || Disposing)
         {
@@ -711,88 +1154,98 @@ internal sealed class RemotesDashboardForm : Form
         }
 
         var selected = GetSelectedDevice();
-        if (selected is null)
+        var activeDeviceIsKnown = _currentModel?.Devices.Any(device => device.IsActiveExitNode) == true;
+        var hasUnknownActiveVpn = _currentSnapshot.HasUnmanagedActiveExitNode
+            || (_currentSnapshot.ActiveExitNodeId is not null && !activeDeviceIsKnown);
+        if (selected is null && !hasUnknownActiveVpn && !forceClear)
         {
             return;
         }
 
         var cancellationToken = _lifetimeCancellation.Token;
         Func<Task<RemoteActionResult>> applyRouteChange;
-        if (selected.IsActiveExitNode)
+        var turningOff = forceClear || hasUnknownActiveVpn || selected?.IsActiveExitNode == true;
+        if (turningOff)
         {
-            var confirmation = MessageBox.Show(
-                this,
-                "Stop routing this computer's internet traffic through the selected remote computer and restore direct routing?",
-                "Turn off internet routing",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
-            if (confirmation != DialogResult.Yes)
+            var availability = _exitNodeController.GetClearAvailability();
+            if (!availability.IsAvailable)
             {
+                _routeErrorText = availability.Reason;
+                SetActionButtons(selected);
                 return;
             }
-
             applyRouteChange = () => _exitNodeController.ClearExitNodeAsync(cancellationToken);
         }
         else
         {
-            var confirmation = MessageBox.Show(
-                this,
-                $"Route all internet traffic through {selected.Device.DeviceName}?\n\n" +
-                $"Non-overlay traffic from this computer will leave through {selected.Device.DeviceName}'s public network connection. " +
-                "Its owner can see connection metadata and any traffic that is not end-to-end encrypted by the destination. " +
-                "Access to this computer's local network will remain disabled while this route is active.",
-                "Route internet traffic",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
-            if (confirmation != DialogResult.Yes)
+            var selectedDevice = selected!.Device;
+            var availability = _exitNodeController.GetAvailability(selectedDevice);
+            if (!availability.IsAvailable)
             {
+                _routeErrorText = FriendlyExitReason(selectedDevice, availability.Reason);
+                SetActionButtons(selected);
                 return;
             }
-
             applyRouteChange = () => _exitNodeController.UseExitNodeAsync(
-                    selected.Device,
+                    selectedDevice,
                     allowLocalNetworkAccess: false,
                     cancellationToken);
         }
 
+        _routeErrorText = null;
         _routeChangeInProgress = true;
-        _routeButton.Enabled = false;
+        _routeChangeTurningOff = turningOff;
+        _routeChangeTargetName = selected?.Device.DeviceName;
         _refreshButton.Enabled = false;
-        _routeHelpLabel.Text = "Applying the internet-routing change...";
+        SetActionButtons(selected);
         try
         {
             var result = await applyRouteChange();
-            _noticeText = result.Message;
             if (!result.Succeeded)
             {
-                MessageBox.Show(this, result.Message, "StayActive Remotes", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _noticeText = "VPN change failed.";
+                _routeErrorText = result.Message;
             }
             else
             {
                 try
                 {
                     await _fleetClient.RefreshAsync(cancellationToken);
+                    var refreshedSnapshot = _fleetClient.GetCachedSnapshot();
+                    var noActiveExit = refreshedSnapshot.ActiveExitNodeId is null
+                        && !refreshedSnapshot.HasUnmanagedActiveExitNode;
+                    var selectedExitConfirmed = selected is not null
+                        && string.Equals(
+                            refreshedSnapshot.ActiveExitNodeId,
+                            selected.Device.Id,
+                            StringComparison.Ordinal);
+                    _noticeText = turningOff && noActiveExit
+                        ? "VPN turned off."
+                        : !turningOff && selectedExitConfirmed
+                            ? $"VPN connected through {selected!.Device.DeviceName}."
+                            : "VPN request completed, but the new state is not confirmed yet. Select Refresh to check again.";
                 }
                 catch
                 {
-                    _noticeText += " Device status could not be refreshed yet; use Refresh to retry.";
+                    _noticeText = "VPN request completed, but the new state could not be checked. Select Refresh to try again.";
+                    _routeErrorText = "The command was accepted, but its new status could not be confirmed. Select Refresh to check again.";
                 }
             }
         }
         catch (OperationCanceledException)
         {
             _noticeText = "The internet-routing change was cancelled.";
+            _routeErrorText = "The change was cancelled.";
         }
         catch
         {
             _noticeText = "The internet-routing change could not be applied. Your last known route remains visible.";
-            MessageBox.Show(this, _noticeText, "StayActive Remotes", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _routeErrorText = "The change could not be applied. Your last known VPN state is still shown.";
         }
         finally
         {
             _routeChangeInProgress = false;
+            _routeChangeTargetName = null;
             if (!IsDisposed && !Disposing)
             {
                 _refreshButton.Enabled = !_refreshInProgress;
@@ -808,6 +1261,7 @@ internal sealed class RemotesDashboardForm : Form
             _ownedResourcesDisposed = true;
             _lifetimeCancellation.Cancel();
             _toolTip.Dispose();
+            _moreMenu.Dispose();
             _lifetimeCancellation.Dispose();
         }
 
@@ -844,13 +1298,20 @@ internal sealed class RemotesDashboardForm : Form
         return string.IsNullOrWhiteSpace(value)
             || string.Equals(value, "Tagged Devices", StringComparison.OrdinalIgnoreCase)
             || string.Equals(value, "Headscale user", StringComparison.OrdinalIgnoreCase)
-            ? "Not provided"
+            ? "Not set"
             : value;
+    }
+
+    private static string FormatEditableOwnerLabel(string? value)
+    {
+        return string.Equals(FormatOwnerLabel(value), "Not set", StringComparison.Ordinal)
+            ? string.Empty
+            : value?.Trim() ?? string.Empty;
     }
 
     private static string FormatLocation(string? value)
     {
-        return string.IsNullOrWhiteSpace(value) ? "Not shared" : value;
+        return string.IsNullOrWhiteSpace(value) ? "Not set" : value;
     }
 
     private static string FormatValue(string? value, string fallback)
@@ -873,43 +1334,34 @@ internal sealed class RemotesDashboardForm : Form
     private void UpdateFooter()
     {
         var refreshedText = _currentSnapshot.RefreshedAt == DateTimeOffset.MinValue
-            ? "Not refreshed yet"
-            : "Last refreshed " + _currentSnapshot.RefreshedAt.ToLocalTime().ToString("g");
-        var parts = new[] { _noticeText, _currentSnapshot.StatusMessage, refreshedText }
-            .Where(part => !string.IsNullOrWhiteSpace(part));
-        _footerLabel.Text = string.Join("  |  ", parts);
-        _toolTip.SetToolTip(_footerLabel, _footerLabel.Text);
+            ? "Not checked yet"
+            : "Last checked " + _currentSnapshot.RefreshedAt.ToLocalTime().ToString("g");
+        _footerLabel.Text = string.IsNullOrWhiteSpace(_noticeText)
+            ? refreshedText
+            : _noticeText + "  •  " + refreshedText;
+        _toolTip.SetToolTip(
+            _footerLabel,
+            string.Join(Environment.NewLine, new[] { _noticeText, _currentSnapshot.StatusMessage, refreshedText }
+                .Where(part => !string.IsNullOrWhiteSpace(part))));
     }
 
-    private void ResizeDeviceColumns()
+    private void ResizeDeviceTiles()
     {
-        if (_deviceList.Columns.Count != 5)
+        if (_deviceList.ClientSize.Width < 220)
         {
             return;
         }
 
-        var width = _deviceList.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 6;
-        if (width < 250)
-        {
-            return;
-        }
-
-        var proportions = new[] { 28, 22, 24, 13 };
-        var used = 0;
-        for (var index = 0; index < proportions.Length; index++)
-        {
-            var columnWidth = width * proportions[index] / 100;
-            _deviceList.Columns[index].Width = columnWidth;
-            used += columnWidth;
-        }
-        _deviceList.Columns[4].Width = Math.Max(50, width - used);
+        _deviceList.TileSize = new Size(
+            Math.Max(220, _deviceList.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 8),
+            78);
     }
 
     private void ResizeDetailText(int panelWidth)
     {
         var textWidth = Math.Max(260, panelWidth - 54);
         _detailsLabel.MaximumSize = new Size(textWidth, 0);
-        _routeHelpLabel.MaximumSize = new Size(textWidth - 24, 0);
+        _routeHelpLabel.MaximumSize = new Size(Math.Max(220, textWidth - _routeToggle.Width - 28), 0);
         _remoteHelpLabel.MaximumSize = new Size(textWidth - 24, 0);
     }
 
