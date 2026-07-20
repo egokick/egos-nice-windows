@@ -108,7 +108,7 @@ internal static class RemoteMenuModelBuilder
 
     private static bool IsActionable(RemoteFleetSnapshot snapshot, RemoteDevice device)
     {
-        return snapshot.ConnectionState == RemoteFleetConnectionState.Connected
+        return snapshot.ConnectionState is RemoteFleetConnectionState.Connected or RemoteFleetConnectionState.Degraded
             && device.IsOnline
             && device.IsVerified;
     }

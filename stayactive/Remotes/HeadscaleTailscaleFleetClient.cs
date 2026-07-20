@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace StayActive.Remotes;
 
 /// <summary>
-/// Result of the one, read-only local Tailscale command this integration permits.
+/// Result of a read-only local Tailscale command this integration permits.
 /// No command output is persisted by this component.
 /// </summary>
 internal sealed record TailscaleStatusProcessResult(
@@ -15,9 +15,10 @@ internal sealed record TailscaleStatusProcessResult(
     string StandardError);
 
 /// <summary>
-/// Deliberately narrow process boundary for the local Tailscale CLI. Implementations
-/// receive a fully constructed <see cref="ProcessStartInfo"/> rather than arbitrary
-/// command strings, so the caller can use <see cref="ProcessStartInfo.ArgumentList"/>.
+/// Deliberately narrow process boundary for the read-only local Tailscale CLI
+/// commands. Implementations receive a fully constructed
+/// <see cref="ProcessStartInfo"/> rather than arbitrary command strings, so the
+/// caller can use <see cref="ProcessStartInfo.ArgumentList"/>.
 /// </summary>
 internal interface ITailscaleStatusProcessRunner
 {
@@ -107,9 +108,12 @@ internal sealed class SystemTailscaleStatusProcessRunner : ITailscaleStatusProce
 
 /// <summary>
 /// Reads the local client's status for a user-configured, self-hosted Headscale
-/// endpoint. It invokes exactly <c>tailscale status --json</c>, filters the result
-/// to peers explicitly tagged <c>tag:stayactive</c>, and does not perform a network
-/// request, enrollment, route change, or remote action.
+/// endpoint. Before accepting any peer data it invokes the read-only
+/// <c>tailscale debug prefs</c> command and requires its <c>ControlURL</c> to match
+/// the configured controller. It then invokes exactly
+/// <c>tailscale status --json</c>, filters the result to peers explicitly tagged
+/// <c>tag:stayactive</c>, and does not perform a network request, enrollment,
+/// route change, or remote action.
 /// </summary>
 internal sealed class HeadscaleTailscaleFleetClient : IRemoteFleetClient
 {
@@ -186,6 +190,21 @@ internal sealed class HeadscaleTailscaleFleetClient : IRemoteFleetClient
         TailscaleStatusProcessResult result;
         try
         {
+            var preferencesResult = await _runner.RunAsync(
+                TailscaleControlPlaneBinding.CreateDebugPreferencesStartInfo(executable),
+                timeoutCancellation.Token).ConfigureAwait(false);
+
+            if (preferencesResult.ExitCode != 0
+                || !TailscaleControlPlaneBinding.MatchesConfiguredControlPlane(
+                    preferencesResult.StandardOutput,
+                    controlPlane))
+            {
+                SetSnapshot(CreateDisconnectedSnapshot(
+                    controlPlaneDisplayName,
+                    "The local Tailscale client is not connected to the configured Headscale control plane."));
+                return;
+            }
+
             result = await _runner.RunAsync(
                 CreateStatusStartInfo(executable),
                 timeoutCancellation.Token).ConfigureAwait(false);
@@ -194,7 +213,7 @@ internal sealed class HeadscaleTailscaleFleetClient : IRemoteFleetClient
         {
             SetSnapshot(CreateDisconnectedSnapshot(
                 controlPlaneDisplayName,
-                "Timed out while reading the local Tailscale status."));
+                "Timed out while verifying the local Tailscale connection."));
             return;
         }
         catch (FileNotFoundException)
@@ -276,8 +295,9 @@ internal sealed class HeadscaleTailscaleFleetClient : IRemoteFleetClient
     {
         controlPlane = null!;
         if (preferences is null
-            || !RemoteClientPreferences.IsSelfHostedControlPlane(preferences.ControlPlaneUrl)
-            || !Uri.TryCreate(preferences.ControlPlaneUrl, UriKind.Absolute, out var parsedControlPlane))
+            || !TailscaleControlPlaneBinding.TryCreateSelfHostedControlPlane(
+                preferences.ControlPlaneUrl,
+                out var parsedControlPlane))
         {
             return false;
         }
@@ -450,7 +470,7 @@ internal static class HeadscaleTailscaleStatusParser
                 Capabilities: IsExitNodeCandidate(peer) ? RemoteCapability.ExitNode : RemoteCapability.None,
                 TailnetIp: tailscaleIps.FirstOrDefault());
 
-            peers.Add(new ParsedPeer(remoteDevice, tailscaleIps));
+            peers.Add(new ParsedPeer(remoteDevice, tailscaleIps, GetBoolean(peer, "ExitNode")));
         }
 
         return peers;
@@ -458,6 +478,15 @@ internal static class HeadscaleTailscaleStatusParser
 
     private static string? GetActiveExitNodeId(JsonElement root, IReadOnlyList<ParsedPeer> peers)
     {
+        // Current Tailscale clients mark the selected peer directly. Older
+        // versions also exposed a root ExitNodeStatus object, so support both
+        // representations to keep the tray and dashboard state accurate.
+        var activeTaggedPeer = peers.FirstOrDefault(peer => peer.IsActiveExitNode)?.Device.Id;
+        if (!string.IsNullOrWhiteSpace(activeTaggedPeer))
+        {
+            return activeTaggedPeer;
+        }
+
         if (!TryGetProperty(root, "ExitNodeStatus", out var exitNode)
             || exitNode.ValueKind != JsonValueKind.Object)
         {
@@ -477,8 +506,19 @@ internal static class HeadscaleTailscaleStatusParser
 
     private static bool HasActiveExitNode(JsonElement root)
     {
-        return TryGetProperty(root, "ExitNodeStatus", out var exitNode)
-            && exitNode.ValueKind == JsonValueKind.Object;
+        if (TryGetProperty(root, "ExitNodeStatus", out var exitNode)
+            && exitNode.ValueKind == JsonValueKind.Object)
+        {
+            return true;
+        }
+
+        if (!TryGetProperty(root, "Peer", out var peerMap) || peerMap.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        return peerMap.EnumerateObject().Any(peer =>
+            peer.Value.ValueKind == JsonValueKind.Object && GetBoolean(peer.Value, "ExitNode"));
     }
 
     private static bool HasRequiredFleetTag(JsonElement peer)
@@ -583,5 +623,8 @@ internal static class HeadscaleTailscaleStatusParser
             : dnsName.TrimEnd('.');
     }
 
-    private sealed record ParsedPeer(RemoteDevice Device, IReadOnlyList<string> TailscaleIps);
+    private sealed record ParsedPeer(
+        RemoteDevice Device,
+        IReadOnlyList<string> TailscaleIps,
+        bool IsActiveExitNode);
 }

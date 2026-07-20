@@ -124,6 +124,13 @@ physically local to the target session.
 
 ## Failure and safety states
 
+- `Control-plane binding mismatch`: before accepting local peer status, and
+  immediately before selecting a new exit node, StayActive runs only the
+  read-only `tailscale debug prefs` command and canonically compares its
+  top-level `ControlURL` with the configured HTTPS self-hosted Headscale URL.
+  Missing, malformed, hosted, or mismatched values fail closed without showing
+  command output or diagnostics. Clearing an existing exit route remains
+  available as a recovery action.
 - `Headscale unavailable`: show a disabled device list and a retry action;
   never silently fall back to a hosted control plane.
 - `No self-hosted relay available`: show the affected device as degraded; do

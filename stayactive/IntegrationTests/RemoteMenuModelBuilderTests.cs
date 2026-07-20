@@ -60,6 +60,24 @@ public sealed class RemoteMenuModelBuilderTests
     }
 
     [Fact]
+    public void Build_WhenRemoteMetadataIsDegraded_KeepsVerifiedVpnPeerActionable()
+    {
+        var exitNode = CreateDevice("exit", "Austin-PC", online: true, verified: true);
+        var snapshot = new RemoteFleetSnapshot(
+            RemoteFleetConnectionState.Degraded,
+            "HQ control plane",
+            "Remote metadata unavailable",
+            new[] { exitNode },
+            null,
+            DateTimeOffset.UtcNow);
+
+        var model = RemoteMenuModelBuilder.Build(snapshot);
+
+        Assert.True(model.CanRefresh);
+        Assert.True(Assert.Single(model.Devices).IsActionable);
+    }
+
+    [Fact]
     public void Build_WhenAnUnmanagedExitNodeIsActive_DoesNotClaimDirectRouting()
     {
         var snapshot = new RemoteFleetSnapshot(

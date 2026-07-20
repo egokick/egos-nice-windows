@@ -49,7 +49,7 @@ internal sealed class PreviewRemoteFleetClient : IRemoteFleetClient
                     | RemoteCapability.SendFile
                     | RemoteCapability.RequestFile
                     | RemoteCapability.LocalAuthenticatorApproval,
-                null,
+                "100.64.0.10",
                 "node//austin-pc"),
             new RemoteDevice(
                 "london-laptop",
@@ -60,7 +60,7 @@ internal sealed class PreviewRemoteFleetClient : IRemoteFleetClient
                 true,
                 DateTimeOffset.UtcNow - TimeSpan.FromHours(2),
                 RemoteCapability.ScreenView | RemoteCapability.SendFile,
-                null,
+                "100.64.0.20",
                 "node//london-laptop"),
             new RemoteDevice(
                 "unverified-host",
@@ -100,7 +100,20 @@ internal sealed class PreviewUriLauncher : IExternalUriLauncher
 
 internal sealed class PreviewExitNodeController : IRemoteExitNodeController
 {
-    public RemoteActionAvailability GetAvailability(RemoteDevice device) => RemoteActionAvailability.Available;
+    public RemoteActionAvailability GetAvailability(RemoteDevice device)
+    {
+        if (!device.IsVerified || !device.IsOnline)
+        {
+            return new RemoteActionAvailability(false, "The selected computer must be verified and online.");
+        }
+
+        if (!device.Capabilities.HasFlag(RemoteCapability.ExitNode))
+        {
+            return new RemoteActionAvailability(false, "This computer is not an approved exit node.");
+        }
+
+        return RemoteActionAvailability.Available;
+    }
 
     public RemoteActionAvailability GetClearAvailability() => RemoteActionAvailability.Available;
 
