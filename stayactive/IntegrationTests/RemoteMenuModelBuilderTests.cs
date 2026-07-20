@@ -9,8 +9,8 @@ public sealed class RemoteMenuModelBuilderTests
     {
         var model = RemoteMenuModelBuilder.Build(RemoteFleetSnapshot.NotConfigured);
 
-        Assert.Equal("Self-hosted remotes: not configured", model.ConnectionText);
-        Assert.Equal("Internet route: Direct", model.InternetRouteText);
+        Assert.Equal("Private network: setup needed", model.ConnectionText);
+        Assert.Equal("Internet VPN: OFF", model.InternetRouteText);
         Assert.False(model.CanRefresh);
         Assert.Empty(model.Devices);
     }
@@ -38,7 +38,7 @@ public sealed class RemoteMenuModelBuilderTests
         Assert.True(model.Devices[1].IsActionable);
         Assert.False(model.Devices[2].IsActionable);
         Assert.True(model.CanRefresh);
-        Assert.Equal("HQ control plane: connected · 2 online", model.ConnectionText);
+        Assert.Equal("Private network: connected • 2 online", model.ConnectionText);
     }
 
     [Fact]
@@ -55,8 +55,28 @@ public sealed class RemoteMenuModelBuilderTests
 
         var model = RemoteMenuModelBuilder.Build(snapshot);
 
-        Assert.Equal("Internet route: Austin-PC", model.InternetRouteText);
+        Assert.Equal("Internet VPN: ON through Austin-PC", model.InternetRouteText);
         Assert.True(Assert.Single(model.Devices).IsActiveExitNode);
+    }
+
+    [Fact]
+    public void Build_WhenRemoteMetadataIsDegraded_KeepsVerifiedVpnPeerActionable()
+    {
+        var exitNode = CreateDevice("exit", "Austin-PC", online: true, verified: true);
+        var snapshot = new RemoteFleetSnapshot(
+            RemoteFleetConnectionState.Degraded,
+            "HQ control plane",
+            "Remote metadata unavailable",
+            new[] { exitNode },
+            null,
+            DateTimeOffset.UtcNow);
+
+        var model = RemoteMenuModelBuilder.Build(snapshot);
+
+        Assert.True(model.CanRefresh);
+        Assert.Equal("Private network: connected • 1 online", model.ConnectionText);
+        Assert.DoesNotContain("degraded", model.ConnectionText, StringComparison.OrdinalIgnoreCase);
+        Assert.True(Assert.Single(model.Devices).IsActionable);
     }
 
     [Fact]
@@ -73,7 +93,23 @@ public sealed class RemoteMenuModelBuilderTests
 
         var model = RemoteMenuModelBuilder.Build(snapshot);
 
-        Assert.Equal("Internet route: an unmanaged exit node", model.InternetRouteText);
+        Assert.Equal("Internet VPN: ON through another exit", model.InternetRouteText);
+    }
+
+    [Fact]
+    public void Build_WhenActiveExitIdIsUnknown_DoesNotClaimVpnIsOff()
+    {
+        var snapshot = new RemoteFleetSnapshot(
+            RemoteFleetConnectionState.Connected,
+            "HQ control plane",
+            "Ready",
+            Array.Empty<RemoteDevice>(),
+            "node:not-in-visible-fleet",
+            DateTimeOffset.UtcNow);
+
+        var model = RemoteMenuModelBuilder.Build(snapshot);
+
+        Assert.Equal("Internet VPN: ON through another exit", model.InternetRouteText);
     }
 
     private static RemoteDevice CreateDevice(string id, string name, bool online, bool verified)

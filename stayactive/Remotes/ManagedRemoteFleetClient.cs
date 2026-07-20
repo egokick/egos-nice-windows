@@ -11,6 +11,7 @@ internal sealed class ManagedRemoteFleetClient : IRemoteFleetClient
     private readonly IRemoteFleetClient _headscaleClient;
     private readonly IRemoteHubInventoryClient _remoteHubClient;
     private readonly object _snapshotLock = new();
+    private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private RemoteFleetSnapshot _snapshot = RemoteFleetSnapshot.NotConfigured;
     private bool _disposed;
 
@@ -33,19 +34,28 @@ internal sealed class ManagedRemoteFleetClient : IRemoteFleetClient
     public async Task RefreshAsync(CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
-        await _headscaleClient.RefreshAsync(cancellationToken).ConfigureAwait(false);
-        var headscale = _headscaleClient.GetCachedSnapshot();
-        if (headscale.ConnectionState is not RemoteFleetConnectionState.Connected and not RemoteFleetConnectionState.Degraded)
+        await _refreshLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            SetSnapshot(headscale);
-            return;
-        }
+            ThrowIfDisposed();
+            await _headscaleClient.RefreshAsync(cancellationToken).ConfigureAwait(false);
+            var headscale = _headscaleClient.GetCachedSnapshot();
+            if (headscale.ConnectionState is not RemoteFleetConnectionState.Connected and not RemoteFleetConnectionState.Degraded)
+            {
+                SetSnapshot(headscale);
+                return;
+            }
 
-        await _remoteHubClient.RefreshAsync(cancellationToken).ConfigureAwait(false);
-        var remoteHub = _remoteHubClient.GetCachedSnapshot();
-        SetSnapshot(remoteHub.State == RemoteHubInventoryState.Available
-            ? MergeVerifiedInventory(headscale, remoteHub)
-            : MergeWithoutInventory(headscale, remoteHub));
+            await _remoteHubClient.RefreshAsync(cancellationToken).ConfigureAwait(false);
+            var remoteHub = _remoteHubClient.GetCachedSnapshot();
+            SetSnapshot(remoteHub.State == RemoteHubInventoryState.Available
+                ? MergeVerifiedInventory(headscale, remoteHub)
+                : MergeWithoutInventory(headscale, remoteHub));
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
     }
 
     public void Dispose()
@@ -84,16 +94,16 @@ internal sealed class ManagedRemoteFleetClient : IRemoteFleetClient
         RemoteFleetSnapshot headscale,
         RemoteHubInventorySnapshot remoteHub)
     {
-        // A disconnected RemoteHub must never leave an old mapping or central
-        // authorization actionable. An active route can still be cleared from
-        // the root menu, but no new screen, file, or exit-node session starts.
+        // A disconnected RemoteHub must never leave an old MeshCentral mapping
+        // or screen/file authorization actionable. Headscale remains the source
+        // of VPN identity and approved exit-node availability, so those narrow
+        // capabilities remain usable without weakening remote-control policy.
         var devices = headscale.Devices
             .Select(device => device with
             {
                 Location = null,
                 MeshCentralNodeId = null,
-                IsVerified = false,
-                Capabilities = RemoteCapability.None
+                Capabilities = device.Capabilities & RemoteCapability.ExitNode
             })
             .ToArray();
 
@@ -103,7 +113,7 @@ internal sealed class ManagedRemoteFleetClient : IRemoteFleetClient
         return new RemoteFleetSnapshot(
             state,
             headscale.ControlPlaneDisplayName,
-            remoteHub.StatusMessage,
+            remoteHub.StatusMessage + " VPN presence and approved internet-exit controls remain available; screen and file controls are disabled.",
             devices,
             headscale.ActiveExitNodeId,
             DateTimeOffset.UtcNow,

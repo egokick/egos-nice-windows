@@ -76,9 +76,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _userActivityMonitor = new UserActivityMonitor();
         _workVmService = new WorkVmService();
         _remoteHubAccessTokenProvider = new RemoteHubOidcAccessTokenProvider(GetRemoteHubOidcConfiguration);
-        _remoteFleetClient = new ManagedRemoteFleetClient(
-            new HeadscaleTailscaleFleetClient(GetRemoteClientPreferences),
-            new RemoteHubFleetClient(GetRemoteClientPreferences, _remoteHubAccessTokenProvider));
+        _remoteFleetClient = new LocalDisplayRemoteFleetClient(
+            new ManagedRemoteFleetClient(
+                new HeadscaleTailscaleFleetClient(GetRemoteClientPreferences),
+                new RemoteHubFleetClient(GetRemoteClientPreferences, _remoteHubAccessTokenProvider)),
+            GetRemoteDeviceDisplayOverrides);
         _remoteActionService = new MeshCentralRemoteActionService(GetRemoteClientPreferences);
         _remoteExitNodeController = new TailscaleExitNodeController(GetRemoteClientPreferences);
         _remoteAdminConsoleLauncher = new RemoteAdminConsoleLauncher(GetRemoteClientPreferences);
@@ -240,8 +242,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         lock (_settingsLock)
         {
-            update(_settings);
-            SettingsStore.Save(_settings);
+            var updatedSettings = _settings.Clone();
+            update(updatedSettings);
+            SettingsStore.Save(updatedSettings);
+            _settings = updatedSettings;
         }
     }
 
@@ -730,6 +734,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
             settings.RemoteEnrollmentOidcClientId);
     }
 
+    private IReadOnlyDictionary<string, RemoteDeviceDisplayOverride> GetRemoteDeviceDisplayOverrides()
+    {
+        var settings = GetSettingsSnapshot();
+        return settings.RemoteDeviceDisplayOverrides;
+    }
+
     private RemoteHubOidcConfiguration? GetRemoteHubOidcConfiguration()
     {
         var preferences = GetRemoteClientPreferences();
@@ -760,6 +770,31 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _remotesMenuController.QueueRefresh();
     }
 
+    private void SaveRemoteDeviceDisplayOverride(string deviceId, RemoteDeviceDisplayOverride displayOverride)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+        {
+            return;
+        }
+
+        var normalized = new RemoteDeviceDisplayOverride(
+            displayOverride.OwnerOrUserLabel,
+            displayOverride.Location);
+        UpdateSettings(settings =>
+        {
+            settings.NormalizeRemoteDeviceDisplayOverrides();
+            if (normalized.IsEmpty)
+            {
+                settings.RemoteDeviceDisplayOverrides.Remove(deviceId);
+            }
+            else
+            {
+                settings.RemoteDeviceDisplayOverrides[deviceId] = normalized;
+            }
+        });
+        _remotesMenuController.RefreshCachedUi();
+    }
+
     private void OpenRemotesDashboard()
     {
         if (_remotesDashboard is { IsDisposed: false })
@@ -777,7 +812,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _remoteHubAccessTokenProvider,
             GetRemoteClientPreferences,
             SaveRemoteClientPreferences,
-            OpenAddRemoteDevice);
+            OpenAddRemoteDevice,
+            SaveRemoteDeviceDisplayOverride);
         _remotesDashboard.FormClosed += (_, _) => _remotesDashboard = null;
         _remotesDashboard.Show();
     }
@@ -838,6 +874,12 @@ internal sealed class AppSettings
 
     public string RemoteLocation { get; set; } = string.Empty;
 
+    // Optional display-only labels for other enrolled computers. They are
+    // keyed by the immutable VPN device ID and never influence trust, routing,
+    // capabilities, or remote-management lookup.
+    public Dictionary<string, RemoteDeviceDisplayOverride> RemoteDeviceDisplayOverrides { get; set; } =
+        new(StringComparer.Ordinal);
+
     public string RemoteHubOidcIssuerUrl { get; set; } = StayActiveRemoteDefaults.OidcIssuerUrl;
 
     public string RemoteHubOidcClientId { get; set; } = StayActiveRemoteDefaults.FleetOidcClientId;
@@ -872,6 +914,28 @@ internal sealed class AppSettings
         RemoteEnrollmentOidcClientId = StayActiveRemoteDefaults.EnrollmentOidcClientId;
     }
 
+    internal void NormalizeRemoteDeviceDisplayOverrides()
+    {
+        var normalized = new Dictionary<string, RemoteDeviceDisplayOverride>(StringComparer.Ordinal);
+        foreach (var pair in RemoteDeviceDisplayOverrides ?? new Dictionary<string, RemoteDeviceDisplayOverride>())
+        {
+            if (string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null)
+            {
+                continue;
+            }
+
+            var displayOverride = new RemoteDeviceDisplayOverride(
+                pair.Value.OwnerOrUserLabel,
+                pair.Value.Location);
+            if (!displayOverride.IsEmpty)
+            {
+                normalized[pair.Key] = displayOverride;
+            }
+        }
+
+        RemoteDeviceDisplayOverrides = normalized;
+    }
+
     public AppSettings Clone()
     {
         return new AppSettings
@@ -889,6 +953,12 @@ internal sealed class AppSettings
             RemoteMeshCentralUrl = RemoteMeshCentralUrl,
             RemoteDeviceDisplayName = RemoteDeviceDisplayName,
             RemoteLocation = RemoteLocation,
+            RemoteDeviceDisplayOverrides = (RemoteDeviceDisplayOverrides ?? new Dictionary<string, RemoteDeviceDisplayOverride>())
+                .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value is not null)
+                .ToDictionary(
+                    pair => pair.Key,
+                    pair => new RemoteDeviceDisplayOverride(pair.Value.OwnerOrUserLabel, pair.Value.Location),
+                    StringComparer.Ordinal),
             RemoteHubOidcIssuerUrl = RemoteHubOidcIssuerUrl,
             RemoteHubOidcClientId = RemoteHubOidcClientId,
             RemoteEnrollmentUrl = RemoteEnrollmentUrl,
@@ -987,6 +1057,7 @@ internal static class SettingsStore
 
             var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
             settings.ApplySelfHostedRemoteDefaultsIfUnconfigured();
+            settings.NormalizeRemoteDeviceDisplayOverrides();
             return settings;
         }
         catch

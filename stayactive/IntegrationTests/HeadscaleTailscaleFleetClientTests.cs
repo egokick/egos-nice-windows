@@ -68,13 +68,125 @@ public sealed class HeadscaleTailscaleFleetClientTests
         Assert.Equal(DateTimeOffset.Parse("2026-07-16T12:00:00Z"), device.LastSeenAt);
         Assert.Equal(RemoteCapability.ExitNode, device.Capabilities);
 
+        Assert.Collection(
+            runner.Calls,
+            call => AssertLiteralReadOnlyCall(call, "debug", "prefs"),
+            call => AssertLiteralReadOnlyCall(call, "status", "--json"));
+    }
+
+    [Fact]
+    public async Task RefreshAsync_WhenReportedControlPlaneCanonicallyMatches_AcceptsStatusPeers()
+    {
+        var runner = new FakeTailscaleStatusProcessRunner
+        {
+            PreferencesResult = SuccessResult(
+                """
+                { "ControlURL": "https://mesh.example.test/controller" }
+                """),
+            Result = SuccessResult("{ \"BackendState\": \"Running\" }")
+        };
+        var client = new HeadscaleTailscaleFleetClient(
+            () => Preferences("https://MESH.example.test:443/controller/"),
+            runner,
+            new FakeTailscaleExecutableLocator(@"C:\Program Files\Tailscale\tailscale.exe"),
+            TimeSpan.FromSeconds(1));
+
+        await client.RefreshAsync(CancellationToken.None);
+
+        Assert.Equal(RemoteFleetConnectionState.Connected, client.GetCachedSnapshot().ConnectionState);
+        Assert.Collection(
+            runner.Calls,
+            call => AssertLiteralReadOnlyCall(call, "debug", "prefs"),
+            call => AssertLiteralReadOnlyCall(call, "status", "--json"));
+    }
+
+    [Fact]
+    public async Task RefreshAsync_WhenReportedControlPlaneDiffers_FailsClosedBeforeReadingStatus()
+    {
+        const string untrustedUrl = "https://untrusted.example.test";
+        const string diagnostic = "sensitive local diagnostic";
+        var runner = new FakeTailscaleStatusProcessRunner
+        {
+            PreferencesResult = new TailscaleStatusProcessResult(
+                0,
+                "{ \"ControlURL\": \"" + untrustedUrl + "\" }",
+                diagnostic),
+            Result = SuccessResult(
+                """
+                {
+                  "BackendState": "Running",
+                  "Peer": {
+                    "nodekey:untrusted": {
+                      "ID": "node:untrusted",
+                      "HostName": "Must-Not-Appear",
+                      "Tags": ["tag:stayactive"],
+                      "Online": true
+                    }
+                  }
+                }
+                """)
+        };
+        var client = CreateClient(runner);
+
+        await client.RefreshAsync(CancellationToken.None);
+
+        var snapshot = client.GetCachedSnapshot();
+        Assert.Equal(RemoteFleetConnectionState.Disconnected, snapshot.ConnectionState);
+        Assert.Empty(snapshot.Devices);
+        Assert.DoesNotContain(untrustedUrl, snapshot.StatusMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(diagnostic, snapshot.StatusMessage, StringComparison.OrdinalIgnoreCase);
         var call = Assert.Single(runner.Calls);
-        Assert.Equal(@"C:\Program Files\Tailscale\tailscale.exe", call.FileName);
-        Assert.False(call.UseShellExecute);
-        Assert.True(call.RedirectStandardOutput);
-        Assert.True(call.RedirectStandardError);
-        Assert.Equal(string.Empty, call.Arguments);
-        Assert.Equal(new[] { "status", "--json" }, call.ArgumentList);
+        AssertLiteralReadOnlyCall(call, "debug", "prefs");
+    }
+
+    [Fact]
+    public async Task RefreshAsync_WhenPreferencesJsonIsUnreadable_FailsClosedBeforeReadingStatus()
+    {
+        var runner = new FakeTailscaleStatusProcessRunner
+        {
+            PreferencesResult = SuccessResult("{ not valid JSON"),
+            Result = SuccessResult("{ \"BackendState\": \"Running\" }")
+        };
+        var client = CreateClient(runner);
+
+        await client.RefreshAsync(CancellationToken.None);
+
+        Assert.Equal(RemoteFleetConnectionState.Disconnected, client.GetCachedSnapshot().ConnectionState);
+        var call = Assert.Single(runner.Calls);
+        AssertLiteralReadOnlyCall(call, "debug", "prefs");
+    }
+
+    [Fact]
+    public async Task RefreshAsync_WhenCurrentClientMarksPeerAsExitNode_ReportsActiveExitWithoutLegacyRootObject()
+    {
+        var runner = new FakeTailscaleStatusProcessRunner
+        {
+            Result = SuccessResult(
+                """
+                {
+                  "BackendState": "Running",
+                  "Peer": {
+                    "nodekey:exit": {
+                      "ID": "2",
+                      "HostName": "anon",
+                      "Tags": ["tag:stayactive", "tag:stayactive-exit"],
+                      "Online": true,
+                      "ExitNode": true,
+                      "ExitNodeOption": true,
+                      "TailscaleIPs": ["100.64.0.2", "fd7a:115c:a1e0::2"]
+                    }
+                  }
+                }
+                """)
+        };
+        var client = CreateClient(runner);
+
+        await client.RefreshAsync(CancellationToken.None);
+
+        var snapshot = client.GetCachedSnapshot();
+        Assert.Equal("2", snapshot.ActiveExitNodeId);
+        Assert.False(snapshot.HasUnmanagedActiveExitNode);
+        Assert.True(Assert.Single(snapshot.Devices).Capabilities.HasFlag(RemoteCapability.ExitNode));
     }
 
     [Fact]
@@ -197,6 +309,44 @@ public sealed class HeadscaleTailscaleFleetClientTests
         Assert.Contains("outside that fleet", snapshot.StatusMessage, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RefreshAsync_WhenCurrentClientMarksUntaggedPeerAsExitNode_ReportsUnmanagedRoute()
+    {
+        var runner = new FakeTailscaleStatusProcessRunner
+        {
+            Result = SuccessResult(
+                """
+                {
+                  "BackendState": "Running",
+                  "Peer": {
+                    "nodekey:managed": {
+                      "ID": "node:managed",
+                      "HostName": "Managed-PC",
+                      "Tags": ["tag:stayactive"],
+                      "Online": true
+                    },
+                    "nodekey:unmanaged": {
+                      "ID": "node:unmanaged",
+                      "HostName": "Other-Exit",
+                      "Tags": ["tag:other"],
+                      "Online": true,
+                      "ExitNode": true,
+                      "ExitNodeOption": true
+                    }
+                  }
+                }
+                """)
+        };
+        var client = CreateClient(runner);
+
+        await client.RefreshAsync(CancellationToken.None);
+
+        var snapshot = client.GetCachedSnapshot();
+        Assert.Null(snapshot.ActiveExitNodeId);
+        Assert.True(snapshot.HasUnmanagedActiveExitNode);
+        Assert.Contains("outside that fleet", snapshot.StatusMessage, StringComparison.Ordinal);
+    }
+
     private static HeadscaleTailscaleFleetClient CreateClient(FakeTailscaleStatusProcessRunner runner)
     {
         return new HeadscaleTailscaleFleetClient(
@@ -222,11 +372,26 @@ public sealed class HeadscaleTailscaleFleetClientTests
         return new TailscaleStatusProcessResult(0, standardOutput, string.Empty);
     }
 
+    private static void AssertLiteralReadOnlyCall(
+        TailscaleStatusProcessCall call,
+        params string[] expectedArguments)
+    {
+        Assert.Equal(@"C:\Program Files\Tailscale\tailscale.exe", call.FileName);
+        Assert.False(call.UseShellExecute);
+        Assert.True(call.RedirectStandardOutput);
+        Assert.True(call.RedirectStandardError);
+        Assert.Equal(string.Empty, call.Arguments);
+        Assert.Equal(expectedArguments, call.ArgumentList);
+    }
+
     private sealed class FakeTailscaleStatusProcessRunner : ITailscaleStatusProcessRunner
     {
         public List<TailscaleStatusProcessCall> Calls { get; } = new();
 
         public TailscaleStatusProcessResult Result { get; set; } = SuccessResult("{ \"BackendState\": \"Running\" }");
+
+        public TailscaleStatusProcessResult PreferencesResult { get; set; } = SuccessResult(
+            "{ \"ControlURL\": \"https://mesh.example.test\" }");
 
         public Exception? ExceptionToThrow { get; set; }
 
@@ -247,7 +412,9 @@ public sealed class HeadscaleTailscaleFleetClientTests
                 return Task.FromException<TailscaleStatusProcessResult>(ExceptionToThrow);
             }
 
-            return Task.FromResult(Result);
+            return Task.FromResult(startInfo.ArgumentList.SequenceEqual(new[] { "debug", "prefs" })
+                ? PreferencesResult
+                : Result);
         }
     }
 

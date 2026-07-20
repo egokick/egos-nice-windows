@@ -60,7 +60,7 @@ public sealed class ManagedRemoteFleetClientTests
     }
 
     [Fact]
-    public async Task RefreshAsync_WhenRemoteHubIsUnavailable_FailsClosedButKeepsTheActiveRouteVisible()
+    public async Task RefreshAsync_WhenRemoteHubIsUnavailable_PreservesOnlyVpnTrustAndExitControl()
     {
         var headscale = new FakeFleetClient(HeadscaleSnapshot(activeExitNodeId: "node:office"));
         var hub = new FakeRemoteHubClient(new RemoteHubInventorySnapshot(
@@ -76,8 +76,11 @@ public sealed class ManagedRemoteFleetClientTests
         var device = Assert.Single(snapshot.Devices);
         Assert.Equal(RemoteFleetConnectionState.Degraded, snapshot.ConnectionState);
         Assert.Equal("node:office", snapshot.ActiveExitNodeId);
-        Assert.False(device.IsVerified);
-        Assert.Equal(RemoteCapability.None, device.Capabilities);
+        Assert.True(device.IsVerified);
+        Assert.Equal(RemoteCapability.ExitNode, device.Capabilities);
+        Assert.Null(device.Location);
+        Assert.Null(device.MeshCentralNodeId);
+        Assert.Contains("screen and file controls are disabled", snapshot.StatusMessage, StringComparison.Ordinal);
     }
 
     [Fact]

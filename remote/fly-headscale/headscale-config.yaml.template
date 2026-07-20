@@ -52,9 +52,14 @@ policy:
 dns:
   magic_dns: false
   base_domain: "stayactive.invalid"
-  override_local_dns: false
+  # Exit-node clients deliberately block local-LAN access. Supplying public
+  # resolvers prevents them from depending on an unreachable router DNS
+  # address, and sends those DNS requests through the selected exit node.
+  override_local_dns: true
   nameservers:
-    global: []
+    global:
+      - 1.1.1.1
+      - 1.0.0.1
   search_domains: []
   extra_records: []
 

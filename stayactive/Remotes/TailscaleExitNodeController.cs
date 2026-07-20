@@ -34,7 +34,11 @@ internal interface IRemoteExitNodeController
 
 /// <summary>
 /// Selects or clears a Headscale-approved exit node through the locally installed
-/// Tailscale client. It intentionally supports no other Tailscale operation.
+/// Tailscale client. A new route is selected only after the read-only local
+/// preferences prove that the client is currently bound to the configured
+/// self-hosted controller. Clearing an existing route remains available as a
+/// recovery action. This component intentionally supports no other Tailscale
+/// operation.
 /// </summary>
 internal sealed class TailscaleExitNodeController : IRemoteExitNodeController
 {
@@ -43,6 +47,7 @@ internal sealed class TailscaleExitNodeController : IRemoteExitNodeController
     private readonly Func<RemoteClientPreferences> _getPreferences;
     private readonly ITailscaleExecutableLocator _executableLocator;
     private readonly ITailscaleExitNodeProcessRunner _runner;
+    private readonly ITailscaleStatusProcessRunner _readOnlyRunner;
     private readonly TimeSpan _commandTimeout;
 
     public TailscaleExitNodeController(Func<RemoteClientPreferences> getPreferences)
@@ -50,6 +55,7 @@ internal sealed class TailscaleExitNodeController : IRemoteExitNodeController
             getPreferences,
             new SystemTailscaleExecutableLocator(),
             new SystemTailscaleExitNodeProcessRunner(),
+            new SystemTailscaleStatusProcessRunner(),
             DefaultCommandTimeout)
     {
     }
@@ -58,11 +64,13 @@ internal sealed class TailscaleExitNodeController : IRemoteExitNodeController
         Func<RemoteClientPreferences> getPreferences,
         ITailscaleExecutableLocator executableLocator,
         ITailscaleExitNodeProcessRunner runner,
+        ITailscaleStatusProcessRunner readOnlyRunner,
         TimeSpan? commandTimeout = null)
     {
         _getPreferences = getPreferences ?? throw new ArgumentNullException(nameof(getPreferences));
         _executableLocator = executableLocator ?? throw new ArgumentNullException(nameof(executableLocator));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
+        _readOnlyRunner = readOnlyRunner ?? throw new ArgumentNullException(nameof(readOnlyRunner));
         _commandTimeout = commandTimeout ?? DefaultCommandTimeout;
         if (_commandTimeout <= TimeSpan.Zero)
         {
@@ -74,7 +82,18 @@ internal sealed class TailscaleExitNodeController : IRemoteExitNodeController
     {
         ArgumentNullException.ThrowIfNull(device);
 
-        if (!RemoteClientPreferences.IsSelfHostedControlPlane(_getPreferences().ControlPlaneUrl))
+        return GetAvailability(device, _getPreferences());
+    }
+
+    private RemoteActionAvailability GetAvailability(
+        RemoteDevice device,
+        RemoteClientPreferences preferences)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+
+        if (!TailscaleControlPlaneBinding.TryCreateSelfHostedControlPlane(
+                preferences.ControlPlaneUrl,
+                out _))
         {
             return new RemoteActionAvailability(false, "Configure an HTTPS self-hosted Headscale URL first.");
         }
@@ -104,11 +123,8 @@ internal sealed class TailscaleExitNodeController : IRemoteExitNodeController
 
     public RemoteActionAvailability GetClearAvailability()
     {
-        if (!RemoteClientPreferences.IsSelfHostedControlPlane(_getPreferences().ControlPlaneUrl))
-        {
-            return new RemoteActionAvailability(false, "Configure an HTTPS self-hosted Headscale URL first.");
-        }
-
+        // Clearing is always a safe recovery operation, even when the configured
+        // controller is missing, invalid, or no longer matches local preferences.
         return TryGetExecutable(out _)
             ? RemoteActionAvailability.Available
             : new RemoteActionAvailability(false, "The local Tailscale client was not found.");
@@ -119,15 +135,34 @@ internal sealed class TailscaleExitNodeController : IRemoteExitNodeController
         bool allowLocalNetworkAccess,
         CancellationToken cancellationToken)
     {
-        var availability = GetAvailability(device);
+        ArgumentNullException.ThrowIfNull(device);
+
+        var preferences = _getPreferences();
+        var availability = GetAvailability(device, preferences);
         if (!availability.IsAvailable)
         {
             return RemoteActionResult.Failure(availability.Reason);
         }
 
+        if (!TailscaleControlPlaneBinding.TryCreateSelfHostedControlPlane(
+                preferences.ControlPlaneUrl,
+                out var configuredControlPlane))
+        {
+            return RemoteActionResult.Failure("Configure an HTTPS self-hosted Headscale URL first.");
+        }
+
         if (!TryGetExecutable(out var executable))
         {
             return RemoteActionResult.Failure("The local Tailscale client was not found.");
+        }
+
+        if (!await IsBoundToConfiguredControlPlaneAsync(
+                executable,
+                configuredControlPlane,
+                cancellationToken).ConfigureAwait(false))
+        {
+            return RemoteActionResult.Failure(
+                "The local Tailscale client could not be verified against the configured self-hosted Headscale control plane.");
         }
 
         return await RunAsync(
@@ -200,6 +235,36 @@ internal sealed class TailscaleExitNodeController : IRemoteExitNodeController
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+    }
+
+    private async Task<bool> IsBoundToConfiguredControlPlaneAsync(
+        string executable,
+        Uri configuredControlPlane,
+        CancellationToken cancellationToken)
+    {
+        using var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCancellation.CancelAfter(_commandTimeout);
+
+        try
+        {
+            var result = await _readOnlyRunner.RunAsync(
+                TailscaleControlPlaneBinding.CreateDebugPreferencesStartInfo(executable),
+                timeoutCancellation.Token).ConfigureAwait(false);
+
+            return result.ExitCode == 0
+                && TailscaleControlPlaneBinding.MatchesConfiguredControlPlane(
+                    result.StandardOutput,
+                    configuredControlPlane);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Fail closed and never surface local CLI output or exception details.
+            return false;
+        }
     }
 
     private async Task<RemoteActionResult> RunAsync(
