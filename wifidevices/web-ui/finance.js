@@ -1,6 +1,6 @@
 const financeState = {
   data: null,
-  historyRange: "1w",
+  historyRange: "6m",
   visibleSeries: readStoredVisibleFinanceSeries()
 };
 
@@ -242,16 +242,21 @@ function renderRefreshAlert(data) {
 
 function renderTables(data) {
   const accounts = data.current.accounts || [];
-  const cards = accounts.filter(account => account.kind === "credit_card");
-  financeEls.cardCount.textContent = `${cards.length} card${cards.length === 1 ? "" : "s"}`;
-  financeEls.accountCount.textContent = `${accounts.length} account${accounts.length === 1 ? "" : "s"}`;
+  const creditLoans = accounts
+    .filter(account => account.kind === "credit_card" || account.kind === "loan")
+    .sort((left, right) => compareNullableNumbersDescending(left.balanceOwed, right.balanceOwed));
+  const sortedAccounts = accounts
+    .filter(account => account.kind !== "credit_card" && account.kind !== "loan")
+    .sort((left, right) => compareNullableNumbersDescending(left.balanceOwed, right.balanceOwed));
+  financeEls.cardCount.textContent = `${creditLoans.length} credit/loan${creditLoans.length === 1 ? "" : "s"}`;
+  financeEls.accountCount.textContent = `${sortedAccounts.length} account${sortedAccounts.length === 1 ? "" : "s"}`;
   financeEls.cardRows.textContent = "";
   financeEls.accountRows.textContent = "";
 
-  if (cards.length === 0) {
-    financeEls.cardRows.append(emptyRow(6, "No credit cards configured yet."));
+  if (creditLoans.length === 0) {
+    financeEls.cardRows.append(emptyRow(6, "No credit cards or loans configured yet."));
   } else {
-    for (const card of cards) {
+    for (const card of creditLoans) {
       const row = document.createElement("tr");
       row.append(
         accountCell(card),
@@ -265,10 +270,10 @@ function renderTables(data) {
     }
   }
 
-  if (accounts.length === 0) {
+  if (sortedAccounts.length === 0) {
     financeEls.accountRows.append(emptyRow(6, "No accounts configured yet."));
   } else {
-    for (const account of accounts) {
+    for (const account of sortedAccounts) {
       const row = document.createElement("tr");
       row.append(
         accountCell(account),
@@ -281,6 +286,17 @@ function renderTables(data) {
       financeEls.accountRows.append(row);
     }
   }
+}
+
+function compareNullableNumbersDescending(left, right) {
+  const leftValue = Number(left);
+  const rightValue = Number(right);
+  const leftMissing = left === null || left === undefined || !Number.isFinite(leftValue);
+  const rightMissing = right === null || right === undefined || !Number.isFinite(rightValue);
+  if (leftMissing && rightMissing) return 0;
+  if (leftMissing) return 1;
+  if (rightMissing) return -1;
+  return rightValue - leftValue;
 }
 
 function renderLog(logs) {
