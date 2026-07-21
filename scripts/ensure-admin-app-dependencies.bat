@@ -22,6 +22,7 @@ if /I "%APP_ID%"=="power-mode-toggle" goto :powerMode
 if /I "%APP_ID%"=="stayactive" goto :stayActive
 if /I "%APP_ID%"=="voicecodex" goto :voiceCodex
 if /I "%APP_ID%"=="wifidevices" goto :wifiDevices
+if /I "%APP_ID%"=="finance" goto :finance
 if /I "%APP_ID%"=="youtube-sync-tray" goto :youtubeSync
 if /I "%APP_ID%"=="light-dark-toggle" goto :lightDark
 
@@ -76,6 +77,10 @@ exit /b %ERRORLEVEL%
 
 :wifiDevices
 call :restoreDotnet "%APP_DIR%\wifidevices.csproj"
+exit /b %ERRORLEVEL%
+
+:finance
+call :restoreDotnet "%APP_DIR%\finance.csproj"
 exit /b %ERRORLEVEL%
 
 :youtubeSync

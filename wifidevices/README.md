@@ -1,6 +1,6 @@
 # Wi-Fi Devices
 
-Small ASP.NET Core dashboard that polls Wi-Fi/LAN devices every five minutes, records MAC/IP/online history, and shows timelines, transition events, and day/hour online patterns.
+Small ASP.NET Core dashboard that polls Wi-Fi/LAN devices every five minutes, records MAC/IP/online history, and shows timelines, transition events, and day/hour online patterns. Finance now runs as its own app in `../finance`.
 
 ## Run
 

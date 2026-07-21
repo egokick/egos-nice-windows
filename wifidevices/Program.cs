@@ -14,7 +14,6 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Win32;
 using DrawingIcon = System.Drawing.Icon;
-using DrawingSystemIcons = System.Drawing.SystemIcons;
 using DrawingBitmap = System.Drawing.Bitmap;
 using DrawingBrushes = System.Drawing.Brushes;
 using DrawingColor = System.Drawing.Color;
@@ -30,6 +29,110 @@ using FormsContextMenuStrip = System.Windows.Forms.ContextMenuStrip;
 using FormsNotifyIcon = System.Windows.Forms.NotifyIcon;
 using FormsToolStripMenuItem = System.Windows.Forms.ToolStripMenuItem;
 
+#if FINANCE_APP
+const string DefaultLocalUrl = "http://127.0.0.1:5137";
+Directory.SetCurrentDirectory(FinanceRuntime.ResolveRuntimeWorkingDirectory(args));
+var financeDataRoot = FinanceRuntime.ResolveDataRoot();
+var webRoot = ResolveWebRoot();
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    WebRootPath = webRoot
+});
+builder.WebHost.UseUrls(DefaultLocalUrl);
+
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    options.SerializerOptions.WriteIndented = false;
+});
+
+builder.Services.AddSingleton(_ => FinanceSettings.Load(financeDataRoot, Directory.GetCurrentDirectory(), AppContext.BaseDirectory));
+builder.Services.AddSingleton<FinanceStore>();
+builder.Services.AddSingleton<FinanceRefreshCoordinator>();
+builder.Services.AddSingleton<CodexFinanceRefreshLauncher>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<FinanceRefreshCoordinator>());
+
+var app = builder.Build();
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(webRoot),
+    OnPrepareResponse = context =>
+    {
+        context.Context.Response.Headers.CacheControl = "no-store, no-cache, max-age=0, must-revalidate";
+        context.Context.Response.Headers.Pragma = "no-cache";
+        context.Context.Response.Headers.Expires = "0";
+    }
+});
+
+app.MapGet("/api/finance/state", async (FinanceStore store, FinanceRefreshCoordinator refresher, CancellationToken cancellationToken) =>
+{
+    var state = await store.GetStateAsync(refresher.Status, cancellationToken);
+    return Results.Json(state);
+});
+
+app.MapPost("/api/finance/refresh", (CodexFinanceRefreshLauncher launcher) =>
+{
+    var result = launcher.Start();
+    return Results.Json(result);
+});
+
+app.MapPost("/api/finance/accounts", async (
+    FinanceAccountRequest request,
+    FinanceStore store,
+    CancellationToken cancellationToken) =>
+{
+    var account = await store.AddAccountAsync(request, cancellationToken);
+    return account is null ? Results.BadRequest(new { error = "Account name and type are required." }) : Results.Json(account);
+});
+
+app.MapPut("/api/finance/accounts/{id}", async (
+    string id,
+    FinanceAccountRequest request,
+    FinanceStore store,
+    CancellationToken cancellationToken) =>
+{
+    var account = await store.UpdateAccountAsync(id, request, cancellationToken);
+    return account is null ? Results.NotFound(new { error = "Account not found or is read-only." }) : Results.Json(account);
+});
+
+app.MapPost("/api/finance/accounts/{id}/values", async (
+    string id,
+    FinanceAccountValuesRequest request,
+    FinanceStore store,
+    CancellationToken cancellationToken) =>
+{
+    var account = await store.UpdateAccountValuesAsync(id, request, cancellationToken);
+    return account is null ? Results.NotFound(new { error = "Account not found or is read-only." }) : Results.Json(account);
+});
+
+app.MapPost("/api/finance/income", async (
+    FinanceIncomeRequest request,
+    FinanceStore store,
+    CancellationToken cancellationToken) =>
+{
+    var income = await store.RecordIncomeAsync(request, cancellationToken);
+    return income is null
+        ? Results.BadRequest(new { error = "A known account, posted date, and positive income amount are required." })
+        : Results.Json(income);
+});
+
+app.MapFallback(async context =>
+{
+    context.Response.ContentType = "text/html; charset=utf-8";
+    await context.Response.SendFileAsync(Path.Combine(webRoot, "finances.html"));
+});
+
+if (OperatingSystem.IsWindows() && !args.Contains("--no-tray", StringComparer.OrdinalIgnoreCase))
+{
+    await RunWithFinanceTrayAsync(app, DefaultLocalUrl);
+}
+else
+{
+    app.Run();
+}
+#else
 const string DefaultLocalUrl = "http://127.0.0.1:5136";
 Directory.SetCurrentDirectory(StartupRegistration.ResolveRuntimeWorkingDirectory(args));
 var webRoot = ResolveWebRoot();
@@ -49,16 +152,11 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddSingleton(_ => AppSettings.Load(Directory.GetCurrentDirectory(), AppContext.BaseDirectory));
 builder.Services.AddSingleton<DeviceHistoryStore>();
 builder.Services.AddSingleton<UiPreferencesStore>();
-builder.Services.AddSingleton(_ => FinanceSettings.Load(Directory.GetCurrentDirectory(), AppContext.BaseDirectory));
-builder.Services.AddSingleton<FinanceStore>();
-builder.Services.AddSingleton<FinanceRefreshCoordinator>();
-builder.Services.AddSingleton<CodexFinanceRefreshLauncher>();
 builder.Services.AddSingleton<RemoteWifiDeviceSource>();
 builder.Services.AddSingleton<WindowsNetworkDeviceSource>();
 builder.Services.AddSingleton<IDeviceSource, CompositeDeviceSource>();
 builder.Services.AddSingleton<PollCoordinator>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<PollCoordinator>());
-builder.Services.AddHostedService(provider => provider.GetRequiredService<FinanceRefreshCoordinator>());
 
 var app = builder.Build();
 
@@ -175,53 +273,6 @@ app.MapPost("/api/poll", async (PollCoordinator poller, CancellationToken cancel
     return Results.Json(status);
 });
 
-app.MapGet("/api/finance/state", async (FinanceStore store, FinanceRefreshCoordinator refresher, CancellationToken cancellationToken) =>
-{
-    var state = await store.GetStateAsync(refresher.Status, cancellationToken);
-    return Results.Json(state);
-});
-
-app.MapPost("/api/finance/refresh", (CodexFinanceRefreshLauncher launcher) =>
-{
-    var result = launcher.Start();
-    return Results.Json(result);
-});
-
-app.MapPost("/api/finance/accounts", async (
-    FinanceAccountRequest request,
-    FinanceStore store,
-    CancellationToken cancellationToken) =>
-{
-    var account = await store.AddAccountAsync(request, cancellationToken);
-    return account is null ? Results.BadRequest(new { error = "Account name and type are required." }) : Results.Json(account);
-});
-
-app.MapPut("/api/finance/accounts/{id}", async (
-    string id,
-    FinanceAccountRequest request,
-    FinanceStore store,
-    CancellationToken cancellationToken) =>
-{
-    var account = await store.UpdateAccountAsync(id, request, cancellationToken);
-    return account is null ? Results.NotFound(new { error = "Account not found or is read-only." }) : Results.Json(account);
-});
-
-app.MapPost("/api/finance/accounts/{id}/values", async (
-    string id,
-    FinanceAccountValuesRequest request,
-    FinanceStore store,
-    CancellationToken cancellationToken) =>
-{
-    var account = await store.UpdateAccountValuesAsync(id, request, cancellationToken);
-    return account is null ? Results.NotFound(new { error = "Account not found or is read-only." }) : Results.Json(account);
-});
-
-app.MapGet("/finances", async context =>
-{
-    context.Response.ContentType = "text/html; charset=utf-8";
-    await context.Response.SendFileAsync(Path.Combine(webRoot, "finances.html"));
-});
-
 app.MapFallback(async context =>
 {
     context.Response.ContentType = "text/html; charset=utf-8";
@@ -236,7 +287,9 @@ else
 {
     app.Run();
 }
+#endif
 
+#if !FINANCE_APP
 static async Task RunWithTrayAsync(WebApplication app, string localUrl)
 {
     var trayReady = new TaskCompletionSource<WifiDevicesTray>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -270,6 +323,43 @@ static async Task RunWithTrayAsync(WebApplication app, string localUrl)
         }
     }
 }
+#endif
+
+#if FINANCE_APP
+static async Task RunWithFinanceTrayAsync(WebApplication app, string localUrl)
+{
+    var trayReady = new TaskCompletionSource<FinanceTray>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var trayThread = new Thread(() =>
+    {
+        FormsApplication.EnableVisualStyles();
+        FormsApplication.SetCompatibleTextRenderingDefault(false);
+        using var tray = new FinanceTray(app, localUrl);
+        trayReady.SetResult(tray);
+        FormsApplication.Run(tray.Context);
+    })
+    {
+        IsBackground = true,
+        Name = "Finance Tray"
+    };
+    trayThread.SetApartmentState(ApartmentState.STA);
+    trayThread.Start();
+
+    var tray = await trayReady.Task;
+    try
+    {
+        await app.RunAsync();
+    }
+    finally
+    {
+        tray.Visible = false;
+        tray.Context.ExitThread();
+        if (!trayThread.Join(TimeSpan.FromSeconds(2)))
+        {
+            FormsApplication.Exit();
+        }
+    }
+}
+#endif
 
 static string ResolveWebRoot()
 {
@@ -290,6 +380,7 @@ static string ResolveWebRoot()
     return candidates[0];
 }
 
+#if !FINANCE_APP
 static HashSet<string>? ParseMacSet(string? macs)
 {
     if (string.IsNullOrWhiteSpace(macs))
@@ -309,6 +400,7 @@ static HashSet<string>? ParseMacSet(string? macs)
 
     return parsed.Count == 0 ? null : parsed;
 }
+#endif
 
 public sealed class WifiDevicesTray : IDisposable
 {
@@ -327,7 +419,6 @@ public sealed class WifiDevicesTray : IDisposable
 
         var menu = new FormsContextMenuStrip();
         var openItem = new FormsToolStripMenuItem("Open Wi-Fi Devices", null, (_, _) => OpenUi());
-        var openFinancesItem = new FormsToolStripMenuItem("Open Finances", null, (_, _) => OpenFinances());
         _startupItem = new FormsToolStripMenuItem("Start with Windows", null, (_, _) => ToggleStartup())
         {
             Checked = StartupRegistration.IsRegistered(),
@@ -335,7 +426,6 @@ public sealed class WifiDevicesTray : IDisposable
         };
         var exitItem = new FormsToolStripMenuItem("Exit", null, async (_, _) => await ExitAsync());
         menu.Items.Add(openItem);
-        menu.Items.Add(openFinancesItem);
         menu.Items.Add(_startupItem);
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         menu.Items.Add(exitItem);
@@ -384,18 +474,6 @@ public sealed class WifiDevicesTray : IDisposable
         }
     }
 
-    private void OpenFinances()
-    {
-        try
-        {
-            Process.Start(new ProcessStartInfo($"{_localUrl}/finances") { UseShellExecute = true });
-        }
-        catch
-        {
-            // The tray menu should stay usable even if the default browser cannot be launched.
-        }
-    }
-
     private void ToggleStartup()
     {
         if (StartupRegistration.IsRegistered())
@@ -408,6 +486,83 @@ public sealed class WifiDevicesTray : IDisposable
         }
 
         _startupItem.Checked = StartupRegistration.IsRegistered();
+    }
+
+    private async Task ExitAsync()
+    {
+        Visible = false;
+        await _app.StopAsync(TimeSpan.FromSeconds(5));
+        Context.ExitThread();
+    }
+}
+
+public sealed class FinanceTray : IDisposable
+{
+    private readonly WebApplication _app;
+    private readonly string _localUrl;
+    private readonly FormsNotifyIcon _notifyIcon;
+    private readonly DrawingIcon _icon;
+    private bool _disposed;
+
+    public FinanceTray(WebApplication app, string localUrl)
+    {
+        _app = app;
+        _localUrl = localUrl;
+        Context = new System.Windows.Forms.ApplicationContext();
+
+        var menu = new FormsContextMenuStrip();
+        menu.Items.Add(new FormsToolStripMenuItem("Open Finance", null, (_, _) => OpenUi()));
+        menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        menu.Items.Add(new FormsToolStripMenuItem("Exit", null, async (_, _) => await ExitAsync()));
+
+        _icon = FinanceTrayIconFactory.Create();
+        _notifyIcon = new FormsNotifyIcon
+        {
+            Icon = _icon,
+            Text = "Finance",
+            ContextMenuStrip = menu,
+            Visible = true
+        };
+        _notifyIcon.MouseClick += (_, eventArgs) =>
+        {
+            if (eventArgs.Button == System.Windows.Forms.MouseButtons.Left)
+            {
+                OpenUi();
+            }
+        };
+    }
+
+    public System.Windows.Forms.ApplicationContext Context { get; }
+
+    public bool Visible
+    {
+        get => _notifyIcon.Visible;
+        set => _notifyIcon.Visible = value;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _notifyIcon.Dispose();
+        _icon.Dispose();
+        Context.Dispose();
+    }
+
+    private void OpenUi()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(_localUrl) { UseShellExecute = true });
+        }
+        catch
+        {
+            // The tray menu should remain usable even if the default browser cannot be launched.
+        }
     }
 
     private async Task ExitAsync()
@@ -522,6 +677,127 @@ public static class StartupRegistration
     private static string Quote(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
 }
 
+public static class FinanceRuntime
+{
+    public static string ResolveRuntimeWorkingDirectory(string[] args)
+    {
+        var requested = ReadArgumentValue(args, "--working-directory");
+        if (!string.IsNullOrWhiteSpace(requested) && Directory.Exists(requested))
+        {
+            return requested;
+        }
+
+        var current = Directory.GetCurrentDirectory();
+        return File.Exists(Path.Combine(current, "finance.csproj"))
+            ? current
+            : AppContext.BaseDirectory;
+    }
+
+    public static string ResolveDataRoot()
+    {
+        var configured = Environment.GetEnvironmentVariable("FINANCE_APP_DATA_ROOT");
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            candidates.Add(configured);
+        }
+
+        var current = Directory.GetCurrentDirectory();
+        candidates.Add(current);
+        candidates.Add(Path.Combine(current, "..", "wifidevices"));
+        candidates.Add(AppContext.BaseDirectory);
+
+        foreach (var candidate in candidates)
+        {
+            string fullPath;
+            try
+            {
+                fullPath = Path.GetFullPath(candidate);
+            }
+            catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                continue;
+            }
+
+            if (File.Exists(Path.Combine(fullPath, ".env.finance"))
+                || Directory.Exists(Path.Combine(fullPath, "data", "finance")))
+            {
+                return fullPath;
+            }
+        }
+
+        return Path.GetFullPath(current);
+    }
+
+    private static string? ReadArgumentValue(string[] args, string name)
+    {
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (string.Equals(args[index], name, StringComparison.OrdinalIgnoreCase))
+            {
+                return index + 1 < args.Length ? args[index + 1] : null;
+            }
+        }
+
+        return null;
+    }
+}
+
+public static class FinanceTrayIconFactory
+{
+    public static DrawingIcon Create()
+    {
+        using var bitmap = new DrawingBitmap(32, 32);
+        using (var graphics = DrawingGraphics.FromImage(bitmap))
+        {
+            graphics.SmoothingMode = DrawingSmoothingMode.AntiAlias;
+            graphics.Clear(DrawingColor.Transparent);
+
+            using var navy = new System.Drawing.SolidBrush(DrawingColor.FromArgb(255, 19, 61, 90));
+            using var paper = new System.Drawing.SolidBrush(DrawingColor.FromArgb(255, 239, 248, 255));
+            using var green = new System.Drawing.SolidBrush(DrawingColor.FromArgb(255, 52, 211, 153));
+            using var ink = new System.Drawing.SolidBrush(DrawingColor.FromArgb(255, 19, 61, 90));
+            using var border = new DrawingPen(DrawingColor.FromArgb(255, 111, 183, 223), 1.4f);
+            using var tile = CreateRoundedRectanglePath(new DrawingRectangle(2, 2, 28, 28), 7);
+            using var document = CreateRoundedRectanglePath(new DrawingRectangle(8, 6, 16, 20), 3);
+
+            graphics.FillPath(navy, tile);
+            graphics.FillPath(paper, document);
+            graphics.DrawPath(border, document);
+            graphics.FillRectangle(green, 10, 9, 12, 2);
+            graphics.FillRectangle(green, 10, 22, 7, 2);
+            using var dollarFont = new DrawingFont("Segoe UI", 12f, FontStyle.Bold, GraphicsUnit.Pixel);
+            graphics.DrawString("$", dollarFont, ink, new System.Drawing.PointF(12, 11));
+        }
+
+        var handle = bitmap.GetHicon();
+        try
+        {
+            using var temporary = DrawingIcon.FromHandle(handle);
+            return (DrawingIcon)temporary.Clone();
+        }
+        finally
+        {
+            _ = DestroyIcon(handle);
+        }
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(nint handle);
+
+    private static DrawingGraphicsPath CreateRoundedRectanglePath(DrawingRectangle rectangle, int radius)
+    {
+        var path = new DrawingGraphicsPath();
+        var diameter = radius * 2;
+        path.AddArc(rectangle.Left, rectangle.Top, diameter, diameter, 180, 90);
+        path.AddArc(rectangle.Right - diameter, rectangle.Top, diameter, diameter, 270, 90);
+        path.AddArc(rectangle.Right - diameter, rectangle.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rectangle.Left, rectangle.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+
 public static class TrayIconFactory
 {
     public static DrawingIcon Create()
@@ -584,15 +860,17 @@ public static class TrayIconFactory
 
 public sealed class FinanceSettings
 {
-    private FinanceSettings(string envPath, IReadOnlyList<FinanceAccountConfig> accounts, TimeOnly refreshTime, string currency)
+    private FinanceSettings(string envPath, string dataRoot, IReadOnlyList<FinanceAccountConfig> accounts, TimeOnly refreshTime, string currency)
     {
         EnvPath = envPath;
+        DataRoot = dataRoot;
         Accounts = accounts;
         RefreshTime = refreshTime;
         Currency = currency;
     }
 
     public string EnvPath { get; }
+    public string DataRoot { get; }
     public IReadOnlyList<FinanceAccountConfig> Accounts { get; }
     public TimeOnly RefreshTime { get; }
     public string Currency { get; }
@@ -626,7 +904,8 @@ public sealed class FinanceSettings
             ? parsedTime
             : new TimeOnly(7, 0);
 
-        return new FinanceSettings(envPath, LoadAccounts(values), refreshTime, currency);
+        var dataRoot = Path.GetDirectoryName(envPath) ?? Directory.GetCurrentDirectory();
+        return new FinanceSettings(envPath, dataRoot, LoadAccounts(values), refreshTime, currency);
     }
 
     private static IReadOnlyList<FinanceAccountConfig> LoadAccounts(IReadOnlyDictionary<string, string> values)
@@ -687,15 +966,17 @@ public sealed class FinanceStore
     private readonly string _accountsPath;
     private readonly string _snapshotsPath;
     private readonly string _logPath;
+    private readonly string _incomePath;
 
     public FinanceStore(FinanceSettings settings)
     {
         _settings = settings;
-        _financeDirectory = Path.Combine(Directory.GetCurrentDirectory(), "data", "finance");
+        _financeDirectory = Path.Combine(_settings.DataRoot, "data", "finance");
         Directory.CreateDirectory(_financeDirectory);
         _accountsPath = Path.Combine(_financeDirectory, "accounts.json");
         _snapshotsPath = Path.Combine(_financeDirectory, "snapshots.jsonl");
         _logPath = Path.Combine(_financeDirectory, "refresh-log.jsonl");
+        _incomePath = Path.Combine(_financeDirectory, "income.json");
     }
 
     public async Task<FinanceDashboardResponse> GetStateAsync(FinanceRefreshStatus status, CancellationToken cancellationToken)
@@ -706,6 +987,7 @@ public sealed class FinanceStore
             var snapshots = ReadSnapshots().TakeLast(365).ToList();
             var current = BuildSnapshot("current", persistable: false);
             var configuredAccounts = GetConfiguredAccounts();
+            var income = BuildIncomeDashboard(LoadIncomeLedger().Records ?? Array.Empty<FinanceIncomeRecord>(), configuredAccounts);
             return new FinanceDashboardResponse(
                 DateTimeOffset.UtcNow,
                 _settings.Currency,
@@ -715,6 +997,7 @@ public sealed class FinanceStore
                 current,
                 snapshots,
                 ReadLogs().TakeLast(20).Reverse().ToList(),
+                income,
                 status);
         }
         finally
@@ -911,6 +1194,83 @@ public sealed class FinanceStore
         }
     }
 
+    public async Task<FinanceIncomeEntry?> RecordIncomeAsync(FinanceIncomeRequest request, CancellationToken cancellationToken)
+    {
+        var accountId = CleanFinanceText(request.AccountId);
+        var amount = request.Amount;
+        if (accountId is null || request.PostedOn is null || amount is null || amount <= 0)
+        {
+            return null;
+        }
+
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            var accounts = GetConfiguredAccounts();
+            var account = accounts.FirstOrDefault(candidate =>
+                string.Equals(candidate.Id, accountId, StringComparison.OrdinalIgnoreCase));
+            if (account is null)
+            {
+                return null;
+            }
+
+            var kind = NormalizeIncomeKind(request.Kind);
+            var currency = NormalizeIncomeCurrency(request.Currency, _settings.Currency);
+            var description = CleanFinanceText(request.Description);
+            var sourceTransactionId = CleanFinanceText(request.SourceTransactionId);
+            var fingerprint = CreateIncomeFingerprint(account.Id, request.PostedOn.Value, amount.Value, currency, kind, description);
+            var now = DateTimeOffset.UtcNow;
+            var records = (LoadIncomeLedger().Records ?? Array.Empty<FinanceIncomeRecord>()).ToList();
+            var index = records.FindIndex(existing =>
+                string.Equals(existing.AccountId, account.Id, StringComparison.OrdinalIgnoreCase)
+                && ((sourceTransactionId is not null
+                        && string.Equals(existing.SourceTransactionId, sourceTransactionId, StringComparison.OrdinalIgnoreCase))
+                    || (sourceTransactionId is null
+                        && string.Equals(existing.Fingerprint, fingerprint, StringComparison.Ordinal))));
+
+            FinanceIncomeRecord record;
+            if (index >= 0)
+            {
+                var existing = records[index];
+                record = existing with
+                {
+                    PostedOn = request.PostedOn.Value,
+                    Amount = amount.Value,
+                    Currency = currency,
+                    Kind = kind,
+                    Description = description,
+                    SourceTransactionId = sourceTransactionId ?? existing.SourceTransactionId,
+                    Fingerprint = fingerprint,
+                    LastSeenAtUtc = now
+                };
+                records[index] = record;
+            }
+            else
+            {
+                record = new FinanceIncomeRecord(
+                    $"income-{Guid.NewGuid():N}",
+                    account.Id,
+                    request.PostedOn.Value,
+                    amount.Value,
+                    currency,
+                    kind,
+                    description,
+                    sourceTransactionId,
+                    fingerprint,
+                    now,
+                    now);
+                records.Add(record);
+            }
+
+            await SaveIncomeLedgerAsync(records, cancellationToken);
+            return ToIncomeEntry(record, account.Name);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private FinanceSnapshot BuildSnapshot(string reason, bool persistable)
     {
         var now = DateTimeOffset.UtcNow;
@@ -968,6 +1328,54 @@ public sealed class FinanceStore
             config.CollectorNotes);
     }
 
+    private FinanceIncomeDashboard BuildIncomeDashboard(
+        IReadOnlyList<FinanceIncomeRecord> records,
+        IReadOnlyList<FinanceAccountConfig> accounts)
+    {
+        var accountNames = accounts.ToDictionary(account => account.Id, account => account.Name, StringComparer.OrdinalIgnoreCase);
+        var today = DateOnly.FromDateTime(DateTime.Now);
+        var salaryCutoff = today.AddMonths(-12);
+        var salary = records
+            .Where(record => record.Kind == "salary" && record.PostedOn >= salaryCutoff)
+            .GroupBy(record => new { record.AccountId, record.Currency })
+            .Select(group =>
+            {
+                var latest = group.OrderByDescending(record => record.PostedOn).ThenByDescending(record => record.LastSeenAtUtc).First();
+                return new FinanceSalarySummary(
+                    group.Key.AccountId,
+                    accountNames.GetValueOrDefault(group.Key.AccountId, "Unknown account"),
+                    group.Key.Currency,
+                    latest.Amount,
+                    latest.PostedOn,
+                    group.Sum(record => record.Amount),
+                    group.Count());
+            })
+            .OrderByDescending(summary => summary.LatestPaymentOn)
+            .ToList();
+        var tracking = accounts
+            .Select(account =>
+            {
+                var hasStoredIncome = records.Any(record => string.Equals(record.AccountId, account.Id, StringComparison.OrdinalIgnoreCase));
+                return new FinanceIncomeTracking(
+                    account.Id,
+                    account.Name,
+                    hasStoredIncome,
+                    hasStoredIncome ? today.AddDays(-30) : today.AddMonths(-24));
+            })
+            .ToList();
+        var recent = records
+            .OrderByDescending(record => record.PostedOn)
+            .ThenByDescending(record => record.LastSeenAtUtc)
+            .Take(12)
+            .Select(record => ToIncomeEntry(record, accountNames.GetValueOrDefault(record.AccountId, "Unknown account")))
+            .ToList();
+
+        return new FinanceIncomeDashboard(records.Count, salary, tracking, recent);
+    }
+
+    private static FinanceIncomeEntry ToIncomeEntry(FinanceIncomeRecord record, string accountName) =>
+        new(record.Id, record.AccountId, accountName, record.PostedOn, record.Amount, record.Currency, record.Kind, record.Description);
+
     private IReadOnlyList<FinanceAccountConfig> GetConfiguredAccounts() =>
         _settings.Accounts.Concat(LoadUserAccounts().Select(account => account.ToConfig())).ToList();
 
@@ -996,6 +1404,33 @@ public sealed class FinanceStore
         File.Move(tempPath, _accountsPath, true);
     }
 
+    private FinanceIncomeLedger LoadIncomeLedger()
+    {
+        if (!File.Exists(_incomePath))
+        {
+            return FinanceIncomeLedger.Empty;
+        }
+
+        try
+        {
+            var ledger = JsonSerializer.Deserialize<FinanceIncomeLedger>(File.ReadAllText(_incomePath), LineJson);
+            return ledger is null ? FinanceIncomeLedger.Empty : ledger with { Records = ledger.Records ?? Array.Empty<FinanceIncomeRecord>() };
+        }
+        catch
+        {
+            return FinanceIncomeLedger.Empty;
+        }
+    }
+
+    private async Task SaveIncomeLedgerAsync(IReadOnlyList<FinanceIncomeRecord> records, CancellationToken cancellationToken)
+    {
+        var tempPath = _incomePath + ".tmp";
+        var ledger = new FinanceIncomeLedger(1, records);
+        var json = JsonSerializer.Serialize(ledger, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
+        File.Move(tempPath, _incomePath, true);
+    }
+
     private static string? CleanFinanceText(string? value)
     {
         var cleaned = value?.Trim();
@@ -1006,6 +1441,31 @@ public sealed class FinanceStore
         decimal.TryParse(value, NumberStyles.Number | NumberStyles.AllowCurrencySymbol, CultureInfo.InvariantCulture, out var parsed)
             ? parsed
             : null;
+
+    private static string NormalizeIncomeKind(string? value)
+    {
+        var kind = CleanFinanceText(value)?.ToLowerInvariant();
+        return kind is "salary" or "bonus" or "other" ? kind : "other";
+    }
+
+    private static string NormalizeIncomeCurrency(string? value, string fallback)
+    {
+        var currency = CleanFinanceText(value)?.ToUpperInvariant() ?? fallback.ToUpperInvariant();
+        return currency.Length == 3 && currency.All(char.IsLetter) ? currency : fallback.ToUpperInvariant();
+    }
+
+    private static string CreateIncomeFingerprint(
+        string accountId,
+        DateOnly postedOn,
+        decimal amount,
+        string currency,
+        string kind,
+        string? description)
+    {
+        var normalizedDescription = Regex.Replace(description?.Trim() ?? string.Empty, @"\s+", " ").ToUpperInvariant();
+        var input = string.Join("\n", accountId.ToUpperInvariant(), postedOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), amount.ToString("0.00", CultureInfo.InvariantCulture), currency, kind, normalizedDescription);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input)));
+    }
 
     private IEnumerable<FinanceSnapshot> ReadSnapshots()
     {
@@ -1135,7 +1595,7 @@ public sealed class FinanceRefreshCoordinator : BackgroundService
 
 public sealed class CodexFinanceRefreshLauncher
 {
-    private const string FinanceRefreshPrompt = "follow the instructions in \"C:\\source\\egos-nice-windows\\wifidevices\\AGENTS.md\" and refresh all the account values for today in the finance app";
+    private const string FinanceRefreshPrompt = "Follow the instructions in \"C:\\source\\egos-nice-windows\\wifidevices\\AGENTS.md\" and refresh all finance account values for today. Also collect UFCU income: use income.tracking.lookbackStartOn (the initial 24-month range until income is stored, then the last 30 days) and save qualifying deposits through the finance income API.";
 
     private readonly object _sync = new();
     private Process? _process;
@@ -1174,7 +1634,7 @@ public sealed class CodexFinanceRefreshLauncher
                     true,
                     false,
                     process.Id,
-                    "Codex finance refresh started.",
+                    "Opened a visible Codex finance refresh session.",
                     null);
             }
             catch (Exception ex)
@@ -1186,48 +1646,45 @@ public sealed class CodexFinanceRefreshLauncher
 
     private static ProcessStartInfo BuildStartInfo(string repositoryRoot)
     {
-        var startInfo = new ProcessStartInfo
+        var codexArguments = new[]
         {
-            FileName = ResolveCodexExecutable(),
-            WorkingDirectory = repositoryRoot,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
+            ResolveCodexExecutable(),
+            "--model",
+            "gpt-5.6-luna",
+            "--config",
+            "model_reasoning_effort=\"low\"",
+            "--config",
+            "service_tier=\"fast\"",
+            "--ask-for-approval",
+            "never",
+            "--enable",
+            "fast_mode",
+            "--enable",
+            "browser_use",
+            "--enable",
+            "browser_use_external",
+            "--enable",
+            "browser_use_full_cdp_access",
+            "--sandbox",
+            "workspace-write",
+            FinanceRefreshPrompt
         };
 
-        startInfo.ArgumentList.Add("exec");
-        startInfo.ArgumentList.Add("--model");
-        startInfo.ArgumentList.Add("gpt-5.6-luna");
-        startInfo.ArgumentList.Add("--config");
-        startInfo.ArgumentList.Add("model_reasoning_effort=\"low\"");
-        startInfo.ArgumentList.Add("--config");
-        startInfo.ArgumentList.Add("service_tier=\"fast\"");
-        startInfo.ArgumentList.Add("--config");
-        startInfo.ArgumentList.Add("approval_policy=\"never\"");
-        startInfo.ArgumentList.Add("--enable");
-        startInfo.ArgumentList.Add("fast_mode");
-        startInfo.ArgumentList.Add("--enable");
-        startInfo.ArgumentList.Add("browser_use");
-        startInfo.ArgumentList.Add("--enable");
-        startInfo.ArgumentList.Add("browser_use_external");
-        startInfo.ArgumentList.Add("--enable");
-        startInfo.ArgumentList.Add("browser_use_full_cdp_access");
-        startInfo.ArgumentList.Add("--sandbox");
-        startInfo.ArgumentList.Add("workspace-write");
-        startInfo.ArgumentList.Add("--cd");
-        startInfo.ArgumentList.Add(repositoryRoot);
-        startInfo.ArgumentList.Add("--ephemeral");
-        startInfo.ArgumentList.Add("--json");
-        startInfo.ArgumentList.Add(FinanceRefreshPrompt);
-
-        var codexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
-        if (string.IsNullOrWhiteSpace(codexHome))
+        var commandInterpreter = Environment.GetEnvironmentVariable("ComSpec");
+        if (string.IsNullOrWhiteSpace(commandInterpreter))
         {
-            startInfo.Environment["CODEX_HOME"] = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".codex");
+            commandInterpreter = "cmd.exe";
         }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = commandInterpreter,
+            Arguments = $"/d /c call {BuildWindowsCommandLine(codexArguments)}",
+            WorkingDirectory = repositoryRoot,
+            UseShellExecute = true,
+            CreateNoWindow = false,
+            WindowStyle = ProcessWindowStyle.Normal
+        };
 
         return startInfo;
     }
@@ -1236,10 +1693,7 @@ public sealed class CodexFinanceRefreshLauncher
     {
         try
         {
-            var stdoutTask = process.StandardOutput.ReadToEndAsync();
-            var stderrTask = process.StandardError.ReadToEndAsync();
             await process.WaitForExitAsync();
-            await Task.WhenAll(stdoutTask, stderrTask);
         }
         catch
         {
@@ -1258,6 +1712,44 @@ public sealed class CodexFinanceRefreshLauncher
 
             process.Dispose();
         }
+    }
+
+    private static string BuildWindowsCommandLine(IEnumerable<string> arguments) =>
+        string.Join(" ", arguments.Select(QuoteWindowsCommandArgument));
+
+    private static string QuoteWindowsCommandArgument(string argument)
+    {
+        if (argument.Length == 0)
+        {
+            return "\"\"";
+        }
+
+        var result = new StringBuilder("\"");
+        var consecutiveBackslashes = 0;
+        foreach (var character in argument)
+        {
+            if (character == '\\')
+            {
+                consecutiveBackslashes++;
+                continue;
+            }
+
+            if (character == '\"')
+            {
+                result.Append('\\', consecutiveBackslashes * 2 + 1);
+                result.Append(character);
+                consecutiveBackslashes = 0;
+                continue;
+            }
+
+            result.Append('\\', consecutiveBackslashes);
+            consecutiveBackslashes = 0;
+            result.Append(character);
+        }
+
+        result.Append('\\', consecutiveBackslashes * 2);
+        result.Append('\"');
+        return result.ToString();
     }
 
     private static string ResolveCodexExecutable()
@@ -3890,6 +4382,60 @@ public sealed record FinanceRefreshLog(
     string Message,
     string Reason);
 
+// Income lives in its own versioned ledger so account configuration and balance
+// snapshots remain independently migratable. AccountId is the stable join key;
+// records may therefore be collected from any configured account in the future.
+public sealed record FinanceIncomeLedger(
+    int Version,
+    IReadOnlyList<FinanceIncomeRecord>? Records)
+{
+    public static FinanceIncomeLedger Empty { get; } = new(1, Array.Empty<FinanceIncomeRecord>());
+}
+
+public sealed record FinanceIncomeRecord(
+    string Id,
+    string AccountId,
+    DateOnly PostedOn,
+    decimal Amount,
+    string Currency,
+    string Kind,
+    string? Description,
+    string? SourceTransactionId,
+    string Fingerprint,
+    DateTimeOffset FirstRecordedAtUtc,
+    DateTimeOffset LastSeenAtUtc);
+
+public sealed record FinanceIncomeEntry(
+    string Id,
+    string AccountId,
+    string AccountName,
+    DateOnly PostedOn,
+    decimal Amount,
+    string Currency,
+    string Kind,
+    string? Description);
+
+public sealed record FinanceSalarySummary(
+    string AccountId,
+    string AccountName,
+    string Currency,
+    decimal LatestPayment,
+    DateOnly LatestPaymentOn,
+    decimal TotalLast12Months,
+    int PaymentCountLast12Months);
+
+public sealed record FinanceIncomeTracking(
+    string AccountId,
+    string AccountName,
+    bool HasStoredIncome,
+    DateOnly LookbackStartOn);
+
+public sealed record FinanceIncomeDashboard(
+    int RecordCount,
+    IReadOnlyList<FinanceSalarySummary> Salary,
+    IReadOnlyList<FinanceIncomeTracking> Tracking,
+    IReadOnlyList<FinanceIncomeEntry> Recent);
+
 public sealed record FinanceRefreshStatus(
     DateTimeOffset? LastStartedUtc,
     DateTimeOffset? LastCompletedUtc,
@@ -3918,6 +4464,7 @@ public sealed record FinanceDashboardResponse(
     FinanceSnapshot Current,
     IReadOnlyList<FinanceSnapshot> History,
     IReadOnlyList<FinanceRefreshLog> RefreshLog,
+    FinanceIncomeDashboard Income,
     FinanceRefreshStatus Refresh);
 
 public sealed record FinanceAccountRequest(
@@ -3940,6 +4487,15 @@ public sealed record FinanceAccountValuesRequest(
     string? CreditLimit,
     string? CreditAvailable,
     string? AprPercent);
+
+public sealed record FinanceIncomeRequest(
+    string? AccountId,
+    DateOnly? PostedOn,
+    decimal? Amount,
+    string? Currency,
+    string? Kind,
+    string? Description,
+    string? SourceTransactionId);
 
 public sealed record DeviceNameRequest(string? Name);
 public sealed record DeviceGroupsRequest(IReadOnlyList<string>? Groups);

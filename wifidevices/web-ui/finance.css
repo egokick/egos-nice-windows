@@ -258,6 +258,59 @@
   background: var(--finance-debt);
 }
 
+.salary-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.salary-empty {
+  margin: 0;
+}
+
+.salary-card {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--finance-line);
+  border-radius: 7px;
+  background: linear-gradient(105deg, var(--finance-cash-soft), #ffffff 58%);
+  padding: 15px;
+}
+
+.salary-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.salary-card-header strong {
+  color: var(--finance-ink);
+}
+
+.salary-card-header span,
+.salary-card-values span {
+  color: var(--finance-muted);
+  font-size: 12px;
+}
+
+.salary-card-values {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.salary-card-values div {
+  display: grid;
+  gap: 4px;
+}
+
+.salary-card-values strong {
+  color: var(--finance-ink);
+  font-variant-numeric: tabular-nums;
+}
+
 .finance-page .section-title {
   background: #fbfcfc;
 }
@@ -661,5 +714,14 @@
 @media (max-width: 480px) {
   .interest-preview-details {
     grid-template-columns: 1fr;
+  }
+
+  .salary-card-header,
+  .salary-card-values {
+    grid-template-columns: 1fr;
+  }
+
+  .salary-card-header {
+    display: grid;
   }
 }

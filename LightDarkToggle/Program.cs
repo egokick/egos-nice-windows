@@ -51,7 +51,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly object _brightnessUpdateLock = new();
 
     private AppSettings _settings;
-    private AdminPanelForm? _adminPanelForm;
     private int? _pendingBrightness;
     private bool _brightnessUpdateRunning;
 
@@ -64,9 +63,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _toggleMenuItem = new ToolStripMenuItem();
         _toggleMenuItem.Click += (_, _) => ToggleThemeManually();
-
-        var adminPanelMenuItem = new ToolStripMenuItem("Admin Panel");
-        adminPanelMenuItem.Click += (_, _) => ShowAdminPanel();
 
         _startupMenuItem = new ToolStripMenuItem("Run at Windows startup")
         {
@@ -113,8 +109,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _notifyIcon.ContextMenuStrip.Opening += (_, _) => RefreshMenuText(refreshBrightness: true, refreshDimming: true);
         _notifyIcon.ContextMenuStrip.Items.Add(_toggleMenuItem);
-        _notifyIcon.ContextMenuStrip.Items.Add(adminPanelMenuItem);
-        _notifyIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         _notifyIcon.ContextMenuStrip.Items.Add(_startupMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_timedModeMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_timedSeparatorMenuItem);
@@ -153,10 +147,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
-        var adminPanel = _adminPanelForm;
-        _adminPanelForm = null;
-        adminPanel?.Close();
-        adminPanel?.Dispose();
         _scheduleTimer.Stop();
         _scheduleTimer.Dispose();
         _displaySettingsTimer.Stop();
@@ -168,35 +158,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _lightIcon.Dispose();
         _darkIcon.Dispose();
         base.ExitThreadCore();
-    }
-
-    private void ShowAdminPanel()
-    {
-        if (_adminPanelForm is null || _adminPanelForm.IsDisposed)
-        {
-            var form = new AdminPanelForm();
-            _adminPanelForm = form;
-            form.FormClosed += (_, _) =>
-            {
-                if (ReferenceEquals(_adminPanelForm, form))
-                {
-                    _adminPanelForm = null;
-                }
-            };
-        }
-
-        if (_adminPanelForm.WindowState == FormWindowState.Minimized)
-        {
-            _adminPanelForm.WindowState = FormWindowState.Normal;
-        }
-
-        if (!_adminPanelForm.Visible)
-        {
-            _adminPanelForm.Show();
-        }
-
-        _adminPanelForm.Activate();
-        _adminPanelForm.BringToFront();
     }
 
     private void NotifyIconOnMouseClick(object? sender, MouseEventArgs e)
@@ -296,7 +257,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ThemeService.SetWindowsTerminalPowerShellScheme(enableLightMode ? LightScheme : DarkScheme);
         ThemeService.NotifyThemeChanged();
         RefreshMenuText();
-        _adminPanelForm?.ApplyCurrentTheme();
     }
 
     private void RefreshMenuText(bool refreshBrightness = false, bool refreshDimming = false)

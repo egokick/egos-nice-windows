@@ -13,6 +13,8 @@ const financeEls = {
   totalCredit: document.querySelector("#totalCredit"),
   totalDebt: document.querySelector("#totalDebt"),
   netBand: document.querySelector(".net-band"),
+  salaryCaption: document.querySelector("#salaryCaption"),
+  salarySummary: document.querySelector("#salarySummary"),
   accountFormTitle: document.querySelector("#accountFormTitle"),
   editAccountSelect: document.querySelector("#editAccountSelect"),
   showAccountForm: document.querySelector("#showAccountForm"),
@@ -40,16 +42,25 @@ let interestPreview = null;
 
 financeEls.refresh.addEventListener("click", async () => {
   financeEls.refresh.disabled = true;
+  const originalLabel = financeEls.refresh.textContent;
+  financeEls.refresh.textContent = "Starting Codex...";
   try {
     const result = await fetchJson("/api/finance/refresh", { method: "POST" });
     await loadFinance();
     financeEls.alert.hidden = false;
     financeEls.alert.className = `poll-alert ${result.started || result.alreadyRunning ? "poll-alert-warning" : "poll-alert-failed"}`;
     financeEls.alert.textContent = result.started
-      ? "Codex finance refresh started in the background."
+      ? "A visible Codex session has opened and is refreshing today's values. Keep its terminal window open while it works; this page will update after it saves the accounts."
+      : result.alreadyRunning
+        ? "A Codex finance refresh is already running. Check its open Codex terminal window for progress."
       : result.message || result.error || "Codex finance refresh could not be started.";
+  } catch (error) {
+    financeEls.alert.hidden = false;
+    financeEls.alert.className = "poll-alert poll-alert-failed";
+    financeEls.alert.textContent = `Codex finance refresh could not be started: ${error.message || error}`;
   } finally {
     financeEls.refresh.disabled = false;
+    financeEls.refresh.textContent = originalLabel;
   }
 });
 
@@ -206,11 +217,62 @@ function renderFinance() {
   financeEls.netBand.classList.toggle("positive", current.netAfterDebt > 0);
   financeEls.netBand.classList.toggle("negative", current.netAfterDebt < 0);
 
+  renderSalary(data.income, data.currency);
   renderChart(data);
   renderAccountSelector(data);
   renderTables(data);
   renderLog(data.refreshLog || []);
   document.title = `${money(current.netAfterDebt, data.currency)} - Finances`;
+}
+
+function renderSalary(income, defaultCurrency) {
+  const salary = income?.salary || [];
+  financeEls.salarySummary.textContent = "";
+  financeEls.salaryCaption.textContent = salary.length === 0
+    ? "No salary deposits recorded yet"
+    : `${salary.length} salary source${salary.length === 1 ? "" : "s"} in the last 12 months`;
+
+  if (salary.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state salary-empty";
+    empty.textContent = "Salary will appear here after a payroll deposit is recorded from an account refresh.";
+    financeEls.salarySummary.append(empty);
+    return;
+  }
+
+  for (const source of salary) {
+    const card = document.createElement("article");
+    card.className = "salary-card";
+
+    const header = document.createElement("div");
+    header.className = "salary-card-header";
+    const account = document.createElement("strong");
+    account.textContent = source.accountName;
+    const date = document.createElement("span");
+    date.textContent = `Last paid ${formatPostedOn(source.latestPaymentOn)}`;
+    header.append(account, date);
+
+    const values = document.createElement("div");
+    values.className = "salary-card-values";
+    values.append(
+      salaryValue("Latest salary payment", money(source.latestPayment, source.currency || defaultCurrency)),
+      salaryValue("Salary deposits, last 12 months", money(source.totalLast12Months, source.currency || defaultCurrency)),
+      salaryValue("Payments recorded", String(source.paymentCountLast12Months))
+    );
+
+    card.append(header, values);
+    financeEls.salarySummary.append(card);
+  }
+}
+
+function salaryValue(label, value) {
+  const item = document.createElement("div");
+  const caption = document.createElement("span");
+  caption.textContent = label;
+  const amount = document.createElement("strong");
+  amount.textContent = value;
+  item.append(caption, amount);
+  return item;
 }
 
 function renderAccountSelector(data) {
@@ -972,6 +1034,19 @@ function formatDateTime(value) {
 
 function formatDate(value) {
   return new Date(value).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function formatPostedOn(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return "--";
+  }
+
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  });
 }
 
 function formatWeekday(value) {

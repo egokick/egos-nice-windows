@@ -20,7 +20,6 @@ Left-click the tray icon to toggle immediately.
 Right-click the tray icon for:
 
 - `Switch to ...`
-- `Admin Panel`
 - `Run at Windows startup`
 - `Brightness` slider
 - `Extra dimming` slider
@@ -29,13 +28,13 @@ Right-click the tray icon for:
 
 ## Admin Panel
 
-Choose `Admin Panel` from the tray menu to open the centered suite dashboard. It contains cards for Parakeet Mic, Power Mode Toggle, Stay Active, Voice Codex, Wi-Fi Devices, Workflow Manager, YouTube Sync Tray, Light / Dark Toggle, Nemotron Mic, and Ollama Coder Agent.
+The centered suite dashboard is now the standalone `AdminPanel` tray app. Run `AdminPanel\start.bat` to start it; it registers itself to start with Windows and its tray menu opens the dashboard.
 
 Each card includes:
 
-- The app's logo, name, and description
-- A large `Launch` button that prepares the app's required runtime first (installing missing .NET, Python, Ollama, or YouTube tools when needed), then runs its existing `start.bat`
-- A `Start with Windows` toggle stored in the current user's Windows Run settings
+- The app's name and a large centered logo
+- Hovering a tile highlights it and shows a translucent play control; clicking the tile prepares its runtime and runs its existing `start.bat`. Wi-Fi Devices, Finance, and YouTube Sync Tray open their local web UI once ready
+- A compact `Start with Windows` checkbox stored in the current user's Windows Run settings
 - A drag handle for reordering cards; `Ctrl` + arrow keys provide a keyboard alternative
 
 The content-only grid shows at most three cards per row, placing further cards on subsequent rows. The card order is saved in `%LOCALAPPDATA%\LightDarkToggle\admin-panel.json`. Only one Admin Panel window is opened at a time, and it follows the current Windows light or dark theme.
