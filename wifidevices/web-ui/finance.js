@@ -27,14 +27,27 @@ const financeEls = {
   cardRows: document.querySelector("#cardRows"),
   accountRows: document.querySelector("#accountRows"),
   refreshCaption: document.querySelector("#refreshCaption"),
-  refreshLog: document.querySelector("#refreshLog")
+  refreshLog: document.querySelector("#refreshLog"),
+  interestPreviewDialog: document.querySelector("#interestPreviewDialog"),
+  interestPreviewAccount: document.querySelector("#interestPreviewAccount"),
+  interestPreviewBalance: document.querySelector("#interestPreviewBalance"),
+  interestPreviewCurrent: document.querySelector("#interestPreviewCurrent"),
+  interestPreviewPayment: document.querySelector("#interestPreviewPayment"),
+  interestPreviewResult: document.querySelector("#interestPreviewResult")
 };
+
+let interestPreview = null;
 
 financeEls.refresh.addEventListener("click", async () => {
   financeEls.refresh.disabled = true;
   try {
-    await fetchJson("/api/finance/refresh", { method: "POST" });
+    const result = await fetchJson("/api/finance/refresh", { method: "POST" });
     await loadFinance();
+    financeEls.alert.hidden = false;
+    financeEls.alert.className = `poll-alert ${result.started || result.alreadyRunning ? "poll-alert-warning" : "poll-alert-failed"}`;
+    financeEls.alert.textContent = result.started
+      ? "Codex finance refresh started in the background."
+      : result.message || result.error || "Codex finance refresh could not be started.";
   } finally {
     financeEls.refresh.disabled = false;
   }
@@ -79,6 +92,11 @@ financeEls.historyRange.addEventListener("change", () => {
   if (financeState.data) {
     renderChart(financeState.data);
   }
+});
+
+financeEls.interestPreviewPayment.addEventListener("input", renderInterestPreview);
+financeEls.interestPreviewDialog.addEventListener("close", () => {
+  interestPreview = null;
 });
 
 loadFinance();
@@ -254,7 +272,7 @@ function renderTables(data) {
   financeEls.accountRows.textContent = "";
 
   if (creditLoans.length === 0) {
-    financeEls.cardRows.append(emptyRow(6, "No credit cards or loans configured yet."));
+    financeEls.cardRows.append(emptyRow(7, "No credit cards or loans configured yet."));
   } else {
     for (const card of creditLoans) {
       const row = document.createElement("tr");
@@ -263,6 +281,7 @@ function renderTables(data) {
         moneyCell(card.balanceOwed, data.currency),
         moneyCell(card.creditAvailable, data.currency),
         percentCell(card.aprPercent),
+        interestPreviewCell(card, data.currency),
         textCell(card.utilizationPercent === null ? "--" : `${card.utilizationPercent}%`),
         statusCell(card)
       );
@@ -297,6 +316,77 @@ function compareNullableNumbersDescending(left, right) {
   if (leftMissing) return 1;
   if (rightMissing) return -1;
   return rightValue - leftValue;
+}
+
+function monthlyInterest(balanceOwed, aprPercent) {
+  const owed = Number(balanceOwed);
+  const apr = Number(aprPercent);
+  if (balanceOwed === null || balanceOwed === undefined || aprPercent === null || aprPercent === undefined
+    || !Number.isFinite(owed) || !Number.isFinite(apr)) {
+    return null;
+  }
+
+  return owed * (apr / 100) / 12;
+}
+
+function interestPreviewCell(account, currency) {
+  const interest = monthlyInterest(account.balanceOwed, account.aprPercent);
+  if (interest === null) {
+    return moneyCell(null, currency);
+  }
+
+  const cell = document.createElement("td");
+  cell.className = "money-cell";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "interest-preview-trigger";
+  button.textContent = money(interest, currency);
+  button.title = "Preview monthly interest after a payment";
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-label", `Preview monthly interest for ${account.name}, currently ${money(interest, currency)}`);
+  button.addEventListener("click", () => openInterestPreview(account, currency));
+  cell.append(button);
+  return cell;
+}
+
+function openInterestPreview(account, currency) {
+  const owed = Number(account.balanceOwed);
+  const apr = Number(account.aprPercent);
+  if (!Number.isFinite(owed) || !Number.isFinite(apr)) {
+    return;
+  }
+
+  interestPreview = { account, currency, owed, apr };
+  financeEls.interestPreviewAccount.textContent = `${account.name} at ${apr.toFixed(2)}% APR`;
+  financeEls.interestPreviewBalance.textContent = money(owed, currency);
+  financeEls.interestPreviewCurrent.textContent = money(monthlyInterest(owed, apr), currency);
+  financeEls.interestPreviewPayment.value = "";
+  renderInterestPreview();
+  if (!financeEls.interestPreviewDialog.open) {
+    financeEls.interestPreviewDialog.showModal();
+  }
+  financeEls.interestPreviewPayment.focus();
+}
+
+function renderInterestPreview() {
+  if (!interestPreview) {
+    return;
+  }
+
+  const enteredValue = financeEls.interestPreviewPayment.value.trim();
+  const requestedPayment = enteredValue === "" ? 0 : Number(enteredValue);
+  if (!Number.isFinite(requestedPayment) || requestedPayment < 0) {
+    financeEls.interestPreviewResult.textContent = "Enter a payment amount of zero or more.";
+    return;
+  }
+
+  const appliedPayment = Math.min(requestedPayment, interestPreview.owed);
+  const remainingBalance = interestPreview.owed - appliedPayment;
+  const newInterest = monthlyInterest(remainingBalance, interestPreview.apr);
+  const cappedNotice = requestedPayment > interestPreview.owed
+    ? ` Payment is capped at ${money(interestPreview.owed, interestPreview.currency)}.`
+    : "";
+  financeEls.interestPreviewResult.textContent = `${money(remainingBalance, interestPreview.currency)} remaining — estimated monthly interest: ${money(newInterest, interestPreview.currency)}.${cappedNotice}`;
 }
 
 function renderLog(logs) {

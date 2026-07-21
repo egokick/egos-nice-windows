@@ -52,6 +52,7 @@ builder.Services.AddSingleton<UiPreferencesStore>();
 builder.Services.AddSingleton(_ => FinanceSettings.Load(Directory.GetCurrentDirectory(), AppContext.BaseDirectory));
 builder.Services.AddSingleton<FinanceStore>();
 builder.Services.AddSingleton<FinanceRefreshCoordinator>();
+builder.Services.AddSingleton<CodexFinanceRefreshLauncher>();
 builder.Services.AddSingleton<RemoteWifiDeviceSource>();
 builder.Services.AddSingleton<WindowsNetworkDeviceSource>();
 builder.Services.AddSingleton<IDeviceSource, CompositeDeviceSource>();
@@ -180,10 +181,10 @@ app.MapGet("/api/finance/state", async (FinanceStore store, FinanceRefreshCoordi
     return Results.Json(state);
 });
 
-app.MapPost("/api/finance/refresh", async (FinanceRefreshCoordinator refresher, CancellationToken cancellationToken) =>
+app.MapPost("/api/finance/refresh", (CodexFinanceRefreshLauncher launcher) =>
 {
-    var status = await refresher.RefreshNowAsync(cancellationToken);
-    return Results.Json(status);
+    var result = launcher.Start();
+    return Results.Json(result);
 });
 
 app.MapPost("/api/finance/accounts", async (
@@ -1129,6 +1130,170 @@ public sealed class FinanceRefreshCoordinator : BackgroundService
                 await Task.Delay(TimeSpan.FromMinutes(15), stoppingToken);
             }
         }
+    }
+}
+
+public sealed class CodexFinanceRefreshLauncher
+{
+    private const string FinanceRefreshPrompt = "follow the instructions in \"C:\\source\\egos-nice-windows\\wifidevices\\AGENTS.md\" and refresh all the account values for today in the finance app";
+
+    private readonly object _sync = new();
+    private Process? _process;
+
+    public CodexRefreshLaunchResult Start()
+    {
+        lock (_sync)
+        {
+            if (_process is { HasExited: false })
+            {
+                return new CodexRefreshLaunchResult(
+                    false,
+                    true,
+                    _process.Id,
+                    "A Codex finance refresh is already running.",
+                    null);
+            }
+
+            try
+            {
+                var repositoryRoot = FindRepositoryRoot(Directory.GetCurrentDirectory());
+                var process = new Process
+                {
+                    StartInfo = BuildStartInfo(repositoryRoot),
+                    EnableRaisingEvents = true
+                };
+                if (!process.Start())
+                {
+                    process.Dispose();
+                    return new CodexRefreshLaunchResult(false, false, null, null, "Codex could not be started.");
+                }
+
+                _process = process;
+                _ = TrackProcessAsync(process);
+                return new CodexRefreshLaunchResult(
+                    true,
+                    false,
+                    process.Id,
+                    "Codex finance refresh started.",
+                    null);
+            }
+            catch (Exception ex)
+            {
+                return new CodexRefreshLaunchResult(false, false, null, null, ex.Message);
+            }
+        }
+    }
+
+    private static ProcessStartInfo BuildStartInfo(string repositoryRoot)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ResolveCodexExecutable(),
+            WorkingDirectory = repositoryRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add("--model");
+        startInfo.ArgumentList.Add("gpt-5.6-luna");
+        startInfo.ArgumentList.Add("--config");
+        startInfo.ArgumentList.Add("model_reasoning_effort=\"low\"");
+        startInfo.ArgumentList.Add("--config");
+        startInfo.ArgumentList.Add("service_tier=\"fast\"");
+        startInfo.ArgumentList.Add("--config");
+        startInfo.ArgumentList.Add("approval_policy=\"never\"");
+        startInfo.ArgumentList.Add("--enable");
+        startInfo.ArgumentList.Add("fast_mode");
+        startInfo.ArgumentList.Add("--enable");
+        startInfo.ArgumentList.Add("browser_use");
+        startInfo.ArgumentList.Add("--enable");
+        startInfo.ArgumentList.Add("browser_use_external");
+        startInfo.ArgumentList.Add("--enable");
+        startInfo.ArgumentList.Add("browser_use_full_cdp_access");
+        startInfo.ArgumentList.Add("--sandbox");
+        startInfo.ArgumentList.Add("workspace-write");
+        startInfo.ArgumentList.Add("--cd");
+        startInfo.ArgumentList.Add(repositoryRoot);
+        startInfo.ArgumentList.Add("--ephemeral");
+        startInfo.ArgumentList.Add("--json");
+        startInfo.ArgumentList.Add(FinanceRefreshPrompt);
+
+        var codexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
+        if (string.IsNullOrWhiteSpace(codexHome))
+        {
+            startInfo.Environment["CODEX_HOME"] = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".codex");
+        }
+
+        return startInfo;
+    }
+
+    private async Task TrackProcessAsync(Process process)
+    {
+        try
+        {
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            await Task.WhenAll(stdoutTask, stderrTask);
+        }
+        catch
+        {
+            // The launch result has already been returned to the UI; a later
+            // finance state read reflects any values the agent successfully saved.
+        }
+        finally
+        {
+            lock (_sync)
+            {
+                if (ReferenceEquals(_process, process))
+                {
+                    _process = null;
+                }
+            }
+
+            process.Dispose();
+        }
+    }
+
+    private static string ResolveCodexExecutable()
+    {
+        var configured = Environment.GetEnvironmentVariable("CODEX_CLI_PATH");
+        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
+        {
+            return configured;
+        }
+
+        var npmCodex = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "npm",
+            "codex.cmd");
+        if (File.Exists(npmCodex))
+        {
+            return npmCodex;
+        }
+
+        return "codex.cmd";
+    }
+
+    private static string FindRepositoryRoot(string startDirectory)
+    {
+        var directory = new DirectoryInfo(startDirectory);
+        while (directory is not null)
+        {
+            if (Directory.Exists(Path.Combine(directory.FullName, ".git")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return startDirectory;
     }
 }
 
@@ -3736,6 +3901,13 @@ public sealed record FinanceRefreshStatus(
 {
     public static FinanceRefreshStatus NotStarted { get; } = new(null, null, false, false, 0, null, null);
 }
+
+public sealed record CodexRefreshLaunchResult(
+    bool Started,
+    bool AlreadyRunning,
+    int? ProcessId,
+    string? Message,
+    string? Error);
 
 public sealed record FinanceDashboardResponse(
     DateTimeOffset NowUtc,
