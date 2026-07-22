@@ -7,16 +7,29 @@ namespace AdminPanel;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        AdminPanelStartMenuRegistration.TryEnsureShortcut(out _);
+
+        var showPanel = args.Any(argument =>
+            string.Equals(argument, "--show", StringComparison.OrdinalIgnoreCase));
+        using var showPanelRequest = new EventWaitHandle(
+            false,
+            EventResetMode.AutoReset,
+            "NiceWindows.AdminPanel.Show");
         using var mutex = new Mutex(true, "NiceWindows.AdminPanel.Singleton", out var createdNew);
         if (!createdNew)
         {
+            if (showPanel)
+            {
+                showPanelRequest.Set();
+            }
+
             return;
         }
 
         ApplicationConfiguration.Initialize();
-        Application.Run(new AdminPanelApplicationContext());
+        Application.Run(new AdminPanelApplicationContext(showPanelRequest, showPanel));
     }
 }
 
@@ -24,10 +37,27 @@ internal sealed class AdminPanelApplicationContext : ApplicationContext
 {
     private readonly NotifyIcon _notifyIcon;
     private readonly Icon _icon;
+    private readonly Control _dispatcher;
+    private readonly RegisteredWaitHandle _showPanelRequestRegistration;
     private AdminPanelForm? _panel;
 
-    public AdminPanelApplicationContext()
+    public AdminPanelApplicationContext(EventWaitHandle showPanelRequest, bool showPanelInitially)
     {
+        _dispatcher = new Control();
+        _dispatcher.CreateControl();
+        _showPanelRequestRegistration = ThreadPool.RegisterWaitForSingleObject(
+            showPanelRequest,
+            (_, _) =>
+            {
+                if (!_dispatcher.IsDisposed && _dispatcher.IsHandleCreated)
+                {
+                    _dispatcher.BeginInvoke(ShowPanel);
+                }
+            },
+            null,
+            Timeout.Infinite,
+            executeOnlyOnce: false);
+
         _icon = AdminPanelTrayIconFactory.CreateLightIcon();
 
         var menu = new ContextMenuStrip();
@@ -60,6 +90,11 @@ internal sealed class AdminPanelApplicationContext : ApplicationContext
                 ShowPanel();
             }
         };
+
+        if (showPanelInitially)
+        {
+            _dispatcher.BeginInvoke(ShowPanel);
+        }
     }
 
     protected override void ExitThreadCore()
@@ -71,6 +106,8 @@ internal sealed class AdminPanelApplicationContext : ApplicationContext
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _icon.Dispose();
+        _showPanelRequestRegistration.Unregister(null);
+        _dispatcher.Dispose();
         base.ExitThreadCore();
     }
 
@@ -124,6 +161,97 @@ internal sealed class AdminPanelApplicationContext : ApplicationContext
             "Nice Windows Admin Panel",
             errorMessage,
             ToolTipIcon.Error);
+    }
+}
+
+internal static class AdminPanelStartMenuRegistration
+{
+    private const string ShortcutFileName = "Nice Windows Admin Panel.lnk";
+    private const string IconDirectoryName = "NiceWindows";
+    private const string IconFileName = "AdminPanel.ico";
+
+    public static bool TryEnsureShortcut(out string errorMessage)
+    {
+        object? shell = null;
+        object? shortcut = null;
+
+        try
+        {
+            var programsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+            var iconDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                IconDirectoryName,
+                "AdminPanel");
+            var shortcutPath = Path.Combine(programsDirectory, ShortcutFileName);
+            var iconPath = Path.Combine(iconDirectory, IconFileName);
+            var executablePath = Environment.ProcessPath ?? Application.ExecutablePath;
+
+            Directory.CreateDirectory(iconDirectory);
+            using (var icon = AdminPanelTrayIconFactory.CreateLightIcon())
+            using (var stream = new FileStream(iconPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+            {
+                icon.Save(stream);
+            }
+
+            var shellType = Type.GetTypeFromProgID("WScript.Shell")
+                ?? throw new InvalidOperationException("Windows Script Host is unavailable.");
+            shell = Activator.CreateInstance(shellType)
+                ?? throw new InvalidOperationException("Could not create the Windows shortcut service.");
+            shortcut = shellType.InvokeMember(
+                "CreateShortcut",
+                System.Reflection.BindingFlags.InvokeMethod,
+                null,
+                shell,
+                [shortcutPath]);
+            if (shortcut is null)
+            {
+                throw new InvalidOperationException("Could not create the Start Menu shortcut.");
+            }
+
+            var shortcutType = shortcut.GetType();
+            SetShortcutProperty(shortcutType, shortcut, "TargetPath", executablePath);
+            SetShortcutProperty(shortcutType, shortcut, "Arguments", "--show");
+            SetShortcutProperty(shortcutType, shortcut, "WorkingDirectory", AppContext.BaseDirectory);
+            SetShortcutProperty(shortcutType, shortcut, "Description", "Open the Nice Windows Admin Panel");
+            SetShortcutProperty(shortcutType, shortcut, "IconLocation", $"{iconPath},0");
+            shortcutType.InvokeMember(
+                "Save",
+                System.Reflection.BindingFlags.InvokeMethod,
+                null,
+                shortcut,
+                null);
+
+            errorMessage = string.Empty;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Could not create the Start Menu shortcut: {exception.Message}";
+            return false;
+        }
+        finally
+        {
+            ReleaseComObject(shortcut);
+            ReleaseComObject(shell);
+        }
+    }
+
+    private static void SetShortcutProperty(Type shortcutType, object shortcut, string name, string value)
+    {
+        shortcutType.InvokeMember(
+            name,
+            System.Reflection.BindingFlags.SetProperty,
+            null,
+            shortcut,
+            [value]);
+    }
+
+    private static void ReleaseComObject(object? value)
+    {
+        if (value is not null && Marshal.IsComObject(value))
+        {
+            Marshal.FinalReleaseComObject(value);
+        }
     }
 }
 

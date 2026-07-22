@@ -326,6 +326,68 @@
   text-align: right;
 }
 
+.history-title-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.future-projection-toggle {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border-color: rgba(208, 122, 24, 0.34);
+  background: #fffaf2;
+  color: #8a4b08;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.future-projection-toggle:hover {
+  border-color: var(--finance-salary);
+}
+
+.future-projection-toggle:focus-visible {
+  outline: 2px solid var(--finance-ink);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(208, 122, 24, 0.2);
+}
+
+.future-projection-toggle[aria-pressed="true"] {
+  border-color: rgba(208, 122, 24, 0.55);
+  background: #fff4e3;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.68);
+}
+
+.projection-toggle-indicator {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #f2d8b5;
+  color: #8a4b08;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.future-projection-toggle[aria-pressed="true"] .projection-toggle-indicator {
+  background: var(--finance-salary);
+  color: #ffffff;
+}
+
+.projection-toggle-state {
+  color: #a35d0e;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -379,6 +441,22 @@
   text-align: right;
 }
 
+.history-range-value-projection {
+  text-align: right;
+}
+
+.history-range-control.is-projection-active .history-range-values {
+  grid-template-columns: minmax(0, 1fr) auto minmax(100px, 0.38fr) minmax(112px, 0.42fr);
+}
+
+.history-range-control.is-projection-active .history-range-value-end {
+  grid-column: 3;
+}
+
+.history-range-control.is-projection-active .history-range-value-projection {
+  grid-column: 4;
+}
+
 .history-range-length {
   margin: 0 0 1px;
   color: var(--finance-net);
@@ -412,6 +490,13 @@
   background: var(--finance-cash);
 }
 
+.history-projection-selection {
+  position: absolute;
+  inset-block: 0;
+  border-radius: inherit;
+  background: var(--finance-salary);
+}
+
 .history-range-input {
   position: absolute;
   inset: 0;
@@ -430,6 +515,10 @@
 
 .history-range-input-end {
   z-index: 4;
+}
+
+.history-range-input-projection {
+  z-index: 6;
 }
 
 .history-range-input.is-active {
@@ -505,6 +594,46 @@
   box-shadow: 0 0 0 4px rgba(17, 122, 86, 0.2), 0 2px 7px rgba(23, 32, 29, 0.2);
 }
 
+.history-range-input-projection::-webkit-slider-thumb {
+  border-color: var(--finance-salary);
+  background: radial-gradient(circle, var(--finance-salary) 0 4px, #ffffff 4.5px);
+  box-shadow: 0 0 0 4px rgba(208, 122, 24, 0.13), 0 2px 7px rgba(23, 32, 29, 0.2);
+}
+
+.history-range-input-projection::-moz-range-thumb {
+  border-color: var(--finance-salary);
+  background: radial-gradient(circle, var(--finance-salary) 0 4px, #ffffff 4.5px);
+  box-shadow: 0 0 0 4px rgba(208, 122, 24, 0.13), 0 2px 7px rgba(23, 32, 29, 0.2);
+}
+
+.history-range-input-projection:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--finance-ink);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px rgba(208, 122, 24, 0.24), 0 2px 7px rgba(23, 32, 29, 0.2);
+}
+
+.history-range-input-projection:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--finance-ink);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px rgba(208, 122, 24, 0.24), 0 2px 7px rgba(23, 32, 29, 0.2);
+}
+
+.history-range-control.is-projection-active .history-range-input-end::-webkit-slider-thumb {
+  border-color: var(--finance-cash);
+  background: var(--finance-cash-soft);
+  box-shadow: 0 2px 7px rgba(23, 32, 29, 0.16);
+  cursor: default;
+  pointer-events: none;
+}
+
+.history-range-control.is-projection-active .history-range-input-end::-moz-range-thumb {
+  border-color: var(--finance-cash);
+  background: var(--finance-cash-soft);
+  box-shadow: 0 2px 7px rgba(23, 32, 29, 0.16);
+  cursor: default;
+  pointer-events: none;
+}
+
 .history-range-input:disabled::-webkit-slider-thumb {
   border-color: #aeb9b5;
   background: #edf1ef;
@@ -520,12 +649,23 @@
 }
 
 .history-range-bounds {
+  position: relative;
   display: flex;
   justify-content: space-between;
   gap: 16px;
   color: var(--finance-muted);
   font-size: 11px;
   line-height: 1.3;
+}
+
+.history-today-bound {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  color: var(--finance-cash);
+  font-weight: 800;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .history-range-bounds span:last-child {
@@ -537,6 +677,72 @@
   color: var(--finance-muted);
   font-size: 11px;
   text-align: center;
+}
+
+.projection-summary {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid var(--finance-line);
+  background: #fffaf2;
+}
+
+.projection-summary[hidden] {
+  display: none;
+}
+
+.projection-summary-intro,
+.projection-summary-metric {
+  min-width: 0;
+  padding: 13px 16px;
+}
+
+.projection-summary-metric {
+  border-left: 1px solid #eadfce;
+}
+
+.projection-summary-kicker {
+  margin: 0 0 4px;
+  color: #9a5a10;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.projection-summary h4 {
+  margin: 0;
+  color: var(--finance-ink);
+  font-size: 16px;
+}
+
+.projection-summary-note {
+  margin: 3px 0 0;
+  color: var(--finance-muted);
+  font-size: 11px;
+}
+
+.projection-summary-metric span {
+  display: block;
+  color: var(--finance-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.projection-summary-metric strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--finance-ink);
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+}
+
+.projection-summary-metric small {
+  display: block;
+  min-height: 14px;
+  margin-top: 2px;
+  color: #8a4b08;
+  font-size: 10px;
 }
 
 .finance-chart-shell {
@@ -568,6 +774,43 @@
 
 .chart-point-salary {
   stroke-width: 2.5;
+}
+
+.chart-projection-zone {
+  fill: #fff8ed;
+}
+
+.chart-projection-boundary {
+  stroke: var(--finance-salary);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.chart-projection-label {
+  fill: #9a5a10;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.chart-line-projected {
+  stroke-dasharray: 7 5;
+}
+
+.chart-point-projected {
+  fill: #ffffff;
+  stroke-width: 2.5;
+}
+
+.chart-point-salary-projected {
+  fill: #ffffff;
+  stroke: var(--finance-salary);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 3px rgba(208, 122, 24, 0.32));
+}
+
+.chart-salary-stem-projected {
+  opacity: 0.72;
+  stroke-dasharray: 4 3;
 }
 
 .chart-salary-stem {
@@ -925,6 +1168,10 @@
     gap: 4px;
   }
 
+  .history-title-heading {
+    flex-wrap: wrap;
+  }
+
   .history-section-title > p {
     text-align: left;
     white-space: normal;
@@ -932,6 +1179,73 @@
 
   .history-range-control {
     padding-inline: 16px;
+  }
+
+  .projection-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .projection-summary-metric {
+    border-top: 1px solid #eadfce;
+  }
+
+  .projection-summary-metric:nth-child(3) {
+    border-left: 0;
+  }
+}
+
+@media (min-width: 641px) and (max-width: 900px) {
+  .history-range-control.is-projection-active ~ .finance-chart-shell #financeChart {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 540px) {
+  .history-range-control.is-projection-active .history-range-values {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 7px 12px;
+  }
+
+  .history-range-control.is-projection-active .history-range-value-start {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .history-range-control.is-projection-active .history-range-value-projection {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .history-range-control.is-projection-active .history-range-value-end {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    text-align: center;
+  }
+
+  .history-range-control.is-projection-active .history-range-length {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+
+  .history-range-control.is-projection-active .history-today-bound {
+    display: none;
+  }
+
+  .history-range-control.is-projection-active .history-range-bounds > span {
+    max-width: 48%;
+  }
+
+  .history-range-control.is-projection-active .history-range-input-end::-webkit-slider-thumb,
+  .history-range-input-projection::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+    margin-top: -10px;
+  }
+
+  .history-range-control.is-projection-active .history-range-input-end::-moz-range-thumb,
+  .history-range-input-projection::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
   }
 }
 
@@ -968,15 +1282,27 @@
   .history-range-value strong {
     font-size: 12px;
   }
+
+  .projection-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .projection-summary-metric {
+    border-top: 1px solid #eadfce;
+    border-left: 0;
+  }
 }
 
 @media (forced-colors: active) {
-  .history-range-selection {
+  .history-range-selection,
+  .history-projection-selection {
     background: Highlight;
   }
 
   .history-range-input::-webkit-slider-thumb,
-  .history-range-input::-moz-range-thumb {
+  .history-range-input::-moz-range-thumb,
+  .history-range-input-projection::-webkit-slider-thumb,
+  .history-range-input-projection::-moz-range-thumb {
     border-color: ButtonText;
     background: Canvas;
   }

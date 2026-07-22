@@ -252,3 +252,4 @@ parakeet-mic/wheels/nemo_toolkit-2.7.3-py3-none-any.whl
 parakeet-mic/wheels/nemo_toolkit-2.0.0-py3-none-any.whl
 .dotnet-sdk/packs
 .dotnet-sdk
+.artifacts

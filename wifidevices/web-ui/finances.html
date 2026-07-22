@@ -6,7 +6,7 @@
     <title>Finances</title>
     <link rel="icon" href="/finance-favicon.svg?v=1" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css?v=26">
-    <link rel="stylesheet" href="/finance.css?v=18">
+    <link rel="stylesheet" href="/finance.css?v=19">
   </head>
   <body class="finance-page">
     <header class="topbar finance-topbar">
@@ -132,7 +132,14 @@
 
       <section class="chart-section">
         <div class="section-title history-section-title">
-          <h3>Values Over Time</h3>
+          <div class="history-title-heading">
+            <h3>Values Over Time</h3>
+            <button id="futureProjectionToggle" class="future-projection-toggle" type="button" aria-pressed="false" aria-controls="historyRangeControl projectionSummary financeChart">
+              <span class="projection-toggle-indicator" aria-hidden="true">&#8599;</span>
+              <span>Future Projection</span>
+              <span id="futureProjectionState" class="projection-toggle-state" aria-hidden="true">Off</span>
+            </button>
+          </div>
           <p id="historyCaption">No history yet</p>
         </div>
         <fieldset id="historyRangeControl" class="history-range-control">
@@ -144,23 +151,52 @@
             </label>
             <p id="historyRangeLength" class="history-range-length">Last 3 months</p>
             <label class="history-range-value history-range-value-end" for="historyEnd">
-              <span>End</span>
+              <span id="historyEndKind">End</span>
               <strong id="historyEndLabel">--</strong>
+            </label>
+            <label id="historyProjectionValue" class="history-range-value history-range-value-projection" for="historyProjection" hidden>
+              <span>Projection</span>
+              <strong id="historyProjectionLabel">--</strong>
             </label>
           </div>
           <div class="history-range-slider">
             <div class="history-range-rail" aria-hidden="true">
               <span id="historyRangeSelection" class="history-range-selection"></span>
+              <span id="historyProjectionSelection" class="history-projection-selection" hidden></span>
             </div>
             <input id="historyStart" class="history-range-input history-range-input-start" type="range" min="0" max="1" value="0" step="1" aria-label="Start date" aria-describedby="historyRangeBounds historyRangeHelp">
             <input id="historyEnd" class="history-range-input history-range-input-end" type="range" min="0" max="1" value="1" step="1" aria-label="End date" aria-describedby="historyRangeBounds historyRangeHelp">
+            <input id="historyProjection" class="history-range-input history-range-input-projection" type="range" min="0" max="1" value="1" step="1" aria-label="Projection date" aria-describedby="historyRangeBounds historyRangeHelp" hidden>
           </div>
           <div id="historyRangeBounds" class="history-range-bounds">
             <span id="historyMinLabel">Earliest data</span>
+            <span id="historyTodayLabel" class="history-today-bound" hidden>Today</span>
             <span id="historyMaxLabel">Latest data</span>
           </div>
           <p id="historyRangeHelp" class="history-range-help">Drag either handle, or use the arrow keys when focused.</p>
         </fieldset>
+        <div id="projectionSummary" class="projection-summary" aria-live="polite" aria-atomic="true" hidden>
+          <div class="projection-summary-intro">
+            <p class="projection-summary-kicker">Salary-only estimate</p>
+            <h4 id="projectionSummaryDate">Projected values</h4>
+            <p id="projectionSummaryNote" class="projection-summary-note">Debt and credit stay at today's values.</p>
+          </div>
+          <div class="projection-summary-metric">
+            <span>Cash available</span>
+            <strong id="projectionCash">--</strong>
+            <small id="projectionCashChange"></small>
+          </div>
+          <div class="projection-summary-metric">
+            <span>After paying all debt</span>
+            <strong id="projectionNet">--</strong>
+            <small id="projectionNetChange"></small>
+          </div>
+          <div class="projection-summary-metric">
+            <span>Expected salary</span>
+            <strong id="projectionSalaryCount">--</strong>
+            <small id="projectionSalaryDetail"></small>
+          </div>
+        </div>
         <div class="finance-chart-shell">
           <svg id="financeChart" role="img" aria-label="Finance history chart"></svg>
         </div>
@@ -243,6 +279,6 @@
       </form>
     </dialog>
 
-    <script src="/finance.js?v=24" defer></script>
+    <script src="/finance.js?v=25" defer></script>
   </body>
 </html>

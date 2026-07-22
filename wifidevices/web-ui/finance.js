@@ -2,6 +2,9 @@ const financeSeriesStorageKey = "finance:visibleSeries:v2";
 const legacyFinanceSeriesStorageKey = "finance:visibleSeries";
 const financeDayMilliseconds = 24 * 60 * 60 * 1000;
 const defaultHistoryMonths = 3;
+const defaultProjectionDays = 14;
+const projectionHorizonMonths = 3;
+const maximumProjectionMonths = 24;
 
 const financeState = {
   data: null,
@@ -13,6 +16,16 @@ const financeState = {
     initialized: false,
     userAdjusted: false,
     hasData: false
+  },
+  projection: {
+    enabled: false,
+    day: null,
+    limitDay: null,
+    todayDay: null,
+    sliderMinDay: null,
+    savedRange: null,
+    userAdjusted: false,
+    autoScrollPending: false
   },
   visibleSeries: readStoredVisibleFinanceSeries()
 };
@@ -35,16 +48,34 @@ const financeEls = {
   cancelAccountForm: document.querySelector("#cancelAccountForm"),
   accountFormStatus: document.querySelector("#accountFormStatus"),
   historyCaption: document.querySelector("#historyCaption"),
+  futureProjectionToggle: document.querySelector("#futureProjectionToggle"),
+  futureProjectionIndicator: document.querySelector(".projection-toggle-indicator"),
+  futureProjectionState: document.querySelector("#futureProjectionState"),
   historyRangeControl: document.querySelector("#historyRangeControl"),
   historyStart: document.querySelector("#historyStart"),
   historyEnd: document.querySelector("#historyEnd"),
+  historyProjection: document.querySelector("#historyProjection"),
   historyStartLabel: document.querySelector("#historyStartLabel"),
   historyEndLabel: document.querySelector("#historyEndLabel"),
+  historyEndKind: document.querySelector("#historyEndKind"),
+  historyProjectionValue: document.querySelector("#historyProjectionValue"),
+  historyProjectionLabel: document.querySelector("#historyProjectionLabel"),
   historyRangeLength: document.querySelector("#historyRangeLength"),
   historyRangeSelection: document.querySelector("#historyRangeSelection"),
+  historyProjectionSelection: document.querySelector("#historyProjectionSelection"),
   historyMinLabel: document.querySelector("#historyMinLabel"),
+  historyTodayLabel: document.querySelector("#historyTodayLabel"),
   historyMaxLabel: document.querySelector("#historyMaxLabel"),
   historyRangeHelp: document.querySelector("#historyRangeHelp"),
+  projectionSummary: document.querySelector("#projectionSummary"),
+  projectionSummaryDate: document.querySelector("#projectionSummaryDate"),
+  projectionSummaryNote: document.querySelector("#projectionSummaryNote"),
+  projectionCash: document.querySelector("#projectionCash"),
+  projectionCashChange: document.querySelector("#projectionCashChange"),
+  projectionNet: document.querySelector("#projectionNet"),
+  projectionNetChange: document.querySelector("#projectionNetChange"),
+  projectionSalaryCount: document.querySelector("#projectionSalaryCount"),
+  projectionSalaryDetail: document.querySelector("#projectionSalaryDetail"),
   chart: document.querySelector("#financeChart"),
   cardCount: document.querySelector("#cardCount"),
   accountCount: document.querySelector("#accountCount"),
@@ -127,6 +158,11 @@ for (const [input, handle] of [[financeEls.historyStart, "start"], [financeEls.h
   input.addEventListener("focus", () => setActiveHistoryHandle(input));
 }
 
+financeEls.futureProjectionToggle.addEventListener("click", toggleFutureProjection);
+financeEls.historyProjection.addEventListener("input", updateProjectionFromInput);
+financeEls.historyProjection.addEventListener("pointerdown", () => setActiveHistoryHandle(financeEls.historyProjection));
+financeEls.historyProjection.addEventListener("focus", () => setActiveHistoryHandle(financeEls.historyProjection));
+
 financeEls.interestPreviewPayment.addEventListener("input", renderInterestPreview);
 financeEls.interestPreviewDialog.addEventListener("close", () => {
   interestPreview = null;
@@ -172,6 +208,108 @@ function toggleFinanceSeries(key) {
   if (financeState.data) {
     renderChart(financeState.data);
   }
+}
+
+function toggleFutureProjection() {
+  if (!financeState.data) {
+    return;
+  }
+
+  const range = syncHistoryDateRange(financeState.data);
+  const projection = financeState.projection;
+  if (!projection.enabled) {
+    const todayDay = dayIndexFromTimestamp(financeState.data.nowUtc) ?? range.maxDay;
+    projection.enabled = true;
+    projection.todayDay = todayDay;
+    projection.day = todayDay + defaultProjectionDays;
+    projection.limitDay = addCalendarMonthsToDayIndex(todayDay, projectionHorizonMonths);
+    projection.sliderMinDay = Math.min(range.startDay, todayDay);
+    projection.savedRange = {
+      startDay: range.startDay,
+      endDay: range.endDay,
+      userAdjusted: range.userAdjusted
+    };
+    projection.userAdjusted = false;
+    projection.autoScrollPending = true;
+    range.startDay = projection.sliderMinDay;
+    range.endDay = todayDay;
+  } else {
+    const savedRange = projection.savedRange;
+    projection.enabled = false;
+    if (savedRange) {
+      range.startDay = clampNumber(savedRange.startDay, range.minDay, range.maxDay);
+      range.endDay = clampNumber(savedRange.endDay, range.startDay, range.maxDay);
+      range.userAdjusted = savedRange.userAdjusted;
+    }
+    Object.assign(projection, {
+      day: null,
+      limitDay: null,
+      todayDay: null,
+      sliderMinDay: null,
+      savedRange: null,
+      userAdjusted: false,
+      autoScrollPending: false
+    });
+  }
+
+  updateHistoryRangeControl();
+  renderChart(financeState.data);
+}
+
+function updateProjectionFromInput() {
+  const projection = financeState.projection;
+  if (!projection.enabled || projection.todayDay === null) {
+    return;
+  }
+
+  const maximumDay = addCalendarMonthsToDayIndex(projection.todayDay, maximumProjectionMonths);
+  const selectedDay = clampNumber(
+    Math.round(Number(financeEls.historyProjection.value)),
+    projection.todayDay + 1,
+    projection.limitDay
+  );
+  projection.day = selectedDay;
+  projection.userAdjusted = true;
+  projection.autoScrollPending = true;
+  if (selectedDay >= projection.limitDay && projection.limitDay < maximumDay) {
+    projection.limitDay = Math.min(
+      addCalendarMonthsToDayIndex(projection.limitDay, projectionHorizonMonths),
+      maximumDay
+    );
+  }
+
+  updateHistoryRangeControl();
+  scheduleHistoryChartRender();
+}
+
+function syncProjectionRange(todayDay, range) {
+  const projection = financeState.projection;
+  if (!projection.enabled || todayDay === null) {
+    return;
+  }
+
+  if (projection.todayDay !== todayDay) {
+    if (!projection.userAdjusted) {
+      projection.day = todayDay + defaultProjectionDays;
+    } else {
+      projection.day = Math.max(todayDay + 1, projection.day ?? todayDay + defaultProjectionDays);
+    }
+    projection.todayDay = todayDay;
+    projection.limitDay = addCalendarMonthsToDayIndex(todayDay, projectionHorizonMonths);
+  }
+
+  projection.sliderMinDay ??= Math.min(range.startDay, todayDay);
+  projection.day = Math.max(todayDay + 1, projection.day ?? todayDay + defaultProjectionDays);
+  const maximumDay = addCalendarMonthsToDayIndex(todayDay, maximumProjectionMonths);
+  while (projection.limitDay < projection.day && projection.limitDay < maximumDay) {
+    projection.limitDay = Math.min(
+      addCalendarMonthsToDayIndex(projection.limitDay, projectionHorizonMonths),
+      maximumDay
+    );
+  }
+  projection.day = Math.min(projection.day, maximumDay);
+  range.startDay = clampNumber(range.startDay, projection.sliderMinDay, todayDay);
+  range.endDay = todayDay;
 }
 
 function hideAccountForm() {
@@ -505,19 +643,74 @@ function renderLog(logs) {
   }
 }
 
+function renderProjectionSummary(data, projectionModel, projectionDay) {
+  const paymentCount = projectionModel.payments.length;
+  const projectedIncome = centsToNumber(projectionModel.incomeCents);
+  financeEls.projectionSummaryDate.textContent = `Projected for ${formatHistoryDay(projectionDay)}`;
+  financeEls.projectionCash.textContent = money(centsToNumber(projectionModel.cashCents), data.currency);
+  financeEls.projectionNet.textContent = money(centsToNumber(projectionModel.netCents), data.currency);
+  financeEls.projectionSalaryCount.textContent = `${paymentCount} payment${paymentCount === 1 ? "" : "s"}`;
+
+  if (paymentCount > 0) {
+    const changeText = `+${money(projectedIncome, data.currency)} expected`;
+    financeEls.projectionCashChange.textContent = changeText;
+    financeEls.projectionNetChange.textContent = changeText;
+    if (paymentCount === 1) {
+      const payment = projectionModel.payments[0];
+      financeEls.projectionSalaryDetail.textContent = `${formatHistoryDay(payment.day)} · ${money(payment.amount, data.currency)}`;
+    } else {
+      const first = projectionModel.payments[0];
+      const last = projectionModel.payments[paymentCount - 1];
+      financeEls.projectionSalaryDetail.textContent = `${formatHistoryDay(first.day)} – ${formatHistoryDay(last.day)} · ${money(projectedIncome, data.currency)} total`;
+    }
+  } else {
+    financeEls.projectionCashChange.textContent = "No salary expected by this date";
+    financeEls.projectionNetChange.textContent = "No salary expected by this date";
+    const next = projectionModel.nextEstimatedPayment;
+    financeEls.projectionSalaryDetail.textContent = next
+      ? `Next estimated ${formatHistoryDay(next.day)} · ${money(centsToNumber(next.amountCents), data.currency)}`
+      : "Not enough recent salary history";
+  }
+
+  financeEls.projectionSummaryNote.textContent = projectionModel.schedules.length > 0
+    ? "Debt and credit stay at today's values."
+    : "Debt and credit stay at today's values. A stable recent salary cadence was not found.";
+}
+
 function renderChart(data) {
   const allHistory = data.history || [];
   const selectedRange = syncHistoryDateRange(data);
-  const rangedHistory = filterHistoryByDateRange(allHistory, selectedRange.startDay, selectedRange.endDay);
+  const projectionActive = financeState.projection.enabled;
+  const todayDay = projectionActive ? financeState.projection.todayDay : null;
+  const chartEndDay = projectionActive ? financeState.projection.day : selectedRange.endDay;
+  const actualEndDay = projectionActive ? todayDay : selectedRange.endDay;
+  const rangedHistory = filterHistoryByDateRange(allHistory, selectedRange.startDay, actualEndDay);
+  if (projectionActive) {
+    rangedHistory.push({
+      ...data.current,
+      sampledAtUtc: data.nowUtc,
+      projected: false,
+      projectionBaseline: true
+    });
+  }
   const history = latestSnapshotPerDay(rangedHistory);
-  const salaryPayments = filterSalaryPaymentsByDateRange(
+  const projectionModel = projectionActive
+    ? buildSalaryProjection(data, todayDay, chartEndDay)
+    : null;
+  if (projectionModel) {
+    renderProjectionSummary(data, projectionModel, chartEndDay);
+  }
+  const recordedSalaryPayments = filterSalaryPaymentsByDateRange(
     data.income?.salaryPayments || [],
     selectedRange.startDay,
-    selectedRange.endDay,
+    actualEndDay,
     data.currency
   );
-  const rangeLabel = formatHistoryDateRange(selectedRange.startDay, selectedRange.endDay);
-  const axisRange = axisRangeForDaySpan(selectedRange.endDay - selectedRange.startDay);
+  const salaryPayments = projectionModel
+    ? [...recordedSalaryPayments, ...projectionModel.payments]
+    : recordedSalaryPayments;
+  const rangeLabel = formatHistoryDateRange(selectedRange.startDay, chartEndDay);
+  const axisRange = axisRangeForDaySpan(chartEndDay - selectedRange.startDay);
   const svg = financeEls.chart;
   svg.textContent = "";
   const continuousSeries = [
@@ -531,7 +724,8 @@ function renderChart(data) {
   const visibleContinuousSeries = continuousSeries.filter(item => financeState.visibleSeries.has(item.key));
   const salaryVisible = financeState.visibleSeries.has(salarySeries.key);
   const hasPlottableSalary = salaryVisible && salaryPayments.length > 0;
-  if (history.length < 2 && !hasPlottableSalary) {
+  const hasProjectionValues = projectionModel?.snapshots.length > 0;
+  if (history.length < 2 && !hasPlottableSalary && !hasProjectionValues) {
     svg.setAttribute("height", "180");
     svg.setAttribute("viewBox", "0 0 820 180");
     drawSvgText(svg, 24, 92, history.length === 0 ? `No finance history in ${rangeLabel}.` : "One daily value in this range. More days will build the graph.", "empty-svg");
@@ -541,8 +735,12 @@ function renderChart(data) {
     return;
   }
 
-  financeEls.historyCaption.textContent = `${rangeLabel} · ${history.length} daily values, ${salaryPayments.length} salary payment${salaryPayments.length === 1 ? "" : "s"}`;
-  const width = Math.max(minChartWidthForRange(axisRange), svg.parentElement.clientWidth - 24);
+  financeEls.historyCaption.textContent = projectionModel
+    ? `${rangeLabel} · ${history.length} recorded days, ${projectionModel.payments.length} projected salary payment${projectionModel.payments.length === 1 ? "" : "s"}`
+    : `${rangeLabel} · ${history.length} daily values, ${salaryPayments.length} salary payment${salaryPayments.length === 1 ? "" : "s"}`;
+  const fitProjectionToTablet = projectionModel && window.innerWidth > 640 && window.innerWidth <= 900;
+  const chartMinimumWidth = fitProjectionToTablet ? 640 : minChartWidthForRange(axisRange);
+  const width = Math.max(chartMinimumWidth, svg.parentElement.clientWidth - 24);
   const height = 330;
   const left = 72;
   const right = 24;
@@ -550,13 +748,21 @@ function renderChart(data) {
   const bottom = 42;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
-  const chartValues = history.map(snapshot => ({
+  const recordedChartValues = history.map(snapshot => ({
     snapshot,
     values: Object.fromEntries(continuousSeries.map(item => {
       const value = Number(snapshot[item.key] || 0);
       return [item.key, value];
     }))
   }));
+  const projectedChartValues = (projectionModel?.snapshots || []).map(snapshot => ({
+    snapshot,
+    values: Object.fromEntries(continuousSeries.map(item => {
+      const value = Number(snapshot[item.key] || 0);
+      return [item.key, value];
+    }))
+  }));
+  const chartValues = [...recordedChartValues, ...projectedChartValues];
   const values = [
     ...chartValues.flatMap(point => visibleContinuousSeries.map(item => point.values[item.key])),
     ...(salaryVisible ? salaryPayments.map(point => point.amount) : [])
@@ -564,12 +770,26 @@ function renderChart(data) {
   const minValue = Math.min(0, ...values);
   const maxValue = Math.max(1, ...values);
   const start = dayIndexToLocalStartDate(selectedRange.startDay);
-  const end = dayIndexToLocalEndDate(selectedRange.endDay);
+  const end = dayIndexToLocalEndDate(chartEndDay);
   const span = end - start || 1;
 
   svg.setAttribute("height", String(height));
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("aria-label", `Finance history chart with ${history.length} daily values and ${salaryPayments.length} discrete salary payments in ${rangeLabel}`);
+  svg.setAttribute("aria-label", projectionModel
+    ? `Finance chart with ${history.length} recorded daily values, ${projectionModel.payments.length} projected salary payments, and a salary-only projection through ${formatHistoryDay(chartEndDay)}`
+    : `Finance history chart with ${history.length} daily values and ${salaryPayments.length} discrete salary payments in ${rangeLabel}`);
+  let projectionBoundaryX = null;
+  if (projectionModel) {
+    const projectionBoundary = dayIndexToLocalEndDate(todayDay);
+    projectionBoundaryX = left + ((projectionBoundary - start) / span) * plotWidth;
+    const zone = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    zone.setAttribute("x", projectionBoundaryX.toFixed(1));
+    zone.setAttribute("y", String(top));
+    zone.setAttribute("width", Math.max(0, width - right - projectionBoundaryX).toFixed(1));
+    zone.setAttribute("height", String(plotHeight));
+    zone.setAttribute("class", "chart-projection-zone");
+    svg.append(zone);
+  }
   drawLine(svg, left, top, left, height - bottom, "#d5ddd7", 1, "axis-grid");
   drawLine(svg, left, height - bottom, width - right, height - bottom, "#b8c2bc", 1, "axis-baseline");
 
@@ -591,21 +811,29 @@ function renderChart(data) {
     range: axisRange
   });
 
+  if (projectionBoundaryX !== null) {
+    drawLine(svg, projectionBoundaryX, top, projectionBoundaryX, height - bottom, colorForSeries("chart-line-salary"), 1, "chart-projection-boundary");
+    drawSvgText(svg, projectionBoundaryX + 7, top + 14, "PROJECTED", "chart-projection-label");
+  }
+
   for (const item of visibleContinuousSeries) {
-    const points = chartValues.map(point => {
+    const recordedPoints = recordedChartValues.map(point => {
       const x = left + ((new Date(point.snapshot.sampledAtUtc) - start) / span) * plotWidth;
       const y = valueToY(point.values[item.key], minValue, maxValue, top, plotHeight);
       return { x, y, value: point.values[item.key], snapshot: point.snapshot };
     });
-    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-    polyline.setAttribute("points", points.map(point => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "));
-    polyline.setAttribute("fill", "none");
-    polyline.setAttribute("stroke-width", "2.6");
-    polyline.setAttribute("class", item.className);
-    svg.append(polyline);
-
-    for (const point of points) {
+    drawChartPolyline(svg, recordedPoints, item.className);
+    for (const point of recordedPoints) {
       drawCircle(svg, point.x, point.y, 3.8, colorForSeries(item.className), "chart-point");
+    }
+
+    if (projectionModel && recordedPoints.length > 0) {
+      const projectedPoints = [recordedPoints[recordedPoints.length - 1], ...projectedChartValues.map(point => {
+        const x = left + ((new Date(point.snapshot.sampledAtUtc) - start) / span) * plotWidth;
+        const y = valueToY(point.values[item.key], minValue, maxValue, top, plotHeight);
+        return { x, y, value: point.values[item.key], snapshot: point.snapshot };
+      })];
+      drawChartPolyline(svg, projectedPoints, `${item.className} chart-line-projected`);
     }
   }
 
@@ -614,10 +842,26 @@ function renderChart(data) {
     for (const point of salaryPayments) {
       const x = left + ((point.date - start) / span) * plotWidth;
       const y = valueToY(point.amount, minValue, maxValue, top, plotHeight);
-      drawLine(svg, x, zeroY, x, y, colorForSeries(salarySeries.className), 1.4, "chart-salary-stem");
-      const marker = drawCircle(svg, x, y, 5.2, colorForSeries(salarySeries.className), "chart-point chart-point-salary");
+      drawLine(
+        svg,
+        x,
+        zeroY,
+        x,
+        y,
+        colorForSeries(salarySeries.className),
+        1.4,
+        `chart-salary-stem${point.projected ? " chart-salary-stem-projected" : ""}`
+      );
+      const marker = drawCircle(
+        svg,
+        x,
+        y,
+        point.projected ? 6.5 : 5.2,
+        point.projected ? "#ffffff" : colorForSeries(salarySeries.className),
+        `chart-point chart-point-salary${point.projected ? " chart-point-salary-projected" : ""}`
+      );
       const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-      title.textContent = `${formatPostedOn(point.payment.postedOn)} salary: ${money(point.amount, point.payment.currency)}`;
+      title.textContent = `${point.projected ? "Estimated " : ""}${formatPostedOn(point.payment.postedOn)} ${point.projected ? "projected " : ""}salary: ${money(point.amount, point.payment.currency)}`;
       marker.append(title);
     }
   }
@@ -641,6 +885,32 @@ function renderChart(data) {
     minValue,
     maxValue,
     currency: data.currency
+  });
+  scheduleProjectionChartScroll();
+}
+
+function drawChartPolyline(svg, points, className) {
+  if (points.length < 2) {
+    return;
+  }
+  const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  polyline.setAttribute("points", points.map(point => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "));
+  polyline.setAttribute("fill", "none");
+  polyline.setAttribute("stroke-width", "2.6");
+  polyline.setAttribute("class", className);
+  svg.append(polyline);
+}
+
+function scheduleProjectionChartScroll() {
+  if (!financeState.projection.enabled || !financeState.projection.autoScrollPending) {
+    return;
+  }
+  financeState.projection.autoScrollPending = false;
+  window.requestAnimationFrame(() => {
+    if (window.innerWidth <= 640) {
+      const shell = financeEls.chart.parentElement;
+      shell.scrollLeft = shell.scrollWidth;
+    }
   });
 }
 
@@ -709,7 +979,7 @@ function attachChartTooltip(svg, chartValues, visibleSeries, salaryPayments, sal
 
     const tooltipItems = showSalary
       ? [{
-          text: `Salary${nearestSalary.payment.accountName ? ` - ${nearestSalary.payment.accountName}` : ""}: ${money(nearestSalary.amount, nearestSalary.payment.currency)}`,
+          text: `${nearestSalary.projected ? "Projected salary" : "Salary"}${nearestSalary.payment.accountName ? ` - ${nearestSalary.payment.accountName}` : ""}: ${money(nearestSalary.amount, nearestSalary.payment.currency)}`,
           color: colorForSeries("chart-line-salary")
         }]
       : visibleSeries.map(item => ({
@@ -730,7 +1000,9 @@ function attachChartTooltip(svg, chartValues, visibleSeries, salaryPayments, sal
 
     titleRow.setAttribute("x", String(tooltipX + 12));
     titleRow.setAttribute("y", String(tooltipY + 20));
-    titleRow.textContent = showSalary ? formatPostedOn(nearestSalary.payment.postedOn) : formatDateTime(nearest.snapshot.sampledAtUtc);
+    titleRow.textContent = showSalary
+      ? `${nearestSalary.projected ? "Estimated " : ""}${formatPostedOn(nearestSalary.payment.postedOn)}`
+      : `${nearest?.snapshot.projected ? "Projected · " : ""}${formatDateTime(nearest.snapshot.sampledAtUtc)}`;
 
     rows.forEach((row, index) => {
       const item = tooltipItems[index];
@@ -783,6 +1055,7 @@ function nearestChartValue(chartValues, time) {
 function setActiveHistoryHandle(input) {
   financeEls.historyStart.classList.toggle("is-active", input === financeEls.historyStart);
   financeEls.historyEnd.classList.toggle("is-active", input === financeEls.historyEnd);
+  financeEls.historyProjection.classList.toggle("is-active", input === financeEls.historyProjection);
 }
 
 function updateHistoryRangeFromInput(handle) {
@@ -793,6 +1066,19 @@ function updateHistoryRangeFromInput(handle) {
 
   let startDay = Math.round(Number(financeEls.historyStart.value));
   let endDay = Math.round(Number(financeEls.historyEnd.value));
+  if (financeState.projection.enabled) {
+    if (handle !== "start") {
+      return;
+    }
+    startDay = clampNumber(startDay, financeState.projection.sliderMinDay, financeState.projection.todayDay);
+    range.startDay = startDay;
+    range.endDay = financeState.projection.todayDay;
+    range.userAdjusted = true;
+    updateHistoryRangeControl();
+    scheduleHistoryChartRender();
+    return;
+  }
+
   if (handle === "start") {
     startDay = clampNumber(startDay, range.minDay, endDay);
   } else {
@@ -832,6 +1118,7 @@ function syncHistoryDateRange(data) {
       userAdjusted: false,
       hasData: false
     });
+    syncProjectionRange(serverToday, range);
     updateHistoryRangeControl();
     return range;
   }
@@ -871,6 +1158,7 @@ function syncHistoryDateRange(data) {
     userAdjusted,
     hasData: true
   });
+  syncProjectionRange(serverToday, range);
   updateHistoryRangeControl();
   return range;
 }
@@ -898,6 +1186,24 @@ function financeDatasetDayExtent(data) {
 
 function updateHistoryRangeControl() {
   const range = financeState.dateRange;
+  const projection = financeState.projection;
+  const projectionActive = projection.enabled && projection.todayDay !== null;
+  financeEls.futureProjectionToggle.setAttribute("aria-pressed", String(projectionActive));
+  financeEls.futureProjectionIndicator.textContent = projectionActive ? "✓" : "↗";
+  financeEls.futureProjectionState.textContent = projectionActive ? "On" : "Off";
+  financeEls.historyRangeControl.classList.toggle("is-projection-active", projectionActive);
+  financeEls.historyProjection.hidden = !projectionActive;
+  financeEls.historyProjectionValue.hidden = !projectionActive;
+  financeEls.historyProjectionSelection.hidden = !projectionActive;
+  financeEls.historyTodayLabel.hidden = !projectionActive;
+  financeEls.projectionSummary.hidden = !projectionActive;
+
+  if (projectionActive) {
+    updateProjectionRangeControl(range, projection);
+    return;
+  }
+
+  financeEls.historyEndKind.textContent = "End";
   const inputs = [financeEls.historyStart, financeEls.historyEnd];
   for (const input of inputs) {
     input.min = String(range.minDay ?? 0);
@@ -955,6 +1261,55 @@ function updateHistoryRangeControl() {
   financeEls.historyRangeSelection.style.width = `${Math.max(0, endPercent - startPercent)}%`;
 }
 
+function updateProjectionRangeControl(range, projection) {
+  const sliderMinDay = projection.sliderMinDay;
+  const sliderMaxDay = projection.limitDay;
+  const todayDay = projection.todayDay;
+  const projectionDay = projection.day;
+  const inputs = [financeEls.historyStart, financeEls.historyEnd, financeEls.historyProjection];
+  for (const input of inputs) {
+    input.min = String(sliderMinDay);
+    input.max = String(sliderMaxDay);
+    input.step = "1";
+  }
+
+  financeEls.historyStart.disabled = !range.hasData || sliderMinDay === todayDay;
+  financeEls.historyEnd.disabled = true;
+  financeEls.historyProjection.disabled = false;
+  financeEls.historyStart.value = String(range.startDay);
+  financeEls.historyEnd.value = String(todayDay);
+  financeEls.historyProjection.value = String(projectionDay);
+  financeEls.historyRangeControl.classList.remove("is-empty", "is-collapsed-at-min", "is-collapsed-at-max");
+
+  const startText = formatHistoryDay(range.startDay);
+  const todayText = formatHistoryDay(todayDay);
+  const projectionText = formatHistoryDay(projectionDay);
+  financeEls.historyStartLabel.textContent = startText;
+  financeEls.historyEndKind.textContent = "Today";
+  financeEls.historyEndLabel.textContent = todayText;
+  financeEls.historyProjectionLabel.textContent = projectionText;
+  financeEls.historyRangeLength.textContent = describeProjectionOffset(todayDay, projectionDay);
+  financeEls.historyRangeHelp.textContent = "Drag the amber projection handle to forecast salary deposits; the green marker stays fixed at today.";
+  financeEls.historyMinLabel.textContent = `Visible start · ${formatHistoryDay(sliderMinDay)}`;
+  financeEls.historyMaxLabel.textContent = `Projection limit · ${formatHistoryDay(sliderMaxDay)}`;
+  financeEls.historyStart.setAttribute("aria-valuetext", startText);
+  financeEls.historyEnd.setAttribute("aria-valuetext", `Today, ${todayText}`);
+  financeEls.historyProjection.setAttribute("aria-valuemin", String(todayDay + 1));
+  financeEls.historyProjection.setAttribute("aria-valuemax", String(sliderMaxDay));
+  financeEls.historyProjection.setAttribute("aria-valuenow", String(projectionDay));
+  financeEls.historyProjection.setAttribute("aria-valuetext", `Projected through ${projectionText}`);
+
+  const domain = sliderMaxDay - sliderMinDay || 1;
+  const startPercent = ((range.startDay - sliderMinDay) / domain) * 100;
+  const todayPercent = ((todayDay - sliderMinDay) / domain) * 100;
+  const projectionPercent = ((projectionDay - sliderMinDay) / domain) * 100;
+  financeEls.historyRangeSelection.style.left = `${startPercent}%`;
+  financeEls.historyRangeSelection.style.width = `${Math.max(0, todayPercent - startPercent)}%`;
+  financeEls.historyProjectionSelection.style.left = `${todayPercent}%`;
+  financeEls.historyProjectionSelection.style.width = `${Math.max(0, projectionPercent - todayPercent)}%`;
+  financeEls.historyTodayLabel.style.left = `${todayPercent}%`;
+}
+
 function filterHistoryByDateRange(history, startDay, endDay) {
   return history.filter(snapshot => {
     const day = dayIndexFromTimestamp(snapshot.sampledAtUtc);
@@ -969,11 +1324,192 @@ function filterSalaryPaymentsByDateRange(payments, startDay, endDay, currency) {
       payment,
       amount: Number(payment.amount || 0),
       date: postedOnToDate(payment.postedOn),
-      day: dayIndexFromPostedOn(payment.postedOn)
+      day: dayIndexFromPostedOn(payment.postedOn),
+      projected: Boolean(payment.projected)
     }))
     .filter(point => Number.isFinite(point.amount) && point.amount > 0 && Number.isFinite(point.date.getTime())
       && point.day !== null && point.day >= startDay && point.day <= endDay)
     .sort((left, right) => left.date - right.date);
+}
+
+function buildSalaryProjection(data, todayDay, projectionDay) {
+  const schedules = inferSalarySchedules(data.income?.salaryPayments || [], data.currency, todayDay);
+  const payments = [];
+  let nextEstimatedPayment = null;
+  for (const schedule of schedules) {
+    let paymentDay = schedule.nextDay;
+    if (!nextEstimatedPayment || paymentDay < nextEstimatedPayment.day) {
+      nextEstimatedPayment = { day: paymentDay, amountCents: schedule.amountCents };
+    }
+    while (paymentDay <= projectionDay) {
+      const amount = centsToNumber(schedule.amountCents);
+      const payment = {
+        ...schedule.sourcePayment,
+        id: `projected:${schedule.key}:${paymentDay}`,
+        postedOn: dayIndexToPostedOn(paymentDay),
+        amount,
+        currency: data.currency,
+        kind: "salary",
+        description: "Estimated from recorded salary cadence",
+        projected: true
+      };
+      payments.push({
+        payment,
+        amount,
+        amountCents: schedule.amountCents,
+        date: dayIndexToLocalDate(paymentDay),
+        day: paymentDay,
+        projected: true
+      });
+      paymentDay += schedule.cadenceDays;
+    }
+  }
+
+  payments.sort((left, right) => left.day - right.day
+    || (left.payment.accountName || "").localeCompare(right.payment.accountName || ""));
+  const incomeCents = payments.reduce((total, payment) => total + payment.amountCents, 0);
+  const cashCents = moneyToCents(data.current.totalCash) + incomeCents;
+  const netCents = moneyToCents(data.current.netAfterDebt) + incomeCents;
+  return {
+    schedules,
+    payments,
+    nextEstimatedPayment,
+    incomeCents,
+    cashCents,
+    netCents,
+    snapshots: buildProjectionSnapshots(data, todayDay, projectionDay, payments)
+  };
+}
+
+function inferSalarySchedules(payments, currency, todayDay) {
+  // Forecast only a dominant recent fixed-day cadence. Calendar-monthly,
+  // semi-monthly, holiday-shifted, or stale histories remain unprojected
+  // instead of inventing pay dates that the ledger cannot confirm.
+  const grouped = new Map();
+  for (const payment of payments) {
+    const day = dayIndexFromPostedOn(payment.postedOn);
+    const amountCents = moneyToCents(payment.amount);
+    if (payment.kind !== "salary" || payment.currency !== currency || day === null || day > todayDay || amountCents <= 0) {
+      continue;
+    }
+    const sourceKey = `${payment.accountId || payment.accountName || "salary"}:${payment.currency}`;
+    if (!grouped.has(sourceKey)) {
+      grouped.set(sourceKey, new Map());
+    }
+    grouped.get(sourceKey).set(day, payment);
+  }
+
+  const schedules = [];
+  for (const [key, byDay] of grouped) {
+    const entries = [...byDay.entries()]
+      .map(([day, payment]) => ({ day, payment }))
+      .sort((left, right) => left.day - right.day);
+    if (entries.length < 3) {
+      continue;
+    }
+    const patternEntries = entries.slice(-18);
+
+    const intervals = [];
+    for (let index = 1; index < patternEntries.length; index++) {
+      const interval = patternEntries[index].day - patternEntries[index - 1].day;
+      if (interval >= 5 && interval <= 45) {
+        intervals.push(interval);
+      }
+    }
+    if (intervals.length < 2) {
+      continue;
+    }
+
+    const sortedIntervals = [...intervals].sort((left, right) => left - right);
+    const medianInterval = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
+    const intervalCounts = new Map();
+    for (const interval of intervals) {
+      intervalCounts.set(interval, (intervalCounts.get(interval) || 0) + 1);
+    }
+    const cadenceCandidate = [...intervalCounts.entries()]
+      .map(([interval, count]) => ({ interval, count }))
+      .sort((left, right) => right.count - left.count
+        || Math.abs(left.interval - medianInterval) - Math.abs(right.interval - medianInterval)
+        || left.interval - right.interval)[0];
+    if (!cadenceCandidate || cadenceCandidate.count < Math.max(2, Math.ceil(intervals.length * 0.35))) {
+      continue;
+    }
+
+    const cadenceDays = cadenceCandidate.interval;
+    const phaseCounts = new Map();
+    for (const entry of patternEntries) {
+      const phase = positiveRemainder(entry.day, cadenceDays);
+      phaseCounts.set(phase, (phaseCounts.get(phase) || 0) + 1);
+    }
+    const [dominantPhase, dominantPhaseCount] = [...phaseCounts.entries()]
+      .sort((left, right) => right[1] - left[1] || left[0] - right[0])[0] || [];
+    if (dominantPhase === undefined || dominantPhaseCount < Math.max(2, Math.ceil(patternEntries.length * 0.5))) {
+      continue;
+    }
+    const anchor = [...patternEntries].reverse().find(entry => positiveRemainder(entry.day, cadenceDays) === dominantPhase);
+    if (!anchor || todayDay - anchor.day > Math.max(45, cadenceDays * 3)) {
+      continue;
+    }
+
+    const amountCents = moneyToCents(anchor.payment.amount);
+    if (amountCents <= 0) {
+      continue;
+    }
+    let nextDay = anchor.day + cadenceDays;
+    while (nextDay <= todayDay) {
+      nextDay += cadenceDays;
+    }
+    schedules.push({
+      key,
+      accountName: anchor.payment.accountName || "Salary",
+      cadenceDays,
+      amountCents,
+      nextDay,
+      sourcePayment: anchor.payment
+    });
+  }
+
+  return schedules.sort((left, right) => left.nextDay - right.nextDay || left.key.localeCompare(right.key));
+}
+
+function buildProjectionSnapshots(data, todayDay, projectionDay, payments) {
+  const paymentCentsByDay = new Map();
+  for (const payment of payments) {
+    paymentCentsByDay.set(payment.day, (paymentCentsByDay.get(payment.day) || 0) + payment.amountCents);
+  }
+
+  let cashCents = moneyToCents(data.current.totalCash);
+  const debtCents = moneyToCents(data.current.totalDebt);
+  const creditCents = moneyToCents(data.current.totalCreditAvailable);
+  const snapshots = [];
+  for (const [day, amountCents] of [...paymentCentsByDay.entries()].sort((left, right) => left[0] - right[0])) {
+    const eventStart = dayIndexToLocalStartDate(day);
+    snapshots.push(projectedSnapshot(eventStart.getTime() - 1, cashCents, debtCents, creditCents, false));
+    cashCents += amountCents;
+    snapshots.push(projectedSnapshot(eventStart.getTime(), cashCents, debtCents, creditCents, true));
+  }
+
+  const projectionEnd = dayIndexToLocalEndDate(projectionDay);
+  const lastSnapshotTime = snapshots.length === 0 ? dayIndexToLocalEndDate(todayDay).getTime() : new Date(snapshots[snapshots.length - 1].sampledAtUtc).getTime();
+  if (projectionEnd.getTime() > lastSnapshotTime) {
+    snapshots.push(projectedSnapshot(projectionEnd.getTime(), cashCents, debtCents, creditCents, false, true));
+  } else if (snapshots.length > 0) {
+    snapshots[snapshots.length - 1].projectionEndpoint = true;
+  }
+  return snapshots;
+}
+
+function projectedSnapshot(timestamp, cashCents, debtCents, creditCents, projectionEvent, projectionEndpoint = false) {
+  return {
+    sampledAtUtc: new Date(timestamp).toISOString(),
+    totalCash: centsToNumber(cashCents),
+    totalDebt: centsToNumber(debtCents),
+    totalCreditAvailable: centsToNumber(creditCents),
+    netAfterDebt: centsToNumber(cashCents - debtCents),
+    projected: true,
+    projectionEvent,
+    projectionEndpoint
+  };
 }
 
 function latestSnapshotPerDay(history) {
@@ -1309,6 +1845,19 @@ function clampNumber(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function moneyToCents(value) {
+  const numeric = Number(value || 0);
+  return Number.isFinite(numeric) ? Math.round(numeric * 100) : 0;
+}
+
+function centsToNumber(value) {
+  return Number(value || 0) / 100;
+}
+
+function positiveRemainder(value, divisor) {
+  return ((value % divisor) + divisor) % divisor;
+}
+
 function dayIndexFromTimestamp(value) {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime())) {
@@ -1345,6 +1894,14 @@ function dayIndexToLocalStartDate(dayIndex) {
 function dayIndexToLocalEndDate(dayIndex) {
   const date = new Date(dayIndex * financeDayMilliseconds);
   return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999);
+}
+
+function dayIndexToPostedOn(dayIndex) {
+  const date = new Date(dayIndex * financeDayMilliseconds);
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function addCalendarMonthsToDayIndex(dayIndex, months) {
@@ -1401,6 +1958,14 @@ function describeHistoryDayRange(startDay, endDay) {
 
   const approximateMonths = Math.max(2, Math.round((endDay - startDay) / 30.4375));
   return `${approximateMonths} months`;
+}
+
+function describeProjectionOffset(todayDay, projectionDay) {
+  const futureDays = Math.max(1, projectionDay - todayDay);
+  const futureRange = futureDays % 7 === 0
+    ? `${futureDays / 7} week${futureDays === 7 ? "" : "s"}`
+    : `${futureDays} day${futureDays === 1 ? "" : "s"}`;
+  return `+${futureRange}`;
 }
 
 function formatDateTime(value) {
