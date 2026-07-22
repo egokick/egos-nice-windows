@@ -1,6 +1,19 @@
+const financeSeriesStorageKey = "finance:visibleSeries:v2";
+const legacyFinanceSeriesStorageKey = "finance:visibleSeries";
+const financeDayMilliseconds = 24 * 60 * 60 * 1000;
+const defaultHistoryMonths = 3;
+
 const financeState = {
   data: null,
-  historyRange: "6m",
+  dateRange: {
+    minDay: null,
+    maxDay: null,
+    startDay: null,
+    endDay: null,
+    initialized: false,
+    userAdjusted: false,
+    hasData: false
+  },
   visibleSeries: readStoredVisibleFinanceSeries()
 };
 
@@ -22,7 +35,16 @@ const financeEls = {
   cancelAccountForm: document.querySelector("#cancelAccountForm"),
   accountFormStatus: document.querySelector("#accountFormStatus"),
   historyCaption: document.querySelector("#historyCaption"),
-  historyRange: document.querySelector("#historyRange"),
+  historyRangeControl: document.querySelector("#historyRangeControl"),
+  historyStart: document.querySelector("#historyStart"),
+  historyEnd: document.querySelector("#historyEnd"),
+  historyStartLabel: document.querySelector("#historyStartLabel"),
+  historyEndLabel: document.querySelector("#historyEndLabel"),
+  historyRangeLength: document.querySelector("#historyRangeLength"),
+  historyRangeSelection: document.querySelector("#historyRangeSelection"),
+  historyMinLabel: document.querySelector("#historyMinLabel"),
+  historyMaxLabel: document.querySelector("#historyMaxLabel"),
+  historyRangeHelp: document.querySelector("#historyRangeHelp"),
   chart: document.querySelector("#financeChart"),
   cardCount: document.querySelector("#cardCount"),
   accountCount: document.querySelector("#accountCount"),
@@ -39,6 +61,7 @@ const financeEls = {
 };
 
 let interestPreview = null;
+let historyRenderFrame = null;
 
 financeEls.refresh.addEventListener("click", async () => {
   financeEls.refresh.disabled = true;
@@ -98,12 +121,11 @@ financeEls.accountForm.addEventListener("submit", async event => {
   await loadFinance();
 });
 
-financeEls.historyRange.addEventListener("change", () => {
-  financeState.historyRange = financeEls.historyRange.value;
-  if (financeState.data) {
-    renderChart(financeState.data);
-  }
-});
+for (const [input, handle] of [[financeEls.historyStart, "start"], [financeEls.historyEnd, "end"]]) {
+  input.addEventListener("input", () => updateHistoryRangeFromInput(handle));
+  input.addEventListener("pointerdown", () => setActiveHistoryHandle(input));
+  input.addEventListener("focus", () => setActiveHistoryHandle(input));
+}
 
 financeEls.interestPreviewPayment.addEventListener("input", renderInterestPreview);
 financeEls.interestPreviewDialog.addEventListener("close", () => {
@@ -115,19 +137,24 @@ setInterval(loadFinance, 60000);
 
 function readStoredVisibleFinanceSeries() {
   try {
-    const parsed = JSON.parse(localStorage.getItem("finance:visibleSeries") || "null");
+    const parsed = JSON.parse(localStorage.getItem(financeSeriesStorageKey) || "null");
     if (Array.isArray(parsed) && parsed.length > 0) {
       return new Set(parsed);
+    }
+
+    const legacy = JSON.parse(localStorage.getItem(legacyFinanceSeriesStorageKey) || "null");
+    if (Array.isArray(legacy) && legacy.length > 0) {
+      return new Set([...legacy, "salary"]);
     }
   } catch {
     // Ignore corrupt local preferences and fall back to all series.
   }
 
-  return new Set(["netAfterDebt", "totalCash", "totalDebt", "totalCreditAvailable"]);
+  return new Set(["netAfterDebt", "totalCash", "totalDebt", "totalCreditAvailable", "salary"]);
 }
 
 function persistVisibleFinanceSeries() {
-  localStorage.setItem("finance:visibleSeries", JSON.stringify([...financeState.visibleSeries]));
+  localStorage.setItem(financeSeriesStorageKey, JSON.stringify([...financeState.visibleSeries]));
 }
 
 function toggleFinanceSeries(key) {
@@ -480,12 +507,31 @@ function renderLog(logs) {
 
 function renderChart(data) {
   const allHistory = data.history || [];
-  const rangedHistory = filterHistoryByRange(allHistory, financeState.historyRange);
+  const selectedRange = syncHistoryDateRange(data);
+  const rangedHistory = filterHistoryByDateRange(allHistory, selectedRange.startDay, selectedRange.endDay);
   const history = latestSnapshotPerDay(rangedHistory);
-  const rangeLabel = selectedRangeLabel();
+  const salaryPayments = filterSalaryPaymentsByDateRange(
+    data.income?.salaryPayments || [],
+    selectedRange.startDay,
+    selectedRange.endDay,
+    data.currency
+  );
+  const rangeLabel = formatHistoryDateRange(selectedRange.startDay, selectedRange.endDay);
+  const axisRange = axisRangeForDaySpan(selectedRange.endDay - selectedRange.startDay);
   const svg = financeEls.chart;
   svg.textContent = "";
-  if (history.length < 2) {
+  const continuousSeries = [
+    { key: "netAfterDebt", label: "Net", className: "chart-line-net" },
+    { key: "totalCash", label: "Cash", className: "chart-line-cash" },
+    { key: "totalDebt", label: "Debt", className: "chart-line-debt" },
+    { key: "totalCreditAvailable", label: "Credit", className: "chart-line-credit" }
+  ];
+  const salarySeries = { key: "salary", label: "Salary", className: "chart-line-salary", discrete: true };
+  const series = [...continuousSeries, salarySeries];
+  const visibleContinuousSeries = continuousSeries.filter(item => financeState.visibleSeries.has(item.key));
+  const salaryVisible = financeState.visibleSeries.has(salarySeries.key);
+  const hasPlottableSalary = salaryVisible && salaryPayments.length > 0;
+  if (history.length < 2 && !hasPlottableSalary) {
     svg.setAttribute("height", "180");
     svg.setAttribute("viewBox", "0 0 820 180");
     drawSvgText(svg, 24, 92, history.length === 0 ? `No finance history in ${rangeLabel}.` : "One daily value in this range. More days will build the graph.", "empty-svg");
@@ -495,38 +541,35 @@ function renderChart(data) {
     return;
   }
 
-  financeEls.historyCaption.textContent = `${rangeLabel} - ${history.length} daily values from ${rangedHistory.length} snapshots`;
-  const width = Math.max(minChartWidthForRange(financeState.historyRange), svg.parentElement.clientWidth - 24);
+  financeEls.historyCaption.textContent = `${rangeLabel} · ${history.length} daily values, ${salaryPayments.length} salary payment${salaryPayments.length === 1 ? "" : "s"}`;
+  const width = Math.max(minChartWidthForRange(axisRange), svg.parentElement.clientWidth - 24);
   const height = 330;
   const left = 72;
   const right = 24;
-  const top = 22;
+  const top = 38;
   const bottom = 42;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
-  const series = [
-    { key: "netAfterDebt", label: "Net", className: "chart-line-net" },
-    { key: "totalCash", label: "Cash", className: "chart-line-cash" },
-    { key: "totalDebt", label: "Debt", className: "chart-line-debt" },
-    { key: "totalCreditAvailable", label: "Credit", className: "chart-line-credit" }
-  ];
-  const visibleSeries = series.filter(item => financeState.visibleSeries.has(item.key));
   const chartValues = history.map(snapshot => ({
     snapshot,
-    values: Object.fromEntries(series.map(item => {
+    values: Object.fromEntries(continuousSeries.map(item => {
       const value = Number(snapshot[item.key] || 0);
       return [item.key, value];
     }))
   }));
-  const values = chartValues.flatMap(point => visibleSeries.map(item => point.values[item.key]));
+  const values = [
+    ...chartValues.flatMap(point => visibleContinuousSeries.map(item => point.values[item.key])),
+    ...(salaryVisible ? salaryPayments.map(point => point.amount) : [])
+  ];
   const minValue = Math.min(0, ...values);
   const maxValue = Math.max(1, ...values);
-  const start = new Date(history[0].sampledAtUtc);
-  const end = new Date(history[history.length - 1].sampledAtUtc);
+  const start = dayIndexToLocalStartDate(selectedRange.startDay);
+  const end = dayIndexToLocalEndDate(selectedRange.endDay);
   const span = end - start || 1;
 
   svg.setAttribute("height", String(height));
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("aria-label", `Finance history chart with ${history.length} daily values and ${salaryPayments.length} discrete salary payments in ${rangeLabel}`);
   drawLine(svg, left, top, left, height - bottom, "#d5ddd7", 1, "axis-grid");
   drawLine(svg, left, height - bottom, width - right, height - bottom, "#b8c2bc", 1, "axis-baseline");
 
@@ -545,10 +588,10 @@ function renderChart(data) {
     plotWidth,
     top,
     plotHeight,
-    range: financeState.historyRange
+    range: axisRange
   });
 
-  for (const item of visibleSeries) {
+  for (const item of visibleContinuousSeries) {
     const points = chartValues.map(point => {
       const x = left + ((new Date(point.snapshot.sampledAtUtc) - start) / span) * plotWidth;
       const y = valueToY(point.values[item.key], minValue, maxValue, top, plotHeight);
@@ -566,12 +609,25 @@ function renderChart(data) {
     }
   }
 
+  if (salaryVisible) {
+    const zeroY = valueToY(0, minValue, maxValue, top, plotHeight);
+    for (const point of salaryPayments) {
+      const x = left + ((point.date - start) / span) * plotWidth;
+      const y = valueToY(point.amount, minValue, maxValue, top, plotHeight);
+      drawLine(svg, x, zeroY, x, y, colorForSeries(salarySeries.className), 1.4, "chart-salary-stem");
+      const marker = drawCircle(svg, x, y, 5.2, colorForSeries(salarySeries.className), "chart-point chart-point-salary");
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = `${formatPostedOn(point.payment.postedOn)} salary: ${money(point.amount, point.payment.currency)}`;
+      marker.append(title);
+    }
+  }
+
   series.forEach((item, index) => {
     const x = left + index * 86;
     drawLegendToggle(svg, x, 4, item, financeState.visibleSeries.has(item.key));
   });
 
-  attachChartTooltip(svg, chartValues, visibleSeries, {
+  attachChartTooltip(svg, chartValues, visibleContinuousSeries, salaryPayments, salaryVisible, {
     left,
     right,
     top,
@@ -588,7 +644,7 @@ function renderChart(data) {
   });
 }
 
-function attachChartTooltip(svg, chartValues, visibleSeries, chart) {
+function attachChartTooltip(svg, chartValues, visibleSeries, salaryPayments, salaryVisible, chart) {
   const overlay = document.createElementNS("http://www.w3.org/2000/svg", "rect");
   overlay.setAttribute("x", String(chart.left));
   overlay.setAttribute("y", String(chart.top));
@@ -612,24 +668,23 @@ function attachChartTooltip(svg, chartValues, visibleSeries, chart) {
   box.setAttribute("class", "chart-tooltip-box");
   tooltip.append(box);
 
-  const rows = [document.createElementNS("http://www.w3.org/2000/svg", "text")];
-  rows[0].setAttribute("class", "chart-tooltip-title");
-  tooltip.append(rows[0]);
+  const titleRow = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  titleRow.setAttribute("class", "chart-tooltip-title");
+  tooltip.append(titleRow);
 
-  for (const item of visibleSeries) {
+  const rows = [];
+  const rowCount = Math.max(1, visibleSeries.length);
+  for (let index = 0; index < rowCount; index++) {
     const row = document.createElementNS("http://www.w3.org/2000/svg", "text");
     row.setAttribute("class", "chart-tooltip-row");
-    row.setAttribute("fill", colorForSeries(item.className));
     tooltip.append(row);
     rows.push(row);
   }
 
   svg.append(tooltip);
 
-  const tooltipWidth = 210;
-  const tooltipHeight = 30 + visibleSeries.length * 18;
+  const tooltipWidth = 260;
   box.setAttribute("width", String(tooltipWidth));
-  box.setAttribute("height", String(tooltipHeight));
 
   const moveTooltip = event => {
     const point = svg.createSVGPoint();
@@ -639,13 +694,30 @@ function attachChartTooltip(svg, chartValues, visibleSeries, chart) {
     const boundedX = Math.max(chart.left, Math.min(chart.left + chart.plotWidth, svgPoint.x));
     const at = chart.start.getTime() + ((boundedX - chart.left) / chart.plotWidth) * chart.span;
     const nearest = nearestChartValue(chartValues, at);
-    if (!nearest) {
+    const nearestSalary = salaryVisible ? nearestSalaryPayment(salaryPayments, at) : null;
+    const historyDistance = nearest ? Math.abs(new Date(nearest.snapshot.sampledAtUtc).getTime() - at) : Number.POSITIVE_INFINITY;
+    const salaryDistance = nearestSalary ? Math.abs(nearestSalary.date.getTime() - at) : Number.POSITIVE_INFINITY;
+    if (!nearest && !nearestSalary) {
       return;
     }
 
-    const x = chart.left + ((new Date(nearest.snapshot.sampledAtUtc) - chart.start) / chart.span) * chart.plotWidth;
+    const showSalary = nearestSalary && salaryDistance <= historyDistance;
+    const selectedTime = showSalary ? nearestSalary.date.getTime() : new Date(nearest.snapshot.sampledAtUtc).getTime();
+    const x = chart.left + ((selectedTime - chart.start) / chart.span) * chart.plotWidth;
     hoverLine.setAttribute("x1", x.toFixed(1));
     hoverLine.setAttribute("x2", x.toFixed(1));
+
+    const tooltipItems = showSalary
+      ? [{
+          text: `Salary${nearestSalary.payment.accountName ? ` - ${nearestSalary.payment.accountName}` : ""}: ${money(nearestSalary.amount, nearestSalary.payment.currency)}`,
+          color: colorForSeries("chart-line-salary")
+        }]
+      : visibleSeries.map(item => ({
+          text: `${item.label}: ${money(nearest.values[item.key], chart.currency)}`,
+          color: colorForSeries(item.className)
+        }));
+    const tooltipHeight = 30 + Math.max(1, tooltipItems.length) * 18;
+    box.setAttribute("height", String(tooltipHeight));
 
     let tooltipX = x + 12;
     if (tooltipX + tooltipWidth > chart.width - chart.right) {
@@ -656,16 +728,20 @@ function attachChartTooltip(svg, chartValues, visibleSeries, chart) {
     box.setAttribute("x", tooltipX.toFixed(1));
     box.setAttribute("y", tooltipY.toFixed(1));
 
-    rows[0].setAttribute("x", String(tooltipX + 12));
-    rows[0].setAttribute("y", String(tooltipY + 20));
-    rows[0].textContent = formatDateTime(nearest.snapshot.sampledAtUtc);
+    titleRow.setAttribute("x", String(tooltipX + 12));
+    titleRow.setAttribute("y", String(tooltipY + 20));
+    titleRow.textContent = showSalary ? formatPostedOn(nearestSalary.payment.postedOn) : formatDateTime(nearest.snapshot.sampledAtUtc);
 
-    visibleSeries.forEach((item, index) => {
-      const row = rows[index + 1];
+    rows.forEach((row, index) => {
+      const item = tooltipItems[index];
+      row.setAttribute("visibility", item ? "visible" : "hidden");
+      if (!item) {
+        return;
+      }
       row.setAttribute("x", String(tooltipX + 12));
       row.setAttribute("y", String(tooltipY + 42 + index * 18));
-      const accountValue = Number(nearest.snapshot[item.key] || 0);
-      row.textContent = `${item.label}: ${money(accountValue, chart.currency)}`;
+      row.setAttribute("fill", item.color);
+      row.textContent = item.text;
     });
 
     tooltip.setAttribute("visibility", "visible");
@@ -674,6 +750,20 @@ function attachChartTooltip(svg, chartValues, visibleSeries, chart) {
   overlay.addEventListener("mousemove", moveTooltip);
   overlay.addEventListener("mouseenter", moveTooltip);
   overlay.addEventListener("mouseleave", () => tooltip.setAttribute("visibility", "hidden"));
+}
+
+function nearestSalaryPayment(salaryPayments, time) {
+  let nearest = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const payment of salaryPayments) {
+    const distance = Math.abs(payment.date.getTime() - time);
+    if (distance < nearestDistance) {
+      nearest = payment;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearest;
 }
 
 function nearestChartValue(chartValues, time) {
@@ -690,24 +780,200 @@ function nearestChartValue(chartValues, time) {
   return nearest;
 }
 
-function filterHistoryByRange(history, range) {
-  if (history.length === 0) {
-    return [];
+function setActiveHistoryHandle(input) {
+  financeEls.historyStart.classList.toggle("is-active", input === financeEls.historyStart);
+  financeEls.historyEnd.classList.toggle("is-active", input === financeEls.historyEnd);
+}
+
+function updateHistoryRangeFromInput(handle) {
+  const range = financeState.dateRange;
+  if (!range.initialized || !range.hasData) {
+    return;
   }
 
-  const latest = history.reduce((max, snapshot) => {
-    const sampledAt = new Date(snapshot.sampledAtUtc).getTime();
-    return Number.isFinite(sampledAt) ? Math.max(max, sampledAt) : max;
-  }, 0);
-  if (!latest) {
-    return history;
+  let startDay = Math.round(Number(financeEls.historyStart.value));
+  let endDay = Math.round(Number(financeEls.historyEnd.value));
+  if (handle === "start") {
+    startDay = clampNumber(startDay, range.minDay, endDay);
+  } else {
+    endDay = clampNumber(endDay, startDay, range.maxDay);
   }
 
-  const cutoff = latest - rangeToMilliseconds(range);
-  return history.filter(snapshot => {
-    const sampledAt = new Date(snapshot.sampledAtUtc).getTime();
-    return Number.isFinite(sampledAt) && sampledAt >= cutoff;
+  range.startDay = startDay;
+  range.endDay = endDay;
+  range.userAdjusted = true;
+  updateHistoryRangeControl();
+  scheduleHistoryChartRender();
+}
+
+function scheduleHistoryChartRender() {
+  if (!financeState.data || historyRenderFrame !== null) {
+    return;
+  }
+
+  historyRenderFrame = window.requestAnimationFrame(() => {
+    historyRenderFrame = null;
+    renderChart(financeState.data);
   });
+}
+
+function syncHistoryDateRange(data) {
+  const range = financeState.dateRange;
+  const extent = financeDatasetDayExtent(data);
+  const serverToday = dayIndexFromTimestamp(data.nowUtc) ?? dayIndexFromTimestamp(new Date());
+  if (!extent) {
+    const onlyDay = serverToday ?? 0;
+    Object.assign(range, {
+      minDay: onlyDay,
+      maxDay: onlyDay,
+      startDay: onlyDay,
+      endDay: onlyDay,
+      initialized: true,
+      userAdjusted: false,
+      hasData: false
+    });
+    updateHistoryRangeControl();
+    return range;
+  }
+
+  const minDay = extent.minDay;
+  const maxDay = Math.max(extent.maxDay, serverToday ?? extent.maxDay);
+  const previous = { ...range };
+  let startDay;
+  let endDay;
+  let userAdjusted = range.userAdjusted;
+
+  if (!range.initialized || !range.hasData) {
+    endDay = maxDay;
+    startDay = Math.max(minDay, addCalendarMonthsToDayIndex(maxDay, -defaultHistoryMonths));
+    userAdjusted = false;
+  } else if (!range.userAdjusted) {
+    endDay = maxDay;
+    startDay = Math.max(minDay, addCalendarMonthsToDayIndex(maxDay, -defaultHistoryMonths));
+  } else {
+    startDay = previous.startDay === previous.minDay
+      ? minDay
+      : clampNumber(previous.startDay, minDay, maxDay);
+    endDay = previous.endDay === previous.maxDay
+      ? maxDay
+      : clampNumber(previous.endDay, minDay, maxDay);
+    if (startDay > endDay) {
+      startDay = endDay;
+    }
+  }
+
+  Object.assign(range, {
+    minDay,
+    maxDay,
+    startDay,
+    endDay,
+    initialized: true,
+    userAdjusted,
+    hasData: true
+  });
+  updateHistoryRangeControl();
+  return range;
+}
+
+function financeDatasetDayExtent(data) {
+  const days = [];
+  for (const snapshot of data.history || []) {
+    const day = dayIndexFromTimestamp(snapshot.sampledAtUtc);
+    if (day !== null) {
+      days.push(day);
+    }
+  }
+
+  for (const payment of data.income?.salaryPayments || []) {
+    const day = dayIndexFromPostedOn(payment.postedOn);
+    if (day !== null) {
+      days.push(day);
+    }
+  }
+
+  return days.length === 0
+    ? null
+    : { minDay: Math.min(...days), maxDay: Math.max(...days) };
+}
+
+function updateHistoryRangeControl() {
+  const range = financeState.dateRange;
+  const inputs = [financeEls.historyStart, financeEls.historyEnd];
+  for (const input of inputs) {
+    input.min = String(range.minDay ?? 0);
+    input.max = String(range.maxDay ?? 0);
+    input.step = "1";
+    input.disabled = !range.hasData || range.minDay === range.maxDay;
+  }
+
+  financeEls.historyStart.value = String(range.startDay ?? range.minDay ?? 0);
+  financeEls.historyEnd.value = String(range.endDay ?? range.maxDay ?? 0);
+  financeEls.historyRangeControl.classList.toggle("is-empty", !range.hasData);
+  financeEls.historyRangeControl.classList.toggle(
+    "is-collapsed-at-min",
+    range.hasData && range.startDay === range.minDay && range.endDay === range.minDay
+  );
+  financeEls.historyRangeControl.classList.toggle(
+    "is-collapsed-at-max",
+    range.hasData && range.startDay === range.maxDay && range.endDay === range.maxDay
+  );
+
+  if (!range.hasData) {
+    financeEls.historyStartLabel.textContent = "--";
+    financeEls.historyEndLabel.textContent = "--";
+    financeEls.historyRangeLength.textContent = "No dated history";
+    financeEls.historyRangeHelp.textContent = "Date controls are unavailable until dated history is recorded.";
+    financeEls.historyMinLabel.textContent = "Earliest data";
+    financeEls.historyMaxLabel.textContent = "Latest data";
+    financeEls.historyRangeSelection.style.left = "0%";
+    financeEls.historyRangeSelection.style.width = "100%";
+    financeEls.historyStart.setAttribute("aria-valuetext", "No start date available");
+    financeEls.historyEnd.setAttribute("aria-valuetext", "No end date available");
+    return;
+  }
+
+  const today = dayIndexFromTimestamp(financeState.data?.nowUtc);
+  const startText = formatHistoryDay(range.startDay);
+  const endText = formatHistoryDay(range.endDay);
+  financeEls.historyStartLabel.textContent = startText;
+  financeEls.historyEndLabel.textContent = range.endDay === today ? `Today · ${endText}` : endText;
+  financeEls.historyRangeLength.textContent = describeHistoryDayRange(range.startDay, range.endDay);
+  financeEls.historyRangeHelp.textContent = range.minDay === range.maxDay
+    ? "Only one dated day is available."
+    : "Drag either handle, or use the arrow keys when focused.";
+  financeEls.historyMinLabel.textContent = `Earliest data · ${formatHistoryDay(range.minDay)}`;
+  financeEls.historyMaxLabel.textContent = range.maxDay === today
+    ? "Today"
+    : `Latest data · ${formatHistoryDay(range.maxDay)}`;
+  financeEls.historyStart.setAttribute("aria-valuetext", startText);
+  financeEls.historyEnd.setAttribute("aria-valuetext", range.endDay === today ? `Today, ${endText}` : endText);
+
+  const domain = range.maxDay - range.minDay;
+  const startPercent = domain > 0 ? ((range.startDay - range.minDay) / domain) * 100 : 0;
+  const endPercent = domain > 0 ? ((range.endDay - range.minDay) / domain) * 100 : 100;
+  financeEls.historyRangeSelection.style.left = `${startPercent}%`;
+  financeEls.historyRangeSelection.style.width = `${Math.max(0, endPercent - startPercent)}%`;
+}
+
+function filterHistoryByDateRange(history, startDay, endDay) {
+  return history.filter(snapshot => {
+    const day = dayIndexFromTimestamp(snapshot.sampledAtUtc);
+    return day !== null && day >= startDay && day <= endDay;
+  });
+}
+
+function filterSalaryPaymentsByDateRange(payments, startDay, endDay, currency) {
+  return payments
+    .filter(payment => payment.kind === "salary" && payment.currency === currency)
+    .map(payment => ({
+      payment,
+      amount: Number(payment.amount || 0),
+      date: postedOnToDate(payment.postedOn),
+      day: dayIndexFromPostedOn(payment.postedOn)
+    }))
+    .filter(point => Number.isFinite(point.amount) && point.amount > 0 && Number.isFinite(point.date.getTime())
+      && point.day !== null && point.day >= startDay && point.day <= endDay)
+    .sort((left, right) => left.date - right.date);
 }
 
 function latestSnapshotPerDay(history) {
@@ -736,16 +1002,26 @@ function localDateKey(date) {
   return `${year}-${month}-${day}`;
 }
 
-function rangeToMilliseconds(range) {
-  return {
-    "24h": 24 * 60 * 60 * 1000,
-    "1w": 7 * 24 * 60 * 60 * 1000,
-    "1m": 31 * 24 * 60 * 60 * 1000,
-    "3m": 93 * 24 * 60 * 60 * 1000,
-    "6m": 183 * 24 * 60 * 60 * 1000,
-    "12m": 366 * 24 * 60 * 60 * 1000,
-    "24m": 732 * 24 * 60 * 60 * 1000
-  }[range] || 7 * 24 * 60 * 60 * 1000;
+function axisRangeForDaySpan(daySpan) {
+  if (daySpan === 0) {
+    return "24h";
+  }
+  if (daySpan <= 7) {
+    return "1w";
+  }
+  if (daySpan <= 31) {
+    return "1m";
+  }
+  if (daySpan <= 93) {
+    return "3m";
+  }
+  if (daySpan <= 183) {
+    return "6m";
+  }
+  if (daySpan <= 366) {
+    return "12m";
+  }
+  return "24m";
 }
 
 function minChartWidthForRange(range) {
@@ -758,11 +1034,6 @@ function minChartWidthForRange(range) {
     "12m": 940,
     "24m": 1040
   }[range] || 820;
-}
-
-function selectedRangeLabel() {
-  const option = financeEls.historyRange.options[financeEls.historyRange.selectedIndex];
-  return option ? option.textContent : "1 week";
 }
 
 function accountCell(account) {
@@ -948,6 +1219,7 @@ function drawCircle(svg, x, y, radius, fill, className = "") {
     circle.setAttribute("class", className);
   }
   svg.append(circle);
+  return circle;
 }
 
 function drawLegendToggle(svg, x, y, item, visible) {
@@ -966,14 +1238,23 @@ function drawLegendToggle(svg, x, y, item, visible) {
   hit.setAttribute("class", "chart-legend-hit");
   group.append(hit);
 
-  const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-  line.setAttribute("x1", String(x));
-  line.setAttribute("y1", String(y + 8));
-  line.setAttribute("x2", String(x + 20));
-  line.setAttribute("y2", String(y + 8));
-  line.setAttribute("stroke", colorForSeries(item.className));
-  line.setAttribute("stroke-width", "3");
-  group.append(line);
+  if (item.discrete) {
+    const marker = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    marker.setAttribute("cx", String(x + 10));
+    marker.setAttribute("cy", String(y + 8));
+    marker.setAttribute("r", "4.5");
+    marker.setAttribute("fill", colorForSeries(item.className));
+    group.append(marker);
+  } else {
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", String(x));
+    line.setAttribute("y1", String(y + 8));
+    line.setAttribute("x2", String(x + 20));
+    line.setAttribute("y2", String(y + 8));
+    line.setAttribute("stroke", colorForSeries(item.className));
+    line.setAttribute("stroke-width", "3");
+    group.append(line);
+  }
 
   const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
   label.setAttribute("x", String(x + 26));
@@ -1011,7 +1292,8 @@ function colorForSeries(className) {
     "chart-line-net": "#16845f",
     "chart-line-cash": "#276f9f",
     "chart-line-debt": "#bd4f43",
-    "chart-line-credit": "#7a5ea8"
+    "chart-line-credit": "#7a5ea8",
+    "chart-line-salary": "#d07a18"
   }[className] || "#65736e";
 }
 
@@ -1021,6 +1303,104 @@ function money(value, currency) {
 
 function compactMoney(value, currency) {
   return new Intl.NumberFormat([], { style: "currency", currency, notation: "compact", maximumFractionDigits: 1 }).format(Number(value || 0));
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function dayIndexFromTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    return null;
+  }
+
+  return Math.round(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / financeDayMilliseconds);
+}
+
+function dayIndexFromPostedOn(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+
+  return Math.round(date.getTime() / financeDayMilliseconds);
+}
+
+function dayIndexToLocalDate(dayIndex) {
+  const date = new Date(dayIndex * financeDayMilliseconds);
+  return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 12);
+}
+
+function dayIndexToLocalStartDate(dayIndex) {
+  const date = new Date(dayIndex * financeDayMilliseconds);
+  return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function dayIndexToLocalEndDate(dayIndex) {
+  const date = new Date(dayIndex * financeDayMilliseconds);
+  return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999);
+}
+
+function addCalendarMonthsToDayIndex(dayIndex, months) {
+  const date = new Date(dayIndex * financeDayMilliseconds);
+  const targetMonth = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1));
+  const lastTargetDay = new Date(Date.UTC(targetMonth.getUTCFullYear(), targetMonth.getUTCMonth() + 1, 0)).getUTCDate();
+  return Math.round(Date.UTC(
+    targetMonth.getUTCFullYear(),
+    targetMonth.getUTCMonth(),
+    Math.min(date.getUTCDate(), lastTargetDay)
+  ) / financeDayMilliseconds);
+}
+
+function formatHistoryDay(dayIndex) {
+  return dayIndexToLocalDate(dayIndex).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  });
+}
+
+function formatHistoryDateRange(startDay, endDay) {
+  const start = dayIndexToLocalDate(startDay);
+  const end = dayIndexToLocalDate(endDay);
+  if (startDay === endDay) {
+    return formatHistoryDay(startDay);
+  }
+
+  const startOptions = start.getFullYear() === end.getFullYear()
+    ? { month: "short", day: "numeric" }
+    : { month: "short", day: "numeric", year: "numeric" };
+  const startText = start.toLocaleDateString([], startOptions);
+  const endText = end.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+  return `${startText} – ${endText}`;
+}
+
+function describeHistoryDayRange(startDay, endDay) {
+  if (startDay === endDay) {
+    return "1 day";
+  }
+
+  const start = new Date(startDay * financeDayMilliseconds);
+  const end = new Date(endDay * financeDayMilliseconds);
+  const monthDifference = (end.getUTCFullYear() - start.getUTCFullYear()) * 12
+    + end.getUTCMonth() - start.getUTCMonth();
+  if (monthDifference > 0 && addCalendarMonthsToDayIndex(startDay, monthDifference) === endDay) {
+    return `${monthDifference} month${monthDifference === 1 ? "" : "s"}`;
+  }
+
+  const inclusiveDays = endDay - startDay + 1;
+  if (inclusiveDays < 60) {
+    return `${inclusiveDays} days`;
+  }
+
+  const approximateMonths = Math.max(2, Math.round((endDay - startDay) / 30.4375));
+  return `${approximateMonths} months`;
 }
 
 function formatDateTime(value) {
@@ -1047,6 +1427,15 @@ function formatPostedOn(value) {
     day: "numeric",
     year: "numeric"
   });
+}
+
+function postedOnToDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(Number.NaN);
+  }
+
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day, 12);
 }
 
 function formatWeekday(value) {

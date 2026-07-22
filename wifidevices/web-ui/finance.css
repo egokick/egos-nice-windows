@@ -12,6 +12,7 @@
   --finance-debt-soft: #fae8e6;
   --finance-net: #1d4f43;
   --finance-violet: #6f5aa6;
+  --finance-salary: #d07a18;
   background:
     linear-gradient(180deg, #e9eef0 0, #f4f6f7 220px),
     var(--finance-bg);
@@ -28,6 +29,11 @@
   max-width: 1420px;
   margin: 0 auto;
   padding: 18px;
+}
+
+.finance-layout > *,
+.finance-grid > * {
+  min-width: 0;
 }
 
 .finance-page .chart-section,
@@ -315,32 +321,222 @@
   background: #fbfcfc;
 }
 
-.chart-tools {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
+.history-section-title > p {
+  margin: 0;
+  text-align: right;
 }
 
-.chart-tools p {
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.history-range-control {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 12px 22px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--finance-line);
+  background: linear-gradient(180deg, #ffffff 0, #fbfcfc 100%);
+}
+
+.history-range-values {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: end;
+}
+
+.history-range-value {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--finance-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.history-range-value strong {
+  color: var(--finance-ink);
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0;
+  line-height: 1.25;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-range-value-end {
+  text-align: right;
+}
+
+.history-range-length {
+  margin: 0 0 1px;
+  color: var(--finance-net);
+  font-size: 12px;
+  font-weight: 800;
   white-space: nowrap;
 }
 
-.chart-tools select {
-  min-height: 32px;
-  border: 1px solid var(--finance-line);
-  border-radius: 6px;
-  background: #ffffff;
-  color: var(--finance-ink);
-  padding: 0 30px 0 10px;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 650;
+.history-range-slider {
+  position: relative;
+  height: 44px;
+  margin: 2px 14px 0;
+  overflow: visible;
 }
 
-.chart-tools select:focus {
-  outline: 2px solid rgba(36, 95, 143, 0.18);
-  border-color: var(--finance-credit);
+.history-range-rail {
+  position: absolute;
+  inset: 20px 14px auto;
+  height: 4px;
+  border-radius: 999px;
+  background: #d4dcda;
+  box-shadow: inset 0 0 0 1px rgba(23, 32, 29, 0.04);
+  pointer-events: none;
+}
+
+.history-range-selection {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 100%;
+  border-radius: inherit;
+  background: var(--finance-cash);
+}
+
+.history-range-input {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+
+.history-range-input-end {
+  z-index: 4;
+}
+
+.history-range-input.is-active {
+  z-index: 5;
+}
+
+.history-range-control.is-collapsed-at-min .history-range-input-start,
+.history-range-control.is-collapsed-at-max .history-range-input-end {
+  z-index: 4;
+}
+
+.history-range-control.is-collapsed-at-min .history-range-input-end,
+.history-range-control.is-collapsed-at-max .history-range-input-start {
+  z-index: 6;
+}
+
+.history-range-input::-webkit-slider-runnable-track {
+  height: 4px;
+  border: 0;
+  background: transparent;
+}
+
+.history-range-input::-moz-range-track {
+  height: 4px;
+  border: 0;
+  background: transparent;
+}
+
+.history-range-input::-webkit-slider-thumb {
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  margin-top: -12px;
+  border: 3px solid var(--finance-cash);
+  border-radius: 50%;
+  appearance: none;
+  -webkit-appearance: none;
+  background: #ffffff;
+  box-shadow: 0 2px 7px rgba(23, 32, 29, 0.2);
+  cursor: grab;
+  pointer-events: auto;
+}
+
+.history-range-input::-moz-range-thumb {
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--finance-cash);
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2px 7px rgba(23, 32, 29, 0.2);
+  cursor: grab;
+  pointer-events: auto;
+}
+
+.history-range-input:active::-webkit-slider-thumb {
+  cursor: grabbing;
+}
+
+.history-range-input:active::-moz-range-thumb {
+  cursor: grabbing;
+}
+
+.history-range-input:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--finance-ink);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(17, 122, 86, 0.2), 0 2px 7px rgba(23, 32, 29, 0.2);
+}
+
+.history-range-input:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--finance-ink);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(17, 122, 86, 0.2), 0 2px 7px rgba(23, 32, 29, 0.2);
+}
+
+.history-range-input:disabled::-webkit-slider-thumb {
+  border-color: #aeb9b5;
+  background: #edf1ef;
+  box-shadow: none;
+  cursor: default;
+}
+
+.history-range-input:disabled::-moz-range-thumb {
+  border-color: #aeb9b5;
+  background: #edf1ef;
+  box-shadow: none;
+  cursor: default;
+}
+
+.history-range-bounds {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--finance-muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.history-range-bounds span:last-child {
+  text-align: right;
+}
+
+.history-range-help {
+  margin: 4px 0 0;
+  color: var(--finance-muted);
+  font-size: 11px;
+  text-align: center;
 }
 
 .finance-chart-shell {
@@ -368,6 +564,16 @@
 .chart-point {
   stroke: #ffffff;
   stroke-width: 2;
+}
+
+.chart-point-salary {
+  stroke-width: 2.5;
+}
+
+.chart-salary-stem {
+  opacity: 0.28;
+  stroke-dasharray: 3 4;
+  pointer-events: none;
 }
 
 .chart-legend-toggle {
@@ -694,6 +900,10 @@
   stroke: var(--finance-violet);
 }
 
+.chart-line-salary {
+  stroke: var(--finance-salary);
+}
+
 @media (max-width: 900px) {
   .finance-metrics,
   .finance-grid,
@@ -709,6 +919,20 @@
   .net-badge {
     justify-self: start;
   }
+
+  .history-section-title {
+    display: grid;
+    gap: 4px;
+  }
+
+  .history-section-title > p {
+    text-align: left;
+    white-space: normal;
+  }
+
+  .history-range-control {
+    padding-inline: 16px;
+  }
 }
 
 @media (max-width: 480px) {
@@ -723,5 +947,42 @@
 
   .salary-card-header {
     display: grid;
+  }
+
+  .history-range-values {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 7px 12px;
+  }
+
+  .history-range-value-end {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .history-range-length {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: center;
+  }
+
+  .history-range-value strong {
+    font-size: 12px;
+  }
+}
+
+@media (forced-colors: active) {
+  .history-range-selection {
+    background: Highlight;
+  }
+
+  .history-range-input::-webkit-slider-thumb,
+  .history-range-input::-moz-range-thumb {
+    border-color: ButtonText;
+    background: Canvas;
+  }
+
+  .history-range-input:focus-visible::-webkit-slider-thumb,
+  .history-range-input:focus-visible::-moz-range-thumb {
+    outline-color: Highlight;
   }
 }

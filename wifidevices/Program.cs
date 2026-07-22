@@ -984,7 +984,7 @@ public sealed class FinanceStore
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            var snapshots = ReadSnapshots().TakeLast(365).ToList();
+            var snapshots = ReadSnapshots().ToList();
             var current = BuildSnapshot("current", persistable: false);
             var configuredAccounts = GetConfiguredAccounts();
             var income = BuildIncomeDashboard(LoadIncomeLedger().Records ?? Array.Empty<FinanceIncomeRecord>(), configuredAccounts);
@@ -1218,15 +1218,18 @@ public sealed class FinanceStore
             var currency = NormalizeIncomeCurrency(request.Currency, _settings.Currency);
             var description = CleanFinanceText(request.Description);
             var sourceTransactionId = CleanFinanceText(request.SourceTransactionId);
+            var requestedRecordId = CleanFinanceText(request.RecordId);
             var fingerprint = CreateIncomeFingerprint(account.Id, request.PostedOn.Value, amount.Value, currency, kind, description);
             var now = DateTimeOffset.UtcNow;
             var records = (LoadIncomeLedger().Records ?? Array.Empty<FinanceIncomeRecord>()).ToList();
-            var index = records.FindIndex(existing =>
-                string.Equals(existing.AccountId, account.Id, StringComparison.OrdinalIgnoreCase)
-                && ((sourceTransactionId is not null
-                        && string.Equals(existing.SourceTransactionId, sourceTransactionId, StringComparison.OrdinalIgnoreCase))
-                    || (sourceTransactionId is null
-                        && string.Equals(existing.Fingerprint, fingerprint, StringComparison.Ordinal))));
+            var index = requestedRecordId is not null
+                ? records.FindIndex(existing => string.Equals(existing.Id, requestedRecordId, StringComparison.OrdinalIgnoreCase))
+                : records.FindIndex(existing =>
+                    string.Equals(existing.AccountId, account.Id, StringComparison.OrdinalIgnoreCase)
+                    && ((sourceTransactionId is not null
+                            && string.Equals(existing.SourceTransactionId, sourceTransactionId, StringComparison.OrdinalIgnoreCase))
+                        || (sourceTransactionId is null
+                            && string.Equals(existing.Fingerprint, fingerprint, StringComparison.Ordinal))));
 
             FinanceIncomeRecord record;
             if (index >= 0)
@@ -1369,8 +1372,14 @@ public sealed class FinanceStore
             .Take(12)
             .Select(record => ToIncomeEntry(record, accountNames.GetValueOrDefault(record.AccountId, "Unknown account")))
             .ToList();
+        var salaryPayments = records
+            .Where(record => record.Kind == "salary")
+            .OrderBy(record => record.PostedOn)
+            .ThenBy(record => record.LastSeenAtUtc)
+            .Select(record => ToIncomeEntry(record, accountNames.GetValueOrDefault(record.AccountId, "Unknown account")))
+            .ToList();
 
-        return new FinanceIncomeDashboard(records.Count, salary, tracking, recent);
+        return new FinanceIncomeDashboard(records.Count, salary, tracking, salaryPayments, recent);
     }
 
     private static FinanceIncomeEntry ToIncomeEntry(FinanceIncomeRecord record, string accountName) =>
@@ -1595,7 +1604,17 @@ public sealed class FinanceRefreshCoordinator : BackgroundService
 
 public sealed class CodexFinanceRefreshLauncher
 {
-    private const string FinanceRefreshPrompt = "Follow the instructions in \"C:\\source\\egos-nice-windows\\wifidevices\\AGENTS.md\" and refresh all finance account values for today. Also collect UFCU income: use income.tracking.lookbackStartOn (the initial 24-month range until income is stored, then the last 30 days) and save qualifying deposits through the finance income API.";
+    private const string FinanceRefreshPrompt =
+        "Follow every instruction in \"C:\\source\\egos-nice-windows\\wifidevices\\AGENTS.md\" and complete today's entire finance refresh; partial completion is failure. " +
+        "Refresh and successfully POST values for every configured finance account before collecting UFCU income. " +
+        "For UFCU, allow at least 60 seconds after each major navigation and another 60 seconds if the authenticated page is still loading. " +
+        "Use the transaction Filter with Start Date equal to income.tracking.lookbackStartOn, End Date equal to today, and Incoming selected. " +
+        "Apply the filter and repeatedly use Load More until it disappears and the displayed result count reconciles with all loaded incoming transactions. " +
+        "Open each possible income transaction and use its detail panel for the exact posted date, amount, description, and source transaction ID; never infer values from the biweekly schedule. " +
+        "Liberty Mutual ACH transactions identified as PAYROLL with Entry Class Code PPD are salary. Exclude transfers, refunds, reversals, adjustments, reimbursements, cash deposits, and other non-income credits. " +
+        "Compare against existing finance income records, update changed transactions by stable source ID when supported, and never create duplicates to reach an expected count. " +
+        "Biweekly payroll should produce roughly 26-27 deposits per full year, so a substantially smaller result requires checking loading, filters, pagination, and date coverage again. " +
+        "Save every verified qualifying deposit through the finance income API, then re-read finance state and do not report success until every account POST and the UFCU income count, dates, amounts, latest payment, and totals reconcile exactly.";
 
     private readonly object _sync = new();
     private Process? _process;
@@ -1666,7 +1685,10 @@ public sealed class CodexFinanceRefreshLauncher
             "--enable",
             "browser_use_full_cdp_access",
             "--sandbox",
-            "workspace-write",
+            // The Windows workspace-write helper can fail before a finance refresh
+            // gets to its first read. This user-initiated workflow must read the
+            // local credential-backed finance store and drive the configured browser.
+            "danger-full-access",
             FinanceRefreshPrompt
         };
 
@@ -4434,6 +4456,7 @@ public sealed record FinanceIncomeDashboard(
     int RecordCount,
     IReadOnlyList<FinanceSalarySummary> Salary,
     IReadOnlyList<FinanceIncomeTracking> Tracking,
+    IReadOnlyList<FinanceIncomeEntry> SalaryPayments,
     IReadOnlyList<FinanceIncomeEntry> Recent);
 
 public sealed record FinanceRefreshStatus(
@@ -4495,7 +4518,8 @@ public sealed record FinanceIncomeRequest(
     string? Currency,
     string? Kind,
     string? Description,
-    string? SourceTransactionId);
+    string? SourceTransactionId,
+    string? RecordId);
 
 public sealed record DeviceNameRequest(string? Name);
 public sealed record DeviceGroupsRequest(IReadOnlyList<string>? Groups);

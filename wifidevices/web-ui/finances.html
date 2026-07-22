@@ -6,7 +6,7 @@
     <title>Finances</title>
     <link rel="icon" href="/finance-favicon.svg?v=1" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css?v=26">
-    <link rel="stylesheet" href="/finance.css?v=14">
+    <link rel="stylesheet" href="/finance.css?v=18">
   </head>
   <body class="finance-page">
     <header class="topbar finance-topbar">
@@ -131,21 +131,36 @@
       </section>
 
       <section class="chart-section">
-        <div class="section-title">
+        <div class="section-title history-section-title">
           <h3>Values Over Time</h3>
-          <div class="chart-tools">
-            <p id="historyCaption">No history yet</p>
-            <select id="historyRange" aria-label="Values over time range">
-              <option value="24h">24h</option>
-              <option value="1w">1 week</option>
-              <option value="1m">1 month</option>
-              <option value="3m">3 months</option>
-              <option value="6m" selected>6 months</option>
-              <option value="12m">12 months</option>
-              <option value="24m">24 months</option>
-            </select>
-          </div>
+          <p id="historyCaption">No history yet</p>
         </div>
+        <fieldset id="historyRangeControl" class="history-range-control">
+          <legend class="visually-hidden">Visible date range</legend>
+          <div class="history-range-values">
+            <label class="history-range-value history-range-value-start" for="historyStart">
+              <span>Start</span>
+              <strong id="historyStartLabel">--</strong>
+            </label>
+            <p id="historyRangeLength" class="history-range-length">Last 3 months</p>
+            <label class="history-range-value history-range-value-end" for="historyEnd">
+              <span>End</span>
+              <strong id="historyEndLabel">--</strong>
+            </label>
+          </div>
+          <div class="history-range-slider">
+            <div class="history-range-rail" aria-hidden="true">
+              <span id="historyRangeSelection" class="history-range-selection"></span>
+            </div>
+            <input id="historyStart" class="history-range-input history-range-input-start" type="range" min="0" max="1" value="0" step="1" aria-label="Start date" aria-describedby="historyRangeBounds historyRangeHelp">
+            <input id="historyEnd" class="history-range-input history-range-input-end" type="range" min="0" max="1" value="1" step="1" aria-label="End date" aria-describedby="historyRangeBounds historyRangeHelp">
+          </div>
+          <div id="historyRangeBounds" class="history-range-bounds">
+            <span id="historyMinLabel">Earliest data</span>
+            <span id="historyMaxLabel">Latest data</span>
+          </div>
+          <p id="historyRangeHelp" class="history-range-help">Drag either handle, or use the arrow keys when focused.</p>
+        </fieldset>
         <div class="finance-chart-shell">
           <svg id="financeChart" role="img" aria-label="Finance history chart"></svg>
         </div>
@@ -228,6 +243,6 @@
       </form>
     </dialog>
 
-    <script src="/finance.js?v=20" defer></script>
+    <script src="/finance.js?v=24" defer></script>
   </body>
 </html>
