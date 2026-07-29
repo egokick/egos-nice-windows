@@ -126,7 +126,18 @@ function Remove-BluetoothFilters {
 
 function Add-BluetoothFilter {
     [void](Invoke-Logged -FileName $script:VBoxManage -Arguments @("usbfilter", "add", "0", "--target", $VMName, "--name", "Laptop MediaTek Bluetooth Adapter VIDPID", "--vendorid", "13d3", "--productid", "3602", "--active", "yes"))
-    [void](Invoke-Logged -FileName $script:VBoxManage -Arguments @("modifyvm", $VMName, "--usb", "on", "--usbxhci", "on", "--boot1=disk", "--boot2=none", "--boot3=none", "--boot4=none"))
+    [void](Invoke-Logged -FileName $script:VBoxManage -Arguments @(
+        "modifyvm", $VMName,
+        "--cpus", "4",
+        "--mouse", "ps2",
+        "--keyboard", "ps2",
+        "--usb-ohci", "off",
+        "--usb-xhci", "on",
+        "--boot1=disk",
+        "--boot2=none",
+        "--boot3=none",
+        "--boot4=none"
+    ))
 }
 
 function Restart-BluetoothPnP {
@@ -212,9 +223,20 @@ Write-Log "Starting force Bluetooth passthrough test."
 $state = Get-VmState
 Write-Log "Initial VM state: $state"
 if ($state -eq "running") {
-    [void](Invoke-Logged -FileName $script:VBoxManage -Arguments @("controlvm", $VMName, "savestate") -TimeoutSeconds 120)
-    $state = Wait-VmState -States @("saved") -TimeoutSeconds 120
-    Write-Log "VM state after save: $state"
+    $shutdownRequested = Invoke-Logged -FileName $script:VBoxManage -Arguments @("controlvm", $VMName, "shutdown") -TimeoutSeconds 30 -AllowFail
+    if (-not $shutdownRequested) {
+        [void](Invoke-Logged -FileName $script:VBoxManage -Arguments @("controlvm", $VMName, "acpipowerbutton") -TimeoutSeconds 30)
+    }
+    $state = Wait-VmState -States @("poweroff") -TimeoutSeconds 180
+    if ($state -ne "poweroff") {
+        throw "VM '$VMName' did not shut down cleanly; refusing to save or force-power it off."
+    }
+    Write-Log "VM state after clean shutdown: $state"
+}
+elseif ($state -in @("saved", "aborted-saved")) {
+    [void](Invoke-Logged -FileName $script:VBoxManage -Arguments @("discardstate", $VMName) -TimeoutSeconds 60)
+    $state = Wait-VmState -States @("poweroff") -TimeoutSeconds 60
+    Write-Log "Discarded saved state; VM state is now: $state"
 }
 
 Remove-BluetoothFilters

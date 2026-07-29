@@ -7,7 +7,7 @@ internal sealed class SoftwareDimmingService : IDisposable
     private readonly Dictionary<string, DimmingOverlayForm> _overlays = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
 
-    public bool TrySetDimming(int dimmingPercent)
+    public bool TrySetDimming(string monitorId, int dimmingPercent)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         dimmingPercent = Math.Clamp(dimmingPercent, 0, 90);
@@ -15,19 +15,19 @@ internal sealed class SoftwareDimmingService : IDisposable
         try
         {
             SynchronizeOverlays();
-            foreach (var overlay in _overlays.Values)
+            if (!_overlays.TryGetValue(monitorId, out var overlay))
             {
-                overlay.SetDimming(dimmingPercent);
+                return false;
             }
 
-            return _overlays.Count > 0;
+            overlay.SetDimming(dimmingPercent);
+            return true;
         }
         catch
         {
             return false;
         }
     }
-
     public void Dispose()
     {
         if (_disposed)

@@ -284,15 +284,8 @@ if (-not $exists) {
 
 $state = Get-VmState
 
-if ($state -eq "saved") {
-    Write-Host "VM '$VMName' is saved. Resuming it without changing powered-off-only settings."
-    Invoke-VBoxWithLockRetry -Arguments @("startvm", $VMName, "--type", "gui")
-    Ensure-DisplayVisible
-    return
-}
-
-if ($state -eq "aborted-saved") {
-    Write-Host "VM '$VMName' has a stale aborted saved state. Discarding the saved state before booting from disk."
+if ($state -in @("saved", "aborted-saved")) {
+    Write-Host "VM '$VMName' has a saved memory state. Discarding it so this launch is a clean boot from disk."
     Invoke-VBoxWithLockRetry -Arguments @("discardstate", $VMName)
     $state = Get-VmState
 }
@@ -334,12 +327,21 @@ if (-not (Test-Path -LiteralPath $DiskPath)) {
 
 Invoke-VBoxWithLockRetry -Arguments @(
     "modifyvm", $VMName,
+    "--cpus=4",
+    "--mouse=ps2",
+    "--keyboard=ps2",
+    "--usb-ohci=off",
+    "--usb-xhci=on",
     "--boot1=disk",
     "--boot2=none",
     "--boot3=none",
     "--boot4=none",
     "--firmware-boot-menu=disabled"
 )
+Invoke-VBoxWithLockRetry -Arguments @("setextradata", $VMName, "GUI/DefaultCloseAction", "Shutdown")
+Invoke-VBoxWithLockRetry -Arguments @("setextradata", $VMName, "GUI/LastCloseAction", "Shutdown")
+Invoke-VBoxWithLockRetry -Arguments @("setextradata", $VMName, "GUI/RestrictedCloseActions", "SaveState")
+Invoke-VBoxWithLockRetry -Arguments @("setextradata", $VMName, "GUI/RestrictedRuntimeMachineMenuActions", "SaveState")
 
 $info = (& $script:VBoxManage showvminfo $VMName --machinereadable) -join "`n"
 if ($info -notmatch [regex]::Escape($DiskPath)) {

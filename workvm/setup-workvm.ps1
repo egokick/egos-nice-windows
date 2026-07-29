@@ -199,6 +199,8 @@ function Start-UnattendedInstall {
     }
 
     $password = Get-GuestPassword
+    $postInstallCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Set-LocalUser -Name ''workvm'' -PasswordNeverExpires $true -AccountNeverExpires; net.exe accounts /maxpwage:unlimited"'
+
     Write-Host "Starting unattended Windows install. Credentials are saved at: $CredentialPath"
     Invoke-VBox @(
         "unattended", "install", $VMName,
@@ -212,6 +214,7 @@ function Start-UnattendedInstall {
         "--time-zone=Eastern Standard Time",
         "--hostname=workrdp.local",
         "--image-index=1",
+        "--post-install-command=$postInstallCommand",
         "--start-vm=gui"
     )
 }

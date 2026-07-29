@@ -32,6 +32,8 @@ Thumbs.db
 *.msixbundle
 
 # Sensitive app data
+/finance/.env.finance
+/finance/data/
 YouTubeSyncTray/Downloads/
 YouTubeSyncTray/youtube-sync/legacy-downloads/
 YouTubeSyncTray/youtube-sync/legacy-youtube-cookies.txt
@@ -253,3 +255,4 @@ parakeet-mic/wheels/nemo_toolkit-2.0.0-py3-none-any.whl
 .dotnet-sdk/packs
 .dotnet-sdk
 .artifacts
+*.pyc

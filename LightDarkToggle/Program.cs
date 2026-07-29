@@ -27,6 +27,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 {
     private const string LightScheme = "Tango Light";
     private const string DarkScheme = "One Half Dark";
+    private const string AllMonitorsId = "__all_monitors__";
 
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _toggleMenuItem;
@@ -38,10 +39,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripControlHost _lightSliderHost;
     private readonly ToolStripControlHost _darkSliderHost;
     private readonly ToolStripSeparator _brightnessSeparatorMenuItem;
-    private readonly BrightnessSliderControl _brightnessSliderControl;
-    private readonly ToolStripControlHost _brightnessSliderHost;
-    private readonly DimmingSliderControl _dimmingSliderControl;
-    private readonly ToolStripControlHost _dimmingSliderHost;
+    private readonly ToolStripMenuItem _separateMonitorsMenuItem;
+    private readonly Dictionary<string, MonitorControlGroup> _monitorControls = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ToolStripControlHost> _monitorControlHosts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ToolStripSeparator _displayControlsBottomSeparator;
+    private readonly ToolStripMenuItem _exitMenuItem;
     private readonly SoftwareDimmingService _softwareDimmingService;
     private readonly Icon _lightIcon;
     private readonly Icon _darkIcon;
@@ -51,7 +53,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly object _brightnessUpdateLock = new();
 
     private AppSettings _settings;
-    private int? _pendingBrightness;
+    private readonly Dictionary<string, int> _pendingBrightness = new(StringComparer.OrdinalIgnoreCase);
     private bool _brightnessUpdateRunning;
 
     public TrayApplicationContext()
@@ -86,18 +88,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _timedSeparatorMenuItem = new ToolStripSeparator();
         _brightnessSeparatorMenuItem = new ToolStripSeparator();
-
-        _brightnessSliderControl = new BrightnessSliderControl();
-        _brightnessSliderControl.BrightnessChanged += (_, _) => QueueBrightnessUpdate(_brightnessSliderControl.Brightness);
-        _brightnessSliderHost = CreateSliderHost(_brightnessSliderControl);
+        _separateMonitorsMenuItem = new ToolStripMenuItem("Control monitors separately")
+        {
+            CheckOnClick = true
+        };
+        _separateMonitorsMenuItem.Click += (_, _) => ToggleSeparateMonitorControls();
 
         _softwareDimmingService = new SoftwareDimmingService();
-        _dimmingSliderControl = new DimmingSliderControl(_settings.ExtraDimmingPercent);
-        _dimmingSliderControl.DimmingChanged += (_, _) => ApplyExtraDimming(_dimmingSliderControl.DimmingPercent);
-        _dimmingSliderHost = CreateSliderHost(_dimmingSliderControl);
-
-        var exitMenuItem = new ToolStripMenuItem("Exit");
-        exitMenuItem.Click += (_, _) => ExitThread();
+        _displayControlsBottomSeparator = new ToolStripSeparator();
+        _exitMenuItem = new ToolStripMenuItem("Exit");
+        _exitMenuItem.Click += (_, _) => ExitThread();
 
         _notifyIcon = new NotifyIcon
         {
@@ -107,7 +107,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = new ContextMenuStrip()
         };
 
-        _notifyIcon.ContextMenuStrip.Opening += (_, _) => RefreshMenuText(refreshBrightness: true, refreshDimming: true);
+        _notifyIcon.ContextMenuStrip.Opening += (_, _) =>
+        {
+            SynchronizeMonitorControls();
+            RefreshMenuText(refreshDisplays: true);
+        };
         _notifyIcon.ContextMenuStrip.Items.Add(_toggleMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_startupMenuItem);
         _notifyIcon.ContextMenuStrip.Items.Add(_timedModeMenuItem);
@@ -115,10 +119,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.ContextMenuStrip.Items.Add(_lightSliderHost);
         _notifyIcon.ContextMenuStrip.Items.Add(_darkSliderHost);
         _notifyIcon.ContextMenuStrip.Items.Add(_brightnessSeparatorMenuItem);
-        _notifyIcon.ContextMenuStrip.Items.Add(_brightnessSliderHost);
-        _notifyIcon.ContextMenuStrip.Items.Add(_dimmingSliderHost);
-        _notifyIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
-        _notifyIcon.ContextMenuStrip.Items.Add(exitMenuItem);
+        _notifyIcon.ContextMenuStrip.Items.Add(_separateMonitorsMenuItem);
+        _notifyIcon.ContextMenuStrip.Items.Add(_displayControlsBottomSeparator);
+        _notifyIcon.ContextMenuStrip.Items.Add(_exitMenuItem);
         _notifyIcon.MouseClick += NotifyIconOnMouseClick;
 
         _scheduleTimer = new System.Windows.Forms.Timer
@@ -135,13 +138,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _displaySettingsTimer.Tick += (_, _) =>
         {
             _displaySettingsTimer.Stop();
-            ApplyExtraDimming(_settings.ExtraDimmingPercent, saveSetting: false, showError: false);
+            SynchronizeMonitorControls();
+            RefreshDisplayControls(refreshBrightness: true, refreshDimming: true, showDimmingError: false);
         };
 
         SystemEvents.DisplaySettingsChanged += SystemEventsOnDisplaySettingsChanged;
         ApplyTimedThemeIfEnabled(showBalloon: false);
-        RefreshBrightnessControl();
-        ApplyExtraDimming(_settings.ExtraDimmingPercent, saveSetting: false);
+        SynchronizeMonitorControls();
+        RefreshDisplayControls(refreshBrightness: true, refreshDimming: true, showDimmingError: true);
         RefreshMenuText();
     }
 
@@ -259,7 +263,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RefreshMenuText();
     }
 
-    private void RefreshMenuText(bool refreshBrightness = false, bool refreshDimming = false)
+    private void RefreshMenuText(bool refreshDisplays = false)
     {
         var isLightMode = ThemeService.IsLightModeEnabled();
         _toggleMenuItem.Text = isLightMode ? "Switch to dark mode" : "Switch to light mode";
@@ -283,14 +287,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _lightSliderHost.Visible = showTimedControls;
         _darkSliderHost.Visible = showTimedControls;
 
-        if (refreshBrightness)
+        if (refreshDisplays)
         {
-            RefreshBrightnessControl();
-        }
-
-        if (refreshDimming)
-        {
-            ApplyExtraDimming(_settings.ExtraDimmingPercent, saveSetting: false, showError: false);
+            RefreshDisplayControls(refreshBrightness: true, refreshDimming: true, showDimmingError: false);
         }
     }
 
@@ -329,42 +328,163 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private void RefreshBrightnessControl()
+    private void ToggleSeparateMonitorControls()
     {
-        if (_brightnessSliderControl.IsInteracting)
-        {
-            return;
-        }
-
-        if (BrightnessService.TryGetCurrentBrightness(out var brightness))
-        {
-            _brightnessSliderControl.SetAvailable(brightness);
-            return;
-        }
-
-        _brightnessSliderControl.SetUnavailable();
+        _settings.ControlMonitorsSeparately = _separateMonitorsMenuItem.Checked;
+        SettingsStore.Save(_settings);
+        SynchronizeMonitorControls();
+        RefreshDisplayControls(refreshBrightness: true, refreshDimming: true, showDimmingError: false);
     }
 
-    private void ApplyExtraDimming(int dimmingPercent, bool saveSetting = true, bool showError = true)
+    private void SynchronizeMonitorControls()
+    {
+        var monitors = DisplayMonitorService.GetActiveMonitors();
+        var hasMultipleMonitors = monitors.Count > 1;
+        var controlSeparately = hasMultipleMonitors && _settings.ControlMonitorsSeparately;
+        var controls = controlSeparately
+            ? monitors
+            : [new DisplayMonitorInfo(AllMonitorsId, "All monitors")];
+        var activeIds = controls.Select(monitor => monitor.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var menu = _notifyIcon.ContextMenuStrip!;
+
+        _separateMonitorsMenuItem.Visible = hasMultipleMonitors;
+        _separateMonitorsMenuItem.Checked = controlSeparately;
+
+        foreach (var removedId in _monitorControls.Keys.Except(activeIds, StringComparer.OrdinalIgnoreCase).ToArray())
+        {
+            var host = _monitorControlHosts[removedId];
+            menu.Items.Remove(host);
+            host.Dispose();
+            _monitorControlHosts.Remove(removedId);
+            _monitorControls.Remove(removedId);
+        }
+
+        foreach (var monitor in controls)
+        {
+            if (!_monitorControls.TryGetValue(monitor.Id, out var group))
+            {
+                var initialDimming = GetConfiguredDimming(monitor.Id);
+                group = new MonitorControlGroup(monitor, initialDimming);
+                group.BrightnessChanged += (_, _) => QueueBrightnessUpdate(group.ControlId, group.Brightness);
+                group.DimmingChanged += (_, _) => ApplyExtraDimming(group.ControlId, group.DimmingPercent);
+                _monitorControls.Add(monitor.Id, group);
+                _monitorControlHosts.Add(monitor.Id, CreateSliderHost(group));
+            }
+
+            group.UpdateMonitor(monitor, showMonitorName: controlSeparately);
+            _monitorControlHosts[monitor.Id].Size = group.Size;
+        }
+
+        foreach (var host in _monitorControlHosts.Values)
+        {
+            menu.Items.Remove(host);
+        }
+
+        var insertIndex = menu.Items.IndexOf(_displayControlsBottomSeparator);
+        foreach (var monitor in controls)
+        {
+            menu.Items.Insert(insertIndex++, _monitorControlHosts[monitor.Id]);
+        }
+    }
+
+    private void RefreshDisplayControls(bool refreshBrightness, bool refreshDimming, bool showDimmingError)
+    {
+        foreach (var (controlId, group) in _monitorControls)
+        {
+            if (refreshBrightness && !group.IsBrightnessInteracting)
+            {
+                if (TryGetCurrentBrightness(controlId, out var brightness))
+                {
+                    group.SetBrightnessAvailable(brightness);
+                }
+                else
+                {
+                    group.SetBrightnessUnavailable();
+                }
+            }
+
+            if (refreshDimming && !group.IsDimmingInteracting)
+            {
+                ApplyExtraDimming(
+                    controlId,
+                    GetConfiguredDimming(controlId),
+                    saveSetting: false,
+                    showError: showDimmingError);
+            }
+        }
+    }
+
+    private bool TryGetCurrentBrightness(string controlId, out int brightness)
+    {
+        var readings = new List<int>();
+        foreach (var monitorId in GetTargetMonitorIds(controlId))
+        {
+            if (BrightnessService.TryGetCurrentBrightness(monitorId, out var monitorBrightness))
+            {
+                readings.Add(monitorBrightness);
+            }
+        }
+
+        brightness = readings.Count == 0 ? 0 : (int)Math.Round(readings.Average());
+        return readings.Count > 0;
+    }
+
+    private void ApplyExtraDimming(string controlId, int dimmingPercent, bool saveSetting = true, bool showError = true)
     {
         dimmingPercent = Math.Clamp(dimmingPercent, 0, 90);
-        if (!_softwareDimmingService.TrySetDimming(dimmingPercent))
+        var updated = false;
+        foreach (var monitorId in GetTargetMonitorIds(controlId))
         {
-            _dimmingSliderControl.SetUnavailable();
+            updated |= _softwareDimmingService.TrySetDimming(monitorId, dimmingPercent);
+        }
+
+        if (!updated)
+        {
+            if (_monitorControls.TryGetValue(controlId, out var unavailableGroup))
+            {
+                unavailableGroup.SetDimmingUnavailable();
+            }
+
             if (showError)
             {
-                ShowErrorBalloon("Software dimming could not create an overlay for the current display configuration.");
+                ShowErrorBalloon("Software dimming could not create an overlay for this display.");
             }
 
             return;
         }
 
-        _dimmingSliderControl.SetAvailable(dimmingPercent);
-        _settings.ExtraDimmingPercent = dimmingPercent;
+        if (_monitorControls.TryGetValue(controlId, out var group))
+        {
+            group.SetDimmingAvailable(dimmingPercent);
+        }
+
+        if (string.Equals(controlId, AllMonitorsId, StringComparison.OrdinalIgnoreCase))
+        {
+            _settings.ExtraDimmingPercent = dimmingPercent;
+        }
+        else
+        {
+            _settings.SetDimmingForMonitor(controlId, dimmingPercent);
+        }
+
         if (saveSetting)
         {
             SettingsStore.Save(_settings);
         }
+    }
+
+    private int GetConfiguredDimming(string controlId)
+    {
+        return string.Equals(controlId, AllMonitorsId, StringComparison.OrdinalIgnoreCase)
+            ? _settings.ExtraDimmingPercent
+            : _settings.GetDimmingForMonitor(controlId);
+    }
+
+    private static IReadOnlyList<string> GetTargetMonitorIds(string controlId)
+    {
+        return string.Equals(controlId, AllMonitorsId, StringComparison.OrdinalIgnoreCase)
+            ? Screen.AllScreens.Select(screen => screen.DeviceName).ToArray()
+            : [controlId];
     }
 
     private void SystemEventsOnDisplaySettingsChanged(object? sender, EventArgs e)
@@ -376,11 +496,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }, null);
     }
 
-    private void QueueBrightnessUpdate(int brightness)
+    private void QueueBrightnessUpdate(string controlId, int brightness)
     {
         lock (_brightnessUpdateLock)
         {
-            _pendingBrightness = Math.Clamp(brightness, 0, 100);
+            _pendingBrightness[controlId] = Math.Clamp(brightness, 0, 100);
             if (_brightnessUpdateRunning)
             {
                 return;
@@ -396,20 +516,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         while (true)
         {
+            string controlId;
             int brightness;
             lock (_brightnessUpdateLock)
             {
-                if (_pendingBrightness is not { } pendingBrightness)
+                if (_pendingBrightness.Count == 0)
                 {
                     _brightnessUpdateRunning = false;
                     return;
                 }
 
-                brightness = pendingBrightness;
-                _pendingBrightness = null;
+                var pending = _pendingBrightness.First();
+                controlId = pending.Key;
+                brightness = pending.Value;
+                _pendingBrightness.Remove(controlId);
             }
 
-            var result = TrySetBrightnessWithRetries(brightness);
+            var result = TrySetBrightnessWithRetries(controlId, brightness);
             if (result.Success)
             {
                 continue;
@@ -417,7 +540,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             lock (_brightnessUpdateLock)
             {
-                if (_pendingBrightness is not null)
+                if (_pendingBrightness.Count > 0)
                 {
                     continue;
                 }
@@ -427,14 +550,25 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             _uiContext.Post(_ =>
             {
-                RefreshBrightnessControl();
+                if (_monitorControls.TryGetValue(controlId, out var group))
+                {
+                    if (TryGetCurrentBrightness(controlId, out var currentBrightness))
+                    {
+                        group.SetBrightnessAvailable(currentBrightness);
+                    }
+                    else
+                    {
+                        group.SetBrightnessUnavailable();
+                    }
+                }
+
                 ShowErrorBalloon(result.ErrorMessage);
             }, null);
             return;
         }
     }
 
-    private static BrightnessUpdateResult TrySetBrightnessWithRetries(int brightness)
+    private static BrightnessUpdateResult TrySetBrightnessWithRetries(string controlId, int brightness)
     {
         const int maxAttempts = 4;
         Exception? lastException = null;
@@ -443,7 +577,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             try
             {
-                if (BrightnessService.TrySetBrightness(brightness))
+                var updated = false;
+                foreach (var monitorId in GetTargetMonitorIds(controlId))
+                {
+                    updated |= BrightnessService.TrySetBrightness(monitorId, brightness);
+                }
+
+                if (updated)
                 {
                     return BrightnessUpdateResult.Successful;
                 }
@@ -486,6 +626,240 @@ internal sealed record BrightnessUpdateResult(bool Success, string ErrorMessage)
     }
 }
 
+internal sealed record DisplayMonitorInfo(string Id, string DisplayName);
+
+internal static class DisplayMonitorService
+{
+    public static IReadOnlyList<DisplayMonitorInfo> GetActiveMonitors()
+    {
+        var screens = Screen.AllScreens
+            .OrderByDescending(screen => screen.Primary)
+            .ThenBy(screen => screen.Bounds.X)
+            .ThenBy(screen => screen.Bounds.Y)
+            .ToArray();
+
+        return screens
+            .Select((screen, index) => new DisplayMonitorInfo(
+                screen.DeviceName,
+                $"{GetFriendlyName(screen.DeviceName)} (Display {index + 1})"))
+            .ToArray();
+    }
+
+    private static string GetFriendlyName(string deviceName)
+    {
+        var hardwareId = GetHardwareId(deviceName);
+        var edidName = GetEdidFriendlyName(hardwareId);
+        if (!string.IsNullOrWhiteSpace(edidName))
+        {
+            return edidName;
+        }
+
+        var pnpName = GetPlugAndPlayName(hardwareId);
+        if (!string.IsNullOrWhiteSpace(pnpName)
+            && !pnpName.Contains("Generic PnP Monitor", StringComparison.OrdinalIgnoreCase))
+        {
+            return pnpName;
+        }
+
+        if (TryGetDisplayDevice(deviceName, out var displayDevice)
+            && !string.IsNullOrWhiteSpace(displayDevice.DeviceString)
+            && !displayDevice.DeviceString.Contains("Generic PnP Monitor", StringComparison.OrdinalIgnoreCase))
+        {
+            return displayDevice.DeviceString.Trim();
+        }
+
+        return hardwareId ?? deviceName.Replace(@"\\.\", string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? GetEdidFriendlyName(string? hardwareId)
+    {
+        if (string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                @"root\wmi",
+                "SELECT InstanceName, UserFriendlyName FROM WmiMonitorID WHERE Active = TRUE");
+            foreach (ManagementObject monitor in searcher.Get())
+            {
+                if (MatchesHardwareId(hardwareId, monitor["InstanceName"] as string))
+                {
+                    return DecodeMonitorString(monitor["UserFriendlyName"]);
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private static string? GetPlugAndPlayName(string? hardwareId)
+    {
+        if (string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT Name, DeviceID FROM Win32_PnPEntity WHERE PNPClass = 'Monitor'");
+            foreach (ManagementObject monitor in searcher.Get())
+            {
+                if (MatchesHardwareId(hardwareId, monitor["DeviceID"] as string))
+                {
+                    return monitor["Name"] as string;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private static bool MatchesHardwareId(string hardwareId, string? instanceName)
+    {
+        return !string.IsNullOrWhiteSpace(instanceName)
+            && instanceName.Split('\\', StringSplitOptions.RemoveEmptyEntries)
+                .Skip(1)
+                .FirstOrDefault() is { } instanceHardwareId
+            && string.Equals(hardwareId, instanceHardwareId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? DecodeMonitorString(object? encodedValue)
+    {
+        var characters = encodedValue switch
+        {
+            ushort[] values => values.Select(value => (char)value),
+            byte[] values => values.Select(value => (char)value),
+            _ => []
+        };
+        var decoded = new string(characters.TakeWhile(character => character != '\0').ToArray()).Trim();
+        return decoded.Length == 0 ? null : decoded;
+    }
+
+    public static string? GetHardwareId(string deviceName)
+    {
+        if (!TryGetDisplayDevice(deviceName, out var displayDevice)
+            || string.IsNullOrWhiteSpace(displayDevice.DeviceId))
+        {
+            return null;
+        }
+
+        var idParts = displayDevice.DeviceId.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        return idParts.Length >= 2 ? idParts[1] : null;
+    }
+
+    private static bool TryGetDisplayDevice(string deviceName, out DisplayDevice displayDevice)
+    {
+        displayDevice = new DisplayDevice
+        {
+            Size = Marshal.SizeOf<DisplayDevice>()
+        };
+        return EnumDisplayDevices(deviceName, 0, ref displayDevice, 0);
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DisplayDevice
+    {
+        public int Size;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string DeviceName;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceString;
+
+        public int StateFlags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceId;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceKey;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplayDevices(
+        string? device,
+        uint deviceNumber,
+        ref DisplayDevice displayDevice,
+        uint flags);
+}
+
+internal sealed class MonitorControlGroup : UserControl
+{
+    private readonly Label _monitorLabel;
+    private readonly BrightnessSliderControl _brightnessControl;
+    private readonly DimmingSliderControl _dimmingControl;
+
+    public MonitorControlGroup(DisplayMonitorInfo monitor, int dimmingPercent)
+    {
+        Size = new Size(360, 156);
+        Margin = Padding.Empty;
+        Padding = Padding.Empty;
+        BackColor = SystemColors.Control;
+        DoubleBuffered = true;
+
+        _monitorLabel = new Label
+        {
+            AutoSize = true,
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            Location = new Point(10, 8),
+            MaximumSize = new Size(340, 0)
+        };
+        _brightnessControl = new BrightnessSliderControl();
+        _dimmingControl = new DimmingSliderControl(dimmingPercent);
+        _brightnessControl.BrightnessChanged += (_, _) => BrightnessChanged?.Invoke(this, EventArgs.Empty);
+        _dimmingControl.DimmingChanged += (_, _) => DimmingChanged?.Invoke(this, EventArgs.Empty);
+
+        Controls.Add(_monitorLabel);
+        Controls.Add(_brightnessControl);
+        Controls.Add(_dimmingControl);
+        UpdateMonitor(monitor, showMonitorName: false);
+    }
+
+    public event EventHandler? BrightnessChanged;
+
+    public event EventHandler? DimmingChanged;
+
+    public string ControlId { get; private set; } = string.Empty;
+
+    public int Brightness => _brightnessControl.Brightness;
+
+    public int DimmingPercent => _dimmingControl.DimmingPercent;
+
+    public bool IsBrightnessInteracting => _brightnessControl.IsInteracting;
+
+    public bool IsDimmingInteracting => _dimmingControl.IsInteracting;
+
+    public void UpdateMonitor(DisplayMonitorInfo monitor, bool showMonitorName)
+    {
+        ControlId = monitor.Id;
+        _monitorLabel.Text = monitor.DisplayName;
+        _monitorLabel.Visible = showMonitorName;
+        var contentTop = showMonitorName ? _monitorLabel.PreferredHeight + 16 : 0;
+        _brightnessControl.Location = new Point(0, contentTop);
+        _dimmingControl.Location = new Point(0, contentTop + _brightnessControl.Height);
+        Size = new Size(360, contentTop + _brightnessControl.Height + _dimmingControl.Height);
+    }
+
+    public void SetBrightnessAvailable(int brightness) => _brightnessControl.SetAvailable(brightness);
+
+    public void SetBrightnessUnavailable() => _brightnessControl.SetUnavailable();
+
+    public void SetDimmingAvailable(int dimmingPercent) => _dimmingControl.SetAvailable(dimmingPercent);
+
+    public void SetDimmingUnavailable() => _dimmingControl.SetUnavailable();
+}
+
 internal sealed class BrightnessSliderControl : UserControl
 {
     private readonly Label _titleLabel;
@@ -495,7 +869,7 @@ internal sealed class BrightnessSliderControl : UserControl
 
     public BrightnessSliderControl()
     {
-        Size = new Size(280, 78);
+        Size = new Size(360, 78);
         Margin = Padding.Empty;
         Padding = Padding.Empty;
         BackColor = SystemColors.Control;
@@ -512,7 +886,7 @@ internal sealed class BrightnessSliderControl : UserControl
         _valueLabel = new Label
         {
             AutoSize = true,
-            Location = new Point(184, 10)
+            Location = new Point(264, 10)
         };
 
         _trackBar = new TrackBar
@@ -523,7 +897,7 @@ internal sealed class BrightnessSliderControl : UserControl
             LargeChange = 10,
             SmallChange = 1,
             AutoSize = false,
-            Bounds = new Rectangle(10, 30, 260, 36),
+            Bounds = new Rectangle(10, 30, 340, 36),
             Value = 50
         };
         _trackBar.Scroll += (_, _) =>
@@ -594,10 +968,11 @@ internal sealed class DimmingSliderControl : UserControl
 {
     private readonly Label _valueLabel;
     private readonly TrackBar _trackBar;
+    private bool _isInteracting;
 
     public DimmingSliderControl(int dimmingPercent)
     {
-        Size = new Size(280, 78);
+        Size = new Size(360, 78);
         Margin = Padding.Empty;
         Padding = Padding.Empty;
         BackColor = SystemColors.Control;
@@ -614,7 +989,7 @@ internal sealed class DimmingSliderControl : UserControl
         _valueLabel = new Label
         {
             AutoSize = true,
-            Location = new Point(184, 10)
+            Location = new Point(264, 10)
         };
 
         _trackBar = new TrackBar
@@ -625,13 +1000,22 @@ internal sealed class DimmingSliderControl : UserControl
             LargeChange = 10,
             SmallChange = 1,
             AutoSize = false,
-            Bounds = new Rectangle(10, 30, 260, 36),
+            Bounds = new Rectangle(10, 30, 340, 36),
             Value = Math.Clamp(dimmingPercent, 0, 90)
         };
         _trackBar.Scroll += (_, _) =>
         {
             UpdateValueLabel();
             DimmingChanged?.Invoke(this, EventArgs.Empty);
+        };
+        _trackBar.MouseDown += (_, _) => _isInteracting = true;
+        _trackBar.MouseUp += (_, _) => _isInteracting = false;
+        _trackBar.MouseCaptureChanged += (_, _) =>
+        {
+            if (Control.MouseButtons == MouseButtons.None)
+            {
+                _isInteracting = false;
+            }
         };
 
         Controls.Add(titleLabel);
@@ -646,6 +1030,10 @@ internal sealed class DimmingSliderControl : UserControl
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int DimmingPercent => _trackBar.Value;
 
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool IsInteracting => _isInteracting || _trackBar.Capture;
+
     public void SetAvailable(int dimmingPercent)
     {
         _trackBar.Enabled = true;
@@ -655,6 +1043,7 @@ internal sealed class DimmingSliderControl : UserControl
 
     public void SetUnavailable()
     {
+        _isInteracting = false;
         _trackBar.Enabled = false;
         _valueLabel.Text = "Unavailable";
     }
@@ -919,17 +1308,41 @@ internal sealed class AppSettings
 {
     public bool TimedModeEnabled { get; set; }
 
+    public bool ControlMonitorsSeparately { get; set; }
+
     public int LightHour { get; set; } = 7;
 
     public int DarkHour { get; set; } = 19;
 
     public int ExtraDimmingPercent { get; set; }
 
+    public Dictionary<string, int>? ExtraDimmingByMonitor { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public int GetDimmingForMonitor(string monitorId)
+    {
+        return ExtraDimmingByMonitor?.TryGetValue(monitorId, out var dimmingPercent) == true
+            ? dimmingPercent
+            : ExtraDimmingPercent;
+    }
+
+    public void SetDimmingForMonitor(string monitorId, int dimmingPercent)
+    {
+        dimmingPercent = Math.Clamp(dimmingPercent, 0, 90);
+        ExtraDimmingByMonitor ??= new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        ExtraDimmingByMonitor[monitorId] = dimmingPercent;
+    }
+
     public void Normalize()
     {
         LightHour = NormalizeHour(LightHour);
         DarkHour = NormalizeHour(DarkHour);
         ExtraDimmingPercent = Math.Clamp(ExtraDimmingPercent, 0, 90);
+        ExtraDimmingByMonitor = new Dictionary<string, int>(
+            (ExtraDimmingByMonitor ?? new Dictionary<string, int>()).ToDictionary(
+                pair => pair.Key,
+                pair => Math.Clamp(pair.Value, 0, 90),
+                StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase);
     }
 
     private static int NormalizeHour(int hour)
@@ -980,10 +1393,14 @@ internal static class SettingsStore
 
 internal static class BrightnessService
 {
-    public static bool TryGetCurrentBrightness(out int brightness)
+    public static bool TryGetCurrentBrightness(string monitorId, out int brightness)
     {
-        var readings = ReadDdcBrightnessValues();
-        readings.AddRange(ReadWmiBrightnessValues());
+        var readings = ReadDdcBrightnessValues(monitorId);
+        if (readings.Count == 0)
+        {
+            readings.AddRange(ReadWmiBrightnessValues(monitorId));
+        }
+
         if (readings.Count == 0)
         {
             brightness = 0;
@@ -994,21 +1411,24 @@ internal static class BrightnessService
         return true;
     }
 
-    public static bool TrySetBrightness(int brightness)
+    public static bool TrySetBrightness(string monitorId, int brightness)
     {
         brightness = Math.Clamp(brightness, 0, 100);
-        var updatedDdc = TrySetDdcBrightness(brightness);
-        var updatedWmi = TrySetWmiBrightness(brightness);
-        return updatedDdc || updatedWmi;
+        if (TrySetDdcBrightness(monitorId, brightness))
+        {
+            return true;
+        }
+
+        return TrySetWmiBrightness(monitorId, brightness);
     }
 
-    private static List<int> ReadDdcBrightnessValues()
+    private static List<int> ReadDdcBrightnessValues(string monitorId)
     {
         var readings = new List<int>();
 
         try
         {
-            ForEachPhysicalMonitor(handle =>
+            ForEachPhysicalMonitor(monitorId, handle =>
             {
                 if (!GetMonitorBrightness(handle, out var minBrightness, out var currentBrightness, out var maxBrightness)
                     || maxBrightness <= minBrightness)
@@ -1027,11 +1447,11 @@ internal static class BrightnessService
         return readings;
     }
 
-    private static bool TrySetDdcBrightness(int brightness)
+    private static bool TrySetDdcBrightness(string monitorId, int brightness)
     {
         try
         {
-            return ForEachPhysicalMonitor(handle =>
+            return ForEachPhysicalMonitor(monitorId, handle =>
             {
                 if (!GetMonitorBrightness(handle, out var minBrightness, out _, out var maxBrightness)
                     || maxBrightness <= minBrightness)
@@ -1049,7 +1469,7 @@ internal static class BrightnessService
         }
     }
 
-    private static List<int> ReadWmiBrightnessValues()
+    private static List<int> ReadWmiBrightnessValues(string monitorId)
     {
         var readings = new List<int>();
 
@@ -1057,11 +1477,14 @@ internal static class BrightnessService
         {
             using var brightnessSearcher = new ManagementObjectSearcher(
                 @"root\wmi",
-                "SELECT CurrentBrightness FROM WmiMonitorBrightness WHERE Active = TRUE");
+                "SELECT CurrentBrightness, InstanceName FROM WmiMonitorBrightness WHERE Active = TRUE");
 
             foreach (ManagementObject brightness in brightnessSearcher.Get())
             {
-                readings.Add(Math.Clamp(Convert.ToInt32(brightness["CurrentBrightness"]), 0, 100));
+                if (MatchesMonitorHardwareId(monitorId, brightness["InstanceName"] as string))
+                {
+                    readings.Add(Math.Clamp(Convert.ToInt32(brightness["CurrentBrightness"]), 0, 100));
+                }
             }
         }
         catch
@@ -1071,7 +1494,7 @@ internal static class BrightnessService
         return readings;
     }
 
-    private static bool TrySetWmiBrightness(int brightness)
+    private static bool TrySetWmiBrightness(string monitorId, int brightness)
     {
         try
         {
@@ -1082,8 +1505,11 @@ internal static class BrightnessService
 
             foreach (ManagementObject method in methodsSearcher.Get())
             {
-                method.InvokeMethod("WmiSetBrightness", new object[] { 1u, (byte)brightness });
-                updated = true;
+                if (MatchesMonitorHardwareId(monitorId, method["InstanceName"] as string))
+                {
+                    method.InvokeMethod("WmiSetBrightness", new object[] { 1u, (byte)brightness });
+                    updated = true;
+                }
             }
 
             return updated;
@@ -1094,7 +1520,18 @@ internal static class BrightnessService
         }
     }
 
-    private static bool ForEachPhysicalMonitor(Func<IntPtr, bool> action)
+    private static bool MatchesMonitorHardwareId(string monitorId, string? wmiInstanceName)
+    {
+        var hardwareId = DisplayMonitorService.GetHardwareId(monitorId);
+        return !string.IsNullOrWhiteSpace(hardwareId)
+            && !string.IsNullOrWhiteSpace(wmiInstanceName)
+            && wmiInstanceName.Split('\\', StringSplitOptions.RemoveEmptyEntries)
+                .Skip(1)
+                .FirstOrDefault() is { } wmiHardwareId
+            && string.Equals(hardwareId, wmiHardwareId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ForEachPhysicalMonitor(string monitorId, Func<IntPtr, bool> action)
     {
         var updated = false;
         EnumDisplayMonitors(
@@ -1102,7 +1539,13 @@ internal static class BrightnessService
             IntPtr.Zero,
             (monitorHandle, _, _, _) =>
             {
-                if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitorHandle, out var physicalMonitorCount)
+                var monitorInfo = new MonitorInfoEx
+                {
+                    Size = Marshal.SizeOf<MonitorInfoEx>()
+                };
+                if (!GetMonitorInfo(monitorHandle, ref monitorInfo)
+                    || !string.Equals(monitorInfo.DeviceName, monitorId, StringComparison.OrdinalIgnoreCase)
+                    || !GetNumberOfPhysicalMonitorsFromHMONITOR(monitorHandle, out var physicalMonitorCount)
                     || physicalMonitorCount == 0)
                 {
                     return true;
@@ -1152,6 +1595,18 @@ internal static class BrightnessService
         public string Description;
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MonitorInfoEx
+    {
+        public int Size;
+        public Rectangle Monitor;
+        public Rectangle WorkArea;
+        public uint Flags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string DeviceName;
+    }
+
     private delegate bool MonitorEnumProc(IntPtr monitorHandle, IntPtr monitorDc, IntPtr monitorRect, IntPtr data);
 
     [DllImport("user32.dll")]
@@ -1160,6 +1615,9 @@ internal static class BrightnessService
         IntPtr lprcClip,
         MonitorEnumProc lpfnEnum,
         IntPtr dwData);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr monitorHandle, ref MonitorInfoEx monitorInfo);
 
     [DllImport("dxva2.dll", SetLastError = true)]
     private static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr hMonitor, out uint numberOfPhysicalMonitors);

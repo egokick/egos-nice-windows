@@ -321,6 +321,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void SetActive(bool isActive, bool showBalloon)
     {
+        if (!isActive)
+        {
+            InputSimulator.ResetMouseMovementBounds();
+        }
+
         UpdateSettings(settings => settings.IsActive = isActive);
         RefreshActivityController();
         RefreshUi();
@@ -334,6 +339,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void ToggleJiggleMouse()
     {
+        InputSimulator.ResetMouseMovementBounds();
         UpdateSettings(settings => settings.JiggleMouseEnabled = _jiggleMouseMenuItem.Checked);
         RefreshActivityController();
         RefreshUi();
@@ -407,7 +413,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         BeginWorkVmAction(
             "Requesting admin approval to open WorkVM with Bluetooth.",
-            "WorkVM Bluetooth-ready open command started.",
+            "WorkVM is open and Bluetooth is attached.",
             () => _workVmService.PassBluetoothToVm());
     }
 
@@ -415,7 +421,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         BeginWorkVmAction(
             "Requesting admin approval to switch Bluetooth to WorkVM.",
-            "Bluetooth switch to WorkVM started.",
+            "Bluetooth is attached to WorkVM.",
             () => _workVmService.PassBluetoothToVm());
     }
 
@@ -423,7 +429,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         BeginWorkVmAction(
             "Requesting admin approval to return Bluetooth to the laptop.",
-            "Bluetooth return to laptop started.",
+            "Bluetooth is back on the laptop and verified healthy.",
             () => _workVmService.ReturnBluetoothToLaptop());
     }
 
@@ -469,6 +475,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void HandleRealUserActivity()
     {
+        InputSimulator.ResetMouseMovementBounds();
         var settings = GetSettingsSnapshot();
         if (!_activityController.HandleRealUserActivity(settings))
         {
@@ -1535,54 +1542,144 @@ internal static class ActivityProfile
         }
     }
 
-    public static (int Radius, int Steps, double StartAngleDegrees) GetCirclePattern()
+    public static MouseMovementPattern GetMouseMovement(CursorPoint currentPosition, CursorPoint anchorPosition)
     {
         lock (SyncLock)
         {
-            return (
-                Radius: Random.Next(9, 19),
-                Steps: Random.Next(14, 25),
-                StartAngleDegrees: Random.NextDouble() * 360.0);
+            const int minimumDistance = 45;
+            const int maximumDistance = 180;
+
+            CursorPoint destination = currentPosition;
+            for (var attempt = 0; attempt < 16; attempt++)
+            {
+                var angle = Random.NextDouble() * Math.PI * 2.0;
+                var distance = Random.Next(minimumDistance, maximumDistance + 1);
+                var candidate = new CursorPoint(
+                    currentPosition.X + (int)Math.Round(Math.Cos(angle) * distance),
+                    currentPosition.Y + (int)Math.Round(Math.Sin(angle) * distance));
+
+                if (InputSimulator.IsWithinMouseMovementBounds(candidate, anchorPosition))
+                {
+                    destination = candidate;
+                    break;
+                }
+            }
+
+            if (destination.X == currentPosition.X && destination.Y == currentPosition.Y)
+            {
+                destination = new CursorPoint(
+                    Random.Next(anchorPosition.X - 300, anchorPosition.X + 301),
+                    Random.Next(anchorPosition.Y - 300, anchorPosition.Y + 301));
+            }
+
+            var deltaX = destination.X - currentPosition.X;
+            var deltaY = destination.Y - currentPosition.Y;
+            var distanceToDestination = Math.Sqrt((deltaX * deltaX) + (deltaY * deltaY));
+
+            return new MouseMovementPattern(
+                destination,
+                Steps: Math.Clamp((int)Math.Round(distanceToDestination / Random.Next(6, 11)), 8, 28),
+                CurveOffset: distanceToDestination * (0.05 + (Random.NextDouble() * 0.13))
+                    * (Random.Next(2) == 0 ? -1.0 : 1.0),
+                StepDelayMilliseconds: Random.Next(18, 34));
         }
+    }
+}
+
+internal readonly record struct MouseMovementPattern(
+    CursorPoint Destination,
+    int Steps,
+    double CurveOffset,
+    int StepDelayMilliseconds);
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct CursorPoint
+{
+    public int X;
+    public int Y;
+
+    public CursorPoint(int x, int y)
+    {
+        X = x;
+        Y = y;
     }
 }
 
 internal static class InputSimulator
 {
-    private const int InputMouse = 0;
+    private const int MouseMovementBoundsHalfSize = 300;
     private const int InputKeyboard = 1;
-    private const uint MouseeventfMove = 0x0001;
     private const uint KeyeventfKeyup = 0x0002;
     private const uint KeyeventfUnicode = 0x0004;
     private const ushort VkReturn = 0x0D;
     private const ushort VkShift = 0x10;
     private const ushort VkTab = 0x09;
+    private static readonly object MouseMovementLock = new();
+    private static CursorPoint? _mouseMovementAnchor;
     internal static readonly IntPtr SyntheticInputMarker = new(unchecked((long)0x5354415941435449));
 
     public static void JiggleMouse(CancellationToken cancellationToken)
     {
-        var pattern = ActivityProfile.GetCirclePattern();
-        var previousX = 0;
-        var previousY = 0;
+        if (!GetCursorPos(out var startPosition))
+        {
+            return;
+        }
 
-        for (var step = 0; step < pattern.Steps; step++)
+        CursorPoint anchorPosition;
+        lock (MouseMovementLock)
+        {
+            if (_mouseMovementAnchor is null
+                || !IsWithinMouseMovementBounds(startPosition, _mouseMovementAnchor.Value))
+            {
+                _mouseMovementAnchor = startPosition;
+            }
+
+            anchorPosition = _mouseMovementAnchor.Value;
+        }
+
+        var pattern = ActivityProfile.GetMouseMovement(startPosition, anchorPosition);
+        var deltaX = pattern.Destination.X - startPosition.X;
+        var deltaY = pattern.Destination.Y - startPosition.Y;
+        var distance = Math.Sqrt((deltaX * deltaX) + (deltaY * deltaY));
+        var perpendicularX = distance > 0 ? -deltaY / distance : 0;
+        var perpendicularY = distance > 0 ? deltaX / distance : 0;
+        for (var step = 1; step <= pattern.Steps; step++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var angle = (pattern.StartAngleDegrees + (step * 360.0 / pattern.Steps)) * Math.PI / 180.0;
-            var wobble = Math.Sin(angle * 2.0) * 1.5;
-            var radius = pattern.Radius + wobble;
-            var nextX = (int)Math.Round(Math.Cos(angle) * radius);
-            var nextY = (int)Math.Round(Math.Sin(angle) * radius);
-            SendMouseMove(nextX - previousX, nextY - previousY);
-            previousX = nextX;
-            previousY = nextY;
-            Thread.Sleep(30);
-        }
+            var progress = step / (double)pattern.Steps;
+            var easedProgress = progress * progress * (3.0 - (2.0 * progress));
+            var curve = Math.Sin(progress * Math.PI) * pattern.CurveOffset;
+            var nextPosition = new CursorPoint(
+                Math.Clamp(
+                    (int)Math.Round(startPosition.X + (deltaX * easedProgress) + (perpendicularX * curve)),
+                    anchorPosition.X - MouseMovementBoundsHalfSize,
+                    anchorPosition.X + MouseMovementBoundsHalfSize),
+                Math.Clamp(
+                    (int)Math.Round(startPosition.Y + (deltaY * easedProgress) + (perpendicularY * curve)),
+                    anchorPosition.Y - MouseMovementBoundsHalfSize,
+                    anchorPosition.Y + MouseMovementBoundsHalfSize));
 
-        if (previousX != 0 || previousY != 0)
-        {
-            SendMouseMove(-previousX, -previousY);
+            _ = SetCursorPos(nextPosition.X, nextPosition.Y);
+
+            if (cancellationToken.WaitHandle.WaitOne(pattern.StepDelayMilliseconds))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
         }
+    }
+
+    public static void ResetMouseMovementBounds()
+    {
+        lock (MouseMovementLock)
+        {
+            _mouseMovementAnchor = null;
+        }
+    }
+
+    internal static bool IsWithinMouseMovementBounds(CursorPoint position, CursorPoint anchorPosition)
+    {
+        return Math.Abs((long)position.X - anchorPosition.X) <= MouseMovementBoundsHalfSize
+            && Math.Abs((long)position.Y - anchorPosition.Y) <= MouseMovementBoundsHalfSize;
     }
 
     public static void PulseKeepAliveInput()
@@ -1606,29 +1703,6 @@ internal static class InputSimulator
         }
 
         SendUnicodeCharacter(character);
-    }
-
-    private static void SendMouseMove(int deltaX, int deltaY)
-    {
-        var inputs = new[]
-        {
-            new Input
-            {
-                type = InputMouse,
-                U = new InputUnion
-                {
-                    mi = new MouseInput
-                    {
-                        dx = deltaX,
-                        dy = deltaY,
-                        dwFlags = MouseeventfMove,
-                        dwExtraInfo = SyntheticInputMarker
-                    }
-                }
-            }
-        };
-
-        _ = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
     }
 
     private static void NudgeCursorPosition()
@@ -1717,7 +1791,7 @@ internal static class InputSimulator
     private static extern uint SendInput(uint nInputs, Input[] pInputs, int cbSize);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool GetCursorPos(out Point point);
+    private static extern bool GetCursorPos(out CursorPoint point);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetCursorPos(int x, int y);
@@ -1733,21 +1807,7 @@ internal static class InputSimulator
     private struct InputUnion
     {
         [FieldOffset(0)]
-        public MouseInput mi;
-
-        [FieldOffset(0)]
         public KeyboardInput ki;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MouseInput
-    {
-        public int dx;
-        public int dy;
-        public uint mouseData;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1760,12 +1820,6 @@ internal static class InputSimulator
         public IntPtr dwExtraInfo;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Point
-    {
-        public int X;
-        public int Y;
-    }
 }
 
 internal static class PowerAssertion

@@ -23,6 +23,8 @@ internal interface IWorkVmProcessRunner
 {
     string? RunAndCapture(string fileName, string arguments, TimeSpan timeout);
 
+    void RunAndWait(string fileName, string arguments, bool elevated, TimeSpan timeout);
+
     void Start(string fileName, string arguments, bool elevated);
 }
 
@@ -44,6 +46,9 @@ internal sealed class SystemWorkVmProcessRunner : IWorkVmProcessRunner
         };
 
         process.Start();
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+
         if (!process.WaitForExit((int)timeout.TotalMilliseconds))
         {
             try
@@ -57,10 +62,45 @@ internal sealed class SystemWorkVmProcessRunner : IWorkVmProcessRunner
             return null;
         }
 
-        return process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+        return standardOutput.GetAwaiter().GetResult() + standardError.GetAwaiter().GetResult();
+    }
+
+    public void RunAndWait(string fileName, string arguments, bool elevated, TimeSpan timeout)
+    {
+        using var process = new Process
+        {
+            StartInfo = CreateStartInfo(fileName, arguments, elevated)
+        };
+
+        process.Start();
+        if (!process.WaitForExit((int)timeout.TotalMilliseconds))
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit();
+            }
+            catch
+            {
+            }
+
+            throw new TimeoutException(
+                $"{Path.GetFileName(fileName)} did not finish within {timeout.TotalMinutes:0.#} minutes.");
+        }
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"{Path.GetFileName(fileName)} exited with code {process.ExitCode}.");
+        }
     }
 
     public void Start(string fileName, string arguments, bool elevated)
+    {
+        Process.Start(CreateStartInfo(fileName, arguments, elevated));
+    }
+
+    private static ProcessStartInfo CreateStartInfo(string fileName, string arguments, bool elevated)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -69,12 +109,13 @@ internal sealed class SystemWorkVmProcessRunner : IWorkVmProcessRunner
             UseShellExecute = true
         };
 
-        if (elevated)
+        if (!elevated)
         {
-            startInfo.Verb = "runas";
+            return startInfo;
         }
 
-        Process.Start(startInfo);
+        startInfo.Verb = "runas";
+        return startInfo;
     }
 }
 
@@ -82,6 +123,13 @@ internal sealed class WorkVmService
 {
     private const string DefaultVmName = "WorkRDP";
     private const string BluetoothHardwareId = @"USB\VID_13D3&PID_3602&MI_00";
+    private const string HealthyHostBluetoothMarker = "STAYACTIVE_BLUETOOTH_HOST_READY";
+    // Both scripts are transactional and restore filters/services in finally
+    // blocks. Their nested, bounded VM/PnP checks can exceed ten minutes on a
+    // slow host; leave enough headroom so the tray app never kills them during
+    // rollback and strands Bluetooth between owners.
+    private static readonly TimeSpan BluetoothToVmTimeout = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan BluetoothToLaptopTimeout = TimeSpan.FromMinutes(20);
 
     private readonly IWorkVmProcessRunner _runner;
     private readonly string _repoRoot;
@@ -106,6 +154,10 @@ internal sealed class WorkVmService
     public string BluetoothToVmScriptPath => Path.Combine(WorkVmFolder, "scripts", "37-repair-bluetooth-passthrough.ps1");
 
     public string BluetoothToLaptopScriptPath => Path.Combine(WorkVmFolder, "scripts", "33-return-laptop-bluetooth-to-host.ps1");
+
+    private string BluetoothToVmLogPath => Path.Combine(WorkVmFolder, ".cache", "bluetooth-passthrough-repair.log");
+
+    private string BluetoothToLaptopLogPath => Path.Combine(WorkVmFolder, ".cache", "bluetooth-return-to-host.log");
 
     public WorkVmStatus GetStatus()
     {
@@ -133,19 +185,19 @@ internal sealed class WorkVmService
     public void PassBluetoothToVm()
     {
         EnsureScriptExists(BluetoothToVmScriptPath);
-        _runner.Start(
-            "powershell.exe",
-            $"-NoProfile -ExecutionPolicy Bypass -File {Quote(BluetoothToVmScriptPath)} -VMName {Quote(_vmName)}",
-            elevated: true);
+        RunBluetoothScriptAndWait(
+            BluetoothToVmScriptPath,
+            BluetoothToVmLogPath,
+            BluetoothToVmTimeout);
     }
 
     public void ReturnBluetoothToLaptop()
     {
         EnsureScriptExists(BluetoothToLaptopScriptPath);
-        _runner.Start(
-            "powershell.exe",
-            $"-NoProfile -ExecutionPolicy Bypass -File {Quote(BluetoothToLaptopScriptPath)} -VMName {Quote(_vmName)}",
-            elevated: true);
+        RunBluetoothScriptAndWait(
+            BluetoothToLaptopScriptPath,
+            BluetoothToLaptopLogPath,
+            BluetoothToLaptopTimeout);
     }
 
     public void EnsureLaptopBluetoothEnabled()
@@ -204,21 +256,11 @@ internal sealed class WorkVmService
                 return BluetoothControlTarget.Vm;
             }
 
-            var usbHost = _runner.RunAndCapture(
-                vboxManage,
-                "list usbhost",
-                TimeSpan.FromSeconds(3));
-
-            if (!string.IsNullOrWhiteSpace(usbHost)
-                && ContainsCapturedBluetoothUsb(usbHost))
-            {
-                return BluetoothControlTarget.Vm;
-            }
         }
 
         var output = _runner.RunAndCapture(
             "powershell.exe",
-            "-NoProfile -ExecutionPolicy Bypass -Command \"$device = Get-PnpDevice | Where-Object { $_.InstanceId -like 'USB\\VID_13D3&PID_3602&MI_00*' } | Select-Object -First 1; if ($null -ne $device) { [string]$device.Status; [string]$device.Problem }\"",
+            "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + EncodePowerShellCommand(BuildHostBluetoothProbeCommand()),
             TimeSpan.FromSeconds(3));
 
         if (string.IsNullOrWhiteSpace(output))
@@ -226,13 +268,12 @@ internal sealed class WorkVmService
             return BluetoothControlTarget.Unknown;
         }
 
-        if (output.Contains("Disabled", StringComparison.OrdinalIgnoreCase))
-        {
-            return BluetoothControlTarget.Vm;
-        }
-
-        if (output.Contains("OK", StringComparison.OrdinalIgnoreCase)
-            || output.Contains("Started", StringComparison.OrdinalIgnoreCase))
+        if (output
+            .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+            .Any(line => string.Equals(
+                line.Trim(),
+                HealthyHostBluetoothMarker,
+                StringComparison.Ordinal)))
         {
             return BluetoothControlTarget.Laptop;
         }
@@ -257,26 +298,22 @@ internal sealed class WorkVmService
             return false;
         }
 
-        return attachedSection.Contains("13d3", StringComparison.OrdinalIgnoreCase)
-            || attachedSection.Contains("3602", StringComparison.OrdinalIgnoreCase)
-            || attachedSection.Contains("Wireless_Device", StringComparison.OrdinalIgnoreCase)
-            || attachedSection.Contains("MediaTek", StringComparison.OrdinalIgnoreCase)
-            || attachedSection.Contains("IMC Networks", StringComparison.OrdinalIgnoreCase);
+        var deviceBlocks = Regex.Matches(
+            attachedSection,
+            @"^[ \t]*UUID[ \t]*:.*?(?=^[ \t]*UUID[ \t]*:|\z)",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Singleline);
+
+        return deviceBlocks.Any(block =>
+            ContainsExactUsbId(block.Value, "VendorId", "13d3")
+            && ContainsExactUsbId(block.Value, "ProductId", "3602"));
     }
 
-    private static bool ContainsCapturedBluetoothUsb(string usbHost)
+    private static bool ContainsExactUsbId(string deviceBlock, string fieldName, string expectedHexValue)
     {
-        var blocks = usbHost.Split(
-            new[] { "\r\n\r\n", "\n\n" },
-            StringSplitOptions.RemoveEmptyEntries);
-
-        return blocks.Any(block =>
-            block.Contains("VendorId:", StringComparison.OrdinalIgnoreCase)
-            && block.Contains("0x13d3", StringComparison.OrdinalIgnoreCase)
-            && block.Contains("ProductId:", StringComparison.OrdinalIgnoreCase)
-            && block.Contains("0x3602", StringComparison.OrdinalIgnoreCase)
-            && block.Contains("Current State:", StringComparison.OrdinalIgnoreCase)
-            && block.Contains("Captured", StringComparison.OrdinalIgnoreCase));
+        return Regex.IsMatch(
+            deviceBlock,
+            $@"^[ \t]*{Regex.Escape(fieldName)}[ \t]*:[ \t]*(?:0x)?{Regex.Escape(expectedHexValue)}[ \t]*(?:\([^)\r\n]+\))?[ \t]*\r?$",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline);
     }
 
     private string? GetVBoxManagePath()
@@ -315,6 +352,49 @@ internal sealed class WorkVmService
         {
             throw new FileNotFoundException("Required WorkVM script was not found.", path);
         }
+    }
+
+    private void RunBluetoothScriptAndWait(string scriptPath, string logPath, TimeSpan timeout)
+    {
+        try
+        {
+            _runner.RunAndWait(
+                "powershell.exe",
+                $"-NoProfile -ExecutionPolicy Bypass -File {Quote(scriptPath)} -VMName {Quote(_vmName)}",
+                elevated: true,
+                timeout);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or TimeoutException)
+        {
+            var loggedError = TryReadLastScriptError(logPath);
+            throw new InvalidOperationException(loggedError ?? exception.Message, exception);
+        }
+    }
+
+    private static string? TryReadLastScriptError(string logPath)
+    {
+        try
+        {
+            if (!File.Exists(logPath))
+            {
+                return null;
+            }
+
+            foreach (var line in File.ReadLines(logPath).Reverse())
+            {
+                var markerIndex = line.IndexOf("] ERROR: ", StringComparison.Ordinal);
+                if (markerIndex >= 0)
+                {
+                    var message = line[(markerIndex + "] ERROR: ".Length)..].Trim();
+                    return string.IsNullOrWhiteSpace(message) ? null : message;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
     }
 
     private static string Quote(string value)
@@ -394,6 +474,49 @@ internal sealed class WorkVmService
             }
 
             pnputil /scan-devices | Out-Null
+            """;
+    }
+
+    private static string BuildHostBluetoothProbeCommand()
+    {
+        return $$"""
+            $devices = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
+
+            $parents = @($devices |
+                Where-Object { $_.InstanceId -like 'USB\VID_13D3&PID_3602\*' })
+
+            $interfaces = @($devices |
+                Where-Object { $_.InstanceId -like 'USB\VID_13D3&PID_3602&MI_00\*' })
+
+            function Test-HealthyBluetoothDevice {
+                param([object]$Device)
+
+                if ($null -eq $Device) {
+                    return $false
+                }
+
+                $problem = [string]$Device.Problem
+                return (
+                    [string]$Device.Status -eq 'OK' -and
+                    (
+                        [string]::IsNullOrWhiteSpace($problem) -or
+                        $problem -eq '0' -or
+                        $problem -eq 'CM_PROB_NONE'
+                    )
+                )
+            }
+
+            $service = Get-Service -Name 'bthserv' -ErrorAction SilentlyContinue
+            if (
+                $parents.Count -eq 1 -and
+                $interfaces.Count -eq 1 -and
+                (Test-HealthyBluetoothDevice $parents[0]) -and
+                (Test-HealthyBluetoothDevice $interfaces[0]) -and
+                $null -ne $service -and
+                [string]$service.Status -eq 'Running'
+            ) {
+                '{{HealthyHostBluetoothMarker}}'
+            }
             """;
     }
 }

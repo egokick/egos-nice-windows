@@ -117,6 +117,31 @@ Hotkeys in the guest:
 
 Check your organization's policy before using any keepalive automation.
 
+## Reliability profile
+
+`WorkRDP` uses 4 vCPUs and PS/2-emulated keyboard and mouse. The xHCI
+controller is reserved for the physical Bluetooth adapter. StayActive disables
+VirtualBox's Save State close action and discards any saved memory state it
+finds, so `Open VM` always starts Windows cleanly from disk.
+
+For a reversible native-VirtualBox comparison, run:
+
+```powershell
+.\scripts\41-prepare-one-time-native-virtualbox-boot.ps1
+```
+
+This creates a BCD backup and schedules a separate Hyper-V/VBS-disabled entry
+for the next restart only. It does not change the normal secured Windows entry.
+After that restart, open WorkRDP and run:
+
+```powershell
+.\scripts\42-verify-one-time-native-virtualbox-boot.ps1
+```
+
+Restart normally to return to the secured Windows boot, then remove the hidden
+test entry with `43-remove-native-virtualbox-test-entry.ps1`. The test boot
+temporarily disables Memory Integrity and related VBS protections.
+
 ## Why not Hyper-V or a Chrome extension?
 
 Hyper-V on Windows does not provide simple native USB passthrough for the Bluetooth/authenticator path. Chrome extensions can keep a browser or display awake, but they cannot reliably generate trusted input into a hidden browser RDP canvas. The VM approach gives the RDP browser its own focused desktop and gives phone auth a direct Bluetooth path.

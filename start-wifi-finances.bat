@@ -3,7 +3,8 @@ setlocal
 
 set "ROOT_DIR=%~dp0"
 set "WIFI_URL=http://127.0.0.1:5136"
-set "FINANCE_URL=http://127.0.0.1:5137"
+set "FINANCE_HEALTH_URL=http://127.0.0.1:5137"
+set "FINANCE_URL=http://finance.local:5137"
 
 call "%ROOT_DIR%wifidevices\start.bat"
 if errorlevel 1 exit /b 1
@@ -16,7 +17,7 @@ powershell -NoProfile -Command ^
   "do {" ^
   "  try {" ^
   "    Invoke-WebRequest '%WIFI_URL%' -UseBasicParsing -TimeoutSec 2 | Out-Null;" ^
-  "    Invoke-WebRequest '%FINANCE_URL%' -UseBasicParsing -TimeoutSec 2 | Out-Null;" ^
+  "    Invoke-WebRequest '%FINANCE_HEALTH_URL%' -UseBasicParsing -TimeoutSec 2 | Out-Null;" ^
   "    exit 0" ^
   "  } catch { Start-Sleep -Milliseconds 500 }" ^
   "} while ((Get-Date) -lt $deadline);" ^

@@ -99,19 +99,24 @@ Invoke-VBox @(
     "--boot3=none",
     "--boot4=none",
     "--nic1=nat",
-    "--mouse=usbtablet",
-    "--keyboard=usb",
+    "--mouse=ps2",
+    "--keyboard=ps2",
     "--audio-driver=default",
     "--audio-controller=hda",
     "--clipboard-mode=bidirectional",
     "--clipboard-file-transfers=enabled",
     "--drag-and-drop=bidirectional",
+    "--usb-ohci=off",
     "--usb-xhci=on"
 )
 
 Invoke-VBox @("setextradata", $VMName, "CustomVideoMode1", "${Width}x${Height}x${BitsPerPixel}")
 Invoke-VBox @("setextradata", $VMName, "GUI/LastGuestSizeHint", "${Width},${Height}")
 Invoke-VBox @("setextradata", $VMName, "VBoxInternal2/EfiGraphicsResolution", "${Width}x${Height}")
+Invoke-VBox @("setextradata", $VMName, "GUI/DefaultCloseAction", "Shutdown")
+Invoke-VBox @("setextradata", $VMName, "GUI/RestrictedCloseActions", "SaveState")
+Invoke-VBox @("setextradata", $VMName, "GUI/RestrictedRuntimeMachineMenuActions", "SaveState")
+Invoke-VBox @("setextradata", $VMName, "GUI/LastCloseAction", "Shutdown")
 
 try {
     Invoke-VBox @("modifyvm", $VMName, "--tpm-type=2.0")
