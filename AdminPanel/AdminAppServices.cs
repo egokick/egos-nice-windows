@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using Microsoft.Win32;
 
 namespace AdminPanel;
@@ -21,6 +22,10 @@ internal sealed record AdminAppDefinition(
     internal string? NativeStartupExecutablePath { get; init; }
 
     internal bool PreferBatchStartup { get; init; }
+
+    // True when start.bat builds/starts a detached process and then exits.
+    // The Admin Panel can wait for these launchers and surface their real errors.
+    internal bool BatchExitsAfterLaunch { get; init; }
 
     internal IReadOnlyList<string> LocalWebUrls { get; init; } = [];
 }
@@ -46,7 +51,8 @@ internal static class AdminAppCatalog
             "power-mode-toggle",
             "PowerModeToggle")
         {
-            NativeStartupExecutablePath = @"PowerModeToggle\bin\Release\net10.0-windows\win-x64\publish\PowerModeToggle.exe"
+            NativeStartupExecutablePath = @"PowerModeToggle\bin\Release\net10.0-windows\win-x64\publish\PowerModeToggle.exe",
+            BatchExitsAfterLaunch = true
         },
         new(
             "stayactive",
@@ -57,7 +63,8 @@ internal static class AdminAppCatalog
             "stayactive",
             "StayActive")
         {
-            NativeStartupExecutablePath = @"stayactive\bin\Release\net10.0-windows\stayactive.exe"
+            NativeStartupExecutablePath = @"stayactive\bin\Release\net10.0-windows\stayactive.exe",
+            BatchExitsAfterLaunch = true
         },
         new(
             "voicecodex",
@@ -81,6 +88,7 @@ internal static class AdminAppCatalog
         {
             NativeStartupExecutablePath = @"wifidevices\bin\Debug\net10.0-windows\wifidevices.exe",
             PreferBatchStartup = true,
+            BatchExitsAfterLaunch = true,
             LocalWebUrls = ["http://127.0.0.1:5136/"]
         },
         new(
@@ -94,7 +102,8 @@ internal static class AdminAppCatalog
         {
             NativeStartupExecutablePath = @"finance\bin\Debug\net10.0-windows\finance.exe",
             PreferBatchStartup = true,
-            LocalWebUrls = ["http://127.0.0.1:5137/"]
+            BatchExitsAfterLaunch = true,
+            LocalWebUrls = ["http://finance.local:5137/"]
         },
         new(
             "workflow-manager",
@@ -103,7 +112,10 @@ internal static class AdminAppCatalog
             "workflow-manager",
             AdminAppLogoKind.Embedded,
             "workflow-manager",
-            "NiceWindows.WorkflowManager"),
+            "NiceWindows.WorkflowManager")
+        {
+            BatchExitsAfterLaunch = true
+        },
         new(
             "youtube-sync-tray",
             "YouTube Sync Tray",
@@ -114,6 +126,7 @@ internal static class AdminAppCatalog
             "YouTubeSyncTray")
         {
             NativeStartupExecutablePath = @"YouTubeSyncTray\bin\Release\net10.0-windows\YouTubeSyncTray.exe",
+            BatchExitsAfterLaunch = true,
             LocalWebUrls = ["http://tom.localhost/", "http://127.0.0.1:48173/"]
         },
         new(
@@ -125,7 +138,8 @@ internal static class AdminAppCatalog
             "light-dark-toggle",
             "LightDarkToggle")
         {
-            NativeStartupExecutablePath = @"LightDarkToggle\bin\Release\net10.0-windows\LightDarkToggle.exe"
+            NativeStartupExecutablePath = @"LightDarkToggle\bin\Release\net10.0-windows\LightDarkToggle.exe",
+            BatchExitsAfterLaunch = true
         },
         new(
             "nemotron-mic",
@@ -287,9 +301,50 @@ internal static class AdminAppLauncher
 
         return Task.Run(() =>
         {
+            // StayActive can have a tray process and one or more short-lived
+            // Chrome native-host processes using the same executable. Launch
+            // the existing output first: the tray mutex makes this idempotent,
+            // and a native-host-only state still receives a real tray process.
+            // Most importantly, no restore, stop, or in-place build can race a
+            // Chrome native-host reconnect while that executable exists.
+            if (IsStayActiveApp(app))
+            {
+                if (!TryLaunchCurrentNativeExecutable(
+                        app,
+                        out var launched,
+                        out var stayActiveLaunchError))
+                {
+                    return new LaunchResult(false, stayActiveLaunchError);
+                }
+
+                if (launched)
+                {
+                    return new LaunchResult(true, string.Empty);
+                }
+            }
+
             if (!TryPrepareDependencies(app, out var errorMessage))
             {
                 return new LaunchResult(false, errorMessage);
+            }
+
+            if (!TryStopExistingProcesses(app, out errorMessage))
+            {
+                return new LaunchResult(false, errorMessage);
+            }
+
+            if (!TryLaunchCurrentNativeExecutableIfCurrent(
+                    app,
+                    out var currentOutputLaunched,
+                    out errorMessage))
+            {
+                return new LaunchResult(false, errorMessage);
+            }
+
+            if (currentOutputLaunched)
+            {
+                OpenLocalWebPageWhenReady(app);
+                return new LaunchResult(true, string.Empty);
             }
 
             if (!TryStart(app, out errorMessage))
@@ -302,6 +357,130 @@ internal static class AdminAppLauncher
         });
     }
 
+    private static bool IsStayActiveApp(AdminAppDefinition app)
+    {
+        return string.Equals(app.Id, "stayactive", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryStopExistingProcesses(
+        AdminAppDefinition app,
+        out string errorMessage)
+    {
+        try
+        {
+            var appFolder = Path.TrimEndingDirectorySeparator(
+                                NiceWindowsRepositoryLocator.GetAppFolder(app))
+                            + Path.DirectorySeparatorChar;
+            var script = $$"""
+                $ErrorActionPreference = 'Stop'
+                $appFolder = '{{EscapePowerShellSingleQuotedString(appFolder)}}'
+                $comparison = [System.StringComparison]::OrdinalIgnoreCase
+                $currentProcessId = $PID
+                $matches = @(
+                    Get-CimInstance Win32_Process | Where-Object {
+                        if ($_.ProcessId -eq $currentProcessId) {
+                            return $false
+                        }
+
+                        $executableMatches =
+                            -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+                            $_.ExecutablePath.StartsWith($appFolder, $comparison)
+                        $commandMatches =
+                            -not [string]::IsNullOrWhiteSpace($_.CommandLine) -and
+                            $_.CommandLine.IndexOf($appFolder, $comparison) -ge 0
+                        $executableMatches -or $commandMatches
+                    }
+                )
+
+                foreach ($process in $matches) {
+                    try {
+                        Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+                    }
+                    catch {
+                        if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) {
+                            throw
+                        }
+
+                        # A parent or child may have exited while the matched process
+                        # tree was being stopped. That already satisfies the restart.
+                    }
+                }
+
+                if ($matches.Count -gt 0) {
+                    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+                    do {
+                        $remaining = @(
+                            $matches | Where-Object {
+                                Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+                            }
+                        )
+                        if ($remaining.Count -eq 0) {
+                            break
+                        }
+                        Start-Sleep -Milliseconds 100
+                    } while ([DateTime]::UtcNow -lt $deadline)
+
+                    if ($remaining.Count -gt 0) {
+                        throw "Timed out waiting for process ID(s) $($remaining.ProcessId -join ', ') to stop."
+                    }
+                }
+                """;
+            var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = GetPowerShellPath(),
+                    Arguments =
+                        $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass " +
+                        $"-EncodedCommand {encodedScript}",
+                    WorkingDirectory = appFolder,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
+            };
+
+            if (!process.Start())
+            {
+                errorMessage =
+                    $"Windows did not start the restart helper for {app.DisplayName}.";
+                return false;
+            }
+
+            var standardOutputTask = process.StandardOutput.ReadToEndAsync();
+            var standardErrorTask = process.StandardError.ReadToEndAsync();
+            process.WaitForExit();
+            Task.WaitAll(standardOutputTask, standardErrorTask);
+            if (process.ExitCode == 0)
+            {
+                errorMessage = string.Empty;
+                return true;
+            }
+
+            errorMessage =
+                $"The existing {app.DisplayName} process could not be stopped " +
+                $"(exit code {process.ExitCode}).";
+            var details = GetOutputTail(standardErrorTask.Result, standardOutputTask.Result);
+            if (!string.IsNullOrWhiteSpace(details))
+            {
+                errorMessage += $" {details}";
+            }
+
+            return false;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+                                             or System.ComponentModel.Win32Exception
+                                             or IOException
+                                             or UnauthorizedAccessException)
+        {
+            errorMessage =
+                $"Could not stop the existing {app.DisplayName} process: {exception.Message}";
+            return false;
+        }
+    }
+
     private static bool TryPrepareDependencies(AdminAppDefinition app, out string errorMessage)
     {
         ArgumentNullException.ThrowIfNull(app);
@@ -309,6 +488,12 @@ internal static class AdminAppLauncher
         try
         {
             var appFolder = NiceWindowsRepositoryLocator.GetAppFolder(app);
+            if (IsDependencyPreparationCurrent(appFolder))
+            {
+                errorMessage = string.Empty;
+                return true;
+            }
+
             var preparationScript = Path.Combine(
                 NiceWindowsRepositoryLocator.GetRepositoryRoot(),
                 "scripts",
@@ -361,6 +546,7 @@ internal static class AdminAppLauncher
                 return false;
             }
 
+            WriteDependencyPreparationMarker(appFolder);
             errorMessage = string.Empty;
             return true;
         }
@@ -374,6 +560,210 @@ internal static class AdminAppLauncher
         }
     }
 
+    private static bool TryLaunchCurrentNativeExecutable(
+        AdminAppDefinition app,
+        out bool launched,
+        out string errorMessage)
+    {
+        launched = false;
+        errorMessage = string.Empty;
+
+        if (app.PreferBatchStartup || string.IsNullOrWhiteSpace(app.NativeStartupExecutablePath))
+        {
+            return true;
+        }
+
+        try
+        {
+            var repositoryRoot = NiceWindowsRepositoryLocator.GetRepositoryRoot();
+            var appFolder = NiceWindowsRepositoryLocator.GetAppFolder(app);
+            var executablePath = Path.Combine(repositoryRoot, app.NativeStartupExecutablePath);
+            if (!File.Exists(executablePath))
+            {
+                return true;
+            }
+
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executablePath,
+                WorkingDirectory = appFolder,
+                UseShellExecute = true
+            });
+            if (process is null)
+            {
+                errorMessage = $"Windows did not start {app.DisplayName} ('{executablePath}').";
+                return false;
+            }
+
+            launched = true;
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+                                             or System.ComponentModel.Win32Exception
+                                             or IOException
+                                             or UnauthorizedAccessException)
+        {
+            errorMessage = $"Could not quick-launch {app.DisplayName}: {exception.Message}";
+            return false;
+        }
+    }
+
+    private static bool TryLaunchCurrentNativeExecutableIfCurrent(
+        AdminAppDefinition app,
+        out bool launched,
+        out string errorMessage)
+    {
+        launched = false;
+        errorMessage = string.Empty;
+
+        if (app.PreferBatchStartup || string.IsNullOrWhiteSpace(app.NativeStartupExecutablePath))
+        {
+            return true;
+        }
+
+        try
+        {
+            var repositoryRoot = NiceWindowsRepositoryLocator.GetRepositoryRoot();
+            var appFolder = NiceWindowsRepositoryLocator.GetAppFolder(app);
+            var executablePath = Path.Combine(repositoryRoot, app.NativeStartupExecutablePath);
+            if (!File.Exists(executablePath) || !IsBuildOutputCurrent(appFolder, executablePath))
+            {
+                return true;
+            }
+
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executablePath,
+                WorkingDirectory = appFolder,
+                UseShellExecute = true
+            });
+            if (process is null)
+            {
+                errorMessage = $"Windows did not start {app.DisplayName} ('{executablePath}').";
+                return false;
+            }
+
+            launched = true;
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+                                             or System.ComponentModel.Win32Exception
+                                             or IOException
+                                             or UnauthorizedAccessException)
+        {
+            errorMessage = $"Could not quick-launch {app.DisplayName}: {exception.Message}";
+            return false;
+        }
+    }
+
+    private static bool IsBuildOutputCurrent(string appFolder, string executablePath)
+    {
+        var executableWriteTime = File.GetLastWriteTimeUtc(executablePath);
+        foreach (var inputPath in EnumerateBuildInputs(appFolder))
+        {
+            if (File.GetLastWriteTimeUtc(inputPath) > executableWriteTime)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static IEnumerable<string> EnumerateBuildInputs(string appFolder)
+    {
+        var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".cs", ".csproj", ".fs", ".fsproj", ".props", ".targets", ".resx",
+            ".xaml", ".config", ".json", ".xml"
+        };
+
+        foreach (var path in Directory.EnumerateFiles(appFolder, "*", SearchOption.AllDirectories))
+        {
+            var relativePath = Path.GetRelativePath(appFolder, path);
+            if (relativePath.StartsWith("bin" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || relativePath.StartsWith("obj" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || relativePath.StartsWith(".git" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || relativePath.StartsWith(".vs" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (extensions.Contains(Path.GetExtension(path))
+                || string.Equals(Path.GetFileName(path), "start.bat", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return path;
+            }
+        }
+    }
+
+    private static bool IsDependencyPreparationCurrent(string appFolder)
+    {
+        var markerPath = GetDependencyPreparationMarkerPath(appFolder);
+        if (!File.Exists(markerPath))
+        {
+            return false;
+        }
+
+        var markerWriteTime = File.GetLastWriteTimeUtc(markerPath);
+        return EnumerateDependencyInputs(appFolder)
+            .All(path => File.GetLastWriteTimeUtc(path) <= markerWriteTime);
+    }
+
+    private static IEnumerable<string> EnumerateDependencyInputs(string appFolder)
+    {
+        var dependencyFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "packages.lock.json", "nuget.config", "directory.packages.props", "requirements.txt",
+            "pyproject.toml", "poetry.lock", "uv.lock", "package.json", "package-lock.json"
+        };
+        var dependencyExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".csproj", ".fsproj", ".props", ".targets"
+        };
+
+        foreach (var path in Directory.EnumerateFiles(appFolder, "*", SearchOption.AllDirectories))
+        {
+            if (dependencyFileNames.Contains(Path.GetFileName(path))
+                || dependencyExtensions.Contains(Path.GetExtension(path)))
+            {
+                yield return path;
+            }
+        }
+
+        var scriptsFolder = Path.Combine(NiceWindowsRepositoryLocator.GetRepositoryRoot(), "scripts");
+        foreach (var path in Directory.EnumerateFiles(scriptsFolder, "*", SearchOption.TopDirectoryOnly))
+        {
+            if (string.Equals(Path.GetExtension(path), ".bat", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Path.GetExtension(path), ".ps1", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return path;
+            }
+        }
+    }
+
+    private static string GetDependencyPreparationMarkerPath(string appFolder)
+    {
+        return Path.Combine(appFolder, "obj", "admin-panel", "dependency-prepared.marker");
+    }
+
+    private static void WriteDependencyPreparationMarker(string appFolder)
+    {
+        try
+        {
+            var markerPath = GetDependencyPreparationMarkerPath(appFolder);
+            Directory.CreateDirectory(Path.GetDirectoryName(markerPath)!);
+            File.WriteAllText(markerPath, DateTime.UtcNow.ToString("O"));
+        }
+        catch (IOException)
+        {
+            // Dependency preparation has still succeeded; this launch will simply not be cached.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Dependency preparation has still succeeded; this launch will simply not be cached.
+        }
+    }
     private static bool TryStart(AdminAppDefinition app, out string errorMessage)
     {
         ArgumentNullException.ThrowIfNull(app);
@@ -389,23 +779,9 @@ internal static class AdminAppLauncher
                 return false;
             }
 
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = GetCommandProcessorPath(),
-                Arguments = $"/d /c call {QuoteCommandArgument(startBatchPath)}",
-                WorkingDirectory = appFolder,
-                UseShellExecute = true
-            });
-
-            if (process is null)
-            {
-                errorMessage =
-                    $"Windows did not start the launcher for {app.DisplayName} ('{startBatchPath}').";
-                return false;
-            }
-
-            errorMessage = string.Empty;
-            return true;
+            return app.BatchExitsAfterLaunch
+                ? TryRunDetachedBatch(app, appFolder, startBatchPath, out errorMessage)
+                : TryRunAttachedBatch(app, appFolder, startBatchPath, out errorMessage);
         }
         catch (Exception exception) when (exception is InvalidOperationException
                                              or System.ComponentModel.Win32Exception
@@ -415,6 +791,159 @@ internal static class AdminAppLauncher
             errorMessage = $"Could not start {app.DisplayName}: {exception.Message}";
             return false;
         }
+    }
+
+    private static bool TryRunDetachedBatch(
+        AdminAppDefinition app,
+        string appFolder,
+        string startBatchPath,
+        out string errorMessage)
+    {
+        CleanupOldLaunchLogs();
+        var outputPath = Path.Combine(
+            Path.GetTempPath(),
+            $"nicewindows-admin-launch-{Guid.NewGuid():N}.log");
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = GetCommandProcessorPath(),
+                    Arguments = $"/d /c call {QuoteCommandArgument(startBatchPath)} " +
+                                $"1> {QuoteCommandArgument(outputPath)} 2>&1",
+                    WorkingDirectory = appFolder,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+
+            if (!process.Start())
+            {
+                errorMessage =
+                    $"Windows did not start the launcher for {app.DisplayName} ('{startBatchPath}').";
+                return false;
+            }
+
+            process.WaitForExit();
+            var output = ReadSharedLaunchLog(outputPath);
+            if (process.ExitCode == 0)
+            {
+                errorMessage = string.Empty;
+                return true;
+            }
+
+            errorMessage = $"{app.DisplayName} could not be started (exit code {process.ExitCode}).";
+            var details = GetOutputTail(string.Empty, output);
+            if (!string.IsNullOrWhiteSpace(details))
+            {
+                errorMessage += $" {details}";
+            }
+
+            return false;
+        }
+        finally
+        {
+            TryDeleteLaunchLog(outputPath);
+        }
+    }
+
+    private static string ReadSharedLaunchLog(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return string.Empty;
+            }
+
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
+        }
+        catch (IOException)
+        {
+            return string.Empty;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static void CleanupOldLaunchLogs()
+    {
+        try
+        {
+            var cutoff = DateTime.UtcNow.AddDays(-1);
+            foreach (var path in Directory.EnumerateFiles(
+                         Path.GetTempPath(),
+                         "nicewindows-admin-launch-*.log"))
+            {
+                if (File.GetLastWriteTimeUtc(path) < cutoff)
+                {
+                    TryDeleteLaunchLog(path);
+                }
+            }
+        }
+        catch (IOException)
+        {
+            // A launch must not fail because old diagnostic logs are unavailable.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // A launch must not fail because old diagnostic logs are unavailable.
+        }
+    }
+
+    private static void TryDeleteLaunchLog(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // A detached child can briefly retain the inherited log handle. A later
+            // launch cleans up logs older than one day.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Diagnostic cleanup is best-effort and must not change launch success.
+        }
+    }
+
+    private static bool TryRunAttachedBatch(
+        AdminAppDefinition app,
+        string appFolder,
+        string startBatchPath,
+        out string errorMessage)
+    {
+        var arguments = $"/d /c call {QuoteCommandArgument(startBatchPath)} " +
+                        "|| (echo. & echo The app failed to start. Review the error above. & " +
+                        "echo Press any key to close this window. & pause ^>NUL)";
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = GetCommandProcessorPath(),
+            Arguments = arguments,
+            WorkingDirectory = appFolder,
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Normal
+        });
+
+        if (process is null)
+        {
+            errorMessage =
+                $"Windows did not start the launcher for {app.DisplayName} ('{startBatchPath}').";
+            return false;
+        }
+
+        errorMessage = string.Empty;
+        return true;
     }
 
     private static void OpenLocalWebPageWhenReady(AdminAppDefinition app)
@@ -483,6 +1012,26 @@ internal static class AdminAppLauncher
         }
 
         return commandProcessorPath;
+    }
+
+    private static string GetPowerShellPath()
+    {
+        var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        var powerShellPath = string.IsNullOrWhiteSpace(systemDirectory)
+            ? "powershell.exe"
+            : Path.Combine(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+
+        if (!File.Exists(powerShellPath))
+        {
+            throw new FileNotFoundException("Windows PowerShell could not be located.");
+        }
+
+        return powerShellPath;
+    }
+
+    private static string EscapePowerShellSingleQuotedString(string value)
+    {
+        return value.Replace("'", "''", StringComparison.Ordinal);
     }
 
     private static string QuoteCommandArgument(string value)
@@ -632,14 +1181,9 @@ internal static class AdminAppAutoStartService
         if (!app.PreferBatchStartup
             && !string.IsNullOrWhiteSpace(app.NativeStartupExecutablePath))
         {
-            var executablePath = string.Equals(
-                app.Id,
-                "light-dark-toggle",
-                StringComparison.OrdinalIgnoreCase)
-                ? Application.ExecutablePath
-                : Path.Combine(
-                    NiceWindowsRepositoryLocator.GetRepositoryRoot(),
-                    app.NativeStartupExecutablePath);
+            var executablePath = Path.Combine(
+                NiceWindowsRepositoryLocator.GetRepositoryRoot(),
+                app.NativeStartupExecutablePath);
             if (File.Exists(executablePath))
             {
                 return QuoteCommandArgument(Path.GetFullPath(executablePath));

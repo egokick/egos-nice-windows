@@ -16,25 +16,29 @@ public sealed class BluetoothHandoffScriptSafetyTests
         "Open VM",
         "_openWorkVmMenuItem",
         "OpenWorkVm",
-        "PassBluetoothToVm",
-        BluetoothToVmScriptName)]
+        "OpenWithBluetooth",
+        "OpenScriptPath",
+        "open-work.ps1")]
     [InlineData(
         "Put Bluetooth on VM",
         "_switchBluetoothToVmMenuItem",
         "SwitchBluetoothToVm",
-        "PassBluetoothToVm",
-        BluetoothToVmScriptName)]
+        "PutBluetoothOnContainer",
+        "BluetoothToContainerScriptPath",
+        "put-bluetooth-on-container.ps1")]
     [InlineData(
         "Put Bluetooth on laptop",
         "_returnBluetoothToLaptopMenuItem",
         "ReturnBluetoothToLaptop",
-        "ReturnBluetoothToLaptop",
-        ReturnToLaptopScriptName)]
+        "PutBluetoothOnLaptop",
+        "BluetoothToLaptopScriptPath",
+        "put-bluetooth-on-laptop.ps1")]
     public void MenuAction_RoutesToIntendedServiceOperationAndScript(
         string label,
         string menuField,
         string handler,
         string serviceOperation,
+        string scriptPathProperty,
         string scriptName)
     {
         var program = ReadRepositoryFile("stayactive", "Program.cs");
@@ -52,22 +56,61 @@ public sealed class BluetoothHandoffScriptSafetyTests
             $"private void {handler}()");
         var serviceCalls = Regex.Matches(
                 handlerBody,
-                @"_workVmService\.(?<operation>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
+                @"_dockerWorkService\.(?<operation>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
             .Select(match => match.Groups["operation"].Value)
             .ToArray();
         Assert.Equal(new[] { serviceOperation }, serviceCalls);
 
-        var service = ReadRepositoryFile("stayactive", "WorkVmService.cs");
+        var service = ReadRepositoryFile("stayactive", "DockerWorkService.cs");
         var operationBody = ExtractBraceBlock(
             service,
             $"public void {serviceOperation}()");
-        var scriptPathProperty = serviceOperation == "ReturnBluetoothToLaptop"
-            ? "BluetoothToLaptopScriptPath"
-            : "BluetoothToVmScriptPath";
         Assert.Contains(scriptPathProperty, operationBody, StringComparison.Ordinal);
         Assert.Matches(
             $@"{Regex.Escape(scriptPathProperty)}\s*=>[\s\S]*?""{Regex.Escape(scriptName)}""",
             service);
+    }
+
+    [Fact]
+    public void DockerWorkMenuReadiness_KeepsLaptopRecoveryIndependentOfSetup()
+    {
+        var program = ReadRepositoryFile("stayactive", "Program.cs");
+        var refreshBody = ExtractBraceBlock(
+            program,
+            "private void RefreshDockerWorkMenuItems()");
+
+        Assert.Contains("status.SetupComplete", refreshBody, StringComparison.Ordinal);
+        Assert.Contains(
+            "_openWorkVmMenuItem.Enabled = !_dockerWorkActionRunning && openReady",
+            refreshBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "_switchBluetoothToVmMenuItem.Enabled = !_dockerWorkActionRunning && containerHandoffReady",
+            refreshBody,
+            StringComparison.Ordinal);
+
+        var laptopReadinessStart = refreshBody.IndexOf(
+            "var laptopRecoveryAvailable",
+            StringComparison.Ordinal);
+        var menuAssignmentsStart = refreshBody.IndexOf(
+            "_openWorkVmMenuItem.Enabled",
+            StringComparison.Ordinal);
+        Assert.True(laptopReadinessStart >= 0);
+        Assert.True(menuAssignmentsStart > laptopReadinessStart);
+        var laptopReadiness = refreshBody[laptopReadinessStart..menuAssignmentsStart];
+        Assert.Contains(
+            "_dockerWorkService.BluetoothToLaptopScriptPath",
+            laptopReadiness,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "status.BluetoothToLaptopScriptExists",
+            laptopReadiness,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("SetupComplete", laptopReadiness, StringComparison.Ordinal);
+        Assert.Contains(
+            "_returnBluetoothToLaptopMenuItem.Enabled = !_dockerWorkActionRunning && laptopRecoveryAvailable",
+            refreshBody,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -76,7 +119,7 @@ public sealed class BluetoothHandoffScriptSafetyTests
         var program = ReadRepositoryFile("stayactive", "Program.cs");
         var actionBody = ExtractBraceBlock(
             program,
-            "private void BeginWorkVmAction(");
+            "private void BeginDockerWorkAction(");
         Assert.Contains("Task.Run(action)", actionBody, StringComparison.Ordinal);
         Assert.Contains("if (task.Exception is not null)", actionBody, StringComparison.Ordinal);
         Assert.Contains("task.Exception.GetBaseException().Message", actionBody, StringComparison.Ordinal);

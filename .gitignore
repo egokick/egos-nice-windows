@@ -34,6 +34,8 @@ Thumbs.db
 # Sensitive app data
 /finance/.env.finance
 /finance/data/
+/docker-work/.cache/
+/docker-work/.state/
 YouTubeSyncTray/Downloads/
 YouTubeSyncTray/youtube-sync/legacy-downloads/
 YouTubeSyncTray/youtube-sync/legacy-youtube-cookies.txt

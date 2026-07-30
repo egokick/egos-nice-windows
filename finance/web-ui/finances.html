@@ -1,0 +1,752 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Finance</title>
+    <link rel="icon" href="/finance-favicon.svg?v=1" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css?v=26">
+    <link rel="stylesheet" href="/finance.css?v=31">
+  </head>
+  <body class="finance-page">
+    <header class="topbar finance-topbar">
+      <button id="showCurrencySettings" class="currency-settings-button" type="button" aria-label="Finance settings" title="Finance settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8.4 4.7v-2.4l-2.2-.8a7.5 7.5 0 0 0-.7-1.6l1-2.1-1.7-1.7-2.1 1a7.5 7.5 0 0 0-1.6-.7L12.3 2H9.9l-.8 2.2a7.5 7.5 0 0 0-1.6.7l-2.1-1-1.7 1.7 1 2.1A7.5 7.5 0 0 0 4 9.3l-2.2.8v2.4l2.2.8c.2.6.4 1.1.7 1.6l-1 2.1 1.7 1.7 2.1-1c.5.3 1 .5 1.6.7l.8 2.2h2.4l.8-2.2c.6-.2 1.1-.4 1.6-.7l2.1 1 1.7-1.7-1-2.1c.3-.5.5-1 .7-1.6l2.2-.8Z"/>
+        </svg>
+      </button>
+      <div class="finance-header-left">
+        <div>
+          <h1>Finances</h1>
+          <p id="financeSummary">Loading finance dashboard</p>
+        </div>
+        <div class="account-tools">
+          <select id="editAccountSelect" aria-label="Select account to edit">
+            <option value="">Edit account...</option>
+          </select>
+          <button id="showAccountForm" type="button">Add account</button>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="refreshTransactions" type="button">Refresh Transactions</button>
+        <button id="refreshFinance" type="button">Refresh Accounts</button>
+      </div>
+    </header>
+
+    <div id="financeAlert" class="poll-alert" hidden></div>
+
+    <main class="finance-layout">
+      <section class="net-band finance-summary-card finance-privacy-section" data-finance-privacy-section="net">
+        <button class="finance-privacy-toggle" type="button" aria-label="Hide monetary values" aria-pressed="false" title="Hide monetary values">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/>
+          </svg>
+        </button>
+        <div class="net-copy">
+          <p>After paying all debt</p>
+          <strong id="netAfterDebt" class="finance-private-value">$0.00</strong>
+        </div>
+        <div class="net-badge">Net position</div>
+      </section>
+
+      <section class="finance-metrics">
+        <div class="finance-metric metric-cash finance-summary-card finance-privacy-section" data-finance-privacy-section="cash">
+          <button class="finance-privacy-toggle" type="button" aria-label="Hide monetary values" aria-pressed="false" title="Hide monetary values">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+          </button>
+          <span>Cash Available</span>
+          <strong id="totalCash" class="finance-private-value">$0.00</strong>
+        </div>
+        <div class="finance-metric metric-credit finance-summary-card finance-privacy-section" data-finance-privacy-section="credit">
+          <button class="finance-privacy-toggle" type="button" aria-label="Hide monetary values" aria-pressed="false" title="Hide monetary values">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+          </button>
+          <span>Credit Available</span>
+          <strong id="totalCredit" class="finance-private-value">$0.00</strong>
+        </div>
+        <div class="finance-metric metric-debt finance-summary-card finance-privacy-section" data-finance-privacy-section="debt">
+          <button class="finance-privacy-toggle" type="button" aria-label="Hide monetary values" aria-pressed="false" title="Hide monetary values">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+          </button>
+          <span>Debt Owed</span>
+          <strong id="totalDebt" class="finance-private-value">$0.00</strong>
+        </div>
+      </section>
+
+      <details class="chart-section salary-section collapsible-section finance-privacy-section" data-finance-privacy-section="salary">
+        <summary class="section-title collapsible-section-summary">
+          <span class="collapsible-section-copy">
+            <span class="collapsible-section-title">Salary</span>
+            <span id="salaryCaption" class="collapsible-section-caption">No salary deposits recorded yet</span>
+          </span>
+          <span class="collapsible-section-actions salary-title-actions">
+            <button id="showSalaryPlanForm" class="salary-edit-button" type="button">Edit salary</button>
+            <button class="finance-privacy-toggle" type="button" aria-label="Hide Salary monetary values" aria-pressed="false" title="Hide Salary monetary values">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+            </button>
+            <span class="collapsible-section-indicator" aria-hidden="true">&#8250;</span>
+          </span>
+        </summary>
+        <div id="salarySummary" class="salary-summary"></div>
+      </details>
+
+      <section class="chart-section account-setup-section" hidden>
+        <form id="accountForm" class="account-form" hidden>
+          <h3 id="accountFormTitle" class="account-form-title">Add Account</h3>
+          <input id="accountId" name="id" type="hidden">
+          <label>
+            <span>Account name</span>
+            <input id="accountName" name="name" type="text" autocomplete="off" required placeholder="Rewards Visa">
+          </label>
+          <label>
+            <span>Type</span>
+            <select id="accountKind" name="kind">
+              <option value="credit_card">Credit card</option>
+              <option value="checking">Checking</option>
+              <option value="savings">Savings</option>
+              <option value="bank">Bank account</option>
+              <option value="loan">Loan</option>
+            </select>
+          </label>
+          <label>
+            <span>Currency</span>
+            <select id="accountCurrency" name="currency" aria-label="Account currency"></select>
+          </label>
+          <label>
+            <span>Institution</span>
+            <input id="accountInstitution" name="institution" type="text" autocomplete="off" placeholder="Bank or card issuer">
+          </label>
+          <label>
+            <span>Website URL</span>
+            <input id="accountLoginUrl" name="loginUrl" type="url" autocomplete="off" placeholder="https://example.com/login">
+          </label>
+          <label>
+            <span>Username</span>
+            <input id="accountUsername" type="text" autocomplete="username" placeholder="Enter to replace saved credentials">
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="accountPassword" type="password" autocomplete="new-password" placeholder="Enter to replace saved credentials">
+          </label>
+          <div class="account-credentials-actions">
+            <p id="accountCredentialsStatus" aria-live="polite">Credentials are saved separately in Windows Credential Manager.</p>
+            <button id="deleteAccountCredentials" type="button" hidden>Remove saved credentials</button>
+          </div>
+          <label>
+            <span>Cash balance</span>
+            <input id="accountCashBalance" name="cashBalance" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Balance owed</span>
+            <input id="accountBalanceOwed" name="balanceOwed" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Minimum payment</span>
+            <input id="accountMinimumPayment" name="minimumPayment" type="number" min="0" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Payment due date</span>
+            <input id="accountPaymentDueDate" name="paymentDueDate" type="date">
+          </label>
+          <label>
+            <span>Met minimum payment?</span>
+            <select id="accountMinimumPaymentMet" name="minimumPaymentMet">
+              <option value="">Unknown</option>
+              <option value="true">Paid</option>
+              <option value="false">Outstanding</option>
+            </select>
+          </label>
+          <label>
+            <span>Credit limit</span>
+            <input id="accountCreditLimit" name="creditLimit" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Available credit</span>
+            <input id="accountCreditAvailable" name="creditAvailable" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>APR %</span>
+            <input id="accountAprPercent" name="aprPercent" type="number" step="0.01" inputmode="decimal">
+          </label>
+          <label>
+            <span>Collector notes</span>
+            <textarea id="accountCollectorNotes" name="collectorNotes" rows="3" placeholder="Login flow, MFA method, balance location"></textarea>
+          </label>
+          <div class="account-form-actions">
+            <p id="accountFormStatus">Values are stored locally. Website refreshes require a Codex-assisted session.</p>
+            <div class="account-form-buttons">
+              <button id="cancelAccountForm" type="button">Cancel</button>
+              <button id="saveAccount" type="submit">Save account</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section class="chart-section">
+        <div class="section-title history-section-title">
+          <div class="history-title-heading">
+            <h3>Values Over Time</h3>
+            <button id="futureProjectionToggle" class="future-projection-toggle" type="button" aria-pressed="false" aria-controls="historyRangeControl projectionSummary financeChart">
+              <span class="projection-toggle-indicator" aria-hidden="true">&#8599;</span>
+              <span>Future Projection</span>
+              <span id="futureProjectionState" class="projection-toggle-state" aria-hidden="true">Off</span>
+            </button>
+          </div>
+          <p id="historyCaption">No history yet</p>
+        </div>
+        <fieldset id="historyRangeControl" class="history-range-control">
+          <legend class="visually-hidden">Visible date range</legend>
+          <div class="history-range-values">
+            <label class="history-range-value history-range-value-start" for="historyStart">
+              <span>Start</span>
+              <strong id="historyStartLabel">--</strong>
+            </label>
+            <p id="historyRangeLength" class="history-range-length">Last 3 months</p>
+            <label class="history-range-value history-range-value-end" for="historyEnd">
+              <span id="historyEndKind">End</span>
+              <strong id="historyEndLabel">--</strong>
+            </label>
+            <label id="historyProjectionValue" class="history-range-value history-range-value-projection" for="historyProjection" hidden>
+              <span>Projection</span>
+              <strong id="historyProjectionLabel">--</strong>
+            </label>
+          </div>
+          <div class="history-range-slider">
+            <div class="history-range-rail" aria-hidden="true">
+              <span id="historyRangeSelection" class="history-range-selection"></span>
+              <span id="historyProjectionSelection" class="history-projection-selection" hidden></span>
+            </div>
+            <input id="historyStart" class="history-range-input history-range-input-start" type="range" min="0" max="1" value="0" step="1" aria-label="Start date" aria-describedby="historyRangeBounds historyRangeHelp">
+            <input id="historyEnd" class="history-range-input history-range-input-end" type="range" min="0" max="1" value="1" step="1" aria-label="End date" aria-describedby="historyRangeBounds historyRangeHelp">
+            <input id="historyProjection" class="history-range-input history-range-input-projection" type="range" min="0" max="1" value="1" step="1" aria-label="Projection date" aria-describedby="historyRangeBounds historyRangeHelp" hidden>
+          </div>
+          <div id="historyRangeBounds" class="history-range-bounds">
+            <span id="historyMinLabel">Earliest data</span>
+            <span id="historyTodayLabel" class="history-today-bound" hidden>Today</span>
+            <span id="historyMaxLabel">Latest data</span>
+          </div>
+          <p id="historyRangeHelp" class="history-range-help">Drag either handle, or use the arrow keys when focused.</p>
+        </fieldset>
+        <div id="projectionSummary" class="projection-summary" aria-live="polite" aria-atomic="true" hidden>
+          <div class="projection-summary-intro">
+            <p class="projection-summary-kicker">Salary, bonuses, and recurring estimate</p>
+            <h4 id="projectionSummaryDate">Projected values</h4>
+            <p id="projectionSummaryNote" class="projection-summary-note">Approved monthly expenses are deducted on their regular dates. Debt and credit stay at today's values.</p>
+          </div>
+          <div class="projection-summary-metric">
+            <span>Cash available</span>
+            <strong id="projectionCash">--</strong>
+            <small id="projectionCashChange"></small>
+          </div>
+          <div class="projection-summary-metric">
+            <span>After paying all debt</span>
+            <strong id="projectionNet">--</strong>
+            <small id="projectionNetChange"></small>
+          </div>
+          <div class="projection-summary-metric">
+            <span>Expected income</span>
+            <strong id="projectionSalaryCount">--</strong>
+            <small id="projectionSalaryDetail"></small>
+          </div>
+        </div>
+        <div class="finance-chart-shell">
+          <svg id="financeChart" role="img" aria-label="Finance history chart"></svg>
+        </div>
+      </section>
+
+      <section class="finance-grid">
+        <details class="chart-section credit-loans-section collapsible-section finance-privacy-section" data-finance-privacy-section="credit-loans" open>
+          <summary class="section-title collapsible-section-summary">
+            <span class="collapsible-section-copy">
+              <span class="collapsible-section-title">Credit/Loans</span>
+            </span>
+            <span class="collapsible-section-actions">
+              <span id="cardCount" class="collapsible-section-count">0 cards</span>
+              <button class="finance-privacy-toggle" type="button" aria-label="Hide Credit/Loans monetary values" aria-pressed="false" title="Hide Credit/Loans monetary values">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+              </button>
+              <span class="collapsible-section-indicator" aria-hidden="true">&#8250;</span>
+            </span>
+          </summary>
+          <div class="finance-table-shell">
+            <table class="finance-table credit-loans-table">
+              <thead>
+                <tr>
+                  <th>Card</th>
+                  <th>Currency</th>
+                  <th>Owed</th>
+                  <th>Minimum Payment</th>
+                  <th>Payment Due Date</th>
+                  <th>Met Minimum Payment?</th>
+                  <th>Available</th>
+                  <th>APR</th>
+                  <th>Monthly interest</th>
+                  <th>Utilization</th>
+                </tr>
+              </thead>
+              <tbody id="cardRows"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="chart-section accounts-table-section collapsible-section finance-privacy-section" data-finance-privacy-section="accounts" open>
+          <summary class="section-title collapsible-section-summary">
+            <span class="collapsible-section-copy">
+              <span class="collapsible-section-title">Accounts</span>
+            </span>
+            <span class="collapsible-section-actions">
+              <span id="accountCount" class="collapsible-section-count">0 accounts</span>
+              <button class="finance-privacy-toggle" type="button" aria-label="Hide Accounts monetary values" aria-pressed="false" title="Hide Accounts monetary values">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+              </button>
+              <span class="collapsible-section-indicator" aria-hidden="true">&#8250;</span>
+            </span>
+          </summary>
+          <div class="finance-table-shell">
+            <table class="finance-table accounts-table">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th>Type</th>
+                  <th>Cash</th>
+                  <th>Currency</th>
+                </tr>
+              </thead>
+              <tbody id="accountRows"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <details id="recurringTransactionsSection" class="chart-section recurring-transactions-section collapsible-section">
+        <summary class="section-title collapsible-section-summary">
+          <span class="collapsible-section-copy">
+            <span class="collapsible-section-title">Recurring transactions</span>
+            <span id="recurringTransactionCaption" class="collapsible-section-caption">Monthly patterns found across all cash accounts</span>
+          </span>
+          <span class="collapsible-section-actions">
+            <span id="recurringTransactionCount" class="collapsible-section-count">0 recurring</span>
+            <button id="showRecurringTransactionForm" class="recurring-add-button" type="button" aria-label="Add recurring transaction" title="Add recurring transaction">+</button>
+            <span class="collapsible-section-indicator" aria-hidden="true">&#8250;</span>
+          </span>
+        </summary>
+        <div class="finance-table-shell">
+          <table class="finance-table recurring-transactions-table">
+            <thead>
+              <tr>
+                <th>Description</th>
+                <th>Account</th>
+                <th>Next date</th>
+                <th>Amount</th>
+                <th>Currency</th>
+                <th>Monthly pattern</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="recurringTransactionRows"></tbody>
+          </table>
+        </div>
+      </details>
+
+      <details id="transactionsSection" class="chart-section transactions-section collapsible-section">
+        <summary class="section-title collapsible-section-summary transaction-section-summary">
+          <span class="collapsible-section-copy">
+            <span class="collapsible-section-title">Transactions</span>
+            <span id="transactionCaption" class="collapsible-section-caption">Select an account above to view its transactions.</span>
+          </span>
+          <span class="collapsible-section-actions transaction-title-actions">
+            <button id="showTransactionForm" class="transaction-add-button" type="button">+ Add</button>
+            <button id="transactionScopeToggle" class="transaction-scope-toggle" type="button" aria-pressed="false">Show all accounts</button>
+            <input id="transactionSearch" class="transaction-search" type="search" placeholder="Search all transaction fields" aria-label="Search all transaction fields" autocomplete="off">
+            <button id="transactionAdvancedToggle" class="transaction-advanced-toggle" type="button" aria-label="Advanced transaction filters" aria-controls="transactionAdvancedFilters" aria-expanded="false" title="Advanced filters">&#9881;</button>
+            <span id="transactionCount" class="collapsible-section-count">0 transactions</span>
+            <span class="collapsible-section-indicator" aria-hidden="true">&#8250;</span>
+          </span>
+        </summary>
+        <div id="transactionAdvancedFilters" class="transaction-advanced-filters" hidden>
+          <label class="transaction-filter-field" for="transactionFilterAccount">Account
+            <select id="transactionFilterAccount" name="account"></select>
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterDateFrom">Posted from
+            <input id="transactionFilterDateFrom" name="dateFrom" type="date">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterDateTo">Posted to
+            <input id="transactionFilterDateTo" name="dateTo" type="date">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterDescription">Description
+            <input id="transactionFilterDescription" name="description" type="search">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterMerchant">Merchant / payee
+            <input id="transactionFilterMerchant" name="merchant" type="search">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterDirection">Money in/out
+            <select id="transactionFilterDirection" name="direction">
+              <option value="">Any direction</option>
+              <option value="money_in">Money in</option>
+              <option value="money_out">Money out</option>
+            </select>
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterAmountMin">Minimum amount
+            <input id="transactionFilterAmountMin" name="amountMin" type="number" min="0" step="0.01" inputmode="decimal">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterAmountMax">Maximum amount
+            <input id="transactionFilterAmountMax" name="amountMax" type="number" min="0" step="0.01" inputmode="decimal">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterCurrency">Currency
+            <select id="transactionFilterCurrency" name="currency"></select>
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterStatus">Status
+            <input id="transactionFilterStatus" name="status" type="search">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterLabel">Label
+            <input id="transactionFilterLabel" name="label" type="search">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterPerson">Person
+            <input id="transactionFilterPerson" name="person" type="search">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterNotes">Notes
+            <input id="transactionFilterNotes" name="notes" type="search">
+          </label>
+          <label class="transaction-filter-field" for="transactionFilterReference">Reference
+            <input id="transactionFilterReference" name="reference" type="search">
+          </label>
+          <button id="clearTransactionFilters" class="transaction-filter-clear" type="button">Clear filters</button>
+        </div>
+        <div id="transactionMatchSummary" class="transaction-match-summary" aria-live="polite">
+          <span><small>Matching transactions</small><strong id="transactionMatchCount">0</strong></span>
+          <span><small>Total money out</small><strong id="transactionMoneyOut">$0.00</strong></span>
+          <span><small>Total money in</small><strong id="transactionMoneyIn">$0.00</strong></span>
+        </div>
+        <div id="transactionBulkLabelBar" class="transaction-bulk-label-bar" hidden>
+          <span><strong>Label current matches</strong><small id="transactionBulkLabelCaption">Choose an existing label or enter a new one.</small></span>
+          <select id="transactionBulkLabel" aria-label="Existing label for matching transactions"></select>
+          <input id="transactionBulkNewLabel" type="text" maxlength="80" placeholder="Or enter a new label" aria-label="New label for matching transactions">
+          <button id="applyTransactionLabelToMatches" type="button">Apply to matches</button>
+          <span id="transactionBulkLabelStatus" class="transaction-bulk-label-status" aria-live="polite"></span>
+        </div>
+        <div class="finance-table-shell">
+          <table class="finance-table transactions-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Account</th>
+                <th>Description</th>
+                <th>Merchant / Payee</th>
+                <th>Money in/out</th>
+                <th>Amount</th>
+                <th>Status</th>
+                <th>Labels</th>
+                <th>Person</th>
+                <th>Notes</th>
+                <th>Reference</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="transactionRows"></tbody>
+          </table>
+        </div>
+      </details>      <details class="chart-section refresh-log-section collapsible-section">
+        <summary class="section-title collapsible-section-summary">
+          <span class="collapsible-section-copy">
+            <span class="collapsible-section-title">Refresh Log</span>
+            <span id="refreshCaption" class="collapsible-section-caption">No refreshes yet</span>
+          </span>
+          <span class="collapsible-section-indicator" aria-hidden="true">&#8250;</span>
+        </summary>
+        <div id="refreshLog" class="refresh-log"></div>
+      </details>
+    </main>
+
+    <dialog id="salaryPlanDialog" class="salary-plan-dialog" aria-labelledby="salaryPlanDialogTitle">
+      <form id="salaryPlanForm" class="salary-plan-form">
+        <div class="currency-settings-heading">
+          <div>
+            <h3 id="salaryPlanDialogTitle">Edit salary projection</h3>
+            <p>Set the repeating take-home payment and add optional one-time bonuses.</p>
+          </div>
+          <button id="closeSalaryPlanForm" type="button" class="currency-settings-close">Close</button>
+        </div>
+        <section class="salary-plan-section" aria-labelledby="salaryScheduleHeading">
+          <div class="salary-plan-section-heading">
+            <div>
+              <h4 id="salaryScheduleHeading">Regular salary</h4>
+              <p>This schedule replaces automatic salary-cadence detection in future projections.</p>
+            </div>
+          </div>
+          <div class="settings-grid salary-plan-grid">
+            <label class="settings-field" for="salaryPlanAmount">Take-home amount
+              <input id="salaryPlanAmount" name="amount" type="number" min="0.01" step="0.01" inputmode="decimal" required>
+            </label>
+            <label class="settings-field" for="salaryPlanCurrency">Currency
+              <select id="salaryPlanCurrency" name="currency" required></select>
+            </label>
+            <label class="settings-field" for="salaryPlanInterval">Pay interval
+              <select id="salaryPlanInterval" name="interval" required>
+                <option value="weekly">Weekly</option>
+                <option value="biweekly">Every 2 weeks</option>
+                <option value="semimonthly">Twice monthly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </label>
+            <label class="settings-field" for="salaryPlanNextOn">Next payday
+              <input id="salaryPlanNextOn" name="nextOn" type="date" required>
+            </label>
+          </div>
+        </section>
+        <section class="salary-plan-section salary-bonus-section" aria-labelledby="salaryBonusHeading">
+          <div class="salary-plan-section-heading">
+            <div>
+              <h4 id="salaryBonusHeading">One-time bonuses</h4>
+              <p>Bonuses are added once on their payment date when that date is inside the projection.</p>
+            </div>
+            <button id="addSalaryBonus" type="button" class="secondary-button">+ Add bonus</button>
+          </div>
+          <div id="salaryBonusRows" class="salary-bonus-rows"></div>
+          <p id="salaryBonusEmpty" class="salary-bonus-empty">No bonuses scheduled.</p>
+        </section>
+        <p id="salaryPlanFormStatus" class="account-form-status" aria-live="polite"></p>
+        <div class="form-actions">
+          <button id="saveSalaryPlan" type="submit">Save salary projection</button>
+          <button id="cancelSalaryPlanForm" type="button" class="secondary-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="transactionDialog" class="transaction-dialog" aria-labelledby="transactionDialogTitle">
+      <form id="transactionForm" class="transaction-form">
+        <div class="currency-settings-heading">
+          <div>
+            <h3 id="transactionDialogTitle">Add transaction</h3>
+            <p>Create or edit a ledger entry, its labels, person, and notes.</p>
+          </div>
+          <button id="closeTransactionForm" type="button" class="currency-settings-close">Close</button>
+        </div>
+        <div class="settings-grid">
+          <label class="settings-field" for="transactionAccount">Account
+            <select id="transactionAccount" name="accountId" required></select>
+          </label>
+          <label class="settings-field" for="transactionPostedOn">Posted date
+            <input id="transactionPostedOn" name="postedOn" type="date" required>
+          </label>
+          <label class="settings-field" for="transactionTransactedOn">Transaction date
+            <input id="transactionTransactedOn" name="transactedOn" type="date">
+          </label>
+          <label class="settings-field" for="transactionStatus">Status
+            <select id="transactionStatus" name="status">
+              <option value="posted">Posted</option>
+              <option value="pending">Pending</option>
+              <option value="declined">Declined</option>
+              <option value="reversed">Reversed</option>
+            </select>
+          </label>
+        </div>
+        <label class="settings-field" for="transactionDescription">Description
+          <input id="transactionDescription" name="description" type="text" maxlength="180" required>
+        </label>
+        <label class="settings-field" for="transactionMerchant">Merchant / payee
+          <input id="transactionMerchant" name="merchant" type="text" maxlength="180">
+        </label>
+        <div class="settings-grid transaction-money-fields">
+          <label class="settings-field" for="transactionDirection">Direction
+            <select id="transactionDirection" name="direction" required>
+              <option value="money_out">Money out</option>
+              <option value="money_in">Money in</option>
+            </select>
+          </label>
+          <label class="settings-field" for="transactionAmount">Amount
+            <input id="transactionAmount" name="amount" type="number" min="0.01" step="0.01" inputmode="decimal" required>
+          </label>
+          <label class="settings-field" for="transactionCurrency">Currency
+            <select id="transactionCurrency" name="currency" required></select>
+          </label>
+        </div>
+        <div class="settings-grid">
+          <label class="settings-field" for="transactionReference">Reference
+            <input id="transactionReference" name="reference" type="text" maxlength="180">
+          </label>
+          <label class="settings-field" for="transactionSourceId">Source transaction ID
+            <input id="transactionSourceId" name="sourceTransactionId" type="text" maxlength="180">
+          </label>
+        </div>
+        <div class="transaction-metadata-grid">
+          <div class="settings-field">
+            <span>Labels</span>
+            <details id="transactionLabelsPicker" class="transaction-labels-picker">
+              <summary id="transactionLabelsSummary">None</summary>
+              <div id="transactionLabelOptions" class="transaction-label-options"></div>
+            </details>
+            <div class="transaction-new-value">
+              <input id="transactionNewLabel" type="text" maxlength="80" placeholder="Add a new label" aria-label="New transaction label">
+              <button id="addTransactionLabel" type="button" class="secondary-button">Add label</button>
+            </div>
+          </div>
+          <label class="settings-field" for="transactionPerson">Person
+            <input id="transactionPerson" name="person" type="text" maxlength="120" list="transactionPeople" placeholder="Select or enter a person">
+            <datalist id="transactionPeople"></datalist>
+          </label>
+        </div>
+        <label class="settings-field" for="transactionNotes">Notes
+          <textarea id="transactionNotes" name="notes" rows="3" maxlength="2000" placeholder="Optional notes about this transaction"></textarea>
+        </label>
+        <p id="transactionFormStatus" class="account-form-status" aria-live="polite"></p>
+        <div class="form-actions">
+          <button id="saveTransaction" type="submit">Add transaction</button>
+          <button id="cancelTransactionForm" type="button" class="secondary-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="recurringTransactionDialog" class="recurring-transaction-dialog" aria-labelledby="recurringTransactionDialogTitle">
+      <form id="recurringTransactionForm" class="recurring-transaction-form">
+        <div class="currency-settings-heading">
+          <div>
+            <h3 id="recurringTransactionDialogTitle">Add recurring transaction</h3>
+            <p>Add a confirmed monthly expense to the cash projection.</p>
+          </div>
+          <button id="closeRecurringTransactionForm" type="button" class="currency-settings-close">Close</button>
+        </div>
+        <label class="settings-field" for="recurringAccount">Account
+          <select id="recurringAccount" name="accountId" required></select>
+        </label>
+        <label class="settings-field" for="recurringDescription">Description
+          <input id="recurringDescription" name="description" type="text" maxlength="180" placeholder="Rent, internet, subscription..." required>
+        </label>
+        <div class="settings-grid">
+          <label class="settings-field" for="recurringAmount">Monthly amount
+            <input id="recurringAmount" name="amount" type="number" min="0.01" step="0.01" inputmode="decimal" required>
+          </label>
+          <label class="settings-field" for="recurringCurrency">Currency
+            <select id="recurringCurrency" name="currency" required></select>
+          </label>
+        </div>
+        <label class="settings-field" for="recurringNextOn">Next date
+          <input id="recurringNextOn" name="nextOn" type="date" required>
+        </label>
+        <p id="recurringTransactionFormStatus" class="account-form-status" aria-live="polite"></p>
+        <div class="form-actions">
+          <button id="saveRecurringTransaction" type="submit">Add recurring transaction</button>
+          <button id="cancelRecurringTransactionForm" type="button" class="secondary-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="currencySettingsDialog" class="currency-settings-dialog" aria-labelledby="currencySettingsTitle">
+      <form method="dialog" class="currency-settings-form">
+        <div class="currency-settings-heading">
+          <div>
+            <h3 id="currencySettingsTitle">Finance settings</h3>
+            <p>Manage display currency and the profile used for salary tax estimates.</p>
+          </div>
+          <button type="submit" class="currency-settings-close">Close</button>
+        </div>
+        <section class="settings-section" aria-labelledby="taxProfileHeading">
+          <div class="settings-section-heading">
+            <div>
+              <h4 id="taxProfileHeading">Tax profile</h4>
+              <p>Used for estimates beside salary totals in Values Over Time.</p>
+            </div>
+            <span class="settings-saved-badge">Local only</span>
+          </div>
+          <div class="settings-grid">
+            <label class="settings-field" for="taxCountry">Tax location
+              <select id="taxCountry" aria-describedby="taxProfileStatus"></select>
+            </label>
+            <label id="taxStateField" class="settings-field" for="taxState">State
+              <select id="taxState" aria-describedby="taxProfileStatus"></select>
+            </label>
+          </div>
+          <label class="settings-field" for="incomeSource">Income source
+            <select id="incomeSource" aria-describedby="taxProfileStatus"></select>
+          </label>
+          <div class="marital-status-field">
+            <span class="settings-field-label">Marital status</span>
+            <button id="maritalStatusToggle" class="marital-status-toggle" type="button" role="switch" aria-checked="true" aria-label="Marital status: married">
+              <span class="marital-status-option marital-status-unmarried">Unmarried</span>
+              <span class="marital-status-option marital-status-married">Married</span>
+            </button>
+            <small>Married estimates use the married-filing-jointly brackets.</small>
+          </div>
+          <p id="taxProfileStatus" class="tax-profile-status" aria-live="polite">Loading tax profile...</p>
+          <p class="tax-profile-help">
+            Rough estimates use recorded salary as taxable pay from December 2024, the standard deduction, and
+            <a href="https://www.irs.gov/filing/federal-income-tax-rates-and-brackets" target="_blank" rel="noreferrer">IRS federal brackets</a>.
+            They exclude FICA, credits, other deductions, and spouse income.
+          </p>
+        </section>
+        <section class="settings-section" aria-labelledby="currencyProfileHeading">
+          <div class="settings-section-heading">
+            <div>
+              <h4 id="currencyProfileHeading">Currency</h4>
+              <p>All monetary values are converted to the master currency for display.</p>
+            </div>
+          </div>
+          <label class="settings-field" for="masterCurrency">Master currency
+            <select id="masterCurrency" aria-describedby="currencyRateStatus"></select>
+          </label>
+          <p id="currencyRateStatus" class="currency-rate-status" aria-live="polite">Loading exchange-rate status...</p>
+          <p class="currency-attribution">
+            <a href="https://www.exchangerate-api.com" target="_blank" rel="noreferrer">Rates by Exchange Rate API</a>
+          </p>
+        </section>
+      </form>
+    </dialog>
+
+    <dialog id="interestPreviewDialog" class="interest-preview-dialog" aria-labelledby="interestPreviewTitle">
+      <form method="dialog" class="interest-preview-form">
+        <div class="interest-preview-header">
+          <div>
+            <h3 id="interestPreviewTitle">Monthly interest preview</h3>
+            <p id="interestPreviewAccount"></p>
+          </div>
+          <button type="submit" class="interest-preview-close">Close</button>
+        </div>
+        <div class="interest-preview-details">
+          <p><span>Current balance</span><strong id="interestPreviewBalance">--</strong></p>
+          <p><span>Current monthly interest</span><strong id="interestPreviewCurrent">--</strong></p>
+        </div>
+        <label for="interestPreviewPayment">Amount to pay off
+          <input id="interestPreviewPayment" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00">
+        </label>
+        <p id="interestPreviewResult" class="interest-preview-result" aria-live="polite"></p>
+        <p class="interest-preview-note">Preview only. This does not change the account balance or schedule a payment.</p>
+      </form>
+    </dialog>
+
+    <dialog id="aprEditorDialog" class="interest-preview-dialog apr-editor-dialog" aria-labelledby="aprEditorTitle">
+      <form id="aprEditorForm" class="interest-preview-form apr-editor-form">
+        <div class="interest-preview-header">
+          <div>
+            <h3 id="aprEditorTitle">Edit APR</h3>
+            <p id="aprEditorAccount">Credit or loan account</p>
+          </div>
+          <button id="closeAprEditor" type="button" class="interest-preview-close">Close</button>
+        </div>
+        <div class="interest-preview-details">
+          <p><span>Effective APR today</span><strong id="aprEditorEffective">--</strong></p>
+          <p><span>Rate schedule</span><strong id="aprEditorSchedule">Regular APR</strong></p>
+        </div>
+        <div class="apr-editor-fields">
+          <label for="aprEditorRegular">Regular APR %
+            <input id="aprEditorRegular" type="number" min="0" step="0.01" inputmode="decimal" placeholder="29.99" required>
+          </label>
+          <label for="aprEditorPromotional">Promotional APR %
+            <input id="aprEditorPromotional" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00">
+          </label>
+          <label class="apr-editor-end-date" for="aprEditorEndsOn">Promotional APR ends
+            <input id="aprEditorEndsOn" type="date">
+          </label>
+        </div>
+        <p class="interest-preview-note">Promotional APR and its end date are optional, but must be saved together. The regular APR starts on the selected end date.</p>
+        <p id="aprEditorStatus" class="apr-editor-status" role="status" aria-live="polite"></p>
+        <div class="apr-editor-actions">
+          <button id="clearAprPromotion" type="button">Clear promotion</button>
+          <span class="apr-editor-action-spacer"></span>
+          <button id="cancelAprEditor" type="button">Cancel</button>
+          <button id="saveAprEditor" type="submit">Save APR</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/finance.js?v=42" defer></script>
+  </body>
+</html>

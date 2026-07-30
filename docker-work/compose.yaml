@@ -1,0 +1,38 @@
+name: stayactive-work
+
+services:
+  browser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: stayactive-work-browser:local
+    container_name: stayactive-work-browser
+    hostname: stayactive-work
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+      - NET_RAW
+      # Chrome's setuid sandbox needs this only to create its nested PID/user
+      # namespaces; Chrome itself runs as the unprivileged "chrome" account.
+      - SYS_ADMIN
+    shm_size: 2gb
+    stop_grace_period: 30s
+    environment:
+      CHROME_START_URL: ${CHROME_START_URL:-https://windows365.microsoft.com/ent#/devices}
+      DISPLAY: :99
+    volumes:
+      - chrome-profile:/home/chrome/work-profile
+      - chrome-downloads:/home/chrome/Downloads
+      - bluetooth-state:/var/lib/bluetooth
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 6g
+
+volumes:
+  chrome-profile:
+  chrome-downloads:
+  bluetooth-state:

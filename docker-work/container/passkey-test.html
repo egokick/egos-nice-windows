@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StayActive passkey transport test</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; max-width: 760px; margin: 48px auto; padding: 0 24px; }
+    button { font: inherit; padding: 12px 18px; margin-right: 8px; }
+    pre { white-space: pre-wrap; background: #f3f4f6; padding: 16px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Container phone-passkey test</h1>
+  <p>
+    This page creates a localhost WebAuthn credential. Choose the option to use
+    a phone or tablet, scan the QR code, and approve on the phone.
+  </p>
+  <button id="create">Create with phone</button>
+  <button id="capabilities">Check capabilities</button>
+  <pre id="result">Ready.</pre>
+  <script>
+    const result = document.querySelector("#result");
+    const bytes = length => crypto.getRandomValues(new Uint8Array(length));
+
+    document.querySelector("#capabilities").addEventListener("click", async () => {
+      try {
+        const capabilities = PublicKeyCredential.getClientCapabilities
+          ? await PublicKeyCredential.getClientCapabilities()
+          : { getClientCapabilities: false };
+        result.textContent = JSON.stringify(capabilities, null, 2);
+      } catch (error) {
+        result.textContent = `${error.name}: ${error.message}`;
+      }
+    });
+
+    document.querySelector("#create").addEventListener("click", async () => {
+      result.textContent = "Checking hybrid transport support...";
+      try {
+        if (PublicKeyCredential.getClientCapabilities) {
+          const capabilities = await PublicKeyCredential.getClientCapabilities();
+          if (capabilities.hybridTransport === false) {
+            throw new Error("Chrome reports that hybrid transport is unavailable.");
+          }
+        }
+
+        result.textContent = "Waiting for Chrome and the phone...";
+        const credential = await navigator.credentials.create({
+          publicKey: {
+            rp: { name: "StayActive local validation", id: "localhost" },
+            user: {
+              id: bytes(32),
+              name: `stayactive-${Date.now()}@localhost`,
+              displayName: "StayActive validation"
+            },
+            challenge: bytes(32),
+            pubKeyCredParams: [
+              { type: "public-key", alg: -7 },
+              { type: "public-key", alg: -257 }
+            ],
+            authenticatorSelection: {
+              authenticatorAttachment: "cross-platform",
+              residentKey: "preferred",
+              userVerification: "required"
+            },
+            hints: ["hybrid"],
+            timeout: 120000,
+            attestation: "none"
+          }
+        });
+        const transports = credential.response.getTransports
+          ? credential.response.getTransports()
+          : [];
+        if (!transports.includes("hybrid")) {
+          result.textContent =
+            `Credential returned, but hybrid transport was not proven. ` +
+            `Reported transports: ${JSON.stringify(transports)}.`;
+          return;
+        }
+        result.textContent =
+          `PASS: hybrid credential ${credential.id} returned to container ` +
+          `Chrome. Reported transports: ${JSON.stringify(transports)}.`;
+      } catch (error) {
+        result.textContent = `${error.name}: ${error.message}`;
+      }
+    });
+  </script>
+</body>
+</html>

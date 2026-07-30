@@ -12,8 +12,13 @@ namespace StayActive;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        if (ChromeCursorInputNativeMessagingHost.TryRun(args))
+        {
+            return;
+        }
+
         using var mutex = new Mutex(true, "StayActive.Singleton", out var createdNew);
         if (!createdNew)
         {
@@ -31,6 +36,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _activeMenuItem;
     private readonly ToolStripMenuItem _jiggleMouseMenuItem;
     private readonly ToolStripMenuItem _typeTextMenuItem;
+    private readonly ToolStripMenuItem _chromeCursorInputStayAwakeMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
     private readonly ToolStripMenuItem _dimScreenMenuItem;
     private readonly ToolStripMenuItem _enableAfterInactivityMenuItem;
@@ -49,7 +55,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly object _idleSessionLock = new();
     private readonly ActivitySessionController _activityController;
     private readonly IUserActivityMonitor _userActivityMonitor;
-    private readonly WorkVmService _workVmService;
+    private readonly ChromeCursorInputStayAwakeService _chromeCursorInputStayAwakeService;
+    private readonly DockerWorkService _dockerWorkService;
     private readonly RemoteHubOidcAccessTokenProvider _remoteHubAccessTokenProvider;
     private readonly IRemoteFleetClient _remoteFleetClient;
     private readonly IRemoteActionService _remoteActionService;
@@ -59,14 +66,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly RemotesMenuController _remotesMenuController;
 
     private AppSettings _settings;
-    private WorkVmStatus? _workVmStatus;
+    private DockerWorkStatus? _dockerWorkStatus;
     private RemotesDashboardForm? _remotesDashboard;
     private CancellationTokenSource? _idleSessionCancellation;
     private CancellationTokenSource? _runnerCancellation;
     private Task? _runnerTask;
     private bool _powerAssertionActive;
-    private bool _workVmActionRunning;
-    private bool _workVmStatusRefreshRunning;
+    private bool _dockerWorkActionRunning;
+    private bool _dockerWorkStatusRefreshRunning;
 
     public TrayApplicationContext()
     {
@@ -74,7 +81,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settings = SettingsStore.Load();
         _activityController = new ActivitySessionController(new SystemIdleMonitor(), new SystemMonitorBrightnessService());
         _userActivityMonitor = new UserActivityMonitor();
-        _workVmService = new WorkVmService();
+        _chromeCursorInputStayAwakeService = new ChromeCursorInputStayAwakeService();
+        _dockerWorkService = new DockerWorkService();
         _remoteHubAccessTokenProvider = new RemoteHubOidcAccessTokenProvider(GetRemoteHubOidcConfiguration);
         _remoteFleetClient = new LocalDisplayRemoteFleetClient(
             new ManagedRemoteFleetClient(
@@ -116,6 +124,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
             CheckOnClick = true
         };
         _typeTextMenuItem.Click += (_, _) => ToggleTypeText();
+
+        _chromeCursorInputStayAwakeMenuItem = new ToolStripMenuItem(
+            "chrome-cursor-input-stay-awake")
+        {
+            CheckOnClick = true
+        };
+        _chromeCursorInputStayAwakeMenuItem.Click += (_, _) =>
+            ToggleChromeCursorInputStayAwake();
 
         _startupMenuItem = new ToolStripMenuItem("Run at Windows startup")
         {
@@ -161,12 +177,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _contextMenu.Opening += (_, _) =>
         {
             RefreshUi();
-            QueueWorkVmStatusRefresh();
+            QueueDockerWorkStatusRefresh();
             _remotesMenuController.QueueRefresh();
         };
         _contextMenu.RegisterStickyItem(_activeMenuItem);
         _contextMenu.RegisterStickyItem(_jiggleMouseMenuItem);
         _contextMenu.RegisterStickyItem(_typeTextMenuItem);
+        _contextMenu.RegisterStickyItem(_chromeCursorInputStayAwakeMenuItem);
         _contextMenu.RegisterStickyItem(_startupMenuItem);
         _contextMenu.RegisterStickyItem(_dimScreenMenuItem);
         _contextMenu.RegisterStickyItem(_enableAfterInactivityMenuItem);
@@ -174,6 +191,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _contextMenu.Items.Add(new ToolStripSeparator());
         _contextMenu.Items.Add(_jiggleMouseMenuItem);
         _contextMenu.Items.Add(_typeTextMenuItem);
+        _contextMenu.Items.Add(_chromeCursorInputStayAwakeMenuItem);
         _contextMenu.Items.Add(_startupMenuItem);
         _contextMenu.Items.Add(_dimScreenMenuItem);
         _contextMenu.Items.Add(_enableAfterInactivityMenuItem);
@@ -199,9 +217,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         RefreshActivityController();
         RefreshUi();
+        EnsureChromeCursorInputBridgeRegistered();
         EnsureStartupPreference();
         ApplyRunnerState();
-        QueueWorkVmStatusRefresh();
+        QueueDockerWorkStatusRefresh();
         _remotesMenuController.QueueRefresh();
     }
 
@@ -354,6 +373,63 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ApplyRunnerState();
     }
 
+    private void ToggleChromeCursorInputStayAwake()
+    {
+        var enabled = _chromeCursorInputStayAwakeMenuItem.Checked;
+        try
+        {
+            _chromeCursorInputStayAwakeService.EnsureRegistered();
+        }
+        catch (Exception ex)
+        {
+            _chromeCursorInputStayAwakeMenuItem.Checked = !enabled;
+            ShowErrorBalloon($"Google Chrome cursor setup failed: {ex.Message}");
+            return;
+        }
+
+        UpdateSettings(settings => settings.ChromeCursorInputStayAwakeEnabled = enabled);
+        RefreshUi();
+
+        if (!enabled)
+        {
+            ShowInfoBalloon("Google Chrome cursor stay-awake disabled.");
+            return;
+        }
+
+        if (_chromeCursorInputStayAwakeService.HasRecentHeartbeat)
+        {
+            ShowInfoBalloon("Google Chrome cursor stay-awake enabled.");
+            return;
+        }
+
+        try
+        {
+            _chromeCursorInputStayAwakeService.OpenExtensionSetup();
+            ShowInfoBalloon(
+                "In Google Chrome, enable Developer mode and Load unpacked from the folder opened in Explorer.");
+        }
+        catch (Exception ex)
+        {
+            ShowErrorBalloon(
+                $"Google Chrome extension setup could not be opened: {ex.Message}");
+        }
+    }
+
+    private void EnsureChromeCursorInputBridgeRegistered()
+    {
+        try
+        {
+            _chromeCursorInputStayAwakeService.EnsureRegistered();
+        }
+        catch (Exception ex)
+        {
+            if (GetSettingsSnapshot().ChromeCursorInputStayAwakeEnabled)
+            {
+                ShowErrorBalloon($"Google Chrome cursor setup failed: {ex.Message}");
+            }
+        }
+    }
+
     private void ToggleDimScreen()
     {
         UpdateSettings(settings => settings.DimScreenWhenActiveEnabled = _dimScreenMenuItem.Checked);
@@ -411,26 +487,26 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void OpenWorkVm()
     {
-        BeginWorkVmAction(
-            "Requesting admin approval to open WorkVM with Bluetooth.",
-            "WorkVM is open and Bluetooth is attached.",
-            () => _workVmService.PassBluetoothToVm());
+        BeginDockerWorkAction(
+            "Requesting admin approval to open the work browser with Bluetooth.",
+            "The work browser is open and Bluetooth is attached to its container.",
+            () => _dockerWorkService.OpenWithBluetooth());
     }
 
     private void SwitchBluetoothToVm()
     {
-        BeginWorkVmAction(
-            "Requesting admin approval to switch Bluetooth to WorkVM.",
-            "Bluetooth is attached to WorkVM.",
-            () => _workVmService.PassBluetoothToVm());
+        BeginDockerWorkAction(
+            "Requesting admin approval to switch Bluetooth to the work-browser container.",
+            "Bluetooth is attached to the work-browser container.",
+            () => _dockerWorkService.PutBluetoothOnContainer());
     }
 
     private void ReturnBluetoothToLaptop()
     {
-        BeginWorkVmAction(
+        BeginDockerWorkAction(
             "Requesting admin approval to return Bluetooth to the laptop.",
             "Bluetooth is back on the laptop and verified healthy.",
-            () => _workVmService.ReturnBluetoothToLaptop());
+            () => _dockerWorkService.PutBluetoothOnLaptop());
     }
 
     private void ToggleStartup()
@@ -486,26 +562,26 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RefreshUi();
     }
 
-    private void BeginWorkVmAction(string startingMessage, string completionMessage, Action action)
+    private void BeginDockerWorkAction(string startingMessage, string completionMessage, Action action)
     {
-        if (_workVmActionRunning)
+        if (_dockerWorkActionRunning)
         {
             return;
         }
 
-        _workVmActionRunning = true;
-        RefreshWorkVmMenuItems();
+        _dockerWorkActionRunning = true;
+        RefreshDockerWorkMenuItems();
         ShowInfoBalloon(startingMessage);
 
         Task.Run(action).ContinueWith(task =>
         {
             _uiContext.Post(_ =>
             {
-                _workVmActionRunning = false;
+                _dockerWorkActionRunning = false;
 
                 if (task.Exception is not null)
                 {
-                    ShowErrorBalloon($"WorkVM action failed: {task.Exception.GetBaseException().Message}");
+                    ShowErrorBalloon($"Work-browser action failed: {task.Exception.GetBaseException().Message}");
                 }
                 else
                 {
@@ -513,30 +589,30 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 }
 
                 RefreshUi();
-                QueueWorkVmStatusRefresh();
+                QueueDockerWorkStatusRefresh();
             }, null);
         });
     }
 
-    private void QueueWorkVmStatusRefresh()
+    private void QueueDockerWorkStatusRefresh()
     {
-        if (_workVmStatusRefreshRunning)
+        if (_dockerWorkStatusRefreshRunning)
         {
             return;
         }
 
-        _workVmStatusRefreshRunning = true;
-        Task.Run(() => _workVmService.GetStatus()).ContinueWith(task =>
+        _dockerWorkStatusRefreshRunning = true;
+        Task.Run(() => _dockerWorkService.GetStatus()).ContinueWith(task =>
         {
             _uiContext.Post(_ =>
             {
-                _workVmStatusRefreshRunning = false;
+                _dockerWorkStatusRefreshRunning = false;
                 if (task.Exception is null)
                 {
-                    _workVmStatus = task.Result;
+                    _dockerWorkStatus = task.Result;
                 }
 
-                RefreshWorkVmMenuItems();
+                RefreshDockerWorkMenuItems();
             }, null);
         });
     }
@@ -686,12 +762,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _activeMenuItem.Checked = settings.IsActive;
         _jiggleMouseMenuItem.Checked = settings.JiggleMouseEnabled;
         _typeTextMenuItem.Checked = settings.TypeTextEnabled;
+        _chromeCursorInputStayAwakeMenuItem.Checked =
+            settings.ChromeCursorInputStayAwakeEnabled;
         _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
         _dimScreenMenuItem.Checked = settings.DimScreenWhenActiveEnabled;
         _enableAfterInactivityMenuItem.Checked = settings.EnableAfterInactivityEnabled;
         _idleThresholdControl.TotalSeconds = settings.EnableAfterInactivitySeconds;
         _idleThresholdHost.Visible = settings.EnableAfterInactivityEnabled;
-        RefreshWorkVmMenuItems();
+        RefreshDockerWorkMenuItems();
         _remotesMenuController.RefreshCachedUi();
 
         var effectiveActive = _activityController.IsEffectivelyActive(settings);
@@ -701,18 +779,28 @@ internal sealed class TrayApplicationContext : ApplicationContext
             : "StayActive: inactive";
     }
 
-    private void RefreshWorkVmMenuItems()
+    private void RefreshDockerWorkMenuItems()
     {
-        var status = _workVmStatus;
-        var scriptsAvailable = status is null
-            || (status.WorkVmFolderExists
-                && status.StartScriptExists
-                && status.BluetoothToVmScriptExists
-                && status.BluetoothToLaptopScriptExists);
+        var status = _dockerWorkStatus;
+        var openReady = status is null
+            ? File.Exists(_dockerWorkService.SetupMarkerPath)
+                && File.Exists(_dockerWorkService.OpenScriptPath)
+            : status.DockerWorkFolderExists
+                && status.SetupComplete
+                && status.OpenScriptExists;
+        var containerHandoffReady = status is null
+            ? File.Exists(_dockerWorkService.SetupMarkerPath)
+                && File.Exists(_dockerWorkService.BluetoothToContainerScriptPath)
+            : status.DockerWorkFolderExists
+                && status.SetupComplete
+                && status.BluetoothToContainerScriptExists;
+        var laptopRecoveryAvailable = status is null
+            ? File.Exists(_dockerWorkService.BluetoothToLaptopScriptPath)
+            : status.BluetoothToLaptopScriptExists;
 
-        _openWorkVmMenuItem.Enabled = !_workVmActionRunning && scriptsAvailable;
-        _switchBluetoothToVmMenuItem.Enabled = !_workVmActionRunning && scriptsAvailable;
-        _returnBluetoothToLaptopMenuItem.Enabled = !_workVmActionRunning && scriptsAvailable;
+        _openWorkVmMenuItem.Enabled = !_dockerWorkActionRunning && openReady;
+        _switchBluetoothToVmMenuItem.Enabled = !_dockerWorkActionRunning && containerHandoffReady;
+        _returnBluetoothToLaptopMenuItem.Enabled = !_dockerWorkActionRunning && laptopRecoveryAvailable;
     }
 
     private void ShowInfoBalloon(string message)
@@ -860,6 +948,8 @@ internal sealed class AppSettings
 
     public bool TypeTextEnabled { get; set; }
 
+    public bool ChromeCursorInputStayAwakeEnabled { get; set; }
+
     public bool DimScreenWhenActiveEnabled { get; set; }
 
     public bool EnableAfterInactivityEnabled { get; set; }
@@ -951,6 +1041,7 @@ internal sealed class AppSettings
             IsActive = IsActive,
             JiggleMouseEnabled = JiggleMouseEnabled,
             TypeTextEnabled = TypeTextEnabled,
+            ChromeCursorInputStayAwakeEnabled = ChromeCursorInputStayAwakeEnabled,
             DimScreenWhenActiveEnabled = DimScreenWhenActiveEnabled,
             EnableAfterInactivityEnabled = EnableAfterInactivityEnabled,
             EnableAfterInactivitySeconds = EnableAfterInactivitySeconds,

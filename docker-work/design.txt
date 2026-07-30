@@ -1,0 +1,196 @@
+StayActive Docker Work Browser - design and operating considerations
+===================================================================
+
+Goal
+----
+
+Replace the heavy Windows WorkRDP VirtualBox guest with a reproducible Linux
+Docker browser appliance. Google Chrome, the visible desktop, BlueZ, D-Bus,
+the persistent browser profile, and the keepalive control endpoint all run in
+the Docker container. Chrome initiates the real WebAuthn Hybrid/passkey flow
+and uses the laptop's MediaTek Bluetooth controller to prove proximity to the
+phone.
+
+This is intentionally not a host-Chrome design.
+
+Non-negotiable hardware rule
+----------------------------
+
+The built-in 13d3:3602 MediaTek MT7925 controller stays physically in the
+laptop, but it can have only one software owner at a time:
+
+  Windows/VirtualBox -> Windows -> WSL/Docker -> Windows -> VirtualBox
+
+Windows cannot use the radio while usbipd has attached it to WSL. Every owner
+transition must pass through a verified healthy Windows state. A direct
+VirtualBox-to-WSL or WSL-to-VirtualBox transition is forbidden.
+
+Architecture
+------------
+
+Windows host:
+
+* StayActive invokes short PowerShell orchestration scripts with UAC.
+* usbipd-win binds the exact hardware ID 13d3:3602 once and transfers it to
+  WSL on demand.
+* usbipd force binding is forbidden: it would prevent Windows from using the
+  adapter while detached and break the laptop ownership option.
+* Existing WorkVM script 33 is used to release an adapter currently captured
+  by VirtualBox. It already has exact-device checks and rollback.
+* The existing Global\StayActiveWorkVmBluetoothHandoff mutex serializes all
+  VirtualBox and Docker ownership changes.
+
+WSL:
+
+* A dedicated Ubuntu 24.04 distribution named StayActiveDocker hosts a native
+  rootful Docker Engine. Docker Desktop is not used for this workload.
+* The Microsoft WSL kernel must include MediaTek HCI initialization.
+  13d3:3602 is an MT7925 device. Microsoft's stock WSL configuration includes
+  generic btusb but disables CONFIG_BT_HCIBTUSB_MTK, so setup builds a matching
+  Microsoft WSL kernel and modules VHDX with that option enabled if the stock
+  kernel cannot produce a healthy hci0. The recipe pins tag
+  linux-msft-wsl-6.18.33.2 and commit
+  c21a03b2943d147c280bdf32530d4fe6badfd6bd, matching this host's WSL
+  6.18.33.2 base release, and refuses an unexpected source revision.
+* Current MediaTek firmware is installed in the Ubuntu host because the kernel,
+  not Chrome, loads it. Setup materializes the MT7925 payload from Ubuntu's
+  compressed firmware package. It also stores the payload in the modules VHD
+  and selects `/modules/firmware` before USB hot-plug, because WSL services
+  hot-plugged USB from a hidden system mount namespace that cannot resolve a
+  distro's ordinary `/lib/firmware`. The custom kernel also enables compressed
+  firmware loading.
+
+Docker container:
+
+* Ubuntu 24.04 base.
+* System D-Bus and BlueZ bluetoothd own hci0.
+* Xvfb and Openbox provide a persistent 1920x1080 graphical desktop.
+* Google Chrome Stable runs as an unprivileged user with its normal sandbox.
+* x11vnc and noVNC expose the desktop only through WSL/Windows loopback.
+* Chrome's profile and BlueZ state are Docker named volumes, not /mnt/c data.
+* A local WebAuthn test page is included for controlled cross-device testing.
+* Chrome DevTools is available only for health checks and page-scoped keepalive
+  injection. It is not used to emulate a passkey or control Chrome's native
+  passkey dialog.
+* The keepalive sends a one-pixel mouse-move pair only to the largest RDP
+  canvas through Chrome DevTools. It never injects host Windows input and does
+  nothing when no RDP canvas exists.
+
+Security boundary
+-----------------
+
+Bluetooth HCI is a kernel facility and Docker Desktop offers no supported
+direct USB passthrough. The production compose file adds the capabilities used
+by upstream BlueZ (NET_ADMIN, NET_RAW, NET_BIND_SERVICE) plus SYS_ADMIN for
+Chrome's signed setuid sandbox to create its nested PID/user namespaces under
+Docker's default seccomp profile. Chrome itself runs as UID/GID 10001 rather
+than root. Verification requires its renderer to enter a different PID
+namespace, apply an additional seccomp filter, and set NoNewPrivs. The
+container is never run with Docker privileged mode.
+
+noVNC, x11vnc, and Chrome DevTools are loopback-only. The VNC server uses no
+second password because it cannot accept a non-local connection; this lets the
+viewer reconnect automatically without putting a reusable credential in a URL,
+browser history, file, or log.
+
+Ownership state machine
+-----------------------
+
+Open work browser:
+
+1. If VirtualBox owns 13d3:3602, invoke the audited WorkVM return script.
+2. Require Windows to report exactly one healthy physical parent and MI_00
+   Bluetooth interface.
+3. Acquire the global handoff mutex and re-check that VirtualBox is detached.
+4. Ensure Ubuntu, Docker, the image, and the container are healthy.
+5. Bind and attach exactly hardware ID 13d3:3602 with usbipd.
+6. Require lsusb, a btusb-bound interface, hci0, BlueZ org.bluez, Powered=yes,
+   LE support, Chrome DevTools, and noVNC.
+7. Open the noVNC browser URL.
+8. On any failure: stop BlueZ, detach usbipd, verify Windows health, and report
+   the exact logged error.
+
+Put Bluetooth on laptop:
+
+1. If VirtualBox owns 13d3:3602, invoke the audited WorkVM return script before
+   acquiring the shared mutex.
+2. Acquire the same mutex.
+3. Stop bluetoothd cleanly and power hci0 down. Chrome and its desktop may keep
+   running.
+4. Detach only 13d3:3602 from WSL.
+5. Scan Windows devices, start Bluetooth services, and require the exact
+   physical parent and MI_00 interface to be healthy.
+6. If normal detach stalls, terminating StayActiveDocker is the recovery path;
+   a PC reboot is never an automatic action.
+
+Put Bluetooth on work container:
+
+1. Require Windows or an already healthy container to be the current owner.
+2. Attach 13d3:3602 to WSL.
+3. Start/restart bluetoothd and require the full in-container health contract.
+4. Roll back to a verified Windows owner if any check fails.
+
+Passkey proof
+-------------
+
+A QR code alone is not success. End-to-end acceptance requires all of:
+
+* Chrome inside the container starts the WebAuthn request.
+* "Use a phone or tablet" displays a QR code.
+* The phone scans it, confirms proximity over Bluetooth, and approves.
+* Chrome receives the credential and the relying-party login completes.
+* The flow succeeds again after a container restart.
+* The flow succeeds again after a full Bluetooth detach/reattach.
+
+The actual managed-company login is the final authority. A corporate policy
+may reject Linux Chrome or require Windows-only device posture even when
+Bluetooth and WebAuthn work correctly; that is an external policy failure, not
+a Bluetooth implementation failure.
+
+Reliability acceptance
+----------------------
+
+Before the StayActive menu is migrated from VirtualBox to Docker:
+
+* hello-world succeeds on the dedicated Docker Engine.
+* The container health contract passes.
+* A real phone passkey completes.
+* Ten attach -> BlueZ/Chrome -> detach -> Windows-health cycles pass without a
+  reboot.
+* A forced container crash still permits a clean usbipd detach and Windows
+  recovery.
+* A WSL shutdown recovers ownership without rebooting Windows.
+* A multi-hour browser/RDP soak remains responsive.
+
+Rollback
+--------
+
+* Stop the container.
+* usbipd detach --hardware-id 13d3:3602.
+* Verify Windows Bluetooth health.
+* usbipd unbind --hardware-id 13d3:3602 is optional and removes persistent
+  sharing.
+* Restore the backed-up .wslconfig and run wsl --shutdown to return to the
+  Microsoft kernel.
+* Existing VirtualBox files and scripts remain available until Docker passes
+  every acceptance gate.
+
+Primary references
+------------------
+
+* Microsoft WSL USB attachment and exclusivity:
+  https://learn.microsoft.com/windows/wsl/connect-usb
+* usbipd-win WSL support:
+  https://github.com/dorssel/usbipd-win/wiki/WSL-support
+* Microsoft WSL kernel:
+  https://github.com/microsoft/WSL2-Linux-Kernel
+* Docker Engine on Ubuntu:
+  https://docs.docker.com/engine/install/ubuntu/
+* Docker Desktop USB limitation:
+  https://docs.docker.com/desktop/troubleshoot-and-support/faqs/general/
+* Chromium Linux Bluetooth/BlueZ implementation:
+  https://chromium.googlesource.com/chromium/src/+/master/device/bluetooth/
+* Google Chrome passkey platform support:
+  https://developers.google.com/identity/passkeys/supported-environments
+* noVNC:
+  https://github.com/novnc/noVNC

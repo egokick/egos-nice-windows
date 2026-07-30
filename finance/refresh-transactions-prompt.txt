@@ -1,0 +1,174 @@
+# Single-account finance transaction refresh
+
+Refresh the raw transaction ledger for exactly the one account in the `Assigned account (authoritative)` block appended to this prompt by the Finances app. This Codex session owns only that account.
+
+## Non-negotiable outcome
+
+Complete the assigned account's entire server-provided window from `requiredStartOn` through `requiredEndOn`, persist every fully reconciled day as you finish each monthly window, post the coverage checkpoint, and verify it in the Finances API. Do not browse, collect, modify, or checkpoint any other account. Do not stop while there is any actionable step, unchecked month, uninspected row, or unposted snapshot for this account.
+
+- `initial_backfill` requires complete coverage of the full 24-month required window, even if local transactions already exist.
+- `incremental` requires complete coverage of the full one-month required window.
+- Finding transactions, enumerating months, loading rows, saving notes, or preserving a signed-in tab is progress only. None is completion.
+- Run duration, a large result count, a slow page, or a tool response-size limit is not a reason to stop. Work in smaller batches and continue.
+- This session runs non-interactively and exits after your final response so the next queued account can start. If a genuine user-only blocker remains, preserve its tab and report it concisely; do not wait indefinitely for a reply in this process and do not prevent the remaining queued accounts from running.
+
+## Authoritative local inputs and APIs
+
+- The launcher-appended account block is the authoritative target. Its `accountId`, `accountName`, `institution`, `loginUrl`, `refreshMode`, `requiredStartOn`, `requiredEndOn`, record metadata, and `collectorNotes` apply only to this session.
+- Read `GET http://127.0.0.1:5137/api/finance/state` to obtain current `transactions.records` for the assigned `accountId` and to verify writes. Ignore all other accounts.
+- The authoritative and exclusive credential source is the launcher-appended **Secure credential lease (authoritative)** block. The Finances app creates that short-lived, account-scoped lease from Windows Credential Manager only when this assigned account starts. The assigned-account JSON, `finance/data/finance/accounts.json`, `/api/finance/state`, browser autofill, and process environment variables are never credential sources.
+- Save revised navigation notes with `PUT http://127.0.0.1:5137/api/finance/accounts/{accountId}/notes`.
+- Save complete daily snapshots with `POST http://127.0.0.1:5137/api/finance/transactions/{accountId}/days/{postedOn}/snapshot`.
+- Save final coverage only with `POST http://127.0.0.1:5137/api/finance/transactions/{accountId}/sync`.
+
+Never print, echo, enumerate, serialize, copy, log, return, persist, reveal, or include any username, password, one-time code, full account number, transaction value copied into notes, or other secret in authored source code, shell commands, tool-call output, notes, or summaries. Credential values may exist only as block-scoped runtime values passed directly to a verified locator fill.
+
+## Dedicated browser tab and sign-in
+
+- Use browser tools through the Microsoft Edge direct extension.
+- Create one brand-new tab for this assigned account and retain its tab identity throughout the run. Do not reuse a pre-existing tab and do not inspect or interact with tabs opened for other account refresh sessions.
+- Every credential fill must target a locator created from that retained assigned-tab binding. Never fill the currently active tab and never rediscover the target by title or focus. Immediately before each fill, verify the retained tab's current URL is the legitimate institution login or expected authentication redirect, verify the locator is visible and enabled, and require a password locator to have `type="password"`.
+- Never take passwords, security answers, one-time codes, or editable username values from browser autofill, a password manager, saved browser credentials, or prepopulated editable form values.
+- Bank-owned saved identity selectors are a navigation exception, not a credential-source exception. If the institution shows the matching or sole preselected saved client card/customer identifier as read-only with an enabled **Next**, **Continue**, or equivalent action, leave it selected and click that action immediately. Do not remove the saved client card, try to replace the locked identifier, call it a blocker, or ask permission merely to advance. Continue to the password step and use the targeted runtime fill for every editable credential field.
+- A read-only preselected client card or customer identifier does not mean credentials are unavailable. It is authorization to proceed through the institution's own remembered-identity flow for this assigned login only; it does not authorize reading secrets from the browser.
+- Outside that read-only saved-identity case, POST to the exact username or password endpoint in the launcher-appended secure credential lease block only inside the same short, block-scoped browser-control call that fills the verified locator. Supply the lease header, require `response.ok`, keep the response and value local to that block, clear the locator, and pass the value immediately to `locator.fill(...)`. For a two-step login, redeem the password separately after its page loads. Never persist or return the response or credential value.
+- A different user-selected Edge tab or foreground application does not affect locator filling into the retained assigned tab and is never a blocker. Do not ask the user to foreground, activate, or click the assigned tab. After the targeted fills, click the enabled **Log in**, **Sign in**, **Next**, **Continue**, or equivalent button in the retained tab and wait for the response.
+- An enabled login/continue button is an action for you, not a user blocker. Never preserve an unsubmitted login form and ask the user to click it.
+- Do not report missing credentials or request user sign-in until the exact account-scoped lease requests and targeted locator fills have been attempted, the enabled login action has been submitted, actionable validation errors have been handled, and one appropriate retry has been attempted. Do not fall back to environment variables or foreground typing.
+- Ask the user only for a genuine user-only step such as MFA, mobile approval, a one-time code, CAPTCHA, or an explicit institution error requiring intervention. Preserve the dedicated tab and resume after the user completes that step.
+
+## Navigation memory and visual recovery
+
+Start with the assigned account's complete `collectorNotes`. Reuse known login routes, account selectors, Activity/Transactions buttons, date controls, pagination, row details, and return paths before experimenting.
+
+Whenever you discover or correct a durable navigation fact, immediately PUT the complete revised notes string:
+
+```json
+{
+  "collectorNotes": "the complete revised notes string"
+}
+```
+
+- Preserve useful existing login, MFA, balance, payment, and navigation notes. Add or revise a concise paragraph beginning `Transaction navigation:`.
+- Record exact visible button/menu labels and sequence: account summary -> assigned account -> activity/transactions -> filter/custom dates -> apply -> pagination/details -> return path.
+- Record which controls expose details, how to load every result, whether filters reset, and successful workarounds.
+- Never put credentials, codes, full account numbers, session URLs/tokens, or transaction data in notes.
+- Saving notes is not a checkpoint and is never a reason to stop.
+
+If the page layout, controls, login action, account selector, filter, pagination, or row-detail target is unclear:
+
+1. Inspect the assigned tab's current DOM/accessibility state and visible interactive controls.
+2. Take a screenshot of that assigned browser tab with the browser screenshot tool and inspect the image to locate controls that semantic inspection missed. Do not capture or expose secrets unnecessarily.
+3. Try plausible visible account cards/names, **Activity**, **Transactions**, **View activity**, **View all**, **Filter**, **Date range**, calendar icons, overflow menus, chevrons, row descriptions/dates/amounts, **Details**, statements, breadcrumbs, and browser Back.
+4. Wait for loading, refresh the page if safe, restore the assigned account/range, and retry.
+5. Update `Transaction navigation:` with the path that worked.
+
+Do not give up after one failed selector, one missing control, one empty page, one timeout, or one response-size failure. Keep searching for a workable route using DOM inspection, a screenshot, alternate controls/views, smaller date ranges, pagination, statements, and retries. A screenshot is required before declaring that a needed visible control cannot be found.
+
+## Existing-direction integrity preflight
+
+Before building the date checklist, inspect every existing local record for the assigned account from `/api/finance/state` and count `money_in` versus `money_out`. Existing directions are untrusted input.
+
+- If the account has at least 20 stored records and at least 95% share one direction, inspect descriptions/types from both the local rows and representative bank rows for evidence that contradicts that direction. Purchases, merchants, withdrawals, fees, bill payments, or outbound transfers stored as `money_in` prove corruption; deposits, payroll, refunds, or inbound transfers stored as `money_out` do likewise.
+- In particular, an existing UFCU ledger whose rows are all `money_in` must be treated as direction-corrupted when any expense/debit evidence exists. Do not trust its prior coverage checkpoint and do not repair only the current incremental month.
+- When corruption is proven, set a repair work range from the earliest non-null `backfillStartOn`, `earliestStoredPostedOn`, or `requiredStartOn` through the latest non-null `backfillEndOn`, `latestStoredPostedOn`, or `requiredEndOn`. Revisit that entire range from the bank in adjacent windows of at most one calendar month, re-derive every row's direction from bank evidence, and POST authoritative complete-day snapshots for every covered date.
+- Do not mechanically flip directions. The repair must classify each bank row using its sign, debit/credit column, type, details, statement representation, or running-balance change.
+- After the repair range is fully reconciled, ensure the assigned `requiredStartOn` through `requiredEndOn` window is also fully covered, then post the sync checkpoint using the assigned server-provided mode and required bounds.
+- If the integrity audit finds no contradictory evidence, use the ordinary assigned required range only.
+
+## Mandatory month-by-month workflow
+
+Before querying transactions, build an ordered checklist of adjacent ranges covering every date from `requiredStartOn` through `requiredEndOn`, with no gaps or overlap. Each filter range must span no more than one calendar month: partial first month, full intervening months, and partial final month.
+
+For each checklist range, perform this entire loop before moving to the next range:
+
+1. Select the exact assigned account and open its full transaction/activity surface.
+2. Inspect for date filters first: **Filter**, **Date range**, **Custom dates**, start/end fields, calendars, presets, or equivalent. Apply only the current range, never a range longer than one calendar month.
+3. If the institution caps searches below a month, split that month into smaller adjacent subranges and complete every subrange.
+4. If there is no usable date filter after inspecting controls and a screenshot, prefer month-scoped statements or another month-scoped UI. Scroll/load all available history only as the last resort when neither date filters nor month-scoped statements/views exist.
+5. Read any displayed result total. Exhaust every page, page number, collapsed group, **Next**, **Load more**, or **Show more** for this range. A large count is work to complete, not a blocker.
+6. Inspect every transaction one by one; never sample. Try linked descriptions/payees, date, amount, row, chevron, **Details**, and overflow menus. Capture the bank-provided posted date, transaction date, signed amount, direction, full description, merchant/counterparty, status, reference, and stable source ID when available. Derive direction independently for every row using the evidence rules below; never copy a default direction across the batch.
+7. After details, return to the same assigned account, range, page, and loaded position. Restore them if the UI reset.
+8. Group the fully inspected range by bank `postedOn`. Reconcile the union of dates shown by the bank and dates with existing local records inside this range. POST every complete daily snapshot now, and verify every response, before advancing to the next month.
+9. If the current range has zero results, reconcile every previously stored date in that range with a complete empty snapshot. Also ensure exactly one explicit `{"complete":true,"transactions":[]}` snapshot is POSTed for the range's final in-scope date, even when that date has no prior row. If the final date was already reconciled as a previously stored date, that one POST also serves as the range sentinel; do not POST it twice. Do not create a sentinel for every otherwise empty day. Verify the sentinel request succeeded and its response has `observedCount` equal to `0` before marking the range checked, then immediately continue to the next unchecked range. An empty month never ends the run.
+10. Mark the range complete only after all its rows have been normalized, all required stored-date reconciliations have succeeded, and any required zero-result-range sentinel has a successful receipt with `observedCount: 0`.
+
+Never enumerate or load several months for later normalization. Never advance from a non-empty month after merely counting or loading its rows. Persist the current month end-to-end while its context is active.
+
+If a browser/tool response is too large, reduce the current month to smaller adjacent date ranges or pages, process each batch fully, and continue. Do not attempt to load the full 24-month history into one response.
+
+## Mandatory transaction-direction classification
+
+`direction` is cash flow relative to the assigned account. Determine it separately for every transaction from bank evidence. The JSON `amount` is signed and must agree with `direction`: `money_in` is positive and `money_out` is negative.
+
+- Use `money_out` for debits, withdrawals, purchases/POS/card spend, bill payments sent, checks paid, ATM cash withdrawals, fees, and outbound transfers; also when the bank shows a minus sign, debit/withdrawal column, or a matching decrease in the account's running balance. Submit `amount` as a negative number, for example `-100.00`, never `100.00`.
+- Use `money_in` for credits, deposits, payroll/direct deposits, interest paid into the account, refunds/reimbursements received, incoming transfers, and reversals that restore funds; also when the bank shows a plus sign, credit/deposit column, or a matching increase in the running balance. Submit `amount` as a positive number, for example `100.00`.
+- Words such as `credit` or `debit` must be interpreted from the assigned deposit account's perspective and cross-checked against the bank's column/sign/type. A transfer is classified by whether money entered or left this assigned account.
+- If the list visually suppresses signs or column headings, inspect the row's DOM/accessibility text, CSS/state, transaction details, statement representation, and running-balance change. Take a screenshot and inspect the visible layout when columns, signs, or colors are unclear.
+- Existing local `direction` values are not evidence. Re-derive direction from the bank and correct the stored rows through complete-day snapshots whenever bank evidence disagrees.
+- Before posting any day's snapshots for the current month, perform a direction sanity check across the fully collected month. If every row has the same direction, explicitly re-check all expense-looking and income-looking descriptions against bank signs, debit/credit columns, details, and balance changes. An all-`money_in` month containing purchases, merchants, withdrawals, fees, bill payments, or outbound transfers is invalid and must be corrected before any snapshot is posted.
+- Do not guess when evidence conflicts. Reopen details or a statement and resolve the direction first. Record the reliable sign/column/type interpretation in `Transaction navigation:` so later months use the verified mapping.
+
+## Complete-day snapshot contract
+
+For each reconciled date POST:
+
+```json
+{
+  "complete": true,
+  "transactions": [
+    {
+      "accountId": "the assigned accountId",
+      "postedOn": "same YYYY-MM-DD as the URL",
+      "transactedOn": "YYYY-MM-DD or null",
+      "amount": -12.34,
+      "currency": "USD",
+      "direction": "money_out",
+      "description": "full institution description",
+      "merchant": "merchant, payee, payer, or transfer counterparty when available",
+      "status": "posted, pending, declined, or reversed",
+      "reference": "confirmation, check, trace, or reference number when available",
+      "sourceTransactionId": "institution transaction id when available",
+      "label": null,
+      "person": null,
+      "recordId": "existing local record id when the match is certain, otherwise null"
+    }
+  ]
+}
+```
+
+- `complete: true` means the array is the bank's entire current transaction set for this account and date. Never send it from a partial page, collapsed group, search subset, or before all details for that date are inspected.
+- Include every transaction and preserve multiplicity, including genuinely separate identical-date/amount rows.
+- Use `transactions: []` only after proving the bank has no current transactions on that date. Empty snapshots reconcile every previously stored date proven empty and provide exactly one final-in-scope-date sentinel for each zero-result month/subrange; do not send one for every otherwise empty day.
+- `amount` is signed and must agree with `direction`: positive for `money_in`, negative for `money_out`, and never zero. The backend canonicalizes this invariant, but you must submit the correct sign. Preserve full descriptions and never invent missing fields.
+- Leave `label` and `person` null. Include pending transactions and reconcile them again when they change.
+- Verify `observedCount`, `insertedCount`, `updatedCount`, `unchangedCount`, and `removedCount` in every response. A zero-result-range sentinel is successful only when `observedCount` is `0`.
+
+## Recovery and genuine blockers
+
+Before declaring the assigned account blocked, you must have tried all applicable recovery steps: saved notes, correct account selection, activity/transaction navigation, DOM/accessibility inspection, a screenshot of the assigned tab, alternate visible buttons and menus, date filters, smaller subranges, month-scoped statements, pagination/load-more controls, multiple row-detail targets, back/breadcrumb return paths, waiting/reloading, and at least one retry.
+
+A 15-minute duration is not a stopping condition. A large result set, slow batch loader, response-size limit, failure of one selector, empty range, missing obvious detail panel, or need to work in smaller batches is not a blocker. Continue until the required range is fully reconciled or a genuine external/user-only blocker remains after the recovery checklist.
+
+If no richer detail view exists after testing multiple controls on representative rows, the complete row-level data is the authoritative available detail; record what was tested and continue every row. If the institution exposes less historical coverage than required, document the proven limitation and do not falsely checkpoint.
+
+## Coverage checkpoint and verification
+
+Only after every month, row, required empty-date reconciliation, and zero-result-range sentinel in the assigned window has a verified successful receipt may you POST to `/api/finance/transactions/{accountId}/sync`:
+
+```json
+{
+  "mode": "initial_backfill or incremental",
+  "coverageStartOn": "the assigned requiredStartOn",
+  "coverageEndOn": "the assigned requiredEndOn"
+}
+```
+
+Then read `/api/finance/state` again and verify only the assigned account changed:
+
+- successful initial backfill: `initialBackfillComplete` is true and the recorded range covers the original required bounds;
+- successful incremental refresh: the last refresh range covers the original required one-month bounds;
+- required transactions are visible, daily snapshot counts reconcile, every zero-result range has exactly one verified final-date sentinel receipt with `observedCount: 0`, and updated `Transaction navigation:` notes are present;
+- no non-assigned account was written.
+
+Finish only when this assigned account is fully complete or genuinely blocked after every recovery step. Report the assigned account's mode, result/row counts, inserted/updated/unchanged/removed totals, checked range, checkpoint result, navigation-note update, and exact safe blocker if any. Never include secrets or full account numbers.

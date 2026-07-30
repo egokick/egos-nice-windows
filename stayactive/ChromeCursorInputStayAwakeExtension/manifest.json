@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "StayActive Chrome Cursor Input Stay Awake",
+  "version": "1.5.0",
+  "description": "Keeps one supported Chrome remote-session tab awake with bounded cursor and keyboard pulses.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtkjfx+e+7f/8/0fxoD+03z7HoaYFATc3xeyBVgUXM7x8/Fc0yGUKEEYNmAk/XNeN8xjfvcigkuEZb8q25IUXiwc3J4YI2+LhZ/4SwR4Bq686FfBcOnwSgmGAbotO0cbPdb3bQt0FAkdkHpuLXEOa4dVrkuFfm6+6BLtJZ96exuINYPOn7FkevW5Hs/WwbOKBC85u+kHNhy/qBEvMzpTEXPjohhnurduBFLxOLioJvl9u1PhUTW2ZDDnb0qukByzKqAXR0o9FONnVxgp5XQMCmQRtpm324AoteCxGs8fSwy3gwAd0dLYlQ9AN5BXHcuvD+/gRm8V//7HpMttPLKjpywIDAQAB",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "alarms",
+    "debugger",
+    "nativeMessaging",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
