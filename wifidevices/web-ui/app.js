@@ -1,4 +1,3 @@
-const ZOOM_HOUR_STEPS = [6, 12, 24, 48, 72, 168, 336, 720, 2160];
 const MAX_HISTORY_HOURS = 2160;
 const UNKNOWN_GAP_MS = 60 * 60 * 1000;
 
@@ -14,7 +13,7 @@ const appState = {
   timelineOffsetHours: 0,
   history: { samples: [], events: [], bounds: { firstSampleUtc: null, lastSampleUtc: null } },
   nameTimers: new Map(),
-  timelineScrollTimer: null
+  timelineRenderFrame: null
 };
 
 let preferencesSaveTimer = null;
@@ -38,10 +37,17 @@ const els = {
   createGroup: document.querySelector("#createGroup"),
   deviceList: document.querySelector("#deviceList"),
   selectionSummary: document.querySelector("#selectionSummary"),
-  rangeHours: document.querySelector("#rangeHours"),
+  timelineRangeControl: document.querySelector("#timelineRangeControl"),
+  timelineStart: document.querySelector("#timelineStart"),
+  timelineEnd: document.querySelector("#timelineEnd"),
+  timelineStartLabel: document.querySelector("#timelineStartLabel"),
+  timelineEndLabel: document.querySelector("#timelineEndLabel"),
+  timelineRangeLength: document.querySelector("#timelineRangeLength"),
+  timelineRangeSelection: document.querySelector("#timelineRangeSelection"),
+  timelineMinLabel: document.querySelector("#timelineMinLabel"),
+  timelineMaxLabel: document.querySelector("#timelineMaxLabel"),
+  timelineRangeHelp: document.querySelector("#timelineRangeHelp"),
   timelineChart: document.querySelector("#timelineChart"),
-  timelineScroll: document.querySelector("#timelineScroll"),
-  timelineScrollLabel: document.querySelector("#timelineScrollLabel"),
   heatmap: document.querySelector("#heatmap"),
   heatmapCaption: document.querySelector("#heatmapCaption"),
   eventList: document.querySelector("#eventList"),
@@ -131,26 +137,12 @@ async function deleteGroup(group) {
   await refreshAll();
 }
 
-els.rangeHours.addEventListener("change", () => {
-  setRangeHours(Number(els.rangeHours.value), true);
-});
-
-els.timelineScroll.addEventListener("input", () => {
-  setTimelineOffset(timelineOffsetFromScrollValue(Number(els.timelineScroll.value)), false);
-  clearTimeout(appState.timelineScrollTimer);
-  appState.timelineScrollTimer = setTimeout(loadHistory, 300);
-});
-
-els.timelineScroll.addEventListener("change", () => {
-  clearTimeout(appState.timelineScrollTimer);
-  setTimelineOffset(timelineOffsetFromScrollValue(Number(els.timelineScroll.value)), true);
-});
-
-els.timelineChart.parentElement.addEventListener("wheel", event => {
-  event.preventDefault();
-  const direction = event.deltaY < 0 ? -1 : 1;
-  zoomTimeline(direction);
-}, { passive: false });
+for (const [input, handle] of [[els.timelineStart, "start"], [els.timelineEnd, "end"]]) {
+  input.addEventListener("input", () => updateTimelineRangeFromInput(handle));
+  input.addEventListener("change", commitTimelineRange);
+  input.addEventListener("pointerdown", () => setActiveTimelineHandle(input));
+  input.addEventListener("focus", () => setActiveTimelineHandle(input));
+}
 
 els.timelineChart.parentElement.addEventListener("auxclick", event => {
   if (event.button === 1) {
@@ -175,9 +167,7 @@ async function initializeApp() {
   } catch (error) {
     console.warn("Unable to load shared Wi-Fi preferences; continuing with local preferences.", error);
   }
-
-  syncRangeControl();
-  syncTimelineScrollControl();
+  syncTimelineRangeControl();
   els.showIgnored.checked = appState.showIgnored;
   await refreshAll();
   setInterval(refreshAll, 30000);
@@ -211,114 +201,115 @@ function normalizeRangeHours(hours) {
   return Math.min(MAX_HISTORY_HOURS, Math.max(6, Math.round(parsed)));
 }
 
-function setRangeHours(hours, reloadHistory) {
-  appState.rangeHours = normalizeRangeHours(hours);
-  appState.timelineOffsetHours = normalizeTimelineOffset(appState.timelineOffsetHours);
-  persistUiPreferences();
-  syncRangeControl();
-  syncTimelineScrollControl();
-  if (reloadHistory) {
-    loadHistory();
-  } else {
-    renderHistory();
-  }
-}
-
-function syncRangeControl() {
-  const value = String(appState.rangeHours);
-  let option = [...els.rangeHours.options].find(item => item.value === value);
-  if (!option) {
-    option = document.createElement("option");
-    option.value = value;
-    option.textContent = formatRangeLabel(appState.rangeHours);
-    els.rangeHours.append(option);
-  }
-  els.rangeHours.value = value;
+function normalizeTimelineOffset(hours) {
+  const parsed = Number(hours);
+  return Number.isFinite(parsed) ? Math.min(MAX_HISTORY_HOURS, Math.max(0, Math.round(parsed))) : 0;
 }
 
 function formatRangeLabel(hours) {
-  if (hours % 24 === 0 && hours >= 24) {
-    const days = hours / 24;
+  if (hours >= 24) {
+    const days = Math.round((hours / 24) * 10) / 10;
     return `${days} day${days === 1 ? "" : "s"}`;
   }
-  return `${hours} hours`;
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
 }
 
-function zoomTimeline(direction) {
-  const current = appState.rangeHours;
-  const index = ZOOM_HOUR_STEPS.findIndex(hours => hours >= current);
-  const currentIndex = index === -1 ? ZOOM_HOUR_STEPS.length - 1 : index;
-  const nextIndex = Math.min(ZOOM_HOUR_STEPS.length - 1, Math.max(0, currentIndex + direction));
-  const next = ZOOM_HOUR_STEPS[nextIndex];
-  if (next !== current) {
-    setRangeHours(next, true);
-  }
+function setActiveTimelineHandle(input) {
+  els.timelineStart.classList.toggle("is-active", input === els.timelineStart);
+  els.timelineEnd.classList.toggle("is-active", input === els.timelineEnd);
 }
 
-function normalizeTimelineOffset(hours) {
-  const parsed = Number(hours);
-  const step = timelineScrollStepHours();
-  const max = timelineScrollMaxHours();
-  if (!Number.isFinite(parsed)) {
-    return 0;
-  }
-
-  return Math.min(max, Math.max(0, Math.round(parsed / step) * step));
-}
-
-function timelineScrollMaxHours() {
-  const step = timelineScrollStepHours();
-  const firstSample = appState.history?.bounds?.firstSampleUtc
-    ? new Date(appState.history.bounds.firstSampleUtc)
-    : null;
+function timelineRangeDomain() {
+  const end = currentTimelineEnd();
+  const firstSample = appState.history?.bounds?.firstSampleUtc ? new Date(appState.history.bounds.firstSampleUtc) : null;
   if (!firstSample || Number.isNaN(firstSample.getTime())) {
-    return 24;
+    return { hasData: false, start: end, end, totalHours: 0 };
   }
 
-  const currentEnd = currentTimelineEnd();
-  const historySpanHours = Math.ceil((currentEnd - firstSample) / (60 * 60 * 1000));
-  const max = Math.max(24, Math.min(MAX_HISTORY_HOURS - appState.rangeHours, historySpanHours - appState.rangeHours));
-  return Math.floor(max / step) * step;
+  const historyHours = Math.max(1, Math.min(MAX_HISTORY_HOURS, Math.floor((end - firstSample) / (60 * 60 * 1000))));
+  const start = new Date(end.getTime() - historyHours * 60 * 60 * 1000);
+  return { hasData: true, start, end, totalHours: historyHours };
 }
 
-function timelineScrollStepHours() {
-  return 1;
+function selectedTimelineRange(domain = timelineRangeDomain()) {
+  const visibleHours = Math.min(appState.rangeHours, domain.totalHours);
+  const offsetHours = Math.min(appState.timelineOffsetHours, Math.max(0, domain.totalHours - visibleHours));
+  const endHour = domain.totalHours - offsetHours;
+  return { startHour: Math.max(0, endHour - visibleHours), endHour };
 }
 
-function timelineOffsetFromScrollValue(value) {
-  const max = timelineScrollMaxHours();
-  return normalizeTimelineOffset(max - value);
-}
+function updateTimelineRangeFromInput(handle) {
+  const domain = timelineRangeDomain();
+  if (!domain.hasData || domain.totalHours === 0) return;
 
-function setTimelineOffset(hours, reloadHistory) {
-  appState.timelineOffsetHours = normalizeTimelineOffset(hours);
-  persistUiPreferences();
-  syncTimelineScrollControl();
-  if (reloadHistory) {
-    loadHistory();
+  let startHour = Math.round(Number(els.timelineStart.value));
+  let endHour = Math.round(Number(els.timelineEnd.value));
+  if (handle === "start") {
+    startHour = Math.min(Math.max(0, startHour), Math.max(0, endHour - 1));
   } else {
-    renderHistory();
+    endHour = Math.max(Math.min(domain.totalHours, endHour), Math.min(domain.totalHours, startHour + 1));
   }
+
+  const selectedHours = Math.max(6, endHour - startHour);
+  if (handle === "start" && endHour - startHour < 6) startHour = Math.max(0, endHour - 6);
+  if (handle === "end" && endHour - startHour < 6) endHour = Math.min(domain.totalHours, startHour + 6);
+  appState.rangeHours = normalizeRangeHours(selectedHours);
+  appState.timelineOffsetHours = Math.max(0, domain.totalHours - endHour);
+  syncTimelineRangeControl();
+  scheduleTimelineRender();
 }
 
-function syncTimelineScrollControl() {
-  if (!els.timelineScroll) {
+function commitTimelineRange() {
+  persistUiPreferences();
+  renderTimelineDetails();
+}
+
+function scheduleTimelineRender() {
+  if (appState.timelineRenderFrame !== null) return;
+  appState.timelineRenderFrame = window.requestAnimationFrame(() => {
+    appState.timelineRenderFrame = null;
+    renderTimeline();
+  });
+}
+
+function syncTimelineRangeControl() {
+  const domain = timelineRangeDomain();
+  for (const input of [els.timelineStart, els.timelineEnd]) {
+    input.min = "0";
+    input.max = String(domain.totalHours);
+    input.step = "1";
+    input.disabled = !domain.hasData || domain.totalHours < 1;
+  }
+
+  els.timelineRangeControl.classList.toggle("is-empty", !domain.hasData);
+  if (!domain.hasData) {
+    els.timelineStartLabel.textContent = "--";
+    els.timelineEndLabel.textContent = "--";
+    els.timelineRangeLength.textContent = "No timeline history";
+    els.timelineRangeHelp.textContent = "Date controls are available after the first device sample is recorded.";
+    els.timelineMinLabel.textContent = "Earliest data";
+    els.timelineMaxLabel.textContent = "Latest data";
+    els.timelineRangeSelection.style.left = "0%";
+    els.timelineRangeSelection.style.width = "100%";
     return;
   }
 
-  appState.timelineOffsetHours = normalizeTimelineOffset(appState.timelineOffsetHours);
-  const max = timelineScrollMaxHours();
-  const step = timelineScrollStepHours();
-  els.timelineScroll.min = "0";
-  els.timelineScroll.max = String(max);
-  els.timelineScroll.step = String(step);
-  els.timelineScroll.value = String(max - appState.timelineOffsetHours);
-  els.timelineScroll.disabled = max === 0;
-
-  const { start, end, now } = timelineWindow();
-  els.timelineScrollLabel.textContent = formatTimelineWindowLabel(start, end, now);
+  const { startHour, endHour } = selectedTimelineRange(domain);
+  const start = new Date(domain.start.getTime() + startHour * 60 * 60 * 1000);
+  const end = new Date(domain.start.getTime() + endHour * 60 * 60 * 1000);
+  els.timelineStart.value = String(startHour);
+  els.timelineEnd.value = String(endHour);
+  els.timelineStartLabel.textContent = formatTimelineDateTime(start);
+  els.timelineEndLabel.textContent = endHour === domain.totalHours ? `Now · ${formatTimelineDateTime(end)}` : formatTimelineDateTime(end);
+  els.timelineRangeLength.textContent = formatRangeLabel(endHour - startHour);
+  els.timelineRangeHelp.textContent = "Drag either handle, or use the arrow keys when focused.";
+  els.timelineMinLabel.textContent = `Earliest data · ${formatTimelineDateTime(domain.start)}`;
+  els.timelineMaxLabel.textContent = `Latest · ${formatTimelineDateTime(domain.end)}`;
+  els.timelineStart.setAttribute("aria-valuetext", formatTimelineDateTime(start));
+  els.timelineEnd.setAttribute("aria-valuetext", endHour === domain.totalHours ? `Now, ${formatTimelineDateTime(end)}` : formatTimelineDateTime(end));
+  els.timelineRangeSelection.style.left = `${(startHour / domain.totalHours) * 100}%`;
+  els.timelineRangeSelection.style.width = `${((endHour - startHour) / domain.totalHours) * 100}%`;
 }
-
 function readStoredExpandedGroups() {
   try {
     const parsed = JSON.parse(localStorage.getItem("wifiDevices:expandedGroups") || "[]");
@@ -375,17 +366,51 @@ async function loadHistory() {
   }
 
   const macs = encodeURIComponent(historyMacs.join(","));
-  const hours = Math.min(MAX_HISTORY_HOURS, appState.rangeHours + appState.timelineOffsetHours);
-  appState.history = await fetchJson(`/api/history?hours=${hours}&macs=${macs}`);
-  const clampedOffset = normalizeTimelineOffset(appState.timelineOffsetHours);
-  if (clampedOffset !== appState.timelineOffsetHours) {
-    appState.timelineOffsetHours = clampedOffset;
-    persistUiPreferences();
-    appState.history = await fetchJson(`/api/history?hours=${appState.rangeHours + appState.timelineOffsetHours}&macs=${macs}`);
-  }
+  appState.history = prepareHistory(await fetchJson(`/api/history?hours=${MAX_HISTORY_HOURS}&macs=${macs}`));
   renderHistory();
 }
 
+function prepareHistory(history) {
+  const samples = history.samples || [];
+  const events = history.events || [];
+  for (const sample of samples) sample.timelineMs = Date.parse(sample.sampledAtUtc);
+  for (const event of events) event.timelineMs = Date.parse(event.atUtc);
+
+  history.samplesByMac = groupBy(samples, sample => sample.mac);
+  history.eventsByMac = groupBy(events, event => event.mac);
+  for (const series of history.samplesByMac.values()) series.sort((a, b) => a.timelineMs - b.timelineMs);
+  for (const series of history.eventsByMac.values()) series.sort((a, b) => a.timelineMs - b.timelineMs);
+  history.groupSeriesByName = new Map();
+  return history;
+}
+
+function timelineItemsInWindow(items, startMs, endMs) {
+  const startIndex = lowerBound(items, startMs);
+  const endIndex = upperBound(items, endMs);
+  return items.slice(startIndex, endIndex);
+}
+
+function lowerBound(items, value) {
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (items[middle].timelineMs < value) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function upperBound(items, value) {
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (items[middle].timelineMs <= value) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
 function historyMacsForCurrentView() {
   if (appState.groupFilters.length > 0) {
     return appState.devices
@@ -642,6 +667,10 @@ function renderDevices() {
 function renderHistory() {
   updateSelectionSummary();
   renderTimeline();
+  renderTimelineDetails();
+}
+
+function renderTimelineDetails() {
   renderHeatmap();
   renderEvents();
 }
@@ -649,7 +678,7 @@ function renderHistory() {
 function renderTimeline() {
   const rows = chartRows();
   const svg = els.timelineChart;
-  syncTimelineScrollControl();
+  syncTimelineRangeControl();
   svg.textContent = "";
 
   if (rows.length === 0) {
@@ -659,15 +688,18 @@ function renderTimeline() {
     return;
   }
 
-  const width = Math.max(appState.rangeHours <= 24 ? 1180 : 820, svg.parentElement.clientWidth - 16);
+  const width = Math.max(320, svg.parentElement.clientWidth - 16);
   const rowHeight = 50;
   const top = 34;
-  const left = 230;
-  const right = 24;
+  const left = width < 620 ? 160 : 230;
+  const right = width < 620 ? 10 : 24;
   const bottom = 36;
   const chartWidth = width - left - right;
   const height = top + bottom + rows.length * rowHeight;
   const { start, end, now } = timelineWindow();
+  const startMs = start.getTime();
+  const endMs = end.getTime();
+  const nowMs = now.getTime();
 
   svg.setAttribute("height", String(height));
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -714,10 +746,7 @@ function renderTimeline() {
     }
     drawSvgText(svg, labelX, y + 36, detail, "row-sub-label");
 
-    const samples = row.samples
-      .map(sample => ({ ...sample, time: new Date(sample.sampledAtUtc) }))
-      .filter(sample => sample.time >= start && sample.time <= end)
-      .sort((a, b) => a.time - b.time);
+    const samples = timelineItemsInWindow(row.samples, startMs, endMs);
 
     const trackY = y + 14;
     drawRect(svg, left, trackY, chartWidth, 18, "#edf1ee", "timeline-track-bg", 9);
@@ -731,35 +760,98 @@ function renderTimeline() {
     const onlinePct = samples.length ? Math.round((onlineSamples / samples.length) * 100) : null;
     drawSvgText(svg, left - 56, y + 27, onlinePct === null ? "--" : `${onlinePct}%`, "row-percent");
 
+    let onlineStart = null;
+    let onlineEnd = null;
+    const drawOnlineSegment = () => {
+      if (onlineStart === null || onlineEnd === null || onlineEnd <= onlineStart) return;
+      const x1 = timeToX(onlineStart, start, end, left, chartWidth);
+      const x2 = timeToX(onlineEnd, start, end, left, chartWidth);
+      const segmentWidth = Math.max(2, x2 - x1);
+      drawRect(svg, Math.max(left, x2 - segmentWidth), trackY, segmentWidth, 18, "#16845f", "timeline-online", 9);
+      onlineStart = null;
+      onlineEnd = null;
+    };
+
     for (let i = 0; i < samples.length; i++) {
       const current = samples[i];
       const next = samples[i + 1];
-      const maxKnownUntil = current.time.getTime() + UNKNOWN_GAP_MS;
-      const nextTime = next?.time.getTime() ?? now.getTime();
-      const segmentEnd = new Date(Math.min(nextTime, maxKnownUntil, now.getTime(), end.getTime()));
-      if (segmentEnd <= current.time) {
+      const maxKnownUntil = current.timelineMs + UNKNOWN_GAP_MS;
+      const nextTime = next?.timelineMs ?? nowMs;
+      const segmentEnd = Math.min(nextTime, maxKnownUntil, nowMs, endMs);
+      if (segmentEnd <= current.timelineMs) continue;
+
+      if (!current.online) {
+        drawOnlineSegment();
         continue;
       }
-
-      const x1 = timeToX(current.time, start, end, left, chartWidth);
-      const x2 = timeToX(segmentEnd, start, end, left, chartWidth);
-      if (current.online) {
-        const segmentWidth = Math.max(2, x2 - x1);
-        const segmentX = Math.max(left, x2 - segmentWidth);
-        drawRect(svg, segmentX, trackY, segmentWidth, 18, "#16845f", "timeline-online", 9);
-      }
+      if (onlineEnd !== null && current.timelineMs > onlineEnd) drawOnlineSegment();
+      if (onlineStart === null) onlineStart = current.timelineMs;
+      onlineEnd = segmentEnd;
     }
+    drawOnlineSegment();
 
-    const events = row.events
-      .map(event => ({ ...event, time: new Date(event.atUtc) }))
-      .filter(event => event.time >= start && event.time <= end);
+    const events = timelineItemsInWindow(row.events, startMs, endMs);
 
     for (const event of events) {
-      const x = timeToX(event.time, start, end, left, chartWidth);
+      const x = timeToX(event.timelineMs, start, end, left, chartWidth);
       drawLine(svg, x, trackY - 6, x, trackY + 24, event.online ? "#0e6147" : "#bd4f43", 2, "timeline-event-line");
       drawCircle(svg, x, trackY + 9, 4, event.online ? "#0e6147" : "#bd4f43", "timeline-event-dot");
     }
   });
+
+  attachTimelineHover(svg, start, end, left, chartWidth, top, height - bottom, width);
+}
+
+function attachTimelineHover(svg, start, end, left, chartWidth, top, baseline, svgWidth) {
+  const hover = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  hover.setAttribute("class", "timeline-hover");
+  hover.setAttribute("visibility", "hidden");
+  hover.setAttribute("pointer-events", "none");
+
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  line.setAttribute("class", "timeline-hover-line");
+  line.setAttribute("y1", String(top - 10));
+  line.setAttribute("y2", String(baseline));
+  hover.append(line);
+
+  const labelBackground = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  labelBackground.setAttribute("class", "timeline-hover-label-bg");
+  labelBackground.setAttribute("y", "4");
+  labelBackground.setAttribute("height", "22");
+  labelBackground.setAttribute("rx", "5");
+  hover.append(labelBackground);
+
+  const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  label.setAttribute("class", "timeline-hover-label");
+  label.setAttribute("y", "19");
+  hover.append(label);
+  svg.append(hover);
+
+  const update = event => {
+    const bounds = svg.getBoundingClientRect();
+    if (!bounds.width) return;
+    const x = ((event.clientX - bounds.left) / bounds.width) * svgWidth;
+    if (x < left || x > left + chartWidth) {
+      hover.setAttribute("visibility", "hidden");
+      return;
+    }
+
+    const progress = (x - left) / chartWidth;
+    const time = new Date(start.getTime() + (end.getTime() - start.getTime()) * progress);
+    const text = formatTimelineDateTime(time);
+    const labelWidth = text.length * 6.8 + 16;
+    const labelX = Math.max(left, Math.min(x - labelWidth / 2, left + chartWidth - labelWidth));
+    line.setAttribute("x1", x.toFixed(1));
+    line.setAttribute("x2", x.toFixed(1));
+    labelBackground.setAttribute("x", labelX.toFixed(1));
+    labelBackground.setAttribute("width", labelWidth.toFixed(1));
+    label.setAttribute("x", (labelX + 8).toFixed(1));
+    label.textContent = text;
+    hover.setAttribute("visibility", "visible");
+  };
+
+  svg.addEventListener("pointermove", update);
+  svg.addEventListener("pointerleave", () => hover.setAttribute("visibility", "hidden"));
 }
 
 function drawAxis(svg, start, end, left, top, width, baseline) {
@@ -842,9 +934,13 @@ function timelineTicks(start, end) {
 function renderHeatmap() {
   els.heatmap.textContent = "";
 
+  const { start, end } = timelineWindow();
+  const startMs = start.getTime();
+  const endMs = end.getTime();
   if (appState.groupFilters.length > 0) {
-    const rows = appState.groupFilters.map(group => groupChartRow(group)).filter(Boolean);
-    const samples = rows.flatMap(row => row.samples);
+    const rows = appState.groupFilters.map(group => groupChartRow(group)).filter(Boolean)
+      .map(row => ({ ...row, samples: timelineItemsInWindow(row.samples, startMs, endMs) }));
+    const samples = rows.flatMap(row => timelineItemsInWindow(row.samples, startMs, endMs));
 
     if (rows.length === 0) {
       els.heatmapCaption.textContent = "No matching groups";
@@ -860,7 +956,7 @@ function renderHeatmap() {
   }
 
   const rows = chartRows();
-  const samples = rows.flatMap(row => row.samples);
+  const samples = rows.flatMap(row => timelineItemsInWindow(row.samples, startMs, endMs));
 
   if (rows.length === 0) {
     els.heatmapCaption.textContent = "Select one or more devices";
@@ -924,12 +1020,15 @@ function renderHeatmapBlock(title, samples) {
 }
 
 function renderEvents() {
+  const { start, end } = timelineWindow();
+  const startMs = start.getTime();
+  const endMs = end.getTime();
   const events = appState.groupFilters.length > 0
-    ? appState.groupFilters.map(group => groupChartRow(group)).filter(Boolean).flatMap(row => row.events)
-    : (appState.history.events || []).filter(event => appState.selected.has(event.mac));
+    ? appState.groupFilters.map(group => groupChartRow(group)).filter(Boolean).flatMap(row => timelineItemsInWindow(row.events, startMs, endMs))
+    : timelineItemsInWindow(appState.history.events || [], startMs, endMs).filter(event => appState.selected.has(event.mac));
 
   const sortedEvents = events
-    .sort((a, b) => new Date(b.atUtc) - new Date(a.atUtc))
+    .sort((a, b) => b.timelineMs - a.timelineMs)
     .slice(0, 80);
 
   els.eventCount.textContent = `${sortedEvents.length} events`;
@@ -1114,8 +1213,8 @@ function chartRows() {
 }
 
 function selectedDeviceRows() {
-  const samplesByMac = groupBy(appState.history.samples || [], sample => sample.mac);
-  const eventsByMac = groupBy(appState.history.events || [], event => event.mac);
+  const samplesByMac = appState.history.samplesByMac || new Map();
+  const eventsByMac = appState.history.eventsByMac || new Map();
   return selectedDevicesInOrder().map(device => ({
     kind: "device",
     key: device.mac,
@@ -1127,8 +1226,8 @@ function selectedDeviceRows() {
 }
 
 function deviceRowsForGroup(group) {
-  const samplesByMac = groupBy(appState.history.samples || [], sample => sample.mac);
-  const eventsByMac = groupBy(appState.history.events || [], event => event.mac);
+  const samplesByMac = appState.history.samplesByMac || new Map();
+  const eventsByMac = appState.history.eventsByMac || new Map();
   return appState.devices
     .filter(device =>
       (!device.ignored || appState.showIgnored)
@@ -1155,8 +1254,14 @@ function groupChartRow(group) {
     return null;
   }
 
-  const samples = aggregateGroupSamples(group, memberMacs);
-  const events = aggregateGroupEvents(group, samples);
+  const cached = appState.history.groupSeriesByName?.get(group);
+  const series = cached || {
+    samples: aggregateGroupSamples(group, memberMacs),
+    events: null
+  };
+  if (!series.events) series.events = aggregateGroupEvents(group, series.samples);
+  appState.history.groupSeriesByName?.set(group, series);
+  const { samples, events } = series;
   const hiddenChildren = memberDevices.filter(device => appState.hiddenTimelineChildren.has(hiddenTimelineChildKey(group, device.mac))).length;
   const hiddenDetail = hiddenChildren > 0 ? `, ${hiddenChildren} hidden` : "";
   return {
@@ -1218,6 +1323,7 @@ function aggregateGroupSamples(group, memberMacs) {
     const key = sample.sampledAtUtc;
     const bucket = byTime.get(key) || {
       sampledAtUtc: sample.sampledAtUtc,
+      timelineMs: sample.timelineMs,
       mac: `group:${group}`,
       ipAddress: null,
       online: false,
@@ -1241,6 +1347,7 @@ function aggregateGroupEvents(group, samples) {
     if (previous === null || previous !== sample.online) {
       events.push({
         atUtc: sample.sampledAtUtc,
+        timelineMs: sample.timelineMs,
         mac: `group:${group}`,
         displayName: group,
         online: sample.online,
@@ -1450,6 +1557,15 @@ function formatDateTime(value) {
   });
 }
 
+function formatTimelineDateTime(value) {
+  return new Date(value).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
 function formatTimelineWindowLabel(start, end, now) {
   const dateOptions = { month: "short", day: "numeric" };
   const timeOptions = { hour: "numeric" };

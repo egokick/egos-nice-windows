@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Wi-Fi Devices</title>
     <link rel="icon" href="/favicon.svg?v=1" type="image/svg+xml">
-    <link rel="stylesheet" href="/styles.css?v=27">
+    <link rel="stylesheet" href="/styles.css?v=28">
   </head>
   <body>
     <header class="topbar">
@@ -69,15 +69,7 @@
             <h2>Selected Devices</h2>
             <p id="selectionSummary">No devices selected</p>
           </div>
-          <label class="range-select">
-            <span>Range</span>
-            <select id="rangeHours">
-              <option value="24">24 hours</option>
-              <option value="168" selected>7 days</option>
-              <option value="720">30 days</option>
-              <option value="2160">90 days</option>
-            </select>
-          </label>
+
         </div>
 
         <section class="chart-section">
@@ -89,14 +81,23 @@
               <span><i class="legend-event"></i>Change</span>
             </div>
           </div>
+          <fieldset id="timelineRangeControl" class="timeline-range-control">
+            <legend class="visually-hidden">Visible timeline date range</legend>
+            <div class="timeline-range-values">
+              <label class="timeline-range-value" for="timelineStart"><span>Start</span><strong id="timelineStartLabel">--</strong></label>
+              <p id="timelineRangeLength" class="timeline-range-length">--</p>
+              <label class="timeline-range-value timeline-range-value-end" for="timelineEnd"><span>End</span><strong id="timelineEndLabel">--</strong></label>
+            </div>
+            <div class="timeline-range-slider">
+              <div class="timeline-range-rail" aria-hidden="true"><span id="timelineRangeSelection" class="timeline-range-selection"></span></div>
+              <input id="timelineStart" class="timeline-range-input timeline-range-input-start" type="range" min="0" max="1" value="0" step="1" aria-label="Timeline start date" aria-describedby="timelineRangeBounds timelineRangeHelp">
+              <input id="timelineEnd" class="timeline-range-input timeline-range-input-end" type="range" min="0" max="1" value="1" step="1" aria-label="Timeline end date" aria-describedby="timelineRangeBounds timelineRangeHelp">
+            </div>
+            <div id="timelineRangeBounds" class="timeline-range-bounds"><span id="timelineMinLabel">Earliest data</span><span id="timelineMaxLabel">Latest data</span></div>
+            <p id="timelineRangeHelp" class="timeline-range-help">Drag either handle, or use the arrow keys when focused.</p>
+          </fieldset>
           <div class="timeline-shell">
             <svg id="timelineChart" role="img" aria-label="Online timeline"></svg>
-          </div>
-          <div class="timeline-time-scroll">
-            <span class="scroll-endcap" aria-hidden="true"></span>
-            <input id="timelineScroll" type="range" min="0" max="0" step="1" value="0" aria-label="Timeline time position">
-            <span class="scroll-endcap" aria-hidden="true"></span>
-            <output id="timelineScrollLabel">Current window</output>
           </div>
         </section>
 
@@ -118,6 +119,6 @@
       </section>
     </main>
 
-    <script src="/app.js?v=28" defer></script>
+    <script src="/app.js?v=29" defer></script>
   </body>
 </html>
