@@ -322,6 +322,52 @@
 {"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
 {"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"B6:AD:92:56:8D:78","online":false,"ipAddress":"192.168.1.178","source":"Remote router (192.168.1.254)","hostName":"Apple iPhone"}
 {"atUtc":"2026-07-17T00:19:07.7837886+00:00","mac":"E0:2B:E9:F7:48:A6","online":true,"ipAddress":"192.168.1.167","source":"Remote router (192.168.1.254)","hostName":"DESKTOP-P3N2172"}
+{"atUtc":"2026-07-17T00:25:59.3867952+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-17T00:25:59.3867952+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T00:25:59.3867952+00:00","mac":"5A:B3:9C:7F:CD:53","online":false,"ipAddress":"192.168.1.173","source":"Remote router (192.168.1.254)","hostName":"Apple iPhone"}
+{"atUtc":"2026-07-17T00:25:59.3867952+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T00:25:59.3867952+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T00:25:59.3867952+00:00","mac":"B6:AD:92:56:8D:78","online":false,"ipAddress":"192.168.1.178","source":"Remote router (192.168.1.254)","hostName":"Apple iPhone"}
+{"atUtc":"2026-07-17T00:25:59.3867952+00:00","mac":"E0:2B:E9:F7:48:A6","online":true,"ipAddress":"192.168.1.167","source":"Remote router (192.168.1.254)","hostName":"DESKTOP-P3N2172"}
+{"atUtc":"2026-07-17T04:29:55.9329948+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T04:34:59.4750525+00:00","mac":"DC:21:48:CF:DD:2A","online":true,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"bfd2f5da582d50a4e517cf4331b6acf8"}
+{"atUtc":"2026-07-17T04:40:02.3305143+00:00","mac":"9C:C7:D3:E3:A3:06","online":false,"ipAddress":"192.168.1.168","source":"Remote router (192.168.1.254)","hostName":"anonti"}
+{"atUtc":"2026-07-17T04:50:09.1692042+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T05:00:14.5948707+00:00","mac":"DC:21:48:CF:DD:2A","online":false,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-17T05:05:17.5524933+00:00","mac":"DC:21:48:CF:DD:2A","online":true,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-17T05:10:20.4256156+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-17T05:20:26.6782377+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-17T08:27:07.5792118+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T08:32:09.8467702+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T09:07:26.4186916+00:00","mac":"DC:21:48:CF:DD:2A","online":false,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-17T09:22:34.2358646+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-17T09:37:41.5355995+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-17T10:33:05.536245+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T11:03:18.636128+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-17T11:03:18.636128+00:00","mac":"42:75:35:A2:D4:AC","online":false,"ipAddress":"192.168.1.166","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-17T14:19:40.7621638+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-17T15:05:01.1782777+00:00","mac":"DC:21:48:CF:DD:2A","online":true,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-17T15:10:02.9841552+00:00","mac":"DC:21:48:CF:DD:2A","online":false,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-18T01:54:12.9711358+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-18T01:54:12.9711358+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-18T03:29:52.9091712+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-18T03:34:55.3129767+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-18T03:55:04.8394208+00:00","mac":"BC:FC:E7:E9:0E:01","online":true,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-18T04:35:21.5910276+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-18T04:40:23.4505558+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-18T05:40:50.6667891+00:00","mac":"BC:FC:E7:E9:0E:01","online":false,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-18T05:55:58.5254686+00:00","mac":"DC:21:48:CF:DD:2A","online":true,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-18T06:41:22.4032518+00:00","mac":"DC:21:48:CF:DD:2A","online":false,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-18T07:21:39.6716459+00:00","mac":"DC:21:48:CF:DD:2A","online":true,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-18T07:31:43.9625523+00:00","mac":"DC:21:48:CF:DD:2A","online":false,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-18T07:46:49.8790264+00:00","mac":"DC:21:48:CF:DD:2A","online":true,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-18T08:01:55.9297124+00:00","mac":"DC:21:48:CF:DD:2A","online":false,"ipAddress":"192.168.1.77","source":"Remote router (192.168.1.254)","hostName":"d2b874f3919d23e4287fd38918f2558c"}
+{"atUtc":"2026-07-18T09:32:34.8619609+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-18T09:37:36.943289+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-18T14:24:33.552259+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-18T21:27:10.9327816+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-19T17:56:25.1266922+00:00","mac":"42:37:05:13:17:06","online":true,"ipAddress":null,"source":"Remote router (192.168.1.254)","hostName":null}
+{"atUtc":"2026-07-19T20:47:34.8608052+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
 {"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"70:70:AA:E9:8A:4C","online":true,"ipAddress":"192.168.1.77","source":"Windows ARP/ping","hostName":null}
 {"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"78:E1:03:7A:69:61","online":true,"ipAddress":"192.168.1.78","source":"Windows ARP/ping","hostName":null}
 {"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:11:32:51:C8:71","online":true,"ipAddress":"192.168.1.79","source":"Windows ARP/ping","hostName":null}
@@ -341,12 +387,358 @@
 {"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:50:56:10:1A:20","online":false,"ipAddress":"100.68.0.31","source":"Windows ARP/ping","hostName":null}
 {"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:50:56:10:1A:30","online":false,"ipAddress":"100.68.0.40","source":"Windows ARP/ping","hostName":null}
 {"atUtc":"2026-07-20T00:54:01.0915273+00:00","mac":"00:50:56:10:2A:20","online":false,"ipAddress":"100.68.0.32","source":"Windows ARP/ping","hostName":null}
+{"atUtc":"2026-07-20T04:10:16.1646716+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-20T04:45:30.5500754+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-20T04:50:32.4334166+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-20T05:10:40.3665201+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-20T05:15:42.3404497+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-20T08:47:08.9127663+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-20T09:07:17.5071214+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-20T14:24:23.4868943+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-20T15:09:40.310767+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-20T19:11:22.5522618+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-20T19:21:26.4749254+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-20T19:31:30.420377+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-21T05:25:13.0967561+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-21T05:30:15.2270372+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-21T06:25:36.0557019+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-21T09:11:46.4151801+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-21T09:16:48.4805851+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
 {"atUtc":"2026-07-21T11:30:14.7469372+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (70.234.253.49)","hostName":"Amazon"}
 {"atUtc":"2026-07-21T11:30:14.7469372+00:00","mac":"42:37:05:13:17:06","online":true,"ipAddress":null,"source":"Remote router (70.234.253.49)","hostName":null}
 {"atUtc":"2026-07-21T11:30:14.7469372+00:00","mac":"42:75:35:A2:D4:AC","online":false,"ipAddress":"192.168.1.166","source":"Remote router (70.234.253.49)","hostName":"iPhone"}
 {"atUtc":"2026-07-21T11:30:14.7469372+00:00","mac":"9C:C7:D3:E3:A3:06","online":false,"ipAddress":"192.168.1.148","source":"Remote router (70.234.253.49)","hostName":"anonti"}
+{"atUtc":"2026-07-21T15:44:27.5869393+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-21T15:54:31.2090737+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-21T22:57:27.9078134+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-22T01:28:29.9484851+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T01:33:32.3583952+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T01:43:36.4400472+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T01:48:38.5189385+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T02:18:51.4208591+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T02:23:53.5276382+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T02:44:01.8904784+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T02:59:08.182955+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T04:49:51.7472099+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-22T04:54:53.8437723+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-22T05:10:00.3989475+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-22T05:15:02.6160727+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T05:30:09.9454738+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T07:41:06.4134393+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-22T07:46:08.512667+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-22T11:07:35.358918+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-22T17:35:37.7886231+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T18:00:50.560376+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T18:10:54.926803+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-22T18:10:54.926803+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-22T20:31:46.4810716+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-22T20:31:46.4810716+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-22T20:36:49.9130894+00:00","mac":"BC:FC:E7:E9:0E:01","online":true,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-22T20:41:52.677206+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-22T22:32:47.3062706+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T22:37:49.952497+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T22:58:00.3722243+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T23:48:25.0671155+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-22T23:58:30.6416702+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T01:44:22.6865889+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T02:14:37.1773604+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-23T02:14:37.1773604+00:00","mac":"BC:FC:E7:E9:0E:01","online":false,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-23T02:29:45.4424875+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T02:34:47.9854633+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T03:15:08.2510466+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T03:15:08.2510466+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T03:15:08.2510466+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T03:25:13.2065249+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T03:30:15.7327887+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T05:11:08.7471774+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-23T05:16:11.1670823+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-23T07:27:18.1182455+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-23T07:37:23.4304077+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-23T11:34:22.1661224+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-23T11:34:22.1661224+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-23T11:54:31.2884868+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-23T14:20:41.3721448+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-23T17:26:58.4553101+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-23T18:12:18.1258395+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T19:07:42.8332993+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-23T19:53:05.010581+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-23T20:03:09.598085+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-23T20:13:14.6378331+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-23T20:43:29.0984914+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T22:09:05.2204617+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T22:29:13.8134156+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T22:29:13.8134156+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-23T22:29:13.8134156+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T01:05:25.2966579+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T01:05:25.2966579+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T02:05:53.9453705+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-24T02:05:53.9453705+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T02:05:53.9453705+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T02:15:59.7539305+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T02:21:02.3380227+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T03:01:24.5039158+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T03:06:27.3512788+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T03:41:46.5540086+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T03:46:49.9957614+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T03:46:49.9957614+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T03:46:49.9957614+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-24T04:57:26.5332225+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-24T05:02:28.7364128+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-24T07:23:35.7636349+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-24T07:33:41.1255903+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-24T08:03:56.5729611+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-24T08:08:59.2049999+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-24T11:25:34.236664+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-24T11:25:34.236664+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-24T11:50:44.7533211+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-24T14:21:44.1750302+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-24T19:38:33.8941018+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-24T20:03:44.8809874+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-24T20:08:46.8848446+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-24T20:49:03.2025274+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-25T01:20:55.6111257+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-25T02:06:14.84222+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-25T02:06:14.84222+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-25T02:11:16.7909093+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-25T02:46:31.3283246+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-25T02:46:31.3283246+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-25T03:01:37.959641+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-25T03:31:58.9292302+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-25T05:32:53.8887719+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-25T05:37:56.4920629+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-25T07:48:58.3645143+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-25T07:59:03.3507897+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-25T08:04:06.2292094+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-25T08:14:11.6813133+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-25T11:20:31.4564775+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-25T11:30:35.0945661+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-25T11:50:42.2927445+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-25T13:56:34.7448658+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-25T14:41:50.0847104+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-25T16:52:44.0260917+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-25T17:02:47.6324115+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-25T17:58:06.0918613+00:00","mac":"10:B2:90:2F:9D:18","online":false,"ipAddress":"192.168.1.183","source":"Remote router (192.168.1.254)","hostName":"unknown10b2902f9d18"}
+{"atUtc":"2026-07-25T18:08:10.6559027+00:00","mac":"10:B2:90:2F:9D:18","online":true,"ipAddress":"192.168.1.183","source":"Remote router (192.168.1.254)","hostName":"unknown10b2902f9d18"}
+{"atUtc":"2026-07-26T04:51:53.628805+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-26T04:51:53.628805+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-26T04:56:55.9170897+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-26T05:01:57.9309594+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-26T05:01:57.9309594+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-26T08:03:08.3442915+00:00","mac":"F4:DD:06:80:4B:40","online":false,"ipAddress":"192.168.1.160","source":"Remote router (192.168.1.254)","hostName":"Samsung"}
+{"atUtc":"2026-07-26T08:08:10.3519527+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-26T08:08:10.3519527+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-26T08:18:14.5854834+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-26T08:18:14.5854834+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
 {"atUtc":"2026-07-26T11:39:20.3449296+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (70.234.253.49)","hostName":"iPhone"}
 {"atUtc":"2026-07-26T11:39:20.3449296+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (70.234.253.49)","hostName":"Amazon"}
 {"atUtc":"2026-07-26T11:39:20.3449296+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (70.234.253.49)","hostName":"Amazon"}
 {"atUtc":"2026-07-26T11:39:20.3449296+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (70.234.253.49)","hostName":"Amazon"}
 {"atUtc":"2026-07-26T11:39:20.3449296+00:00","mac":"F4:DD:06:80:4B:40","online":false,"ipAddress":"192.168.1.160","source":"Remote router (70.234.253.49)","hostName":"Samsung"}
+{"atUtc":"2026-07-26T15:35:39.3250546+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-26T15:40:41.1460845+00:00","mac":"BC:FC:E7:E9:0E:01","online":true,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-26T15:50:44.9060095+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-26T15:55:46.8248114+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-26T18:21:41.7034583+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-26T18:26:43.7732224+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-26T20:07:21.6333781+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-26T20:12:23.4309368+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-26T22:48:21.805729+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-26T22:53:23.928089+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-26T23:33:37.3363731+00:00","mac":"F4:DD:06:80:4B:40","online":true,"ipAddress":"192.168.1.160","source":"Remote router (192.168.1.254)","hostName":"Samsung"}
+{"atUtc":"2026-07-27T02:44:51.4507232+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T02:49:53.4377441+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T03:30:08.7371472+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T03:35:10.6491636+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T03:45:14.5241092+00:00","mac":"BC:FC:E7:E9:0E:01","online":false,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-27T04:20:27.6585827+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-27T04:25:30.0082861+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T04:30:32.1524228+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T04:45:38.4197033+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-27T04:50:40.565322+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-27T05:36:00.0076583+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T05:41:02.7644529+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T05:41:02.7644529+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T05:46:04.6905375+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-27T10:48:21.6606798+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-27T10:58:26.7542372+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-27T15:05:22.9596506+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-27T15:10:25.2469386+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-27T16:41:07.7530347+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-27T16:46:10.3136621+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-27T16:51:12.6654164+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-27T18:52:08.1366375+00:00","mac":"BC:FC:E7:E9:0E:01","online":true,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-27T20:12:45.6026632+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-27T20:17:47.8663108+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-27T20:37:56.6104809+00:00","mac":"BC:FC:E7:E9:0E:01","online":false,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-27T20:42:58.4164133+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-27T23:34:00.645453+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T01:34:45.7794555+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T01:39:47.8872649+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T04:05:46.3197901+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-28T04:15:51.1296914+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T04:15:51.1296914+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-28T04:20:53.4074534+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T04:20:53.4074534+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T04:20:53.4074534+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T04:20:53.4074534+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T04:51:08.736711+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-28T04:56:10.9968525+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-28T08:12:37.2074679+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-28T08:52:55.4668009+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-28T09:53:20.4490969+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-28T09:58:22.5366002+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-28T11:28:58.7486488+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-28T17:31:29.8078453+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-28T17:41:34.3642638+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-28T17:41:34.3642638+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-28T17:46:36.7929044+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-28T17:51:39.2107336+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T18:31:58.2953176+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-28T18:37:00.4382044+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-28T18:37:00.4382044+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-28T20:12:40.8518253+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-28T20:17:42.8999079+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-28T22:58:57.4503041+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-28T23:49:25.2010032+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-28T23:54:28.0056655+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-28T23:59:30.5598749+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T00:24:42.7265909+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T00:24:42.7265909+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T04:46:25.7997534+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-29T04:51:27.7432722+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-29T05:36:45.4763789+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T05:41:47.7948869+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T06:01:56.0841261+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T06:01:56.0841261+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T06:01:56.0841261+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T06:01:56.0841261+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T06:01:56.0841261+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T06:06:58.2645296+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T06:06:58.2645296+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T06:06:58.2645296+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T06:06:58.2645296+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T06:37:12.2503402+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T06:42:14.4068809+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T08:12:56.7797474+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-29T08:17:59.0730198+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-29T10:39:07.2019481+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-29T10:49:12.3675948+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-29T17:17:08.2962904+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-29T17:37:17.247609+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T17:37:17.247609+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T20:13:10.5305765+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-29T20:18:13.0271961+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T20:18:13.0271961+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T20:18:13.0271961+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-29T20:23:14.5571607+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T20:23:14.5571607+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T20:33:18.2386846+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T20:33:18.2386846+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T20:38:20.2785234+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T20:38:20.2785234+00:00","mac":"BC:FC:E7:E9:0E:01","online":true,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-29T20:58:28.2543674+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T21:23:39.1848014+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-29T21:33:43.443455+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-29T23:44:42.7831544+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-30T00:14:55.1980706+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-30T00:24:59.6786939+00:00","mac":"BC:FC:E7:E9:0E:01","online":false,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-30T00:30:01.6127883+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-30T00:30:01.6127883+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-30T01:00:12.4537608+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-30T01:00:12.4537608+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-30T01:30:24.6726876+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-30T02:10:40.5417966+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-30T03:26:12.4923754+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-30T03:26:12.4923754+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-30T03:31:14.4450703+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-30T05:27:00.4438973+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-30T05:32:02.5258603+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-30T08:13:06.0252267+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-30T08:18:08.3503362+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-30T10:34:01.2001166+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-30T11:19:20.5179413+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-30T11:34:26.6692517+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-30T16:06:10.7775844+00:00","mac":"BC:FC:E7:E9:0E:01","online":true,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-30T17:31:41.9803441+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-30T17:41:46.145772+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-30T17:41:46.145772+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-30T19:27:36.6031826+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-30T19:32:38.8388639+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-30T20:12:54.9186996+00:00","mac":"BC:FC:E7:E9:0E:01","online":false,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-07-30T20:48:09.2204224+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-31T00:29:33.7562117+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T00:29:33.7562117+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T02:10:13.2632777+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T02:30:21.3783969+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T02:30:21.3783969+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T02:30:21.3783969+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-31T02:30:21.3783969+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T02:30:21.3783969+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T03:50:52.1203599+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T04:00:56.8927883+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T04:00:56.8927883+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-31T09:58:38.3510389+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-31T10:03:40.625288+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-07-31T12:24:41.7389807+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-31T12:24:41.7389807+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-31T12:54:51.8037662+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-31T14:20:27.7010775+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-31T17:36:34.7794967+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-31T17:41:36.9771745+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-07-31T17:46:39.2532158+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-07-31T19:52:30.5416691+00:00","mac":"10:B2:90:2F:9D:18","online":false,"ipAddress":"192.168.1.183","source":"Remote router (192.168.1.254)","hostName":"unknown10b2902f9d18"}
+{"atUtc":"2026-07-31T20:12:38.5180507+00:00","mac":"10:B2:90:2F:9D:18","online":true,"ipAddress":"192.168.1.183","source":"Remote router (192.168.1.254)","hostName":"unknown10b2902f9d18"}
+{"atUtc":"2026-07-31T20:17:41.0632796+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-31T20:22:43.3130608+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-07-31T20:27:45.3585174+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-07-31T20:47:53.6956114+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-07-31T20:52:56.0465834+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-08-01T02:10:26.7753523+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-01T02:10:26.7753523+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-01T02:15:29.3764886+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-01T02:15:29.3764886+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-01T02:25:33.7405686+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-08-01T03:46:11.1655702+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-08-01T03:51:13.5564131+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-08-01T05:32:02.4951338+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-08-01T05:37:04.8662085+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-08-01T07:38:03.4146198+00:00","mac":"7C:C0:AA:41:F1:50","online":true,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-08-01T07:43:05.9355455+00:00","mac":"7C:C0:AA:41:F1:50","online":false,"ipAddress":"192.168.1.181","source":"Remote router (192.168.1.254)","hostName":"XBOX"}
+{"atUtc":"2026-08-01T14:21:26.8110156+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-08-01T16:22:21.215225+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-08-01T16:27:23.3930196+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-08-01T16:37:28.4397201+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-08-01T20:19:06.4429255+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-08-01T20:24:08.8799087+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-08-01T21:34:38.975615+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-08-01T21:49:46.2719123+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-08-01T22:04:53.528984+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-01T22:09:55.4300269+00:00","mac":"12:9E:FE:BB:CC:A3","online":false,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-08-01T22:09:55.4300269+00:00","mac":"5E:F1:80:FE:D0:A0","online":false,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-08-02T00:35:53.9776502+00:00","mac":"12:9E:FE:BB:CC:A3","online":true,"ipAddress":"192.168.1.68","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-08-02T00:35:53.9776502+00:00","mac":"20:6E:F1:64:BA:3C","online":true,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T00:35:53.9776502+00:00","mac":"5E:F1:80:FE:D0:A0","online":true,"ipAddress":"192.168.1.67","source":"Remote router (192.168.1.254)","hostName":"iPhone"}
+{"atUtc":"2026-08-02T00:40:57.4104775+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T00:40:57.4104775+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-08-02T00:46:00.1875567+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T00:46:00.1875567+00:00","mac":"7C:2C:67:03:B4:6C","online":true,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T00:46:00.1875567+00:00","mac":"9C:9E:6E:BC:65:40","online":true,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T00:56:08.2747504+00:00","mac":"BC:FC:E7:E9:0E:01","online":true,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
+{"atUtc":"2026-08-02T01:06:14.2922468+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T01:11:17.4672193+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T01:21:23.471985+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-08-02T01:36:32.6890717+00:00","mac":"B4:17:A8:6E:75:AD","online":false,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-08-02T01:51:41.9835751+00:00","mac":"B4:17:A8:6E:75:AD","online":true,"ipAddress":"192.168.1.164","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-08-02T01:51:41.9835751+00:00","mac":"B4:17:A8:6F:F2:63","online":true,"ipAddress":"192.168.1.165","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-08-02T02:22:11.2042182+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-08-02T02:27:15.3115261+00:00","mac":"2C:F0:5D:86:2F:7A","online":true,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-08-02T04:58:48.6287701+00:00","mac":"78:42:1C:73:B4:C8","online":true,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-08-02T05:13:57.7848128+00:00","mac":"78:42:1C:73:B4:C8","online":false,"ipAddress":"192.168.1.162","source":"Remote router (192.168.1.254)","hostName":"Venus"}
+{"atUtc":"2026-08-02T05:24:03.6473311+00:00","mac":"B4:17:A8:6F:F2:63","online":false,"ipAddress":"192.168.1.165","source":"Remote router (192.168.1.254)","hostName":"Android Device"}
+{"atUtc":"2026-08-02T05:34:10.4485011+00:00","mac":"20:6E:F1:61:6E:A8","online":true,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T05:34:10.4485011+00:00","mac":"2C:F0:5D:86:2F:7A","online":false,"ipAddress":"192.168.1.79","source":"Remote router (192.168.1.254)","hostName":"SavviePC"}
+{"atUtc":"2026-08-02T05:39:13.4375679+00:00","mac":"20:6E:F1:61:6E:A8","online":false,"ipAddress":"192.168.1.76","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T05:39:13.4375679+00:00","mac":"7C:2C:67:03:B4:6C","online":false,"ipAddress":"192.168.1.70","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T05:39:13.4375679+00:00","mac":"9C:9E:6E:BC:65:40","online":false,"ipAddress":"192.168.1.69","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T05:44:16.0530313+00:00","mac":"20:6E:F1:64:BA:3C","online":false,"ipAddress":"192.168.1.75","source":"Remote router (192.168.1.254)","hostName":"Amazon"}
+{"atUtc":"2026-08-02T06:09:30.4653429+00:00","mac":"BC:FC:E7:E9:0E:01","online":false,"ipAddress":"192.168.1.182","source":"Remote router (192.168.1.254)","hostName":"POO-C"}
