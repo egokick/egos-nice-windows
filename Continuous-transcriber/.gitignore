@@ -1,0 +1,15 @@
+# Downloaded native runtime and models
+/runtime/
+
+# Runtime state and user data
+/recordings/
+/.transcriber-heartbeat
+/.transcriber-ffmpeg.pid
+/transcription-errors.log
+/transcript *.txt
+
+# Python cache
+/.venv/
+/__pycache__/
+/tests/__pycache__/
+*.pyc

@@ -17,6 +17,7 @@ internal sealed class AdminPanelForm : Form
     private readonly Label _titleLabel;
     private readonly Button _closeButton;
     private readonly ToolTip _toolTip;
+    private readonly System.Windows.Forms.Timer _runtimeStatusTimer;
 
     private AdminPalette _palette;
     private Icon? _windowIcon;
@@ -24,6 +25,8 @@ internal sealed class AdminPanelForm : Form
     private List<string>? _orderBeforeDrag;
     private bool _dropCommitted;
     private bool _statusIsError;
+    private bool _runtimeRefreshInProgress;
+    private long _runtimeStateVersion;
 
     public AdminPanelForm()
     {
@@ -35,6 +38,11 @@ internal sealed class AdminPanelForm : Form
             ReshowDelay = 150,
             ShowAlways = true
         };
+        _runtimeStatusTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 2500
+        };
+        _runtimeStatusTimer.Tick += (_, _) => _ = RefreshRuntimeStatesAsync();
 
         Text = "Admin Panel";
         AccessibleName = "Nice Windows Admin Panel";
@@ -97,8 +105,8 @@ internal sealed class AdminPanelForm : Form
         foreach (var app in AdminPanelOrderStore.LoadOrderedApps())
         {
             var card = new AdminAppCard(app, _toolTip);
-            card.LaunchRequested += (_, _) => LaunchAppAsync(card);
-            card.AutoStartToggleRequested += (_, _) => ToggleAutoStart(card);
+            card.LaunchRequested += (_, _) => HandlePrimaryAction(card);
+            card.SettingsRequested += (_, _) => ShowAppSettings(card);
             card.DragRequested += (_, _) => StartCardDrag(card);
             card.MoveRequested += (_, args) => MoveCard(card, args.Offset);
             RegisterDropTarget(card);
@@ -112,6 +120,7 @@ internal sealed class AdminPanelForm : Form
         {
             ResizeCardsForGrid();
             RefreshAllAppStates();
+            _runtimeStatusTimer.Start();
         };
         Activated += (_, _) =>
         {
@@ -229,6 +238,8 @@ internal sealed class AdminPanelForm : Form
     {
         if (disposing)
         {
+            _runtimeStatusTimer.Stop();
+            _runtimeStatusTimer.Dispose();
             _toolTip.Dispose();
             _windowIcon?.Dispose();
             _windowIcon = null;
@@ -250,6 +261,8 @@ internal sealed class AdminPanelForm : Form
 
     private void RefreshAllAppStates()
     {
+        _ = RefreshRuntimeStatesAsync();
+
         if (!NiceWindowsRepositoryLocator.TryGetRepositoryRoot(out var repositoryRoot, out var locatorError))
         {
             foreach (var card in GetCardsInVisualOrder())
@@ -301,25 +314,167 @@ internal sealed class AdminPanelForm : Form
         }
     }
 
-    private async void LaunchAppAsync(AdminAppCard card)
+    private async Task RefreshRuntimeStatesAsync()
+    {
+        if (_runtimeRefreshInProgress || IsDisposed)
+        {
+            return;
+        }
+
+        _runtimeRefreshInProgress = true;
+        var refreshVersion = _runtimeStateVersion;
+        try
+        {
+            var cards = GetCardsInVisualOrder();
+            var states = await AdminAppRuntimeStatusService.GetRuntimeStatesAsync(
+                cards.Select(card => card.Definition).ToArray());
+            if (IsDisposed || refreshVersion != _runtimeStateVersion)
+            {
+                return;
+            }
+
+            foreach (var card in cards)
+            {
+                if (card.IsDisposed
+                    || card.IsLaunchBusy
+                    || !states.TryGetValue(card.Definition.Id, out var state))
+                {
+                    continue;
+                }
+
+                card.SetRuntimeStatus(state.IsRunning, state.ErrorMessage);
+            }
+        }
+        finally
+        {
+            _runtimeRefreshInProgress = false;
+        }
+    }
+
+    private void HandlePrimaryAction(AdminAppCard card)
+    {
+        if (card.Definition.SupportsRuntimeControl && card.RuntimeIsRunning is null)
+        {
+            SetStatus(
+                $"Checking whether {card.Definition.DisplayName} is already running…");
+            return;
+        }
+
+        if (card.RuntimeIsRunning == true && card.Definition.SupportsRuntimeControl)
+        {
+            StopAppAsync(card);
+            return;
+        }
+
+        LaunchAppAsync(card);
+    }
+
+    private void ShowAppSettings(AdminAppCard card)
+    {
+        AdminAppAutoStartService.TryGetEnabled(card.Definition, out var startWithWindows, out _);
+        if (card.Definition.HasLaunchSettings)
+        {
+            var settings = ContinuousTranscriberSettingsStore.Load(out var loadWarning);
+            if (!string.IsNullOrWhiteSpace(loadWarning)) SetStatus(loadWarning, isError: true);
+            using var dialog = new ContinuousTranscriberSettingsDialog(card.Definition, settings, _palette, card.RuntimeIsRunning == true, startWithWindows);
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            SaveAppSettings(card, dialog.StartWithWindows, dialog.Settings);
+            LaunchAppAsync(card, dialog.Settings.ToArguments());
+            return;
+        }
+        using var basicDialog = new AdminAppSettingsDialog(card.Definition, _palette, startWithWindows);
+        if (basicDialog.ShowDialog(this) != DialogResult.OK) return;
+        SaveAppSettings(card, basicDialog.StartWithWindows);
+    }
+
+    private void SaveAppSettings(AdminAppCard card, bool startWithWindows, ContinuousTranscriberLaunchSettings? launchSettings = null)
+    {
+        if (launchSettings is not null && !ContinuousTranscriberSettingsStore.TrySave(launchSettings, out var saveError))
+            MessageBox.Show(this, saveError, "Could not save settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        if (!AdminAppAutoStartService.TrySetEnabled(card.Definition, startWithWindows, out var startupError))
+            MessageBox.Show(this, startupError, "Could not update startup settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        card.SetAutoStartState(startWithWindows, string.Empty);
+    }
+
+    private async void StopAppAsync(AdminAppCard card)
     {
         if (card.IsLaunchBusy)
         {
             return;
         }
 
-        card.SetLaunchBusy(true, "Preparing…");
-        SetStatus($"Preparing {card.Definition.DisplayName} dependencies…");
+        InvalidateRuntimeRefreshes();
+        card.SetLaunchBusy(true, "Stopping…");
+        SetStatus($"Stopping {card.Definition.DisplayName}…");
 
-        var launchResult = await AdminAppLauncher.PrepareAndLaunchAsync(card.Definition);
+        var stopResult = await AdminAppLauncher.StopAsync(card.Definition);
         if (IsDisposed || card.IsDisposed)
         {
             return;
         }
 
+        InvalidateRuntimeRefreshes();
+        if (stopResult.Success)
+        {
+            card.SetRuntimeStatus(false, string.Empty);
+            card.SetLaunchResult(
+                success: true,
+                detail: $"{card.Definition.DisplayName} stopped",
+                successText: "Stopped");
+            SetStatus($"{card.Definition.DisplayName} stopped");
+            await Task.Delay(700);
+            if (!card.IsDisposed)
+            {
+                card.SetLaunchBusy(false);
+            }
+
+            return;
+        }
+
+        card.SetLaunchBusy(false);
+        card.SetLaunchResult(
+            success: false,
+            detail: stopResult.ErrorMessage,
+            failureText: "Could not stop");
+        _ = RefreshRuntimeStatesAsync();
+        SetStatus(stopResult.ErrorMessage, isError: true);
+        MessageBox.Show(
+            this,
+            stopResult.ErrorMessage,
+            $"Could not stop {card.Definition.DisplayName}",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error);
+    }
+
+    private async void LaunchAppAsync(
+        AdminAppCard card,
+        IReadOnlyList<string>? launchArguments = null)
+    {
+        if (card.IsLaunchBusy)
+        {
+            return;
+        }
+
+        InvalidateRuntimeRefreshes();
+        card.SetLaunchBusy(true, "Preparing…");
+        SetStatus($"Preparing {card.Definition.DisplayName} dependencies…");
+        launchArguments ??= AdminAppLaunchSettings.GetArguments(card.Definition);
+
+        var launchResult = await AdminAppLauncher.PrepareAndLaunchAsync(
+            card.Definition,
+            launchArguments);
+        if (IsDisposed || card.IsDisposed)
+        {
+            return;
+        }
+
+        InvalidateRuntimeRefreshes();
         if (launchResult.Success)
         {
             card.SetLaunchResult(success: true);
+            card.SetRuntimeStatus(
+                card.Definition.SupportsRuntimeControl ? true : false,
+                string.Empty);
             SetStatus($"{card.Definition.DisplayName} launch requested");
             await Task.Delay(1400);
             if (!card.IsDisposed)
@@ -332,6 +487,7 @@ internal sealed class AdminPanelForm : Form
 
         card.SetLaunchBusy(false);
         card.SetLaunchResult(success: false, launchResult.ErrorMessage);
+        _ = RefreshRuntimeStatesAsync();
         SetStatus(launchResult.ErrorMessage, isError: true);
         MessageBox.Show(
             this,
@@ -339,6 +495,14 @@ internal sealed class AdminPanelForm : Form
             $"Could not prepare {card.Definition.DisplayName}",
             MessageBoxButtons.OK,
             MessageBoxIcon.Error);
+    }
+
+    private void InvalidateRuntimeRefreshes()
+    {
+        unchecked
+        {
+            _runtimeStateVersion++;
+        }
     }
 
     private void ToggleAutoStart(AdminAppCard card)
@@ -593,7 +757,8 @@ internal sealed class AdminAppCard : UserControl
     private readonly PictureBox _logo;
     private readonly Button _dragGrip;
     private readonly Label _title;
-    private readonly CheckBox _startupToggle;
+    private readonly Button _settingsButton = null!;
+    private readonly PillLabel? _runtimeStatusBadge;
     private readonly ToolTip _toolTip;
 
     private AdminPalette _palette = AdminPalette.ForCurrentSystemTheme();
@@ -603,6 +768,9 @@ internal sealed class AdminAppCard : UserControl
     private bool _launchBusy;
     private bool _isDragging;
     private bool _isHovered;
+    private bool? _runtimeIsRunning;
+    private string _runtimeStatusError = string.Empty;
+    private string _launchUnavailableReason = string.Empty;
     private string? _launchResultText;
 
     public AdminAppCard(AdminAppDefinition definition, ToolTip toolTip)
@@ -639,9 +807,16 @@ internal sealed class AdminAppCard : UserControl
             {
                 DrawLaunchStatus(args.Graphics, _logo.ClientRectangle, _launchResultText ?? "Launching…");
             }
-            else if (_isHovered && _launchAvailable)
+            else if (_isHovered && _launchAvailable && IsPrimaryActionReady)
             {
-                DrawPlayAffordance(args.Graphics, _logo.ClientRectangle);
+                if (Definition.SupportsRuntimeControl && _runtimeIsRunning == true)
+                {
+                    DrawStopAffordance(args.Graphics, _logo.ClientRectangle);
+                }
+                else
+                {
+                    DrawPlayAffordance(args.Graphics, _logo.ClientRectangle);
+                }
             }
         };
 
@@ -670,38 +845,62 @@ internal sealed class AdminAppCard : UserControl
         _title = new Label
         {
             AutoSize = false,
-            Height = 38,
+            Height = 54,
             Font = new Font("Segoe UI", 14f, FontStyle.Bold, GraphicsUnit.Point),
             Text = definition.DisplayName,
             TextAlign = ContentAlignment.MiddleCenter,
-            AutoEllipsis = false
+            AutoEllipsis = false,
+            UseMnemonic = false
         };
 
-        _startupToggle = new CheckBox
+        _settingsButton = new Button
         {
-            Appearance = Appearance.Normal,
-            AutoCheck = false,
             AutoSize = false,
-            Size = new Size(22, 22),
+            Size = new Size(94, 28),
             FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point),
-            Text = string.Empty,
+            Font = new Font("Segoe UI", 8f, FontStyle.Bold, GraphicsUnit.Point),
+            Text = "SETTINGS",
             TextAlign = ContentAlignment.MiddleCenter,
-            UseVisualStyleBackColor = false,
+            TabStop = true,
             Cursor = Cursors.Hand,
-            AccessibleRole = AccessibleRole.CheckButton,
-            AccessibleName = $"Start {definition.DisplayName} with Windows"
+            AccessibleName = $"{definition.DisplayName} settings",
+            AccessibleDescription = $"Configure {definition.DisplayName}, including whether it starts with Windows."
         };
-        _startupToggle.FlatAppearance.BorderSize = 1;
-        _startupToggle.Click += (_, _) => AutoStartToggleRequested?.Invoke(this, EventArgs.Empty);
+        _settingsButton.FlatAppearance.BorderSize = 0;
+        _settingsButton.Click += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
+        if (definition.ShowRuntimeStatusBadge)
+        {
+            _runtimeStatusBadge = new PillLabel
+            {
+                AutoSize = false,
+                Size = new Size(96, 26),
+                Font = new Font("Segoe UI", 8f, FontStyle.Bold, GraphicsUnit.Point),
+                Text = "CHECKING",
+                TextAlign = ContentAlignment.MiddleCenter,
+                TabStop = false,
+                Cursor = Cursors.SizeAll,
+                AccessibleRole = AccessibleRole.StaticText,
+                AccessibleName = $"{definition.DisplayName} runtime status",
+                AccessibleDescription = "Runtime status is being checked."
+            };
+        }
 
         Controls.Add(_logo);
         Controls.Add(_dragGrip);
         Controls.Add(_title);
-        Controls.Add(_startupToggle);
+        Controls.Add(_settingsButton);
+        if (_runtimeStatusBadge is not null)
+        {
+            Controls.Add(_runtimeStatusBadge);
+        }
 
         _toolTip.SetToolTip(_dragGrip, "Drag to reorder, or press Ctrl + an arrow key");
-        _toolTip.SetToolTip(_startupToggle, $"Toggle Windows startup for {definition.DisplayName}");
+        if (_settingsButton is not null)
+        {
+            _toolTip.SetToolTip(
+                _settingsButton,
+                $"Open settings for {definition.DisplayName}");
+        }
 
         AttachDragSurface(this, launchesApp: true);
         AttachDragSurface(_logo, launchesApp: true);
@@ -711,7 +910,17 @@ internal sealed class AdminAppCard : UserControl
         AttachHoverSurface(_logo);
         AttachHoverSurface(_title);
         AttachHoverSurface(_dragGrip);
-        AttachHoverSurface(_startupToggle);
+        AttachHoverSurface(_settingsButton!);
+        if (_runtimeStatusBadge is not null)
+        {
+            AttachDragSurface(_runtimeStatusBadge);
+            _runtimeStatusBadge.MouseEnter += (_, _) => SetHovered(false);
+            _runtimeStatusBadge.MouseLeave += (_, _) =>
+            {
+                var pointerInCard = ClientRectangle.Contains(PointToClient(Cursor.Position));
+                SetHovered(pointerInCard);
+            };
+        }
 
         LayoutCardContent();
         ApplyRoundedRegion();
@@ -724,9 +933,15 @@ internal sealed class AdminAppCard : UserControl
 
     public bool IsLaunchBusy => _launchBusy;
 
+    public bool? RuntimeIsRunning => _runtimeIsRunning;
+
+    private bool IsPrimaryActionReady =>
+        !Definition.SupportsRuntimeControl
+        || (_runtimeIsRunning.HasValue && string.IsNullOrWhiteSpace(_runtimeStatusError));
+
     public event EventHandler? LaunchRequested;
 
-    public event EventHandler? AutoStartToggleRequested;
+    public event EventHandler? SettingsRequested;
 
     public event EventHandler? DragRequested;
 
@@ -744,7 +959,8 @@ internal sealed class AdminAppCard : UserControl
         _dragGrip.ForeColor = palette.SecondaryText;
         _dragGrip.FlatAppearance.MouseOverBackColor = palette.CardHover;
         _dragGrip.FlatAppearance.MouseDownBackColor = palette.AccentSoft;
-        ApplyStartupTogglePalette();
+        ApplySettingsButtonPalette();
+        ApplyRuntimeStatusPalette();
         _logo.Invalidate();
         Invalidate();
     }
@@ -752,9 +968,9 @@ internal sealed class AdminAppCard : UserControl
     public void SetLaunchAvailability(bool available, string reason)
     {
         _launchAvailable = available;
-        _toolTip.SetToolTip(
-            this,
-            available ? $"Launch {Definition.DisplayName}" : reason);
+        _launchUnavailableReason = available ? string.Empty : reason;
+        _settingsButton.Enabled = available && !_launchBusy;
+        UpdatePrimaryActionPresentation();
         UpdateCursor();
         _logo.Invalidate();
         Invalidate();
@@ -763,6 +979,7 @@ internal sealed class AdminAppCard : UserControl
     public void SetLaunchBusy(bool busy, string? busyText = null)
     {
         _launchBusy = busy;
+        _settingsButton.Enabled = _launchAvailable && !busy;
         if (busy)
         {
             _launchResultText = busyText ?? "Launching…";
@@ -772,14 +989,19 @@ internal sealed class AdminAppCard : UserControl
             _launchResultText = null;
         }
 
+        UpdatePrimaryActionPresentation();
         UpdateCursor();
         _logo.Invalidate();
         Invalidate();
     }
 
-    public void SetLaunchResult(bool success, string? detail = null)
+    public void SetLaunchResult(
+        bool success,
+        string? detail = null,
+        string successText = "Requested",
+        string failureText = "Could not start")
     {
-        _launchResultText = success ? "Requested" : "Could not start";
+        _launchResultText = success ? successText : failureText;
         _toolTip.SetToolTip(
             this,
             string.IsNullOrWhiteSpace(detail)
@@ -794,37 +1016,51 @@ internal sealed class AdminAppCard : UserControl
     public void SetAutoStartState(bool? enabled, string errorMessage)
     {
         AutoStartEnabled = enabled;
-        _startupToggle.Enabled = enabled.HasValue;
-        _startupToggle.Checked = enabled == true;
-        _startupToggle.AccessibleDescription = enabled switch
+    }
+
+    public void SetAutoStartBusy(bool busy, bool targetState) { }
+
+    public void SetRuntimeStatus(bool? running, string errorMessage)
+    {
+        if (running.HasValue || !_runtimeIsRunning.HasValue)
         {
-            true => "Enabled. Activate to disable Windows startup.",
-            false => "Disabled. Activate to enable Windows startup.",
-            null => errorMessage
-        };
-        _toolTip.SetToolTip(
-            _startupToggle,
-            string.IsNullOrWhiteSpace(errorMessage)
-                ? enabled == true
-                    ? $"{Definition.DisplayName} starts with Windows. Click to disable."
-                    : $"Start {Definition.DisplayName} with Windows"
-                : errorMessage);
-        ApplyStartupTogglePalette();
+            _runtimeIsRunning = running;
+        }
+
+        _runtimeStatusError = errorMessage;
+        UpdatePrimaryActionPresentation();
+        _logo.Invalidate();
+        Invalidate();
+
+        if (_runtimeStatusBadge is null)
+        {
+            return;
+        }
+
+        _runtimeStatusBadge.Text = !string.IsNullOrWhiteSpace(errorMessage)
+            ? "UNKNOWN"
+            : _runtimeIsRunning switch
+            {
+                true => "RUNNING",
+                false => "STOPPED",
+                null => "UNKNOWN"
+            };
+        var accessibleStatus = !string.IsNullOrWhiteSpace(errorMessage)
+            ? errorMessage
+            : _runtimeIsRunning switch
+            {
+                true => $"{Definition.DisplayName} is running.",
+                false => $"{Definition.DisplayName} is stopped.",
+                null => $"{Definition.DisplayName} runtime status is unknown."
+            };
+        _runtimeStatusBadge.AccessibleName =
+            $"{Definition.DisplayName} runtime status: {_runtimeStatusBadge.Text}";
+        _runtimeStatusBadge.AccessibleDescription = accessibleStatus;
+        _toolTip.SetToolTip(_runtimeStatusBadge, accessibleStatus);
+        ApplyRuntimeStatusPalette();
     }
 
-    public void SetAutoStartBusy(bool busy, bool targetState)
-    {
-        _startupToggle.Enabled = !busy;
-        _startupToggle.Checked = targetState;
-    }
-
-    public void ShowAutoStartNotification(bool enabled)
-    {
-        var message = enabled
-            ? $"{Definition.DisplayName} will start with Windows."
-            : $"{Definition.DisplayName} has been disabled from auto startup.";
-        _toolTip.Show(message, _startupToggle, _startupToggle.Width / 2, _startupToggle.Height + 8, 2400);
-    }
+    public void ShowAutoStartNotification(bool enabled) { }
 
     public void SetDragging(bool dragging)
     {
@@ -854,8 +1090,12 @@ internal sealed class AdminAppCard : UserControl
     {
         base.OnPaint(e);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        var highlight = _isDragging || (_isHovered && _launchAvailable && !_launchBusy);
-        using var border = new Pen(highlight ? _palette.Accent : _palette.CardBorder, highlight ? 2.4f : 1.2f);
+        var highlight = _isDragging
+                        || (_isHovered && _launchAvailable && !_launchBusy && IsPrimaryActionReady);
+        var actionColor = Definition.SupportsRuntimeControl && _runtimeIsRunning == true
+            ? _palette.Error
+            : _palette.Accent;
+        using var border = new Pen(highlight ? actionColor : _palette.CardBorder, highlight ? 2.4f : 1.2f);
         using var path = AdminDrawing.CreateRoundedRectangle(
             new RectangleF(1, 1, Width - 2.5f, Height - 2.5f),
             16f);
@@ -915,7 +1155,7 @@ internal sealed class AdminAppCard : UserControl
                 && !_dragGestureRaised;
             _dragOriginScreen = null;
             _dragGestureRaised = false;
-            if (shouldLaunch && _launchAvailable && !_launchBusy)
+            if (shouldLaunch && _launchAvailable && !_launchBusy && IsPrimaryActionReady)
             {
                 LaunchRequested?.Invoke(this, EventArgs.Empty);
             }
@@ -949,9 +1189,31 @@ internal sealed class AdminAppCard : UserControl
     {
         Cursor = _isDragging
             ? Cursors.SizeAll
-            : _isHovered && _launchAvailable && !_launchBusy
+            : _isHovered && _launchAvailable && !_launchBusy && IsPrimaryActionReady
                 ? Cursors.Hand
                 : Cursors.Default;
+    }
+
+    private void UpdatePrimaryActionPresentation()
+    {
+        var action = Definition.SupportsRuntimeControl && _runtimeIsRunning == true
+            ? "Stop"
+            : "Launch";
+        var description = !_launchAvailable
+            ? _launchUnavailableReason
+            : _launchBusy
+                ? _launchResultText ?? $"{action} in progress"
+                : !IsPrimaryActionReady
+                    ? string.IsNullOrWhiteSpace(_runtimeStatusError)
+                        ? $"Checking whether {Definition.DisplayName} is running"
+                        : $"Runtime status is unavailable for {Definition.DisplayName}: {_runtimeStatusError}"
+                    : $"{action} {Definition.DisplayName}";
+
+        _toolTip.SetToolTip(this, description);
+        _toolTip.SetToolTip(_logo, description);
+        _toolTip.SetToolTip(_title, description);
+        AccessibleDescription = $"{Definition.Description} {description}.";
+        _logo.AccessibleDescription = description;
     }
 
     private void DrawPlayAffordance(Graphics graphics, Rectangle clientBounds)
@@ -974,6 +1236,29 @@ internal sealed class AdminAppCard : UserControl
             new PointF(bounds.Right - 21, bounds.Top + (bounds.Height / 2f))
         };
         graphics.FillPolygon(play, triangle);
+    }
+
+    private void DrawStopAffordance(Graphics graphics, Rectangle clientBounds)
+    {
+        var diameter = Math.Min(76f, Math.Min(clientBounds.Width, clientBounds.Height) - 24f);
+        var bounds = new RectangleF(
+            clientBounds.Left + ((clientBounds.Width - diameter) / 2f),
+            clientBounds.Top + ((clientBounds.Height - diameter) / 2f),
+            diameter,
+            diameter);
+        using var background = new SolidBrush(Color.FromArgb(150, _palette.Card));
+        using var border = new Pen(Color.FromArgb(220, _palette.Error), 2.4f);
+        using var stop = new SolidBrush(_palette.Error);
+        graphics.FillEllipse(background, bounds);
+        graphics.DrawEllipse(border, bounds);
+
+        var squareSize = Math.Max(18f, diameter * 0.38f);
+        var square = new RectangleF(
+            bounds.Left + ((bounds.Width - squareSize) / 2f),
+            bounds.Top + ((bounds.Height - squareSize) / 2f),
+            squareSize,
+            squareSize);
+        graphics.FillRectangle(stop, square);
     }
 
     private void DrawLaunchStatus(Graphics graphics, Rectangle clientBounds, string message)
@@ -1029,36 +1314,73 @@ internal sealed class AdminAppCard : UserControl
         if (_logo is null
             || _dragGrip is null
             || _title is null
-            || _startupToggle is null)
+            )
+        {
+            return;
+        }
+        _dragGrip.Location = new Point(ClientSize.Width - _dragGrip.Width - 11, 10);
+        _title.Bounds = new Rectangle(18, 10, Math.Max(100, ClientSize.Width - 62), _title.Height);
+        if (_runtimeStatusBadge is not null)
+        {
+            _runtimeStatusBadge.Location = new Point(
+                (ClientSize.Width - _runtimeStatusBadge.Width) / 2,
+                ClientSize.Height - _runtimeStatusBadge.Height - 13);
+        }
+        if (_settingsButton is not null)
+        {
+            _settingsButton.Location = new Point(
+                ClientSize.Width - _settingsButton.Width - 12,
+                ClientSize.Height - _settingsButton.Height - 12);
+        }
+
+        var logoContentBottom = _runtimeStatusBadge?.Top ?? ClientSize.Height - 16;
+        var logoSize = Math.Max(
+            140,
+            Math.Min(250, Math.Min(ClientSize.Width - 36, logoContentBottom - _title.Bottom - 12)));
+        _logo.Size = new Size(logoSize, logoSize);
+        _logo.Location = new Point(
+            (ClientSize.Width - _logo.Width) / 2,
+            _title.Bottom + ((logoContentBottom - _title.Bottom - _logo.Height) / 2));
+    }
+
+    private void ApplyStartupTogglePalette() { }
+
+    private void ApplySettingsButtonPalette()
+    {
+        if (_settingsButton is null)
         {
             return;
         }
 
-        _startupToggle.Location = new Point(12, 17);
-        _dragGrip.Location = new Point(ClientSize.Width - _dragGrip.Width - 11, 10);
-        _title.Bounds = new Rectangle(42, 10, Math.Max(100, ClientSize.Width - 86), _title.Height);
-        var logoSize = Math.Max(
-            140,
-            Math.Min(250, Math.Min(ClientSize.Width - 36, ClientSize.Height - _title.Bottom - 32)));
-        _logo.Size = new Size(logoSize, logoSize);
-        _logo.Location = new Point(
-            (ClientSize.Width - _logo.Width) / 2,
-            _title.Bottom + ((ClientSize.Height - 16 - _title.Bottom - _logo.Height) / 2));
+        _settingsButton.BackColor = _palette.AccentSoft;
+        _settingsButton.ForeColor = _palette.Text;
+        _settingsButton.FlatAppearance.MouseOverBackColor = _palette.AccentHover;
+        _settingsButton.FlatAppearance.MouseDownBackColor = _palette.Accent;
     }
 
-    private void ApplyStartupTogglePalette()
+    private void ApplyRuntimeStatusPalette()
     {
-        var enabled = AutoStartEnabled == true;
-        var backColor = enabled ? _palette.SuccessSoft : _palette.MutedButton;
-        var hoverColor = enabled ? _palette.SuccessHover : _palette.MutedButtonHover;
-        var foreColor = enabled ? _palette.Success : _palette.SecondaryText;
+        if (_runtimeStatusBadge is null)
+        {
+            return;
+        }
 
-        _startupToggle.BackColor = backColor;
-        _startupToggle.ForeColor = foreColor;
-        _startupToggle.FlatAppearance.BorderColor = enabled ? _palette.Success : _palette.CardBorder;
-        _startupToggle.FlatAppearance.CheckedBackColor = backColor;
-        _startupToggle.FlatAppearance.MouseOverBackColor = hoverColor;
-        _startupToggle.FlatAppearance.MouseDownBackColor = hoverColor;
+        var displayedState = string.IsNullOrWhiteSpace(_runtimeStatusError)
+            ? _runtimeIsRunning
+            : null;
+        var background = displayedState switch
+        {
+            true => _palette.SuccessSoft,
+            false => _palette.MutedButton,
+            null => _palette.AccentSoft
+        };
+        var foreground = displayedState switch
+        {
+            true => _palette.Text,
+            false => _palette.SecondaryText,
+            null => _palette.Text
+        };
+        _runtimeStatusBadge.ApplyPalette(background, foreground);
     }
 }
 
@@ -1228,6 +1550,9 @@ internal static class AdminAppLogoFactory
                 break;
             case "voicecodex":
                 DrawMicrophone(graphics, Color.FromArgb(52, 211, 153));
+                break;
+            case "continuous-transcriber":
+                DrawMicrophone(graphics, Color.FromArgb(56, 189, 248));
                 break;
             case "wifidevices":
                 DrawWifi(graphics);

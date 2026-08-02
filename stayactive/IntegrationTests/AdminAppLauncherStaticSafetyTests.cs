@@ -10,7 +10,7 @@ public sealed class AdminAppLauncherStaticSafetyTests
         var services = ReadRepositoryFile("AdminPanel", "AdminAppServices.cs");
         var prepareAndLaunch = ExtractBraceBlock(
             services,
-            "public static Task<LaunchResult> PrepareAndLaunchAsync(AdminAppDefinition app)");
+            "public static Task<LaunchResult> PrepareAndLaunchAsync(");
 
         var existingOutputLaunch = prepareAndLaunch.IndexOf(
             "TryLaunchCurrentNativeExecutable(",
@@ -119,6 +119,25 @@ public sealed class AdminAppLauncherStaticSafetyTests
     }
 
     [Fact]
+    public void YouTubeSyncBatch_PassesAppDirectoryWithoutATrailingBackslash()
+    {
+        var batch = ReadRepositoryFile("YouTubeSyncTray", "start.bat");
+
+        Assert.Contains(
+            "for %%I in (\"%~dp0.\") do set \"APP_DIR=%%~fI\"",
+            batch,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "set \"APP_DIR=%~dp0\"",
+            batch,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            "-AppDirectory \"%APP_DIR%\"",
+            batch,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void StayActiveDependencyPreparation_RestoresButNeverBuildsLiveOutput()
     {
         var dependencyScript = ReadRepositoryFile(
@@ -171,6 +190,140 @@ public sealed class AdminAppLauncherStaticSafetyTests
                 """,
                 RegexOptions.IgnorePatternWhitespace),
             main);
+    }
+
+    [Fact]
+    public void AdminPanelPrimaryAction_StopsRunningAppsAndReturnsTheCardToLaunchState()
+    {
+        var form = ReadRepositoryFile("AdminPanel", "AdminPanelForm.cs");
+        var services = ReadRepositoryFile("AdminPanel", "AdminAppServices.cs");
+        var primaryAction = ExtractBraceBlock(
+            form,
+            "private void HandlePrimaryAction(AdminAppCard card)");
+        var stopAction = ExtractBraceBlock(
+            form,
+            "private async void StopAppAsync(AdminAppCard card)");
+        var stopService = ExtractBraceBlock(
+            services,
+            "public static Task<LaunchResult> StopAsync(AdminAppDefinition app)");
+
+        Assert.Contains("card.RuntimeIsRunning == true", primaryAction, StringComparison.Ordinal);
+        Assert.Contains("StopAppAsync(card)", primaryAction, StringComparison.Ordinal);
+        Assert.Contains("LaunchAppAsync(card)", primaryAction, StringComparison.Ordinal);
+        Assert.Contains("TryStopExistingProcesses(app", stopService, StringComparison.Ordinal);
+
+        var stoppedState = stopAction.IndexOf(
+            "card.SetRuntimeStatus(false",
+            StringComparison.Ordinal);
+        var clearBusyState = stopAction.IndexOf(
+            "card.SetLaunchBusy(false)",
+            stoppedState,
+            StringComparison.Ordinal);
+        Assert.True(
+            stoppedState >= 0 && clearBusyState > stoppedState,
+            "A successful stop must switch the card back to launch before accepting another click.");
+    }
+
+    [Fact]
+    public void AdminPanelRuntimeRefresh_IsBatchedOffTheUiThreadAndDrivesTheStopAffordance()
+    {
+        var form = ReadRepositoryFile("AdminPanel", "AdminPanelForm.cs");
+        var services = ReadRepositoryFile("AdminPanel", "AdminAppServices.cs");
+        var runtimeRefresh = ExtractBraceBlock(
+            form,
+            "private async Task RefreshRuntimeStatesAsync()");
+        var runtimeService = ExtractBraceBlock(
+            services,
+            "public static Task<IReadOnlyDictionary<string, RuntimeState>> GetRuntimeStatesAsync(");
+        var processProbe = ExtractBraceBlock(
+            services,
+            "private static bool TryGetRunningProcessAppIds(");
+        var stopProcesses = ExtractBraceBlock(
+            services,
+            "private static bool TryStopExistingProcesses(");
+        var primaryAction = ExtractBraceBlock(
+            form,
+            "private void HandlePrimaryAction(AdminAppCard card)");
+        var setRuntimeStatus = ExtractBraceBlock(
+            form,
+            "public void SetRuntimeStatus(bool? running, string errorMessage)");
+
+        Assert.Contains("Task.Run", runtimeService, StringComparison.Ordinal);
+        Assert.Single(
+            Regex.Matches(
+                    runtimeRefresh,
+                    @"AdminAppRuntimeStatusService\.GetRuntimeStatesAsync")
+                .Cast<Match>());
+        Assert.Contains("Get-CimInstance Win32_Process", processProbe, StringComparison.Ordinal);
+        Assert.Contains("if (_runtimeRefreshInProgress", runtimeRefresh, StringComparison.Ordinal);
+        Assert.Contains(
+            "refreshVersion != _runtimeStateVersion",
+            runtimeRefresh,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "RefreshRuntimeStateAsync",
+            form,
+            StringComparison.Ordinal);
+        Assert.Contains("DrawStopAffordance", form, StringComparison.Ordinal);
+        Assert.Contains(
+            "card.RuntimeIsRunning is null",
+            primaryAction,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "AdminAppProcessIdentityResolver.Resolve",
+            processProbe,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "AdminAppProcessIdentityResolver.Resolve",
+            stopProcesses,
+            StringComparison.Ordinal);
+        Assert.Contains("$commandHostNames", processProbe, StringComparison.Ordinal);
+        Assert.Contains("$commandHostNames", stopProcesses, StringComparison.Ordinal);
+        Assert.DoesNotContain("StartsWith($appFolder", stopProcesses, StringComparison.Ordinal);
+        Assert.DoesNotContain("IndexOf($appFolder", stopProcesses, StringComparison.Ordinal);
+
+        var stateAssignment = setRuntimeStatus.IndexOf(
+            "_runtimeIsRunning = running",
+            StringComparison.Ordinal);
+        var optionalBadgeCheck = setRuntimeStatus.IndexOf(
+            "if (_runtimeStatusBadge is null)",
+            StringComparison.Ordinal);
+        Assert.True(
+            stateAssignment >= 0 && optionalBadgeCheck > stateAssignment,
+            "Every card must retain runtime state even when it does not show a status badge.");
+    }
+
+    [Fact]
+    public void WorkflowManager_RemainsBrowserSafeWhileSingletonAppsUseTheirMutexes()
+    {
+        var services = ReadRepositoryFile("AdminPanel", "AdminAppServices.cs");
+        var prepareAndLaunch = ExtractBraceBlock(
+            services,
+            "public static Task<LaunchResult> PrepareAndLaunchAsync(");
+        var stopService = ExtractBraceBlock(
+            services,
+            "public static Task<LaunchResult> StopAsync(AdminAppDefinition app)");
+
+        Assert.Matches(
+            new Regex(
+                """
+                (?s)"workflow-manager".*?SupportsRuntimeControl\s*=\s*false
+                """,
+                RegexOptions.IgnorePatternWhitespace),
+            services);
+        Assert.Contains(
+            "if (app.SupportsRuntimeControl",
+            prepareAndLaunch,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "if (!app.SupportsRuntimeControl)",
+            stopService,
+            StringComparison.Ordinal);
+        Assert.Contains("RuntimeMutexName = \"StayActive.Singleton\"", services, StringComparison.Ordinal);
+        Assert.Contains("RuntimeMutexName = \"PowerModeToggle.Singleton\"", services, StringComparison.Ordinal);
+        Assert.Contains("RuntimeMutexName = \"VoiceCodex.Singleton\"", services, StringComparison.Ordinal);
+        Assert.Contains("RuntimeMutexName = \"YouTubeSyncTray.Singleton\"", services, StringComparison.Ordinal);
+        Assert.Contains("RuntimeMutexName = \"LightDarkToggle.Singleton\"", services, StringComparison.Ordinal);
     }
 
     private static string ReadRepositoryFile(params string[] relativePathParts)

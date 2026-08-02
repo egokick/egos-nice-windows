@@ -27,6 +27,24 @@ internal sealed record AdminAppDefinition(
     // The Admin Panel can wait for these launchers and surface their real errors.
     internal bool BatchExitsAfterLaunch { get; init; }
 
+    // When present, the Admin Panel uses this mutex as an opt-in runtime status probe.
+    internal string? RuntimeMutexName { get; init; }
+
+    // Browser-only documents do not own a process that the Admin Panel can safely stop.
+    internal bool SupportsRuntimeControl { get; init; } = true;
+
+    // Some apps surface their runtime state outside the hover action as well.
+    internal bool ShowRuntimeStatusBadge { get; init; }
+
+    // Exact app-relative script/project paths that identify hosted runtimes.
+    internal IReadOnlyList<string> RuntimeCommandLineRelativePaths { get; init; } = [];
+
+    // Optional windowless launcher used only for the per-user startup registration.
+    internal string? AutoStartLauncherRelativePath { get; init; }
+
+    // Shows an app-specific launch settings button and forwards persisted arguments.
+    internal bool HasLaunchSettings { get; init; }
+
     internal IReadOnlyList<string> LocalWebUrls { get; init; } = [];
 }
 
@@ -41,7 +59,28 @@ internal static class AdminAppCatalog
             "parakeet-mic",
             AdminAppLogoKind.Embedded,
             "parakeet-mic",
-            "NiceWindows.ParakeetMic"),
+            "NiceWindows.ParakeetMic")
+        {
+            RuntimeCommandLineRelativePaths =
+                ["start.bat", "start-parakeet-mic.bat", "transcribe_mic.py"]
+        },
+        new(
+            "continuous-transcriber",
+            "Continuous Transcriber",
+            "Continuously capture speech and retain useful local transcripts.",
+            "Continuous-transcriber",
+            AdminAppLogoKind.Generated,
+            "continuous-transcriber",
+            "NiceWindows.ContinuousTranscriber")
+        {
+            BatchExitsAfterLaunch = true,
+            RuntimeMutexName = @"Local\ContinuousMicrophoneTranscriberMonitor",
+            ShowRuntimeStatusBadge = true,
+            RuntimeCommandLineRelativePaths =
+                ["monitor_transcriber.py", "transcribe_microphone.py"],
+            AutoStartLauncherRelativePath = "start-hidden.vbs",
+            HasLaunchSettings = true
+        },
         new(
             "power-mode-toggle",
             "Power Mode Toggle",
@@ -52,7 +91,8 @@ internal static class AdminAppCatalog
             "PowerModeToggle")
         {
             NativeStartupExecutablePath = @"PowerModeToggle\bin\Release\net10.0-windows\win-x64\publish\PowerModeToggle.exe",
-            BatchExitsAfterLaunch = true
+            BatchExitsAfterLaunch = true,
+            RuntimeMutexName = "PowerModeToggle.Singleton"
         },
         new(
             "stayactive",
@@ -64,7 +104,8 @@ internal static class AdminAppCatalog
             "StayActive")
         {
             NativeStartupExecutablePath = @"stayactive\bin\Release\net10.0-windows\stayactive.exe",
-            BatchExitsAfterLaunch = true
+            BatchExitsAfterLaunch = true,
+            RuntimeMutexName = "StayActive.Singleton"
         },
         new(
             "voicecodex",
@@ -75,7 +116,10 @@ internal static class AdminAppCatalog
             "voicecodex",
             "VoiceCodex")
         {
-            NativeStartupExecutablePath = @"voicecodex\bin\Debug\net10.0-windows\voicecodex.exe"
+            NativeStartupExecutablePath = @"voicecodex\bin\Debug\net10.0-windows\voicecodex.exe",
+            RuntimeMutexName = "VoiceCodex.Singleton",
+            RuntimeCommandLineRelativePaths =
+                ["start.bat", "start-voicecodex.bat"]
         },
         new(
             "wifidevices",
@@ -114,7 +158,8 @@ internal static class AdminAppCatalog
             "workflow-manager",
             "NiceWindows.WorkflowManager")
         {
-            BatchExitsAfterLaunch = true
+            BatchExitsAfterLaunch = true,
+            SupportsRuntimeControl = false
         },
         new(
             "youtube-sync-tray",
@@ -127,6 +172,7 @@ internal static class AdminAppCatalog
         {
             NativeStartupExecutablePath = @"YouTubeSyncTray\bin\Release\net10.0-windows\YouTubeSyncTray.exe",
             BatchExitsAfterLaunch = true,
+            RuntimeMutexName = "YouTubeSyncTray.Singleton",
             LocalWebUrls = ["http://tom.localhost/", "http://127.0.0.1:48173/"]
         },
         new(
@@ -139,7 +185,8 @@ internal static class AdminAppCatalog
             "LightDarkToggle")
         {
             NativeStartupExecutablePath = @"LightDarkToggle\bin\Release\net10.0-windows\LightDarkToggle.exe",
-            BatchExitsAfterLaunch = true
+            BatchExitsAfterLaunch = true,
+            RuntimeMutexName = "LightDarkToggle.Singleton"
         },
         new(
             "nemotron-mic",
@@ -148,7 +195,11 @@ internal static class AdminAppCatalog
             "nemotron-mic",
             AdminAppLogoKind.Embedded,
             "nemotron-mic",
-            "NiceWindows.NemotronMic"),
+            "NiceWindows.NemotronMic")
+        {
+            RuntimeCommandLineRelativePaths =
+                ["start.bat", "start-nemotron-mic.bat", "transcribe_mic.py"]
+        },
         new(
             "ollama-coder-agent",
             "Ollama Coder Agent",
@@ -157,6 +208,10 @@ internal static class AdminAppCatalog
             AdminAppLogoKind.Embedded,
             "ollama-coder-agent",
             "NiceWindows.OllamaCoderAgent")
+        {
+            RuntimeCommandLineRelativePaths =
+                ["start.bat", "start-coder-files.bat", "coder_files_agent.py"]
+        }
     ];
 
     public static IReadOnlyList<AdminAppDefinition> Apps { get; } = Array.AsReadOnly(Catalog);
@@ -167,6 +222,311 @@ internal static class AdminAppCatalog
 
         return Catalog.FirstOrDefault(app => string.Equals(app.Id, id, StringComparison.OrdinalIgnoreCase))
             ?? throw new KeyNotFoundException($"No admin app is registered with the id '{id}'.");
+    }
+}
+
+internal readonly record struct AdminAppProcessIdentity(
+    string? ExecutablePath,
+    IReadOnlyList<string> CommandLineMarkers);
+
+internal static class AdminAppProcessIdentityResolver
+{
+    public static AdminAppProcessIdentity Resolve(AdminAppDefinition app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+
+        var repositoryRoot = Path.TrimEndingDirectorySeparator(
+                                 NiceWindowsRepositoryLocator.GetRepositoryRoot())
+                             + Path.DirectorySeparatorChar;
+        var appFolder = Path.TrimEndingDirectorySeparator(
+                            NiceWindowsRepositoryLocator.GetAppFolder(app))
+                        + Path.DirectorySeparatorChar;
+
+        string? executablePath = null;
+        if (!string.IsNullOrWhiteSpace(app.NativeStartupExecutablePath))
+        {
+            executablePath = Path.GetFullPath(
+                Path.Combine(repositoryRoot, app.NativeStartupExecutablePath));
+            if (!executablePath.StartsWith(repositoryRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"The runtime executable for {app.DisplayName} is outside the repository.");
+            }
+        }
+
+        var commandLineMarkers = app.RuntimeCommandLineRelativePaths
+            .Select(relativePath => Path.GetFullPath(Path.Combine(appFolder, relativePath)))
+            .ToArray();
+        if (commandLineMarkers.Any(marker =>
+                !marker.StartsWith(appFolder, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"A runtime marker for {app.DisplayName} is outside its app folder.");
+        }
+
+        if (app.SupportsRuntimeControl
+            && string.IsNullOrWhiteSpace(executablePath)
+            && commandLineMarkers.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"{app.DisplayName} does not define a safe runtime process identity.");
+        }
+
+        return new AdminAppProcessIdentity(executablePath, commandLineMarkers);
+    }
+}
+
+internal static class AdminAppRuntimeStatusService
+{
+    internal readonly record struct RuntimeState(bool? IsRunning, string ErrorMessage);
+
+    public static Task<IReadOnlyDictionary<string, RuntimeState>> GetRuntimeStatesAsync(
+        IReadOnlyList<AdminAppDefinition> apps)
+    {
+        ArgumentNullException.ThrowIfNull(apps);
+
+        var appSnapshot = apps.ToArray();
+        return Task.Run<IReadOnlyDictionary<string, RuntimeState>>(
+            () => GetRuntimeStates(appSnapshot));
+    }
+
+    private static IReadOnlyDictionary<string, RuntimeState> GetRuntimeStates(
+        IReadOnlyList<AdminAppDefinition> apps)
+    {
+        var states = new Dictionary<string, RuntimeState>(StringComparer.OrdinalIgnoreCase);
+        var processProbedApps = new List<AdminAppDefinition>();
+
+        foreach (var app in apps)
+        {
+            if (!app.SupportsRuntimeControl)
+            {
+                states[app.Id] = new RuntimeState(false, string.Empty);
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(app.RuntimeMutexName))
+            {
+                processProbedApps.Add(app);
+                continue;
+            }
+
+            states[app.Id] = TryGetMutexRunning(
+                app,
+                out var running,
+                out var errorMessage)
+                ? new RuntimeState(running, string.Empty)
+                : new RuntimeState(null, errorMessage);
+        }
+
+        if (processProbedApps.Count == 0)
+        {
+            return states;
+        }
+
+        if (TryGetRunningProcessAppIds(
+                processProbedApps,
+                out var runningAppIds,
+                out var processError))
+        {
+            foreach (var app in processProbedApps)
+            {
+                states[app.Id] = new RuntimeState(
+                    runningAppIds.Contains(app.Id),
+                    string.Empty);
+            }
+        }
+        else
+        {
+            foreach (var app in processProbedApps)
+            {
+                states[app.Id] = new RuntimeState(null, processError);
+            }
+        }
+
+        return states;
+    }
+
+    private static bool TryGetMutexRunning(
+        AdminAppDefinition app,
+        out bool running,
+        out string errorMessage)
+    {
+        try
+        {
+            using var runtimeMutex = Mutex.OpenExisting(app.RuntimeMutexName!);
+            running = true;
+            errorMessage = string.Empty;
+            return true;
+        }
+        catch (WaitHandleCannotBeOpenedException)
+        {
+            running = false;
+            errorMessage = string.Empty;
+            return true;
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException
+                                             or IOException
+                                             or ArgumentException)
+        {
+            running = false;
+            errorMessage = $"Could not read the runtime status for {app.DisplayName}: {exception.Message}";
+            return false;
+        }
+    }
+
+    private static bool TryGetRunningProcessAppIds(
+        IReadOnlyList<AdminAppDefinition> apps,
+        out HashSet<string> runningAppIds,
+        out string errorMessage)
+    {
+        runningAppIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            var appEntries = apps.Select(app =>
+            {
+                var identity = AdminAppProcessIdentityResolver.Resolve(app);
+                var executable = identity.ExecutablePath is null
+                    ? "$null"
+                    : $"'{AdminAppLauncher.EscapePowerShellSingleQuotedString(identity.ExecutablePath)}'";
+                var commandLineMarkers = string.Join(
+                    ", ",
+                    identity.CommandLineMarkers.Select(marker =>
+                        $"'{AdminAppLauncher.EscapePowerShellSingleQuotedString(marker)}'"));
+                return
+                    $"[pscustomobject]@{{ Id = '{AdminAppLauncher.EscapePowerShellSingleQuotedString(app.Id)}'; " +
+                    $"Executable = {executable}; CommandLineMarkers = @({commandLineMarkers}) }}";
+            });
+            var script = $$"""
+                $ErrorActionPreference = 'Stop'
+                $comparison = [System.StringComparison]::OrdinalIgnoreCase
+                $apps = @(
+                {{string.Join(Environment.NewLine, appEntries)}}
+                )
+                $commandHostNames = @(
+                    'cmd.exe', 'python.exe', 'pythonw.exe', 'py.exe', 'pyw.exe')
+                $running = [System.Collections.Generic.HashSet[string]]::new(
+                    [System.StringComparer]::OrdinalIgnoreCase)
+
+                foreach ($processInfo in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+                    $executablePath = [string]$processInfo.ExecutablePath
+                    $commandLine = [string]$processInfo.CommandLine
+                    foreach ($app in $apps) {
+                        $executableMatches =
+                            -not [string]::IsNullOrWhiteSpace([string]$app.Executable) -and
+                            [string]::Equals(
+                                $executablePath,
+                                [string]$app.Executable,
+                                $comparison)
+                        $commandMatches = $false
+                        if ($commandHostNames -contains [string]$processInfo.Name -and
+                            -not [string]::IsNullOrWhiteSpace($commandLine)) {
+                            foreach ($marker in @($app.CommandLineMarkers)) {
+                                if ($commandLine.IndexOf([string]$marker, $comparison) -ge 0) {
+                                    $commandMatches = $true
+                                    break
+                                }
+                            }
+                        }
+                        if ($executableMatches -or $commandMatches) {
+                            [void]$running.Add($app.Id)
+                        }
+                    }
+                }
+
+                foreach ($id in $running) {
+                    Write-Output $id
+                }
+                """;
+            var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = AdminAppLauncher.GetPowerShellPath(),
+                    Arguments =
+                        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass " +
+                        $"-EncodedCommand {encodedScript}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
+            };
+
+            if (!process.Start())
+            {
+                errorMessage = "Windows did not start the app status helper.";
+                return false;
+            }
+
+            if (!process.WaitForExit(10_000))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (Exception exception) when (exception is InvalidOperationException
+                                                     or System.ComponentModel.Win32Exception
+                                                     or NotSupportedException)
+                {
+                    // The helper may have exited between the timeout and the kill request.
+                }
+
+                errorMessage = "Timed out while checking which apps are running.";
+                return false;
+            }
+
+            var standardOutput = process.StandardOutput.ReadToEnd();
+            var standardError = process.StandardError.ReadToEnd();
+            if (process.ExitCode != 0)
+            {
+                errorMessage = "Could not check which apps are running.";
+                var details = GetOutputTail(standardError, standardOutput);
+                if (!string.IsNullOrWhiteSpace(details))
+                {
+                    errorMessage += $" {details}";
+                }
+
+                return false;
+            }
+
+            var knownIds = apps.Select(app => app.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var line in standardOutput.Split(
+                         ['\r', '\n'],
+                         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (knownIds.Contains(line))
+                {
+                    runningAppIds.Add(line);
+                }
+            }
+
+            errorMessage = string.Empty;
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+                                             or System.ComponentModel.Win32Exception
+                                             or IOException
+                                             or UnauthorizedAccessException
+                                             or ArgumentException
+                                             or NotSupportedException
+                                             or PathTooLongException)
+        {
+            errorMessage = $"Could not check which apps are running: {exception.Message}";
+            return false;
+        }
+    }
+
+    private static string GetOutputTail(params string[] values)
+    {
+        return string.Join(
+            " | ",
+            values
+                .SelectMany(value => value.Split(
+                    ['\r', '\n'],
+                    StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .TakeLast(6));
     }
 }
 
@@ -295,7 +655,26 @@ internal static class AdminAppLauncher
         return TryStart(app, out errorMessage);
     }
 
-    public static Task<LaunchResult> PrepareAndLaunchAsync(AdminAppDefinition app)
+    public static Task<LaunchResult> StopAsync(AdminAppDefinition app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+
+        if (!app.SupportsRuntimeControl)
+        {
+            return Task.FromResult(new LaunchResult(
+                false,
+                $"{app.DisplayName} does not own a process that can be stopped safely."));
+        }
+
+        return Task.Run(() =>
+            TryStopExistingProcesses(app, out var errorMessage)
+                ? new LaunchResult(true, string.Empty)
+                : new LaunchResult(false, errorMessage));
+    }
+
+    public static Task<LaunchResult> PrepareAndLaunchAsync(
+        AdminAppDefinition app,
+        IReadOnlyList<string>? launchArguments = null)
     {
         ArgumentNullException.ThrowIfNull(app);
 
@@ -328,7 +707,8 @@ internal static class AdminAppLauncher
                 return new LaunchResult(false, errorMessage);
             }
 
-            if (!TryStopExistingProcesses(app, out errorMessage))
+            if (app.SupportsRuntimeControl
+                && !TryStopExistingProcesses(app, out errorMessage))
             {
                 return new LaunchResult(false, errorMessage);
             }
@@ -347,7 +727,7 @@ internal static class AdminAppLauncher
                 return new LaunchResult(true, string.Empty);
             }
 
-            if (!TryStart(app, out errorMessage))
+            if (!TryStart(app, launchArguments, out errorMessage))
             {
                 return new LaunchResult(false, errorMessage);
             }
@@ -368,31 +748,72 @@ internal static class AdminAppLauncher
     {
         try
         {
-            var appFolder = Path.TrimEndingDirectorySeparator(
-                                NiceWindowsRepositoryLocator.GetAppFolder(app))
-                            + Path.DirectorySeparatorChar;
+            var appFolder = NiceWindowsRepositoryLocator.GetAppFolder(app);
+            var identity = AdminAppProcessIdentityResolver.Resolve(app);
+            var expectedExecutable = identity.ExecutablePath is null
+                ? "$null"
+                : $"'{EscapePowerShellSingleQuotedString(identity.ExecutablePath)}'";
+            var commandLineMarkers = string.Join(
+                ", ",
+                identity.CommandLineMarkers.Select(marker =>
+                    $"'{EscapePowerShellSingleQuotedString(marker)}'"));
             var script = $$"""
                 $ErrorActionPreference = 'Stop'
-                $appFolder = '{{EscapePowerShellSingleQuotedString(appFolder)}}'
                 $comparison = [System.StringComparison]::OrdinalIgnoreCase
                 $currentProcessId = $PID
+                $expectedExecutable = {{expectedExecutable}}
+                $commandLineMarkers = @({{commandLineMarkers}})
+                $commandHostNames = @(
+                    'cmd.exe', 'python.exe', 'pythonw.exe', 'py.exe', 'pyw.exe')
+                $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop)
                 $matches = @(
-                    Get-CimInstance Win32_Process | Where-Object {
+                    $allProcesses | Where-Object {
                         if ($_.ProcessId -eq $currentProcessId) {
                             return $false
                         }
 
                         $executableMatches =
-                            -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
-                            $_.ExecutablePath.StartsWith($appFolder, $comparison)
-                        $commandMatches =
-                            -not [string]::IsNullOrWhiteSpace($_.CommandLine) -and
-                            $_.CommandLine.IndexOf($appFolder, $comparison) -ge 0
+                            -not [string]::IsNullOrWhiteSpace([string]$expectedExecutable) -and
+                            [string]::Equals(
+                                [string]$_.ExecutablePath,
+                                [string]$expectedExecutable,
+                                $comparison)
+                        $commandMatches = $false
+                        if ($commandHostNames -contains [string]$_.Name -and
+                            -not [string]::IsNullOrWhiteSpace([string]$_.CommandLine)) {
+                            foreach ($marker in $commandLineMarkers) {
+                                if ($_.CommandLine.IndexOf([string]$marker, $comparison) -ge 0) {
+                                    $commandMatches = $true
+                                    break
+                                }
+                            }
+                        }
                         $executableMatches -or $commandMatches
                     }
                 )
 
+                $targetIds = [System.Collections.Generic.HashSet[int]]::new()
                 foreach ($process in $matches) {
+                    [void]$targetIds.Add([int]$process.ProcessId)
+                }
+
+                $addedDescendant = $true
+                while ($addedDescendant) {
+                    $addedDescendant = $false
+                    foreach ($process in $allProcesses) {
+                        if ($targetIds.Contains([int]$process.ParentProcessId) -and
+                            $targetIds.Add([int]$process.ProcessId)) {
+                            $addedDescendant = $true
+                        }
+                    }
+                }
+
+                $targets = @(
+                    $allProcesses | Where-Object {
+                        $targetIds.Contains([int]$_.ProcessId)
+                    }
+                )
+                foreach ($process in $targets) {
                     try {
                         Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
                     }
@@ -406,11 +827,11 @@ internal static class AdminAppLauncher
                     }
                 }
 
-                if ($matches.Count -gt 0) {
+                if ($targets.Count -gt 0) {
                     $deadline = [DateTime]::UtcNow.AddSeconds(5)
                     do {
                         $remaining = @(
-                            $matches | Where-Object {
+                            $targets | Where-Object {
                                 Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
                             }
                         )
@@ -451,7 +872,24 @@ internal static class AdminAppLauncher
 
             var standardOutputTask = process.StandardOutput.ReadToEndAsync();
             var standardErrorTask = process.StandardError.ReadToEndAsync();
-            process.WaitForExit();
+            if (!process.WaitForExit(15_000))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (Exception exception) when (exception is InvalidOperationException
+                                                     or System.ComponentModel.Win32Exception
+                                                     or NotSupportedException)
+                {
+                    // The helper may have exited between the timeout and the kill request.
+                }
+
+                errorMessage =
+                    $"Timed out while stopping the existing {app.DisplayName} process.";
+                return false;
+            }
+
             Task.WaitAll(standardOutputTask, standardErrorTask);
             if (process.ExitCode == 0)
             {
@@ -473,7 +911,10 @@ internal static class AdminAppLauncher
         catch (Exception exception) when (exception is InvalidOperationException
                                              or System.ComponentModel.Win32Exception
                                              or IOException
-                                             or UnauthorizedAccessException)
+                                             or UnauthorizedAccessException
+                                             or ArgumentException
+                                             or NotSupportedException
+                                             or PathTooLongException)
         {
             errorMessage =
                 $"Could not stop the existing {app.DisplayName} process: {exception.Message}";
@@ -715,7 +1156,8 @@ internal static class AdminAppLauncher
         var dependencyFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "packages.lock.json", "nuget.config", "directory.packages.props", "requirements.txt",
-            "pyproject.toml", "poetry.lock", "uv.lock", "package.json", "package-lock.json"
+            "pyproject.toml", "poetry.lock", "uv.lock", "package.json", "package-lock.json",
+            "prepare-runtime.ps1"
         };
         var dependencyExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -766,6 +1208,14 @@ internal static class AdminAppLauncher
     }
     private static bool TryStart(AdminAppDefinition app, out string errorMessage)
     {
+        return TryStart(app, [], out errorMessage);
+    }
+
+    private static bool TryStart(
+        AdminAppDefinition app,
+        IReadOnlyList<string>? launchArguments,
+        out string errorMessage)
+    {
         ArgumentNullException.ThrowIfNull(app);
 
         try
@@ -780,8 +1230,10 @@ internal static class AdminAppLauncher
             }
 
             return app.BatchExitsAfterLaunch
-                ? TryRunDetachedBatch(app, appFolder, startBatchPath, out errorMessage)
-                : TryRunAttachedBatch(app, appFolder, startBatchPath, out errorMessage);
+                ? TryRunDetachedBatch(
+                    app, appFolder, startBatchPath, launchArguments, out errorMessage)
+                : TryRunAttachedBatch(
+                    app, appFolder, startBatchPath, launchArguments, out errorMessage);
         }
         catch (Exception exception) when (exception is InvalidOperationException
                                              or System.ComponentModel.Win32Exception
@@ -797,6 +1249,7 @@ internal static class AdminAppLauncher
         AdminAppDefinition app,
         string appFolder,
         string startBatchPath,
+        IReadOnlyList<string>? launchArguments,
         out string errorMessage)
     {
         CleanupOldLaunchLogs();
@@ -810,8 +1263,9 @@ internal static class AdminAppLauncher
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = GetCommandProcessorPath(),
-                    Arguments = $"/d /c call {QuoteCommandArgument(startBatchPath)} " +
-                                $"1> {QuoteCommandArgument(outputPath)} 2>&1",
+                    Arguments = $"/d /c call {QuoteCommandArgument(startBatchPath)}" +
+                                FormatForwardedArguments(launchArguments) +
+                                $" 1> {QuoteCommandArgument(outputPath)} 2>&1",
                     WorkingDirectory = appFolder,
                     UseShellExecute = false,
                     CreateNoWindow = true
@@ -921,10 +1375,12 @@ internal static class AdminAppLauncher
         AdminAppDefinition app,
         string appFolder,
         string startBatchPath,
+        IReadOnlyList<string>? launchArguments,
         out string errorMessage)
     {
-        var arguments = $"/d /c call {QuoteCommandArgument(startBatchPath)} " +
-                        "|| (echo. & echo The app failed to start. Review the error above. & " +
+        var arguments = $"/d /c call {QuoteCommandArgument(startBatchPath)}" +
+                        FormatForwardedArguments(launchArguments) +
+                        " || (echo. & echo The app failed to start. Review the error above. & " +
                         "echo Press any key to close this window. & pause ^>NUL)";
         using var process = Process.Start(new ProcessStartInfo
         {
@@ -1014,7 +1470,7 @@ internal static class AdminAppLauncher
         return commandProcessorPath;
     }
 
-    private static string GetPowerShellPath()
+    internal static string GetPowerShellPath()
     {
         var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
         var powerShellPath = string.IsNullOrWhiteSpace(systemDirectory)
@@ -1029,10 +1485,18 @@ internal static class AdminAppLauncher
         return powerShellPath;
     }
 
-    private static string EscapePowerShellSingleQuotedString(string value)
+    internal static string EscapePowerShellSingleQuotedString(string value)
     {
         return value.Replace("'", "''", StringComparison.Ordinal);
     }
+
+    private static string FormatForwardedArguments(IReadOnlyList<string>? arguments)
+    {
+        return arguments is not { Count: > 0 }
+            ? string.Empty
+            : " " + string.Join(" ", arguments.Select(QuoteCommandArgument));
+    }
+
 
     private static string QuoteCommandArgument(string value)
     {
@@ -1097,7 +1561,8 @@ internal static class AdminAppAutoStartService
             }
 
             var canonicalCommand = GetCanonicalCommand(app);
-            var batchCommand = GetBatchCommand(app);
+            var batchCommand = GetBatchCommand(app) +
+                               FormatConfiguredArguments(AdminAppLaunchSettings.GetArguments(app));
             enabled = string.Equals(
                           registeredCommand,
                           canonicalCommand,
@@ -1178,6 +1643,12 @@ internal static class AdminAppAutoStartService
     {
         ArgumentNullException.ThrowIfNull(app);
 
+        if (!string.IsNullOrWhiteSpace(app.AutoStartLauncherRelativePath))
+        {
+            return GetWindowlessScriptCommand(app) +
+                   FormatConfiguredArguments(AdminAppLaunchSettings.GetArguments(app));
+        }
+
         if (!app.PreferBatchStartup
             && !string.IsNullOrWhiteSpace(app.NativeStartupExecutablePath))
         {
@@ -1190,7 +1661,38 @@ internal static class AdminAppAutoStartService
             }
         }
 
-        return GetBatchCommand(app);
+        return GetBatchCommand(app) +
+               FormatConfiguredArguments(AdminAppLaunchSettings.GetArguments(app));
+    }
+
+    private static string GetWindowlessScriptCommand(AdminAppDefinition app)
+    {
+        var appFolder = NiceWindowsRepositoryLocator.GetAppFolder(app);
+        var launcherPath = Path.GetFullPath(
+            Path.Combine(appFolder, app.AutoStartLauncherRelativePath!));
+        var normalizedAppFolder =
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(appFolder))
+            + Path.DirectorySeparatorChar;
+        if (!launcherPath.StartsWith(normalizedAppFolder, StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(launcherPath))
+        {
+            throw new FileNotFoundException(
+                $"Cannot configure startup for {app.DisplayName}: its windowless launcher was not found at " +
+                $"'{launcherPath}'.",
+                launcherPath);
+        }
+
+        var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        var scriptHostPath = string.IsNullOrWhiteSpace(systemDirectory)
+            ? "wscript.exe"
+            : Path.Combine(systemDirectory, "wscript.exe");
+        if (!File.Exists(scriptHostPath))
+        {
+            throw new FileNotFoundException("Windows Script Host wscript.exe could not be located.");
+        }
+
+        return $"{QuoteCommandArgument(Path.GetFullPath(scriptHostPath))} " +
+               QuoteCommandArgument(launcherPath);
     }
 
     private static string GetBatchCommand(AdminAppDefinition app)
@@ -1225,6 +1727,14 @@ internal static class AdminAppAutoStartService
         }
 
         return Path.GetFullPath(commandProcessorPath);
+    }
+
+
+    private static string FormatConfiguredArguments(IReadOnlyList<string> arguments)
+    {
+        return arguments.Count == 0
+            ? string.Empty
+            : " " + string.Join(" ", arguments.Select(QuoteCommandArgument));
     }
 
     private static string QuoteCommandArgument(string value)

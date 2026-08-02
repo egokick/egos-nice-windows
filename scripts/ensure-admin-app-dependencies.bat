@@ -15,6 +15,7 @@ if not exist "%APP_DIR%\" (
 )
 
 if /I "%APP_ID%"=="parakeet-mic" goto :parakeet
+if /I "%APP_ID%"=="continuous-transcriber" goto :continuousTranscriber
 if /I "%APP_ID%"=="nemotron-mic" goto :nemotron
 if /I "%APP_ID%"=="ollama-coder-agent" goto :ollama
 if /I "%APP_ID%"=="workflow-manager" goto :workflow
@@ -35,6 +36,28 @@ if not exist "%APP_DIR%\transcribe_mic.py" (
     exit /b 2
 )
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0ensure-python.ps1" -Version "3.12" -AppDirectory "%APP_DIR%" -RequirementsFile "%APP_DIR%\requirements.txt"
+exit /b %ERRORLEVEL%
+
+:continuousTranscriber
+if not exist "%APP_DIR%\start.bat" (
+    echo Required app file not found: %APP_DIR%\start.bat
+    exit /b 2
+)
+if not exist "%APP_DIR%\monitor_transcriber.py" (
+    echo Required app file not found: %APP_DIR%\monitor_transcriber.py
+    exit /b 2
+)
+if not exist "%APP_DIR%\transcribe_microphone.py" (
+    echo Required app file not found: %APP_DIR%\transcribe_microphone.py
+    exit /b 2
+)
+if not exist "%APP_DIR%\prepare-runtime.ps1" (
+    echo Required app file not found: %APP_DIR%\prepare-runtime.ps1
+    exit /b 2
+)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0ensure-python.ps1" -Version "3.12" -AppDirectory "%APP_DIR%"
+if errorlevel 1 exit /b 1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%APP_DIR%\prepare-runtime.ps1"
 exit /b %ERRORLEVEL%
 
 :nemotron
