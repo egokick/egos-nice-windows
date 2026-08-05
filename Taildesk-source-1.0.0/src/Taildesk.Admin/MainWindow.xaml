@@ -210,6 +210,15 @@
                             <StackPanel Grid.Row="1" Grid.ColumnSpan="6" Margin="0,15,0,0">
                                 <TextBlock Text="SHARED FOLDERS" Style="{StaticResource LabelText}" />
                                 <WrapPanel Margin="0,7,0,0">
+                                    <WrapPanel.Resources>
+                                        <Style TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
+                                            <Setter Property="Background" Value="#272C32" />
+                                            <Setter Property="BorderBrush" Value="{StaticResource BorderStrongBrush}" />
+                                            <Setter Property="BorderThickness" Value="1" />
+                                            <Setter Property="Padding" Value="8,4" />
+                                            <Setter Property="HorizontalContentAlignment" Value="Center" />
+                                        </Style>
+                                    </WrapPanel.Resources>
                                     <CheckBox x:Name="InviteRootDesktopCheck" Content="Desktop" IsChecked="True" Margin="0,0,22,0" />
                                     <CheckBox x:Name="InviteRootDocumentsCheck" Content="Documents" IsChecked="True" Margin="0,0,22,0" />
                                     <CheckBox x:Name="InviteRootDownloadsCheck" Content="Downloads" IsChecked="True" Margin="0,0,22,0" />
@@ -221,6 +230,15 @@
                     </Border>
                     <DataGrid x:Name="InviteGrid" Grid.Row="3" Margin="0,12,0,0" ItemsSource="{Binding Invites}" IsReadOnly="True"
                               MouseDoubleClick="InviteGrid_DoubleClick" PreviewMouseRightButtonDown="InviteGrid_PreviewMouseRightButtonDown">
+                        <DataGrid.Resources>
+                            <Style TargetType="DataGridCell" BasedOn="{StaticResource {x:Type DataGridCell}}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsExpired}" Value="True">
+                                        <Setter Property="Foreground" Value="#87919B" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.Resources>
                         <DataGrid.ContextMenu>
                             <ContextMenu>
                                 <MenuItem Header="Copy invitation URL" Click="CopyInviteUrl_Click" />

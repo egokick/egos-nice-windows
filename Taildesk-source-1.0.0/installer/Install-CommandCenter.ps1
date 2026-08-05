@@ -105,7 +105,13 @@ function Configure-PrivateRustDeskController {
     Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
     Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue | Set-Service -StartupType Disabled
     Get-Process -Name 'RustDesk' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    $configRoots = @((Join-Path $ProfilePath 'AppData\Roaming\RustDesk\config'),(Join-Path $env:APPDATA 'RustDesk\config'),(Join-Path $env:WINDIR 'System32\config\systemprofile\AppData\Roaming\RustDesk\config')) | Select-Object -Unique
+    $configRoots = @(
+        (Join-Path $ProfilePath 'AppData\Roaming\RustDesk\config'),
+        (Join-Path $env:APPDATA 'RustDesk\config'),
+        (Join-Path $env:WINDIR 'ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config'),
+        (Join-Path $env:WINDIR 'ServiceProfiles\NetworkService\AppData\Roaming\RustDesk\config'),
+        (Join-Path $env:WINDIR 'System32\config\systemprofile\AppData\Roaming\RustDesk\config')
+    ) | Select-Object -Unique
     foreach ($configRoot in $configRoots) {
         if (-not (Test-Path -LiteralPath $configRoot)) { continue }
         foreach ($configFile in Get-ChildItem -LiteralPath $configRoot -File -Filter '*.toml' -ErrorAction SilentlyContinue) {

@@ -13,7 +13,9 @@ var tests = new (string Name, Action Body)[]
     ("hosted invitation encryption rejects wrong keys and tampering", TestHostedInvite),
     ("invitation storage rejects OneDrive", TestPrivateStorage),
     ("dependency downloads are version and hash pinned", TestDependencyPins),
+    ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
+    ("RustDesk installer configures every Windows service profile before validation", TestRustDeskInstallerProfiles),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
     ("path guard permits a child and blocks traversal", TestPathGuard),
@@ -166,6 +168,16 @@ static void TestDependencyPins()
         Assert(artifact.FallbackUrl.EndsWith(artifact.FileName, StringComparison.Ordinal), "fallback filename changed");
     }
 }
+static void TestTailscaleEnrollmentArguments()
+{
+    var arguments = TailscaleCommandLine.BuildEnrollmentArguments(
+        "https://headscale.example.test", "tskey-auth-test", "managed-pc");
+    Assert(arguments[0] == "up", "Tailscale enrollment must use the up command");
+    Assert(arguments.Contains("--reset", StringComparer.Ordinal),
+        "Tailscale enrollment must reset stale non-default settings from a partial installation");
+    Assert(arguments.Contains("--accept-dns=false", StringComparer.Ordinal) && arguments.Contains("--accept-routes=false", StringComparer.Ordinal),
+        "Tailscale enrollment must reapply Opticon route and DNS policy after reset");
+}
 static void TestRustDeskHardening()
 {
     const string original = "rendezvous_server = 'public.example'\r\n[options]\r\ndirect-server = 'N'\r\nunknown = 'preserved'\r\n";
@@ -175,6 +187,35 @@ static void TestRustDeskHardening()
     Assert(hardened.Contains("direct-server = 'Y'", StringComparison.Ordinal), "direct server must be enabled");
     Assert(hardened.Contains("whitelist = ','", StringComparison.Ordinal), "RustDesk must not receive an unsupported CIDR whitelist; Windows Firewall enforces the tailnet range");
     Assert(hardened.Contains("unknown = 'preserved'", StringComparison.Ordinal), "unmanaged options must be preserved");
+}
+
+static void TestRustDeskInstallerProfiles()
+{
+    string? sourcePath = null;
+    foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+    {
+        var directory = new DirectoryInfo(start);
+        while (directory is not null)
+        {
+            var candidate = Path.Combine(directory.FullName, "src", "Taildesk.Setup", "InstallerServices.cs");
+            if (File.Exists(candidate))
+            {
+                sourcePath = candidate;
+                break;
+            }
+            directory = directory.Parent;
+        }
+        if (sourcePath is not null) break;
+    }
+    if (sourcePath is null) throw new InvalidOperationException("Taildesk.Setup InstallerServices.cs was not found.");
+    var source = File.ReadAllText(sourcePath);
+    Assert(source.Contains("ServiceProfiles\", \"LocalService", StringComparison.Ordinal), "LocalService RustDesk profile is not hardened");
+    Assert(source.Contains("ServiceProfiles\", \"NetworkService", StringComparison.Ordinal), "NetworkService RustDesk profile is not hardened");
+    Assert(source.Contains("System32\", \"config\", \"systemprofile", StringComparison.Ordinal), "SYSTEM RustDesk profile is not hardened");
+    Assert(source.Contains("taskkill.exe", StringComparison.Ordinal), "stale RustDesk child processes are not cleared");
+    var configureIndex = source.IndexOf("await ConfigureRustDeskAsync(rustDesk", StringComparison.Ordinal);
+    var listenerIndex = source.IndexOf("WaitForListeningPortAsync(21118", StringComparison.Ordinal);
+    Assert(configureIndex >= 0 && listenerIndex > configureIndex, "RustDesk listener is checked before configuration");
 }
 static void TestControllerRegistryShape()
 {

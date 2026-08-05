@@ -90,8 +90,8 @@ public sealed class InstallCoordinator
                 }
 
                 var up = await ProcessRunner.RunAsync(tailscale,
-                    ["up", $"--login-server={_invite.HeadscaleLoginUrl}", $"--auth-key={_invite.TailscaleAuthKey}",
-                        $"--hostname={SafeHostName(_invite.DeviceName)}", "--unattended=true", "--accept-dns=false", "--accept-routes=false"],
+                    TailscaleCommandLine.BuildEnrollmentArguments(
+                        _invite.HeadscaleLoginUrl, _invite.TailscaleAuthKey, SafeHostName(_invite.DeviceName)),
                     TimeSpan.FromMinutes(2), cancellationToken);
                 EnsureSuccess(up, "Tailscale could not join the tailnet");
                 snapshot = await WaitForExpectedTailscaleSessionAsync(tailscale, cancellationToken);
@@ -113,14 +113,14 @@ public sealed class InstallCoordinator
             }
 
             var rustDesk = await EnsureRustDeskAsync(tempDirectory, cancellationToken);
-            if (!await WaitForListeningPortAsync(21118, TimeSpan.FromSeconds(30), cancellationToken))
+            await ConfigureRustDeskAsync(rustDesk, cancellationToken);
+            if (!await WaitForListeningPortAsync(21118, TimeSpan.FromSeconds(90), cancellationToken))
             {
                 _progress.Report(new InstallProgress(66, "Repairing the RustDesk private listener?"));
                 await ConfigureRustDeskAsync(rustDesk, cancellationToken);
-                if (!await WaitForListeningPortAsync(21118, TimeSpan.FromSeconds(30), cancellationToken))
+                if (!await WaitForListeningPortAsync(21118, TimeSpan.FromSeconds(90), cancellationToken))
                     throw new InvalidOperationException("RustDesk did not open its private direct-access listener on TCP 21118 after an automatic repair.");
             }
-            await ConfigureRustDeskAsync(rustDesk, cancellationToken);
             await InstallAgentAsync(agentPayload, snapshot.Ip, cancellationToken);
             await ConfigureFirewallAsync(snapshot.Ip, rustDesk, cancellationToken);
 
@@ -206,6 +206,8 @@ public sealed class InstallCoordinator
         EnsureSuccess(password, "RustDesk password provisioning failed");
 
         _ = await ProcessRunner.RunAsync("sc.exe", ["stop", "RustDesk"], TimeSpan.FromSeconds(30), cancellationToken);
+        _ = await ProcessRunner.RunAsync("taskkill.exe", ["/F", "/IM", "rustdesk.exe"], TimeSpan.FromSeconds(20), cancellationToken);
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
         await Task.Delay(750, cancellationToken);
         HardenRustDeskConfigFiles();
         var restart = await ProcessRunner.RunAsync("sc.exe", ["start", "RustDesk"], TimeSpan.FromSeconds(30), cancellationToken);
@@ -518,6 +520,8 @@ public sealed class InstallCoordinator
         {
             Path.Combine(_userProfile.ProfilePath, "AppData", "Roaming"),
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "ServiceProfiles", "LocalService", "AppData", "Roaming"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "ServiceProfiles", "NetworkService", "AppData", "Roaming"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "config", "systemprofile", "AppData", "Roaming")
         };
         foreach (var root in roamingRoots.Where(root => !string.IsNullOrWhiteSpace(root)))
