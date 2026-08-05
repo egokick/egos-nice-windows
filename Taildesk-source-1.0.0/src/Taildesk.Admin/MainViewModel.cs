@@ -357,6 +357,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         if (!File.Exists(Config.RustDeskPath)) throw new FileNotFoundException("RustDesk was not found. Set its path in Settings.");
         if (!AgentClient.IsTailscaleIp(device.TailscaleIp)) throw new InvalidOperationException("The selected device has no valid Tailscale address.");
+        if (device.State == DeviceConnectionState.Offline)
+            throw new InvalidOperationException($"{device.Name} is offline. Wake or power on the device and wait for it to reconnect to the private network.");
         var password = GetRustDeskPassword(device);
         await RustDeskSessionLauncher.LaunchAsync(Config.RustDeskPath, device.TailscaleIp, password, cancellationToken);
         Status = $"Remote session: {device.Name}";

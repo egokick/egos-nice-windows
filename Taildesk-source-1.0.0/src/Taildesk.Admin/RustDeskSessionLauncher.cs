@@ -22,6 +22,13 @@ internal static class RustDeskSessionLauncher
                     .AsTask()
                     .WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
             }
+            catch (SocketException exception) when (exception.SocketErrorCode == SocketError.AccessDenied)
+            {
+                throw new InvalidOperationException(
+                    "Windows or another VPN blocked Opticon from opening the private Tailscale connection. " +
+                    "Run System checks and repair the NordVPN private-mesh application exclusions.",
+                    exception);
+            }
             catch (Exception exception) when (exception is SocketException or TimeoutException)
             {
                 throw new InvalidOperationException(

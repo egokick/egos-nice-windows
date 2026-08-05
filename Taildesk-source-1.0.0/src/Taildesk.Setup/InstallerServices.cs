@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Http;
+using System.Net.NetworkInformation;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
@@ -112,6 +113,13 @@ public sealed class InstallCoordinator
             }
 
             var rustDesk = await EnsureRustDeskAsync(tempDirectory, cancellationToken);
+            if (!await WaitForListeningPortAsync(21118, TimeSpan.FromSeconds(30), cancellationToken))
+            {
+                _progress.Report(new InstallProgress(66, "Repairing the RustDesk private listener?"));
+                await ConfigureRustDeskAsync(rustDesk, cancellationToken);
+                if (!await WaitForListeningPortAsync(21118, TimeSpan.FromSeconds(30), cancellationToken))
+                    throw new InvalidOperationException("RustDesk did not open its private direct-access listener on TCP 21118 after an automatic repair.");
+            }
             await ConfigureRustDeskAsync(rustDesk, cancellationToken);
             await InstallAgentAsync(agentPayload, snapshot.Ip, cancellationToken);
             await ConfigureFirewallAsync(snapshot.Ip, rustDesk, cancellationToken);
@@ -120,6 +128,8 @@ public sealed class InstallCoordinator
 
             _progress.Report(new InstallProgress(94, "Starting the Opticon agent…"));
             var start = await ProcessRunner.RunAsync("schtasks.exe", ["/Run", "/TN", "Taildesk Agent"], TimeSpan.FromSeconds(20), cancellationToken);
+            if (!await WaitForListeningPortAsync(45831, TimeSpan.FromSeconds(30), cancellationToken))
+                throw new InvalidOperationException("The Opticon agent task started but did not open its private API listener on TCP 45831.");
             EnsureSuccess(start, "The Opticon background agent task could not be started");
             _progress.Report(new InstallProgress(96, "Waiting for the command center to confirm enrollment…"));
             await WaitForEnrollmentAsync(cancellationToken);
@@ -182,6 +192,15 @@ public sealed class InstallCoordinator
             var installService = await ProcessRunner.RunAsync(rustDesk, ["--install-service"], TimeSpan.FromSeconds(20), cancellationToken);
             EnsureSuccess(installService, "RustDesk service installation failed");
         }
+        var automatic = await ProcessRunner.RunAsync("sc.exe", ["config", "RustDesk", "start=", "auto"], TimeSpan.FromSeconds(15), cancellationToken);
+        EnsureSuccess(automatic, "RustDesk could not be configured for automatic startup");
+        var recovery = await ProcessRunner.RunAsync("sc.exe",
+            ["failure", "RustDesk", "reset=", "86400", "actions=", "restart/60000/restart/60000/restart/60000"],
+            TimeSpan.FromSeconds(15), cancellationToken);
+        EnsureSuccess(recovery, "RustDesk service recovery could not be configured");
+        var failureFlag = await ProcessRunner.RunAsync("sc.exe", ["failureflag", "RustDesk", "1"], TimeSpan.FromSeconds(15), cancellationToken);
+        EnsureSuccess(failureFlag, "RustDesk non-crash failure recovery could not be configured");
+
 
         var password = await ProcessRunner.RunAsync(rustDesk, ["--password", _invite.RustDeskPassword], TimeSpan.FromSeconds(15), cancellationToken);
         EnsureSuccess(password, "RustDesk password provisioning failed");
@@ -471,6 +490,21 @@ public sealed class InstallCoordinator
         }
         try { if (File.Exists(destination)) File.Delete(destination); } catch { }
         throw new InvalidDataException($"Neither verified source supplied {artifact.Product} {artifact.Version}: {string.Join(" | ", errors)}");
+    }
+
+    private static async Task<bool> WaitForListeningPortAsync(int port, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        do
+        {
+            try
+            {
+                if (IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(endpoint => endpoint.Port == port)) return true;
+            }
+            catch { }
+            await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+        } while (DateTimeOffset.UtcNow < deadline);
+        return false;
     }
 
     private static async Task<bool> InstalledTailscaleMatchesAsync(string executable, string version, CancellationToken cancellationToken)

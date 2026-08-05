@@ -76,6 +76,8 @@ public partial class MainWindow : Window
         try
         {
             var device = RequireDevice();
+            if (device.State == DeviceConnectionState.Offline)
+                throw new InvalidOperationException($"{device.Name} is offline. Wake or power on the device and wait for it to reconnect to the private network.");
             var app = (App)System.Windows.Application.Current;
             new FileManagerWindow(device, _viewModel.GetAgentToken(device), app.Agents, app.Transfers) { Owner = this }.Show();
         }

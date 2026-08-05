@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Xml.Linq;
 using Taildesk.Shared;
 
 var tests = new (string Name, Action Body)[]
@@ -16,6 +17,7 @@ var tests = new (string Name, Action Body)[]
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
     ("path guard permits a child and blocks traversal", TestPathGuard),
+    ("WPF style templates match their control target types", TestWpfStyleTemplateTargets),
     ("DPAPI current-user and machine scopes round-trip", TestDpapi)
 };
 
@@ -171,7 +173,7 @@ static void TestRustDeskHardening()
     Assert(RustDeskConfiguration.IsManagedHostHardened(hardened), "hardened configuration should verify");
     Assert(hardened == RustDeskConfiguration.HardenManagedHost(hardened), "hardening should be idempotent");
     Assert(hardened.Contains("direct-server = 'Y'", StringComparison.Ordinal), "direct server must be enabled");
-    Assert(hardened.Contains("whitelist = '100.64.0.0/10'", StringComparison.Ordinal), "tailnet whitelist must be pinned");
+    Assert(hardened.Contains("whitelist = ','", StringComparison.Ordinal), "RustDesk must not receive an unsupported CIDR whitelist; Windows Firewall enforces the tailnet range");
     Assert(hardened.Contains("unknown = 'preserved'", StringComparison.Ordinal), "unmanaged options must be preserved");
 }
 static void TestControllerRegistryShape()
@@ -219,6 +221,41 @@ static void TestDpapi()
     Assert(SecretProtector.Unprotect(user, SecretScope.CurrentUser) == secret, "current-user DPAPI failed");
     Assert(SecretProtector.Unprotect(machine, SecretScope.LocalMachine) == secret, "machine DPAPI failed");
 }
+
+static void TestWpfStyleTemplateTargets()
+{
+    string? xamlPath = null;
+    foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+    {
+        var directory = new DirectoryInfo(start);
+        while (directory is not null)
+        {
+            var candidate = Path.Combine(directory.FullName, "src", "Taildesk.Admin", "App.xaml");
+            if (File.Exists(candidate))
+            {
+                xamlPath = candidate;
+                break;
+            }
+            directory = directory.Parent;
+        }
+        if (xamlPath is not null) break;
+    }
+    if (xamlPath is null) throw new InvalidOperationException("Taildesk.Admin App.xaml was not found.");
+    var document = XDocument.Load(xamlPath);
+    foreach (var style in document.Descendants().Where(element => element.Name.LocalName == "Style"))
+    {
+        var styleTarget = NormalizeTargetType(style.Attribute("TargetType")?.Value ?? string.Empty);
+        if (styleTarget.Length == 0) continue;
+        foreach (var template in style.Descendants().Where(element => element.Name.LocalName == "ControlTemplate"))
+        {
+            var templateTarget = NormalizeTargetType(template.Attribute("TargetType")?.Value ?? string.Empty);
+            if (templateTarget.Length == 0) continue;
+            Assert(templateTarget == styleTarget, $"{styleTarget} style contains a {templateTarget} control template");
+        }
+    }
+}
+
+static string NormalizeTargetType(string value) => value.Replace("{x:Type ", string.Empty, StringComparison.Ordinal).Replace("}", string.Empty, StringComparison.Ordinal).Trim();
 
 static void Assert(bool condition, string message)
 {

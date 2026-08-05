@@ -33,6 +33,7 @@ $publishArgs = @(
     '-p:PublishSingleFile=true',
     '-p:IncludeNativeLibrariesForSelfExtract=true',
     '-p:DebugType=None',
+    '-p:EnableCompressionInSingleFile=true',
     '-p:DebugSymbols=false',
     '-p:EnableWindowsTargeting=true'
 )

@@ -6,6 +6,8 @@ APPS = (
     ("tailscaled", r"C:\Program Files\Tailscale\tailscaled.exe"),
     ("tailscale-ipn", r"C:\Program Files\Tailscale\tailscale-ipn.exe"),
     ("tailscale", r"C:\Program Files\Tailscale\tailscale.exe"),
+    ("Opticon", r"C:\Program Files\Taildesk\Admin\Opticon.exe"),
+    ("rustdesk", r"C:\Program Files\RustDesk\rustdesk.exe"),
 )
 
 

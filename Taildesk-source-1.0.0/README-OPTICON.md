@@ -56,6 +56,8 @@ Important compatibility locations:
 - Fly roaming task on this laptop: `Taildesk Fly Route`
 
 The Fly route task updates only `213.188.217.227/32` through the active physical gateway at startup, sign-in, and every five minutes. This preserves control-plane reachability alongside NordVPN while leaving all other traffic on the normal VPN/default route.
+On this command-center laptop, NordVPN split tunneling is set to **exclude from VPN** only the three Tailscale executables, `Opticon.exe`, and the pinned `rustdesk.exe`. This lets private mesh traffic coexist with NordVPN; RustDesk remains firewall-restricted to Tailscale IPv4, and the Opticon system checks detect drift in this exact set and the NordLynx default route.
+
 
 The **System checks** page is the operational drift guard. It runs automatically after Opticon starts and can be rerun from the sidebar. It validates command-center identity and tags, DPAPI and certificate availability, signed control-plane administration, internet/Fly reachability, DNS and the dedicated route, the protected route task and pinned helper, exact dependency versions and Fly artifacts, coordinator/firewall isolation, RustDesk's controller-only posture, and installed shortcuts. It reports failures without displaying saved credentials.
 

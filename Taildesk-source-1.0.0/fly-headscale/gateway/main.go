@@ -94,6 +94,7 @@ func main() {
 	if err := os.MkdirAll(g.inviteDir, 0700); err != nil { log.Fatal(err) }
 	if err := os.MkdirAll(g.bundleDir, 0700); err != nil { log.Fatal(err) }
 	if err := migrateBundleUploads("/var/lib/headscale", g.bundleDir); err != nil { log.Fatal(err) }
+	if err := g.pruneUndeclaredBundles(); err != nil { log.Fatal(err) }
 
 	server := &http.Server{Addr: "0.0.0.0:8080", Handler: g, ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
@@ -346,6 +347,32 @@ func (g *gateway) bundleByFile(name string) (bundleArtifact, error) {
 	}
 	return bundleArtifact{}, errors.New("bundle is not declared")
 }
+
+func (g *gateway) pruneUndeclaredBundles() error {
+	data, err := os.ReadFile(filepath.Join(g.artifactDir, "manifest.json"))
+	if err != nil { return err }
+	var manifest artifactManifest
+	if err := json.Unmarshal(data, &manifest); err != nil { return err }
+	declared := make(map[string]struct{})
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Product == "OpticonBundle" && filepath.Base(artifact.File) == artifact.File {
+			declared[artifact.File] = struct{}{}
+		}
+	}
+	entries, err := os.ReadDir(g.bundleDir)
+	if err != nil { return err }
+	for _, entry := range entries {
+		if entry.IsDir() { continue }
+		name := entry.Name()
+		if !strings.HasPrefix(name, "opticon-bundle-") { continue }
+		base := strings.TrimSuffix(name, ".upload")
+		if !strings.HasSuffix(base, ".zip") { continue }
+		if _, current := declared[base]; current { continue }
+		if err := os.Remove(filepath.Join(g.bundleDir, name)); err != nil && !os.IsNotExist(err) { return err }
+	}
+	return nil
+}
+
 func (g *gateway) invitationLanding(w http.ResponseWriter, r *http.Request, publicID string, invite hostedInvite, bundle bundleArtifact) {
 	command := buildInstallerCommand(g.publicOrigin, publicID, bundle)
 	commandJSON, _ := json.Marshal(command)

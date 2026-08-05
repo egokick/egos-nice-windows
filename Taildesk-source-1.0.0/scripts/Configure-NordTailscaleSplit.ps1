@@ -11,7 +11,9 @@ $tailscaleRoot = 'C:\Program Files\Tailscale'
 $tailscaleApps = @(
     @{ Name = 'tailscaled'; DisplayName = 'Tailscale Service'; Path = (Join-Path $tailscaleRoot 'tailscaled.exe') },
     @{ Name = 'tailscale-ipn'; DisplayName = 'Tailscale'; Path = (Join-Path $tailscaleRoot 'tailscale-ipn.exe') },
-    @{ Name = 'tailscale'; DisplayName = 'Tailscale CLI'; Path = (Join-Path $tailscaleRoot 'tailscale.exe') }
+    @{ Name = 'tailscale'; DisplayName = 'Tailscale CLI'; Path = (Join-Path $tailscaleRoot 'tailscale.exe') },
+    @{ Name = 'Opticon'; DisplayName = 'Opticon'; Path = 'C:\Program Files\Taildesk\Admin\Opticon.exe' },
+    @{ Name = 'rustdesk'; DisplayName = 'RustDesk Remote Desktop'; Path = 'C:\Program Files\RustDesk\rustdesk.exe' }
 )
 
 if (-not (Test-Path -LiteralPath $database) -or -not (Test-Path -LiteralPath $helper)) {
@@ -62,4 +64,4 @@ Start-Sleep -Seconds 15
 Restart-Service -Name 'Tailscale'
 Start-Sleep -Seconds 8
 Clear-DnsClientCache
-Write-Host "NordVPN now excludes only Tailscale. Backup: $backup"
+Write-Host "NordVPN now excludes only the Opticon private-mesh applications. Backup: $backup"

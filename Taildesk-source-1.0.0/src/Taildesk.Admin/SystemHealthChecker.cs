@@ -302,6 +302,10 @@ public sealed class SystemHealthChecker
             $exe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__EXE64__'))
             $ts=Get-CimInstance Win32_Service -Filter "Name='Tailscale'"
             $rs=Get-CimInstance Win32_Service -Filter "Name='RustDesk'"
+            $nordService=Get-CimInstance Win32_Service -Filter "Name='nordvpn-service'"
+            $nordFile=Get-ChildItem (Join-Path $env:ProgramData 'NordVPN\settings\*.json')|Sort-Object LastWriteTime -Descending|Select-Object -First 1
+            $nord=if($nordFile){(Get-Content -Raw -LiteralPath $nordFile.FullName|ConvertFrom-Json).SettingsDto}
+            $nordDefault=[bool](Get-NetRoute -DestinationPrefix '0.0.0.0/0'|Where-Object{$_.InterfaceAlias -eq 'NordLynx'}|Select-Object -First 1)
             $coord=@(@('Opticon Coordinator (Tailscale only)','Taildesk Coordinator (Tailscale only)') | ForEach-Object { Get-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue } | Where-Object {$_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow'} | ForEach-Object { $r=$_;$p=$r|Get-NetFirewallPortFilter;$a=$r|Get-NetFirewallAddressFilter;[pscustomobject]@{Name=$r.DisplayName;Protocol=$p.Protocol;Port=$p.LocalPort;Local=@($a.LocalAddress);Remote=@($a.RemoteAddress)} })
             $taskError=@()
             $task=Get-ScheduledTask -TaskName 'Taildesk Fly Route' -ErrorAction SilentlyContinue -ErrorVariable taskError
@@ -322,6 +326,7 @@ public sealed class SystemHealthChecker
             $startupTarget=if(Test-Path $startup){$shell.CreateShortcut($startup).TargetPath}else{''};$menuTarget=if(Test-Path $menu){$shell.CreateShortcut($menu).TargetPath}else{''}
             [pscustomobject]@{
               TailscaleState=$ts.State;TailscaleStartMode=$ts.StartMode
+              NordServiceState=$nordService.State;NordSplitEnabled=[bool]$nord.IsSplitTunnelingEnabled;NordSplitMode=[string]$nord.SplitTunnelingMode;NordSplitApps=@($nord.SplitTunnelingApps|ForEach-Object{$_.Path});NordDefaultRoutePresent=$nordDefault
               RustDeskState=$rs.State;RustDeskStartMode=$rs.StartMode;RustDeskProcessCount=@(Get-Process rustdesk).Count
               CoordinatorRules=$coord
               RouteTaskPresent=[bool]$task;RouteTaskProtected=$taskProtected;RouteHelperHash=$helperHash;RouteTaskState=[string]$task.State;RouteTaskUser=$task.Principal.UserId;RouteTaskRunLevel=[string]$task.Principal.RunLevel;RouteTaskTriggerCount=@($task.Triggers).Count;RouteTaskAction=(@($task.Actions|ForEach-Object{$_.Execute+' '+$_.Arguments})-join ' ');RouteTaskLastResult=$taskInfo.LastTaskResult
@@ -368,6 +373,23 @@ public sealed class SystemHealthChecker
             routeTaskVisibleAndValid ? $"SYSTEM task is {snapshot.RouteTaskState}; last result {snapshot.RouteTaskLastResult}." : routeTaskValid ? "The SYSTEM task is administrator-protected and its pinned helper is intact." : "The SYSTEM startup/sign-in/five-minute Fly route task is missing or has drifted.");
         add("Network", "Current Fly host route", snapshot.RoutePresent && snapshot.RouteIsPhysical ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
             snapshot.RoutePresent ? $"{FlyDedicatedIpv4}/32 uses {snapshot.RouteInterface} via {snapshot.RouteNextHop}." : "The dedicated Fly IPv4 route is missing.");
+        var expectedNordApps = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscaled.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale-ipn.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe"),
+            Path.Combine(AppPaths.InstallDirectory, "Admin", "Opticon.exe"),
+            Environment.ExpandEnvironmentVariables(config.RustDeskPath)
+        };
+        var nordAppsValid = snapshot.NordSplitApps.Length == expectedNordApps.Length
+                            && expectedNordApps.All(expected => snapshot.NordSplitApps.Any(actual => PathsEqual(actual, expected)));
+        var nordValid = snapshot.NordServiceState == "Running" && snapshot.NordDefaultRoutePresent
+                        && snapshot.NordSplitEnabled && snapshot.NordSplitMode.Equals("vpnDisabledForApps", StringComparison.OrdinalIgnoreCase)
+                        && nordAppsValid;
+        add("Network", "NordVPN and private mesh coexistence", nordValid ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
+            nordValid ? "NordVPN is the default route and excludes only Tailscale, Opticon, and the pinned RustDesk controller."
+                : "NordVPN must be running as the default route with split tunneling set to exclude exactly the three Tailscale executables, Opticon, and RustDesk.");
+
 
         var rustDeskPresent = File.Exists(Environment.ExpandEnvironmentVariables(config.RustDeskPath));
         var rustDeskVersion = rustDeskPresent ? FileVersionInfo.GetVersionInfo(Environment.ExpandEnvironmentVariables(config.RustDeskPath)).ProductVersion ?? string.Empty : string.Empty;
@@ -409,6 +431,11 @@ public sealed class SystemHealthChecker
     {
         public string TailscaleState { get; set; } = string.Empty;
         public string TailscaleStartMode { get; set; } = string.Empty;
+        public string NordServiceState { get; set; } = string.Empty;
+        public bool NordSplitEnabled { get; set; }
+        public string NordSplitMode { get; set; } = string.Empty;
+        public string[] NordSplitApps { get; set; } = [];
+        public bool NordDefaultRoutePresent { get; set; }
         public string RustDeskState { get; set; } = string.Empty;
         public string RustDeskStartMode { get; set; } = string.Empty;
         public int RustDeskProcessCount { get; set; }

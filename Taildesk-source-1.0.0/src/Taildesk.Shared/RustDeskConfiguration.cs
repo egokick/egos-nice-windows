@@ -13,7 +13,7 @@ public static class RustDeskConfiguration
             ["direct-access-port"] = "21118",
             ["custom-rendezvous-server"] = "127.0.0.1",
             ["relay-server"] = "127.0.0.1",
-            ["whitelist"] = "100.64.0.0/10",
+            ["whitelist"] = ",",
             ["access-mode"] = "full",
             ["enable-keyboard"] = "Y",
             ["enable-clipboard"] = "Y",

@@ -94,6 +94,28 @@ func TestBundleUploadRequiresHMACAndManifestPins(t *testing.T) {
 	if obsoleteResult.Code != http.StatusNoContent { t.Fatalf("obsolete bundle deletion returned %d", obsoleteResult.Code) }
 	if _, err := os.Stat(filepath.Join(bundleDir, artifact.File)); !os.IsNotExist(err) { t.Fatal("obsolete bundle remained on disk") }
 }
+
+func TestPruneUndeclaredBundlesPreservesCurrentArtifacts(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := filepath.Join(root, "artifacts")
+	bundleDir := filepath.Join(root, "bundles")
+	if err := os.MkdirAll(artifactDir, 0700); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
+	current := "opticon-bundle-current-managed-win-x64.zip"
+	manifest, _ := json.Marshal(artifactManifest{Artifacts: []bundleArtifact{{Product: "OpticonBundle", File: current}}})
+	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
+	for _, name := range []string{current, current + ".upload", "opticon-bundle-old-managed-win-x64.zip", "opticon-bundle-old-controller-win-x64.zip.upload", "unrelated.data"} {
+		if err := os.WriteFile(filepath.Join(bundleDir, name), []byte(name), 0600); err != nil { t.Fatal(err) }
+	}
+	g := &gateway{artifactDir: artifactDir, bundleDir: bundleDir}
+	if err := g.pruneUndeclaredBundles(); err != nil { t.Fatal(err) }
+	for _, name := range []string{current, current + ".upload", "unrelated.data"} {
+		if _, err := os.Stat(filepath.Join(bundleDir, name)); err != nil { t.Fatalf("current or unrelated file %q was removed: %v", name, err) }
+	}
+	for _, name := range []string{"opticon-bundle-old-managed-win-x64.zip", "opticon-bundle-old-controller-win-x64.zip.upload"} {
+		if _, err := os.Stat(filepath.Join(bundleDir, name)); !os.IsNotExist(err) { t.Fatalf("obsolete bundle %q was not removed", name) }
+	}
+}
 func TestArtifactRejectsUndeclaredOrWrongSizedBundle(t *testing.T) {
 	root := t.TempDir()
 	artifactDir := filepath.Join(root, "artifacts")
