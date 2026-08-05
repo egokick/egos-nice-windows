@@ -175,6 +175,8 @@ static void TestTailscaleEnrollmentArguments()
     Assert(arguments[0] == "up", "Tailscale enrollment must use the up command");
     Assert(arguments.Contains("--reset", StringComparer.Ordinal),
         "Tailscale enrollment must reset stale non-default settings from a partial installation");
+    Assert(arguments.Contains("--force-reauth", StringComparer.Ordinal),
+        "Tailscale enrollment must replace an expired partial-installation session without calling logout");
     Assert(arguments.Contains("--accept-dns=false", StringComparer.Ordinal) && arguments.Contains("--accept-routes=false", StringComparer.Ordinal),
         "Tailscale enrollment must reapply Opticon route and DNS policy after reset");
 }

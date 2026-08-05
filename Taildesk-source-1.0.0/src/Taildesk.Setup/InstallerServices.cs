@@ -83,10 +83,8 @@ public sealed class InstallCoordinator
                 {
                     if (!_allowTailscaleReauthentication)
                     {
-                        throw new ExistingTailscaleSessionException("This machine is already connected to Tailscale. To consume this single-use invitation and enforce its exact tailnet and role, Opticon must sign it out and re-enroll it.");
+                        throw new ExistingTailscaleSessionException("This machine is already connected to Tailscale. To consume this single-use invitation and enforce its exact tailnet and role, Opticon must reauthenticate it with the new invitation.");
                     }
-                    var logout = await ProcessRunner.RunAsync(tailscale, ["logout"], TimeSpan.FromSeconds(30), cancellationToken);
-                    EnsureSuccess(logout, "Tailscale could not sign out of the existing session");
                 }
 
                 var up = await ProcessRunner.RunAsync(tailscale,

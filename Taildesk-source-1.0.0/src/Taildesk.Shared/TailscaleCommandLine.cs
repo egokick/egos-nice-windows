@@ -12,6 +12,7 @@ public static class TailscaleCommandLine
         [
             "up",
             "--reset",
+            "--force-reauth",
             $"--login-server={loginServer}",
             $"--auth-key={authKey}",
             $"--hostname={hostName}",
