@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Win32;
 
 namespace Taildesk.Setup;
@@ -14,8 +15,8 @@ internal static class OpticonComponentIntegration
 
     private static readonly ComponentDefinition[] Components =
     [
-        new("Private Network", ["Tailscale"], ["Tailscale"], ["Tailscale.lnk"], ["Tailscale"]),
-        new("Remote Access", ["RustDesk", "RustDesk Remote Desktop"], ["RustDesk"], ["RustDesk.lnk", "RustDesk Tray.lnk"], ["RustDesk"])
+        new("Private Network", ["Tailscale"], ["Tailscale"], ["Tailscale.lnk"], ["Tailscale"], ["tailscale-ipn"], false),
+        new("Remote Access", ["RustDesk", "RustDesk Remote Desktop"], ["RustDesk"], ["RustDesk.lnk", "RustDesk Tray.lnk"], ["RustDesk"], ["RustDesk"], true)
     ];
 
     public static void Integrate(InteractiveUserProfile profile, bool installedNetworkComponent, bool installedRemoteAccessComponent)
@@ -85,6 +86,31 @@ internal static class OpticonComponentIntegration
             using var users = Registry.Users;
             RemoveRunValues(users, $"{profile.Sid}\\{RunKey}", component.RunValueNames);
         }
+
+        StopInteractiveTrayProcesses(component);
+    }
+
+    private static void StopInteractiveTrayProcesses(ComponentDefinition component)
+    {
+        foreach (var processName in component.TrayProcessNames)
+        {
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                try
+                {
+                    if (!component.StopOnlyInteractiveTrayProcesses || process.SessionId != 0)
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
     }
 
     private static void RemoveRunValues(RegistryKey root, string path, IEnumerable<string> valueNames)
@@ -129,5 +155,7 @@ internal static class OpticonComponentIntegration
         string[] InstalledAppNames,
         string[] StartMenuFolders,
         string[] Shortcuts,
-        string[] RunValueNames);
+        string[] RunValueNames,
+        string[] TrayProcessNames,
+        bool StopOnlyInteractiveTrayProcesses);
 }
