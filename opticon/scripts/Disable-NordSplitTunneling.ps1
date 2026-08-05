@@ -5,7 +5,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $nordRoot = 'C:\ProgramData\NordVPN'
 $database = Join-Path $nordRoot 'settings.db'
-$helper = 'C:\source\egos-nice-windows\Taildesk-source-1.0.0\scripts\Disable-NordSplitTunneling.py'
+$helper = 'C:\source\egos-nice-windows\opticon\scripts\Disable-NordSplitTunneling.py'
 $backup = Join-Path $nordRoot ('OpticonBackups\split-tunneling-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 if (-not (Test-Path -LiteralPath $database) -or -not (Test-Path -LiteralPath $helper)) {

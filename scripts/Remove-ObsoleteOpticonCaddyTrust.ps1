@@ -9,7 +9,7 @@ $thumbprints = @(
     'C816A2B380DB7931406B6EC417BF876D2C60BEE0',
     '2B2A4E496E3E67048092DEEDD4AE2DC3913CBDCB'
 )
-$legacyState = 'C:\source\egos-nice-windows\Taildesk-source-1.0.0\local-headscale\state'
+$legacyState = 'C:\source\egos-nice-windows\opticon\local-headscale\state'
 $quarantineRoot = 'C:\ProgramData\Opticon\SecurityQuarantine'
 $quarantinePath = Join-Path $quarantineRoot ('LegacyLocalHeadscale-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 

@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-set "TAILDESK_SOURCE=%~dp0..\Taildesk-source-1.0.0"
+set "TAILDESK_SOURCE=%~dp0..\opticon"
 set "REBUILD_SCRIPT=%~dp0rebuild-if-source-changed.ps1"
 
 set "OPTICON_EXE=%ProgramFiles%\Taildesk\Admin\Opticon.exe"

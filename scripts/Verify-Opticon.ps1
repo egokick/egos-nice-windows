@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 
 $local = [Environment]::GetFolderPath('LocalApplicationData')
 $exe = Join-Path $local 'Programs\Opticon\Opticon.exe'
-$stage = Join-Path $PSScriptRoot '..\Taildesk-source-1.0.0\artifacts\Opticon-CommandCenter-win-x64\App\Opticon.exe'
+$stage = Join-Path $PSScriptRoot '..\opticon\artifacts\Opticon-CommandCenter-win-x64\App\Opticon.exe'
 $process = Get-CimInstance Win32_Process -Filter "Name='Opticon.exe'" | Select-Object -First 1
 $legacyProcesses = @(Get-Process -Name 'Taildesk.Admin' -ErrorAction SilentlyContinue)
 $configPath = Join-Path $local 'Taildesk\Admin\admin.json'

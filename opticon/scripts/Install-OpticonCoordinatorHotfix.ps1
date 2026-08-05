@@ -3,7 +3,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$source = 'C:\source\egos-nice-windows\Taildesk-source-1.0.0\artifacts\admin-hotfix-1.0.3-compressed\Opticon.exe'
+$source = 'C:\source\egos-nice-windows\opticon\artifacts\admin-hotfix-1.0.3-compressed\Opticon.exe'
 $installDirectory = 'C:\Program Files\Taildesk\Admin'
 $destination = Join-Path $installDirectory 'Opticon.exe'
 $backup = Join-Path $installDirectory 'Opticon.exe.previous-1.0.2'

@@ -115,7 +115,7 @@ if (-not $tokenLine) { throw 'FLY_API_TOKEN was not found.' }
 
 $env:FLY_API_TOKEN = ($tokenLine -split '=', 2)[1].Trim().Trim('"').Trim("'")
 try {
-    Set-Location 'C:\source\egos-nice-windows\Taildesk-source-1.0.0\fly-headscale'
+    Set-Location 'C:\source\egos-nice-windows\opticon\fly-headscale'
 
     .\scripts\Build-OpticonBundles.ps1
     flyctl volumes snapshots create vol_re17jzg9qjylg034 --app taildesk-egokick-control
@@ -150,7 +150,7 @@ Fly CLI references: [deploy](https://fly.io/docs/flyctl/deploy/), [status](https
 From a Windows PowerShell prompt with the .NET 8 SDK:
 
 ```powershell
-Set-Location 'C:\source\egos-nice-windows\Taildesk-source-1.0.0'
+Set-Location 'C:\source\egos-nice-windows\opticon'
 .\build.ps1 -Runtime win-x64
 ```
 
