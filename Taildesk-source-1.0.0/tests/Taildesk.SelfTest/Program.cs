@@ -13,7 +13,9 @@ var tests = new (string Name, Action Body)[]
     ("hosted invitation encryption rejects wrong keys and tampering", TestHostedInvite),
     ("invitation storage rejects OneDrive", TestPrivateStorage),
     ("dependency downloads are version and hash pinned", TestDependencyPins),
+    ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
+    ("RustDesk service configuration targets the LocalService profile", TestRustDeskServiceProfile),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
     ("path guard permits a child and blocks traversal", TestPathGuard),
@@ -166,6 +168,17 @@ static void TestDependencyPins()
         Assert(artifact.FallbackUrl.EndsWith(artifact.FileName, StringComparison.Ordinal), "fallback filename changed");
     }
 }
+static void TestTailscaleEnrollmentArguments()
+{
+    var arguments = TailscaleCommandLine.BuildEnrollmentArguments(
+        "https://headscale.example.test", "tskey-auth-test", "managed-pc");
+    Assert(arguments[0] == "up", "Tailscale enrollment must use the up command");
+    Assert(arguments.Contains("--reset", StringComparer.Ordinal),
+        "Tailscale enrollment must reset stale non-default settings from a partial installation");
+    Assert(arguments.Contains("--accept-dns=false", StringComparer.Ordinal)
+           && arguments.Contains("--accept-routes=false", StringComparer.Ordinal),
+        "Tailscale enrollment must reapply Opticon route and DNS policy after reset");
+}
 static void TestRustDeskHardening()
 {
     const string original = "rendezvous_server = 'public.example'\r\n[options]\r\ndirect-server = 'N'\r\nunknown = 'preserved'\r\n";
@@ -175,6 +188,14 @@ static void TestRustDeskHardening()
     Assert(hardened.Contains("direct-server = 'Y'", StringComparison.Ordinal), "direct server must be enabled");
     Assert(hardened.Contains("whitelist = ','", StringComparison.Ordinal), "RustDesk must not receive an unsupported CIDR whitelist; Windows Firewall enforces the tailnet range");
     Assert(hardened.Contains("unknown = 'preserved'", StringComparison.Ordinal), "unmanaged options must be preserved");
+}
+static void TestRustDeskServiceProfile()
+{
+    var root = RustDeskConfiguration.GetWindowsServiceRoamingRoot(Path.Combine("C:\\", "Windows"));
+    Assert(root == Path.Combine("C:\\", "Windows", "ServiceProfiles", "LocalService", "AppData", "Roaming"),
+        "RustDesk service configuration does not target the LocalService roaming profile");
+    Assert(!root.Contains("systemprofile", StringComparison.OrdinalIgnoreCase),
+        "RustDesk service configuration must not target the SYSTEM profile that RustDesk redirects away from");
 }
 static void TestControllerRegistryShape()
 {

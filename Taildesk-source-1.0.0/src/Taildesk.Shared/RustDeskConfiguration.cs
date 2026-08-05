@@ -6,6 +6,12 @@ public static class RustDeskConfiguration
 {
     public const string PrivateRendezvousServer = "127.0.0.1:21116";
 
+    public static string GetWindowsServiceRoamingRoot(string windowsDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(windowsDirectory);
+        return Path.Combine(windowsDirectory, "ServiceProfiles", "LocalService", "AppData", "Roaming");
+    }
+
     public static IReadOnlyDictionary<string, string> ManagedHostOptions { get; } =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
