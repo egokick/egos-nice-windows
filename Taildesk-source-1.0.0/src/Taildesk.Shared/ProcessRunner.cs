@@ -13,13 +13,14 @@ public static class ProcessRunner
         string executable,
         IEnumerable<string> arguments,
         TimeSpan? timeout = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool captureOutput = true)
     {
         var start = new ProcessStartInfo(executable)
         {
             UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
+            RedirectStandardOutput = captureOutput,
+            RedirectStandardError = captureOutput,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden
         };
@@ -35,8 +36,12 @@ public static class ProcessRunner
             throw new InvalidOperationException($"Could not start {executable}.");
         }
 
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var outputTask = captureOutput
+            ? process.StandardOutput.ReadToEndAsync(cancellationToken)
+            : Task.FromResult(string.Empty);
+        var errorTask = captureOutput
+            ? process.StandardError.ReadToEndAsync(cancellationToken)
+            : Task.FromResult(string.Empty);
         using var timeoutSource = timeout.HasValue ? new CancellationTokenSource(timeout.Value) : null;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,

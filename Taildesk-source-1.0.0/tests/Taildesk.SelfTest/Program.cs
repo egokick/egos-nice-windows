@@ -14,6 +14,7 @@ var tests = new (string Name, Action Body)[]
     ("invitation storage rejects OneDrive", TestPrivateStorage),
     ("dependency downloads are version and hash pinned", TestDependencyPins),
     ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
+    ("process runner supports commands with inherited standard handles", TestProcessRunnerWithoutCapture),
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
     ("RustDesk installer configures every Windows service profile before validation", TestRustDeskInstallerProfiles),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
@@ -179,6 +180,15 @@ static void TestTailscaleEnrollmentArguments()
         "Tailscale enrollment must replace an expired partial-installation session without calling logout");
     Assert(arguments.Contains("--accept-dns=false", StringComparer.Ordinal) && arguments.Contains("--accept-routes=false", StringComparer.Ordinal),
         "Tailscale enrollment must reapply Opticon route and DNS policy after reset");
+}
+static void TestProcessRunnerWithoutCapture()
+{
+    if (!OperatingSystem.IsWindows()) return;
+    var result = ProcessRunner.RunAsync("cmd.exe", ["/d", "/c", "echo ignored"],
+        TimeSpan.FromSeconds(5), captureOutput: false).GetAwaiter().GetResult();
+    Assert(result.Succeeded, "uncaptured command failed");
+    Assert(result.StandardOutput.Length == 0 && result.StandardError.Length == 0,
+        "uncaptured command unexpectedly retained redirected output");
 }
 static void TestRustDeskHardening()
 {

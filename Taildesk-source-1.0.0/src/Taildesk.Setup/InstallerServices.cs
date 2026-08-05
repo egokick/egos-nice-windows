@@ -187,7 +187,10 @@ public sealed class InstallCoordinator
         var service = await ProcessRunner.RunAsync("sc.exe", ["query", "RustDesk"], TimeSpan.FromSeconds(10), cancellationToken);
         if (!service.Succeeded)
         {
-            var installService = await ProcessRunner.RunAsync(rustDesk, ["--install-service"], TimeSpan.FromSeconds(20), cancellationToken);
+            // RustDesk starts long-lived service/session children which inherit redirected
+            // standard handles. Capturing them would wait forever after this command exits.
+            var installService = await ProcessRunner.RunAsync(rustDesk, ["--install-service"],
+                TimeSpan.FromSeconds(20), cancellationToken, captureOutput: false);
             EnsureSuccess(installService, "RustDesk service installation failed");
         }
         var automatic = await ProcessRunner.RunAsync("sc.exe", ["config", "RustDesk", "start=", "auto"], TimeSpan.FromSeconds(15), cancellationToken);
