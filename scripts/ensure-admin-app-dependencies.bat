@@ -120,10 +120,15 @@ exit /b %ERRORLEVEL%
 :taildesk
 if exist "%ProgramFiles%\Taildesk\Admin\Opticon.exe" goto :taildeskReady
 if exist "%LocalAppData%\Programs\Opticon\Opticon.exe" goto :taildeskReady
-echo Opticon is not installed. Run Opticon's Install-Opticon.ps1 first.
+echo Opticon is not installed. Its signed installer requires administrator approval and an interactive Tailscale sign-in.
+echo Run Taildesk-source-1.0.0\artifacts\Opticon-CommandCenter-win-x64\Install-Opticon.ps1 after building the signed package.
 exit /b 2
 
 :taildeskReady
+if not exist "%ProgramFiles%\Taildesk\Admin\Opticon.exe" if not exist "%LocalAppData%\Programs\Opticon\Opticon.exe" (
+    echo Opticon is not installed.
+    exit /b 2
+)
 echo Opticon is installed.
 exit /b 0
 

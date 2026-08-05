@@ -1,15 +1,18 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 
 namespace AdminPanel;
 
 internal sealed record ContinuousTranscriberLaunchSettings(
+    string Microphone,
     bool KeepAudio,
     int ChunkSeconds,
     int Threads)
 {
     public static ContinuousTranscriberLaunchSettings Defaults => new(
+        Microphone: string.Empty,
         KeepAudio: true,
         ChunkSeconds: 15,
         Threads: Math.Max(1, Environment.ProcessorCount));
@@ -18,6 +21,7 @@ internal sealed record ContinuousTranscriberLaunchSettings(
     {
         return this with
         {
+            Microphone = (Microphone ?? string.Empty).Trim(),
             ChunkSeconds = Math.Clamp(ChunkSeconds, 3, 3600),
             Threads = Math.Clamp(Threads, 1, 256)
         };
@@ -26,15 +30,22 @@ internal sealed record ContinuousTranscriberLaunchSettings(
     public IReadOnlyList<string> ToArguments()
     {
         var normalized = Normalize();
-        return
-        [
+        var arguments = new List<string>
+        {
             "--mode",
             normalized.KeepAudio ? "keep-audio" : "default",
             "--chunk-seconds",
             normalized.ChunkSeconds.ToString(CultureInfo.InvariantCulture),
             "--threads",
             normalized.Threads.ToString(CultureInfo.InvariantCulture)
-        ];
+        };
+        if (!string.IsNullOrWhiteSpace(normalized.Microphone))
+        {
+            arguments.Add("--mic");
+            arguments.Add(normalized.Microphone);
+        }
+
+        return arguments;
     }
 }
 
@@ -74,6 +85,7 @@ internal static class ContinuousTranscriberSettingsStore
 
             warningMessage = string.Empty;
             return new ContinuousTranscriberLaunchSettings(
+                    document.Microphone ?? string.Empty,
                     document.KeepAudio,
                     document.ChunkSeconds,
                     document.Threads)
@@ -106,6 +118,7 @@ internal static class ContinuousTranscriberSettingsStore
             var document = new SettingsDocument
             {
                 SchemaVersion = CurrentSchemaVersion,
+                Microphone = normalized.Microphone,
                 KeepAudio = normalized.KeepAudio,
                 ChunkSeconds = normalized.ChunkSeconds,
                 Threads = normalized.Threads
@@ -143,6 +156,8 @@ internal static class ContinuousTranscriberSettingsStore
     {
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
+        public string? Microphone { get; set; }
+
         public bool KeepAudio { get; set; } = true;
 
         public int ChunkSeconds { get; set; } = 15;
@@ -166,6 +181,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
 {
     private readonly CheckBox _keepAudio;
     private readonly CheckBox _startWithWindows;
+    private readonly ComboBox _microphone;
     private readonly NumericUpDown _chunkSeconds;
     private readonly NumericUpDown _threads;
 
@@ -185,7 +201,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
         AccessibleName = Text;
         AccessibleDescription = "Choose how Continuous Transcriber records and processes microphone audio.";
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(520, 418);
+        ClientSize = new Size(640, 460);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -197,7 +213,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
 
         var title = new Label
         {
-            Bounds = new Rectangle(24, 20, 472, 34),
+            Bounds = new Rectangle(24, 20, 592, 34),
             Font = new Font("Segoe UI", 16f, FontStyle.Bold, GraphicsUnit.Point),
             Text = "Launch settings",
             ForeColor = palette.Text,
@@ -205,7 +221,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
         };
         var description = new Label
         {
-            Bounds = new Rectangle(24, 60, 472, 44),
+            Bounds = new Rectangle(24, 60, 592, 44),
             Text = $"{app.Description} {(isRunning ? "Launching will restart it with these settings." : "These settings are saved and reused when you launch from the app card.")}",
             ForeColor = palette.SecondaryText,
             BackColor = Color.Transparent
@@ -213,7 +229,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
 
         _keepAudio = new CheckBox
         {
-            Bounds = new Rectangle(24, 116, 472, 34),
+            Bounds = new Rectangle(24, 116, 592, 34),
             Checked = Settings.KeepAudio,
             Text = "Keep audio that produced a successful transcript",
             Font = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point),
@@ -223,45 +239,72 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
         };
         var keepHint = new Label
         {
-            Bounds = new Rectangle(48, 150, 448, 36),
+            Bounds = new Rectangle(48, 150, 568, 36),
             Text = "Silence, empty recognition results, and failed chunks are always deleted.",
             ForeColor = palette.SecondaryText,
             BackColor = Color.Transparent
         };
 
-        var chunkLabel = CreateFieldLabel("Recording chunk length", 198, palette);
+        var microphoneLabel = CreateFieldLabel("Recording microphone", 198, palette);
+        _microphone = new ComboBox
+        {
+            Bounds = new Rectangle(248, 192, 368, 30),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            BackColor = palette.Surface,
+            ForeColor = palette.Text,
+            AccessibleName = "Recording microphone",
+            AccessibleDescription = "Select the DirectShow microphone used for continuous transcription."
+        };
+        var microphones = ContinuousTranscriberMicrophoneService.GetAvailableMicrophones();
+        var selectedMicrophone = string.IsNullOrWhiteSpace(Settings.Microphone)
+            ? ContinuousTranscriberMicrophoneService.GetDefaultMicrophone()
+            : Settings.Microphone;
+        if (!string.IsNullOrWhiteSpace(selectedMicrophone)
+            && !microphones.Contains(selectedMicrophone, StringComparer.OrdinalIgnoreCase))
+        {
+            microphones.Insert(0, selectedMicrophone);
+        }
+        _microphone.Items.AddRange(microphones.Cast<object>().ToArray());
+        if (_microphone.Items.Count > 0)
+        {
+            var selectedIndex = microphones.FindIndex(name =>
+                string.Equals(name, selectedMicrophone, StringComparison.OrdinalIgnoreCase));
+            _microphone.SelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+        }
+
+        var chunkLabel = CreateFieldLabel("Recording chunk length", 244, palette);
         _chunkSeconds = CreateNumberInput(
             Settings.ChunkSeconds,
             minimum: 3,
             maximum: 3600,
-            top: 192,
+            top: 238,
             palette);
-        var chunkUnit = CreateUnitLabel("seconds", 198, palette);
+        var chunkUnit = CreateUnitLabel("seconds", 244, palette);
 
-        var threadLabel = CreateFieldLabel("CPU transcription threads", 244, palette);
+        var threadLabel = CreateFieldLabel("CPU transcription threads", 290, palette);
         _threads = CreateNumberInput(
             Settings.Threads,
             minimum: 1,
             maximum: 256,
-            top: 238,
+            top: 284,
             palette);
-        var threadUnit = CreateUnitLabel("threads", 244, palette);
+        var threadUnit = CreateUnitLabel("threads", 290, palette);
 
         var divider = new Panel
         {
-            Bounds = new Rectangle(24, 340, 472, 1),
+            Bounds = new Rectangle(24, 382, 592, 1),
             BackColor = palette.CardBorder
         };
         var cancelButton = CreateDialogButton(
             "Cancel",
-            new Rectangle(274, 360, 104, 38),
+            new Rectangle(420, 400, 104, 38),
             palette.MutedButton,
             palette.Text);
         cancelButton.DialogResult = DialogResult.Cancel;
 
         _startWithWindows = new CheckBox
         {
-            Bounds = new Rectangle(24, 294, 472, 30),
+            Bounds = new Rectangle(24, 336, 592, 30),
             Checked = StartWithWindows,
             Text = "Start with Windows",
             Font = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point),
@@ -272,7 +315,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
 
         var launchButton = CreateDialogButton(
             isRunning ? "Restart" : "Launch",
-            new Rectangle(388, 360, 108, 38),
+            new Rectangle(530, 400, 86, 38),
             palette.Accent,
             palette.AccentText);
         launchButton.AccessibleDescription = isRunning
@@ -282,6 +325,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
         {
             StartWithWindows = _startWithWindows.Checked;
             Settings = new ContinuousTranscriberLaunchSettings(
+                    _microphone.SelectedItem as string ?? string.Empty,
                     _keepAudio.Checked,
                     Decimal.ToInt32(_chunkSeconds.Value),
                     Decimal.ToInt32(_threads.Value))
@@ -292,7 +336,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
 
         var dashboardButton = CreateDialogButton(
             "View dashboard",
-            new Rectangle(24, 360, 144, 38),
+            new Rectangle(24, 400, 144, 38),
             palette.AccentSoft,
             palette.Text);
         dashboardButton.AccessibleDescription =
@@ -319,12 +363,27 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
             }
         };
 
+        var runtimeLogsButton = CreateDialogButton(
+            "View runtime logs",
+            new Rectangle(176, 400, 184, 38),
+            palette.AccentSoft,
+            palette.Text);
+        runtimeLogsButton.AccessibleDescription =
+            "Show the current Continuous Transcriber monitor and worker log, including recording errors.";
+        runtimeLogsButton.Click += (_, _) =>
+        {
+            using var logDialog = new ContinuousTranscriberRuntimeLogDialog(palette);
+            logDialog.ShowDialog(this);
+        };
+
         Controls.AddRange(
         [
             title,
             description,
             _keepAudio,
             keepHint,
+            microphoneLabel,
+            _microphone,
             chunkLabel,
             _chunkSeconds,
             chunkUnit,
@@ -334,6 +393,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
             _startWithWindows,
             divider,
             dashboardButton,
+            runtimeLogsButton,
             cancelButton,
             launchButton
         ]);
@@ -394,6 +454,148 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
         Rectangle bounds,
         Color background,
         Color foreground)
+    {
+        var button = new Button
+        {
+            Bounds = bounds,
+            Text = text,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = background,
+            ForeColor = foreground,
+            Cursor = Cursors.Hand,
+            UseVisualStyleBackColor = false
+        };
+        button.FlatAppearance.BorderSize = 0;
+        return button;
+    }
+}
+
+internal static class ContinuousTranscriberRuntimeLog
+{
+    private const int MaximumDisplayedBytes = 512 * 1024;
+
+    public static string GetPath()
+    {
+        return Path.Combine(
+            NiceWindowsRepositoryLocator.GetRepositoryRoot(),
+            "Continuous-transcriber",
+            "transcription-errors.log");
+    }
+
+    public static string ReadLatest()
+    {
+        var path = GetPath();
+        if (!File.Exists(path))
+        {
+            return "No runtime log has been written yet.";
+        }
+
+        try
+        {
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite);
+            var skippedPrefix = string.Empty;
+            if (stream.Length > MaximumDisplayedBytes)
+            {
+                stream.Seek(-MaximumDisplayedBytes, SeekOrigin.End);
+                skippedPrefix =
+                    $"Showing the latest {MaximumDisplayedBytes / 1024} KB of the runtime log.{Environment.NewLine}{Environment.NewLine}";
+            }
+
+            using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
+            return skippedPrefix + reader.ReadToEnd();
+        }
+        catch (Exception exception) when (exception is IOException
+                                             or UnauthorizedAccessException
+                                             or DecoderFallbackException)
+        {
+            return $"Could not read the runtime log at '{path}'.{Environment.NewLine}{Environment.NewLine}{exception.Message}";
+        }
+    }
+}
+
+internal sealed class ContinuousTranscriberRuntimeLogDialog : Form
+{
+    private readonly TextBox _logText;
+
+    public ContinuousTranscriberRuntimeLogDialog(AdminPalette palette)
+    {
+        Text = "Continuous Transcriber Runtime Logs";
+        AccessibleName = Text;
+        AccessibleDescription = "Displays the Continuous Transcriber monitor and worker log.";
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ClientSize = new Size(780, 560);
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MinimumSize = new Size(640, 440);
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+        BackColor = palette.Window;
+        ForeColor = palette.Text;
+
+        var title = new Label
+        {
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Bounds = new Rectangle(20, 18, 740, 28),
+            Font = new Font("Segoe UI", 14f, FontStyle.Bold, GraphicsUnit.Point),
+            Text = "Runtime logs",
+            ForeColor = palette.Text,
+            BackColor = Color.Transparent
+        };
+        var path = new Label
+        {
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Bounds = new Rectangle(20, 50, 740, 34),
+            Text = ContinuousTranscriberRuntimeLog.GetPath(),
+            ForeColor = palette.SecondaryText,
+            BackColor = Color.Transparent,
+            AutoEllipsis = true
+        };
+        _logText = new TextBox
+        {
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            Bounds = new Rectangle(20, 90, 740, 402),
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            Font = new Font("Cascadia Mono", 9f, FontStyle.Regular, GraphicsUnit.Point),
+            BackColor = palette.Surface,
+            ForeColor = palette.Text,
+            BorderStyle = BorderStyle.FixedSingle,
+            AccessibleName = "Runtime log content"
+        };
+        var refresh = CreateButton(
+            "Refresh",
+            new Rectangle(536, 508, 106, 34),
+            palette.AccentSoft,
+            palette.Text);
+        refresh.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+        refresh.AccessibleDescription = "Reload the latest Continuous Transcriber runtime log entries.";
+        refresh.Click += (_, _) => Reload();
+        var close = CreateButton(
+            "Close",
+            new Rectangle(654, 508, 106, 34),
+            palette.Accent,
+            palette.AccentText);
+        close.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+        close.DialogResult = DialogResult.Cancel;
+
+        Controls.AddRange([title, path, _logText, refresh, close]);
+        CancelButton = close;
+        Reload();
+    }
+
+    private void Reload()
+    {
+        _logText.Text = ContinuousTranscriberRuntimeLog.ReadLatest();
+        _logText.SelectionStart = _logText.TextLength;
+        _logText.ScrollToCaret();
+    }
+
+    private static Button CreateButton(string text, Rectangle bounds, Color background, Color foreground)
     {
         var button = new Button
         {

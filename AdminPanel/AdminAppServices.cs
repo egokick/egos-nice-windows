@@ -943,12 +943,6 @@ internal static class AdminAppLauncher
         try
         {
             var appFolder = NiceWindowsRepositoryLocator.GetAppFolder(app);
-            if (IsDependencyPreparationCurrent(appFolder))
-            {
-                errorMessage = string.Empty;
-                return true;
-            }
-
             var preparationScript = Path.Combine(
                 NiceWindowsRepositoryLocator.GetRepositoryRoot(),
                 "scripts",
@@ -1001,7 +995,6 @@ internal static class AdminAppLauncher
                 return false;
             }
 
-            WriteDependencyPreparationMarker(appFolder);
             errorMessage = string.Empty;
             return true;
         }
@@ -1152,74 +1145,6 @@ internal static class AdminAppLauncher
         }
     }
 
-    private static bool IsDependencyPreparationCurrent(string appFolder)
-    {
-        var markerPath = GetDependencyPreparationMarkerPath(appFolder);
-        if (!File.Exists(markerPath))
-        {
-            return false;
-        }
-
-        var markerWriteTime = File.GetLastWriteTimeUtc(markerPath);
-        return EnumerateDependencyInputs(appFolder)
-            .All(path => File.GetLastWriteTimeUtc(path) <= markerWriteTime);
-    }
-
-    private static IEnumerable<string> EnumerateDependencyInputs(string appFolder)
-    {
-        var dependencyFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "packages.lock.json", "nuget.config", "directory.packages.props", "requirements.txt",
-            "pyproject.toml", "poetry.lock", "uv.lock", "package.json", "package-lock.json",
-            "prepare-runtime.ps1"
-        };
-        var dependencyExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ".csproj", ".fsproj", ".props", ".targets"
-        };
-
-        foreach (var path in Directory.EnumerateFiles(appFolder, "*", SearchOption.AllDirectories))
-        {
-            if (dependencyFileNames.Contains(Path.GetFileName(path))
-                || dependencyExtensions.Contains(Path.GetExtension(path)))
-            {
-                yield return path;
-            }
-        }
-
-        var scriptsFolder = Path.Combine(NiceWindowsRepositoryLocator.GetRepositoryRoot(), "scripts");
-        foreach (var path in Directory.EnumerateFiles(scriptsFolder, "*", SearchOption.TopDirectoryOnly))
-        {
-            if (string.Equals(Path.GetExtension(path), ".bat", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(Path.GetExtension(path), ".ps1", StringComparison.OrdinalIgnoreCase))
-            {
-                yield return path;
-            }
-        }
-    }
-
-    private static string GetDependencyPreparationMarkerPath(string appFolder)
-    {
-        return Path.Combine(appFolder, "obj", "admin-panel", "dependency-prepared.marker");
-    }
-
-    private static void WriteDependencyPreparationMarker(string appFolder)
-    {
-        try
-        {
-            var markerPath = GetDependencyPreparationMarkerPath(appFolder);
-            Directory.CreateDirectory(Path.GetDirectoryName(markerPath)!);
-            File.WriteAllText(markerPath, DateTime.UtcNow.ToString("O"));
-        }
-        catch (IOException)
-        {
-            // Dependency preparation has still succeeded; this launch will simply not be cached.
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Dependency preparation has still succeeded; this launch will simply not be cached.
-        }
-    }
     private static bool TryStart(AdminAppDefinition app, out string errorMessage)
     {
         return TryStart(app, [], out errorMessage);
