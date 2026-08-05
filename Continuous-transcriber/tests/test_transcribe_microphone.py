@@ -20,7 +20,7 @@ import transcribe_microphone as worker
 
 def make_config(root: Path, *, mode: str = "default", output: Path | None = None):
     return worker.WorkerConfig(
-        microphone=worker.DEFAULT_MICROPHONE,
+        microphone="Test Microphone",
         chunk_seconds=15,
         threads=8,
         mode=mode,
@@ -37,10 +37,11 @@ def make_config(root: Path, *, mode: str = "default", output: Path | None = None
 
 class CliAndCommandTests(unittest.TestCase):
     def test_defaults_match_specification(self):
-        args = worker.build_parser().parse_args([])
-        config = worker.config_from_namespace(args)
+        with mock.patch.object(worker, "default_microphone_name", return_value="Default Mic"):
+            args = worker.build_parser().parse_args([])
+            config = worker.config_from_namespace(args)
 
-        self.assertEqual(config.microphone, "Microphone Array (Realtek(R) Audio)")
+        self.assertEqual(config.microphone, "Default Mic")
         self.assertEqual(config.chunk_seconds, 15)
         self.assertEqual(config.threads, max(1, worker.os.cpu_count() or 1))
         self.assertEqual(config.mode, "keep-audio")
@@ -75,7 +76,7 @@ class CliAndCommandTests(unittest.TestCase):
                 "-f",
                 "dshow",
                 "-i",
-                "audio=Microphone Array (Realtek(R) Audio)",
+                "audio=Test Microphone",
                 "-ac",
                 "1",
                 "-ar",

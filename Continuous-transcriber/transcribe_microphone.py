@@ -27,8 +27,9 @@ KEPT_DIR = RECORDINGS_DIR / "kept"
 ERROR_LOG = APP_DIR / "transcription-errors.log"
 HEARTBEAT_FILE = APP_DIR / ".transcriber-heartbeat"
 FFMPEG_PID_FILE = APP_DIR / ".transcriber-ffmpeg.pid"
+FFMPEG_PATH_MARKER = RUNTIME_BIN_DIR / "ffmpeg.path"
 
-DEFAULT_MICROPHONE = "Microphone Array (Realtek(R) Audio)"
+DEFAULT_MICROPHONE = ""
 DEFAULT_CHUNK_SECONDS = 15
 DEFAULT_THREADS = max(1, os.cpu_count() or 1)
 DEFAULT_PARAKEET_EXE = RUNTIME_BIN_DIR / "parakeet-cli.exe"
@@ -49,6 +50,50 @@ VAD_RESULT_RE = re.compile(r"Detected\s+(\d+)\s+speech segments?", re.IGNORECASE
 
 class ChunkProcessingError(RuntimeError):
     """A native VAD or ASR operation failed."""
+
+
+def default_ffmpeg_path() -> str:
+    """Use the exact FFmpeg binary verified by prepare-runtime when available."""
+    try:
+        candidate = Path(FFMPEG_PATH_MARKER.read_text(encoding="ascii").strip())
+    except (OSError, UnicodeError):
+        return "ffmpeg"
+    return str(candidate) if candidate.is_file() else "ffmpeg"
+
+
+def default_microphone_name() -> str:
+    """Return the current Windows default capture endpoint's DirectShow name."""
+    resolver = APP_DIR / "get-default-microphone.ps1"
+    if not resolver.is_file():
+        return DEFAULT_MICROPHONE
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(resolver),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return DEFAULT_MICROPHONE
+
+    if completed.returncode != 0:
+        return DEFAULT_MICROPHONE
+    return next(
+        (line.strip() for line in reversed(completed.stdout.splitlines()) if line.strip()),
+        DEFAULT_MICROPHONE,
+    )
 
 
 @dataclass(frozen=True)
@@ -88,7 +133,7 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument(
         "--mic",
-        default=DEFAULT_MICROPHONE,
+        default=default_microphone_name(),
         help=f'DirectShow audio device display name (default: "{DEFAULT_MICROPHONE}")',
     )
     parser.add_argument(
@@ -132,7 +177,7 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--ffmpeg",
-        default="ffmpeg",
+        default=default_ffmpeg_path(),
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -175,6 +220,10 @@ def config_from_namespace(args: argparse.Namespace) -> WorkerConfig:
         raise ValueError("--threads must be at least 1")
     if args.max_chunks < 0:
         raise ValueError("--max-chunks cannot be negative")
+    if not args.mic.strip():
+        raise ValueError(
+            "Windows did not report a default microphone. Select a microphone in the Admin Panel settings."
+        )
     return WorkerConfig(
         microphone=args.mic,
         chunk_seconds=args.chunk_seconds,

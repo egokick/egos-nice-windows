@@ -13,6 +13,8 @@ $binDirectory = Join-Path $runtimeDirectory "bin"
 $modelDirectory = Join-Path $runtimeDirectory "models"
 $downloadDirectory = Join-Path $runtimeDirectory "downloads"
 $runtimeMarker = Join-Path $binDirectory ".whisper-runtime.sha256"
+$ffmpegDirectory = Join-Path $runtimeDirectory "ffmpeg"
+$ffmpegPathMarker = Join-Path $binDirectory "ffmpeg.path"
 
 $whisperArchive = [pscustomobject]@{
     Name = "whisper.cpp v1.9.1 Windows x64 runtime"
@@ -101,8 +103,105 @@ function Get-VerifiedArtifact {
     return $destination
 }
 
-if (-not (Get-Command "ffmpeg.exe" -ErrorAction SilentlyContinue)) {
-    throw "FFmpeg was not found on PATH. Install an FFmpeg build with DirectShow support, then run this script again."
+function Test-DirectShowFfmpeg {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable
+    )
+
+    if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $devices = & $Executable -hide_banner -devices 2>&1
+        return $LASTEXITCODE -eq 0 -and ($devices -match '(?im)^\s*D[\. ]\s+dshow\b')
+    }
+    catch {
+        return $false
+    }
+}
+
+function Find-DirectShowFfmpeg {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $ffmpegPathMarker -PathType Leaf) {
+        $configuredPath = (Get-Content -LiteralPath $ffmpegPathMarker -Raw).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($configuredPath)) {
+            $candidates.Add($configuredPath)
+        }
+    }
+
+    $pathFfmpeg = Get-Command "ffmpeg.exe" -ErrorAction SilentlyContinue
+    if ($pathFfmpeg) {
+        $candidates.Add($pathFfmpeg.Source)
+    }
+
+    if (Test-Path -LiteralPath $ffmpegDirectory -PathType Container) {
+        foreach ($candidate in Get-ChildItem -LiteralPath $ffmpegDirectory -Filter "ffmpeg.exe" -File -Recurse -ErrorAction SilentlyContinue) {
+            $candidates.Add($candidate.FullName)
+        }
+    }
+
+    foreach ($candidate in $candidates | Select-Object -Unique) {
+        if (Test-DirectShowFfmpeg -Executable $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Install-DirectShowFfmpeg {
+    $archiveUri = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+    $archive = Join-Path $downloadDirectory 'ffmpeg-release-essentials.zip'
+    $temporary = "$archive.download"
+
+    New-Item -ItemType Directory -Force -Path $ffmpegDirectory, $downloadDirectory | Out-Null
+    try {
+        Write-Host 'Downloading the FFmpeg Windows essentials build with DirectShow capture support...'
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -UseBasicParsing -Uri $archiveUri -OutFile $temporary
+        $checksumResponse = Invoke-WebRequest -UseBasicParsing -Uri "$archiveUri.sha256"
+        $checksumMatch = [regex]::Match([string]$checksumResponse.Content, '(?i)[a-f0-9]{64}')
+        if (-not $checksumMatch.Success) {
+            throw 'The FFmpeg publisher checksum response was invalid.'
+        }
+
+        $actualHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+        if (-not [string]::Equals($actualHash, $checksumMatch.Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The downloaded FFmpeg archive checksum did not match the publisher checksum.'
+        }
+
+        Move-Item -LiteralPath $temporary -Destination $archive -Force
+        Expand-Archive -LiteralPath $archive -DestinationPath $ffmpegDirectory -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+
+    $ffmpeg = Find-DirectShowFfmpeg
+    if (-not $ffmpeg) {
+        throw 'The installed FFmpeg build does not provide DirectShow capture support.'
+    }
+
+    return $ffmpeg
+}
+
+$ffmpeg = Find-DirectShowFfmpeg
+if (-not $ffmpeg) {
+    if ($VerifyOnly) {
+        throw 'FFmpeg with DirectShow capture support is not installed.'
+    }
+
+    $ffmpeg = Install-DirectShowFfmpeg
+}
+
+if (-not (Test-DirectShowFfmpeg -Executable $ffmpeg)) {
+    throw 'FFmpeg could not be verified with DirectShow capture support.'
+}
+
+if (-not $VerifyOnly) {
+    New-Item -ItemType Directory -Force -Path $binDirectory | Out-Null
+    Set-Content -LiteralPath $ffmpegPathMarker -Value $ffmpeg -Encoding ASCII
 }
 
 if (-not $VerifyOnly) {

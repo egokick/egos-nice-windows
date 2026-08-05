@@ -19,7 +19,9 @@ start-dashboard.bat
 Requirements:
 
 - Windows 11 and Python 3
-- FFmpeg on `PATH`, built with DirectShow support
+- A DirectShow-capable FFmpeg build. The Admin Panel and `prepare-runtime.ps1`
+  automatically download, checksum-verify, and keep a private copy when a
+  suitable system installation is not already available.
 - About 500 MB of free disk space for the pinned runtime and models, plus space for recordings
 
 Run:
