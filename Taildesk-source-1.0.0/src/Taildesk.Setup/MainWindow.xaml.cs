@@ -41,7 +41,7 @@ public partial class MainWindow : Window
             CoordinatorText.Text = _invite.CoordinatorUrl;
             ExpiresText.Text = _invite.ExpiresAt.ToLocalTime().ToString("f");
             AppendLog("Invitation loaded.");
-            AppendLog("The installer will add Tailscale, RustDesk, and the Opticon agent.");
+            AppendLog("The installer will add Opticon's managed network, remote-access, and agent components.");
             AppendLog("No router port forwarding is required.");
             await RunInstallAsync();
         }

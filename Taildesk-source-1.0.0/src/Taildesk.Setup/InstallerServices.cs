@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Win32;
 using Taildesk.Shared;
 
 namespace Taildesk.Setup;
@@ -65,7 +66,7 @@ public sealed class InstallCoordinator
             }
             await InvitationSigning.VerifyAuthenticodeAsync(agentExecutable, cancellationToken);
 
-            await EnsureTailscaleAsync(tempDirectory, cancellationToken);
+            var installedNetworkComponent = await EnsureTailscaleAsync(tempDirectory, cancellationToken);
             _progress.Report(new InstallProgress(28, "Joining the private Opticon network…"));
             var tailscale = FindTailscale();
             var existing = await TryReadTailscaleStatusAsync(tailscale, cancellationToken);
@@ -110,7 +111,8 @@ public sealed class InstallCoordinator
                 EnsureSuccess(advertise, "Tailscale could not advertise the exit node");
             }
 
-            var rustDesk = await EnsureRustDeskAsync(tempDirectory, cancellationToken);
+            var rustDeskInstallation = await EnsureRustDeskAsync(tempDirectory, cancellationToken);
+            var rustDesk = rustDeskInstallation.Path;
             await ConfigureRustDeskAsync(rustDesk, cancellationToken);
             if (!await WaitForListeningPortAsync(21118, TimeSpan.FromSeconds(90), cancellationToken))
             {
@@ -121,6 +123,7 @@ public sealed class InstallCoordinator
             }
             await InstallAgentAsync(agentPayload, snapshot.Ip, cancellationToken);
             await ConfigureFirewallAsync(snapshot.Ip, rustDesk, cancellationToken);
+            OpticonComponentIntegration.Integrate(_userProfile, installedNetworkComponent, rustDeskInstallation.InstalledByOpticon);
 
             await InstallControllerPayloadAsync(_invite.Role == DeviceRole.ControllerAndManaged, cancellationToken);
 
@@ -139,39 +142,55 @@ public sealed class InstallCoordinator
         }
     }
 
-    private async Task EnsureTailscaleAsync(string tempDirectory, CancellationToken cancellationToken)
+    private async Task<bool> EnsureTailscaleAsync(string tempDirectory, CancellationToken cancellationToken)
     {
         var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe");
         var artifact = DependencyArtifacts.Tailscale(RuntimeInformation.ProcessArchitecture);
-        if (File.Exists(installed) && await InstalledTailscaleMatchesAsync(installed, artifact.Version, cancellationToken))
+        if (File.Exists(installed)
+            && OpticonComponentIntegration.IsManagedByOpticon("Private Network")
+            && await InstalledTailscaleMatchesAsync(installed, artifact.Version, cancellationToken))
         {
-            _progress.Report(new InstallProgress(12, $"Pinned Tailscale {artifact.Version} is already installed."));
-            return;
+            _progress.Report(new InstallProgress(12, $"Pinned Tailscale {artifact.Version} is already managed by Opticon."));
+            return true;
         }
 
-        _progress.Report(new InstallProgress(10, $"Downloading pinned Tailscale {artifact.Version}…"));
+        if (File.Exists(installed) || FindInstalledMsiProductCode(["Tailscale"]) is not null)
+        {
+            await RemoveStandaloneComponentAsync("Tailscale", ["Tailscale"], installed, cancellationToken);
+        }
+
+        _progress.Report(new InstallProgress(10, $"Downloading Opticon's private-network component ({artifact.Version})…"));
         var installer = Path.Combine(tempDirectory, artifact.FileName);
         await DownloadVerifiedAsync(artifact, installer, cancellationToken);
-        _progress.Report(new InstallProgress(18, "Installing Tailscale…"));
+        _progress.Report(new InstallProgress(18, "Installing the Opticon private-network component…"));
         var result = await ProcessRunner.RunAsync("msiexec.exe", ["/i", installer, "/qn", "/norestart"], TimeSpan.FromMinutes(5), cancellationToken);
         EnsureSuccess(result, "Tailscale installation failed");
         if (!File.Exists(installed) || !await InstalledTailscaleMatchesAsync(installed, artifact.Version, cancellationToken))
             throw new InvalidDataException($"Tailscale installed, but its version is not the pinned {artifact.Version}.");
+        return true;
     }
-    private async Task<string> EnsureRustDeskAsync(string tempDirectory, CancellationToken cancellationToken)
+
+    private async Task<ComponentInstallation> EnsureRustDeskAsync(string tempDirectory, CancellationToken cancellationToken)
     {
         var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RustDesk", "rustdesk.exe");
         var artifact = DependencyArtifacts.RustDesk(RuntimeInformation.ProcessArchitecture);
-        if (File.Exists(installed) && FileVersionInfo.GetVersionInfo(installed).ProductVersion?.StartsWith(artifact.Version, StringComparison.Ordinal) == true)
+        if (File.Exists(installed)
+            && OpticonComponentIntegration.IsManagedByOpticon("Remote Access")
+            && FileVersionInfo.GetVersionInfo(installed).ProductVersion?.StartsWith(artifact.Version, StringComparison.Ordinal) == true)
         {
-            _progress.Report(new InstallProgress(47, $"Pinned RustDesk {artifact.Version} is already installed."));
-            return installed;
+            _progress.Report(new InstallProgress(47, $"Pinned RustDesk {artifact.Version} is already managed by Opticon."));
+            return new ComponentInstallation(installed, true);
+        }
+
+        if (File.Exists(installed) || FindInstalledMsiProductCode(["RustDesk", "RustDesk Remote Desktop"]) is not null)
+        {
+            await RemoveStandaloneComponentAsync("RustDesk", ["RustDesk", "RustDesk Remote Desktop"], installed, cancellationToken);
         }
 
         var installer = Path.Combine(tempDirectory, artifact.FileName);
-        _progress.Report(new InstallProgress(49, $"Downloading pinned RustDesk {artifact.Version}…"));
+        _progress.Report(new InstallProgress(49, $"Downloading Opticon's remote-access component ({artifact.Version})…"));
         await DownloadVerifiedAsync(artifact, installer, cancellationToken);
-        _progress.Report(new InstallProgress(56, "Installing RustDesk…"));
+        _progress.Report(new InstallProgress(56, "Installing the Opticon remote-access component…"));
         var install = await ProcessRunner.RunAsync("msiexec.exe", ["/i", installer, "/qn", "/norestart"], TimeSpan.FromMinutes(5), cancellationToken);
         EnsureSuccess(install, "RustDesk installation failed");
 
@@ -179,7 +198,7 @@ public sealed class InstallCoordinator
             await Task.Delay(500, cancellationToken);
         if (!File.Exists(installed) || FileVersionInfo.GetVersionInfo(installed).ProductVersion?.StartsWith(artifact.Version, StringComparison.Ordinal) != true)
             throw new InvalidDataException($"RustDesk installed, but its version is not the pinned {artifact.Version}.");
-        return installed;
+        return new ComponentInstallation(installed, true);
     }
     private async Task ConfigureRustDeskAsync(string rustDesk, CancellationToken cancellationToken)
     {
@@ -510,6 +529,53 @@ public sealed class InstallCoordinator
         return false;
     }
 
+    private async Task RemoveStandaloneComponentAsync(string componentName, string[] displayNames, string executablePath, CancellationToken cancellationToken)
+    {
+        var productCode = FindInstalledMsiProductCode(displayNames);
+        if (string.IsNullOrWhiteSpace(productCode))
+        {
+            throw new InvalidOperationException($"A standalone {componentName} installation was detected, but Windows did not provide a safe MSI product code for removal. Remove it manually, then run this Opticon invitation again.");
+        }
+
+        _progress.Report(new InstallProgress(componentName == "Tailscale" ? 8 : 45, $"Removing the existing standalone {componentName} installation…"));
+        var uninstall = await ProcessRunner.RunAsync("msiexec.exe", ["/x", productCode, "/qn", "/norestart"], TimeSpan.FromMinutes(5), cancellationToken);
+        EnsureSuccess(uninstall, $"Could not remove the existing {componentName} installation");
+
+        for (var attempt = 0; attempt < 20 && (File.Exists(executablePath) || FindInstalledMsiProductCode(displayNames) is not null); attempt++)
+            await Task.Delay(500, cancellationToken);
+        if (File.Exists(executablePath) || FindInstalledMsiProductCode(displayNames) is not null)
+        {
+            throw new InvalidOperationException($"Windows reported that {componentName} was removed, but its standalone installation is still present. Restart Windows, remove it, then run this Opticon invitation again.");
+        }
+    }
+
+    private static string? FindInstalledMsiProductCode(IEnumerable<string> displayNames)
+    {
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            using var localMachine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+            using var uninstall = localMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", writable: false);
+            if (uninstall is null) continue;
+
+            foreach (var subKeyName in uninstall.GetSubKeyNames())
+            {
+                using var entry = uninstall.OpenSubKey(subKeyName, writable: false);
+                var displayName = entry?.GetValue("DisplayName") as string;
+                if (entry is null || !displayNames.Contains(displayName, StringComparer.OrdinalIgnoreCase)) continue;
+
+                var candidate = ExtractMsiProductCode(entry.GetValue("UninstallString") as string)
+                                ?? ExtractMsiProductCode(subKeyName);
+                if (!string.IsNullOrWhiteSpace(candidate)) return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static string? ExtractMsiProductCode(string? value)
+    {
+        var match = Regex.Match(value ?? string.Empty, @"\{[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}");
+        return match.Success ? match.Value : null;
+    }
     private static async Task<bool> InstalledTailscaleMatchesAsync(string executable, string version, CancellationToken cancellationToken)
     {
         var result = await ProcessRunner.RunAsync(executable, ["version"], TimeSpan.FromSeconds(20), cancellationToken);
@@ -637,4 +703,6 @@ public sealed class InstallCoordinator
         public string Tailnet { get; init; } = string.Empty;
         public string[] Tags { get; init; } = [];
     }
+
+    private sealed record ComponentInstallation(string Path, bool InstalledByOpticon);
 }

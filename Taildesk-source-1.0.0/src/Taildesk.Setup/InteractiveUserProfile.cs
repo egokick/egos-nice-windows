@@ -6,6 +6,7 @@ namespace Taildesk.Setup;
 
 public sealed class InteractiveUserProfile
 {
+    public string Sid { get; init; } = string.Empty;
     public string AccountName { get; init; } = Environment.UserName;
     public string ProfilePath { get; init; } = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     public string LocalAppData { get; init; } = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -56,6 +57,7 @@ public sealed class InteractiveUserProfile
 
             return new InteractiveUserProfile
             {
+                Sid = sid,
                 AccountName = account,
                 ProfilePath = profile,
                 LocalAppData = Folder("Local AppData", "AppData\\Local"),

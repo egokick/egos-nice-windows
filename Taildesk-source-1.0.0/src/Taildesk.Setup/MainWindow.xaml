@@ -14,7 +14,7 @@
         <StackPanel>
             <TextBlock Text="TAILDESK" FontSize="12" FontWeight="Bold" Foreground="{StaticResource AccentBrush}" />
             <TextBlock Text="Connect this machine" Margin="0,9,0,0" FontSize="28" FontWeight="SemiBold" />
-            <TextBlock Text="Tailscale provides the private network. RustDesk provides remote control on Windows Home." 
+            <TextBlock Text="Opticon installs its private-network and remote-access components as part of this managed connection."
                        Margin="0,8,0,0" Foreground="{StaticResource MutedBrush}" FontSize="14" />
         </StackPanel>
 
