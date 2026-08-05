@@ -1,0 +1,63 @@
+<Window x:Class="Taildesk.Setup.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Opticon Setup" Height="590" Width="760"
+        MinHeight="560" MinWidth="700" WindowStartupLocation="CenterScreen">
+    <Grid Margin="34">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+            <TextBlock Text="TAILDESK" FontSize="12" FontWeight="Bold" Foreground="{StaticResource AccentBrush}" />
+            <TextBlock Text="Connect this machine" Margin="0,9,0,0" FontSize="28" FontWeight="SemiBold" />
+            <TextBlock Text="Tailscale provides the private network. RustDesk provides remote control on Windows Home." 
+                       Margin="0,8,0,0" Foreground="{StaticResource MutedBrush}" FontSize="14" />
+        </StackPanel>
+
+        <Border Grid.Row="1" Margin="0,26,0,18" Padding="18" Background="{StaticResource PanelBrush}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="150" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="30" />
+                    <RowDefinition Height="30" />
+                    <RowDefinition Height="30" />
+                    <RowDefinition Height="30" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="Machine name" Foreground="{StaticResource MutedBrush}" />
+                <TextBlock x:Name="DeviceNameText" Grid.Column="1" FontWeight="SemiBold" />
+                <TextBlock Grid.Row="1" Text="Permission" Foreground="{StaticResource MutedBrush}" />
+                <TextBlock x:Name="RoleText" Grid.Row="1" Grid.Column="1" />
+                <TextBlock Grid.Row="2" Text="Command center" Foreground="{StaticResource MutedBrush}" />
+                <TextBlock x:Name="CoordinatorText" Grid.Row="2" Grid.Column="1" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Row="3" Text="Invite expires" Foreground="{StaticResource MutedBrush}" />
+                <TextBlock x:Name="ExpiresText" Grid.Row="3" Grid.Column="1" />
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Padding="14" Background="#0D0F12" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="4">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="LogText" FontFamily="Cascadia Mono,Consolas" FontSize="12" Foreground="#C8D0D8" TextWrapping="Wrap" />
+            </ScrollViewer>
+        </Border>
+
+        <Grid Grid.Row="3" Margin="0,18,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel VerticalAlignment="Center">
+                <ProgressBar x:Name="InstallProgress" Height="4" Minimum="0" Maximum="100" Value="0" Foreground="{StaticResource AccentBrush}" />
+                <TextBlock x:Name="StatusText" Margin="0,7,0,0" Foreground="{StaticResource MutedBrush}" Text="Review the invitation, then install." />
+            </StackPanel>
+            <Button x:Name="InstallButton" Grid.Column="1" Margin="24,0,0,0" Content="Install and connect" Click="InstallButton_Click" />
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,52 @@
+{
+  "tagOwners": {
+    "tag:taildesk-provisioner": ["autogroup:admin"],
+    "tag:taildesk-hub": ["autogroup:admin"],
+    "tag:taildesk-managed": ["tag:taildesk-provisioner"],
+    "tag:taildesk-controller": ["tag:taildesk-provisioner"],
+    "tag:taildesk-exit": ["tag:taildesk-provisioner"]
+  },
+  "grants": [
+    {
+      "src": ["tag:taildesk-hub", "tag:taildesk-controller"],
+      "dst": ["tag:taildesk-managed", "tag:taildesk-controller", "tag:taildesk-hub"],
+      "ip": ["tcp:45831", "tcp:21118"]
+    },
+    {
+      "src": ["tag:taildesk-managed", "tag:taildesk-controller"],
+      "dst": ["tag:taildesk-hub"],
+      "ip": ["tcp:45830"]
+    },
+    {
+      "src": ["tag:taildesk-hub", "tag:taildesk-controller"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"]
+    }
+  ],
+  "autoApprovers": {
+    "exitNode": ["tag:taildesk-exit"]
+  },
+  "tests": [
+    {
+      "src": "tag:taildesk-managed",
+      "deny": [
+        "tag:taildesk-managed:45831",
+        "tag:taildesk-managed:21118",
+        "tag:taildesk-controller:45831",
+        "tag:taildesk-controller:21118"
+      ]
+    },
+    {
+      "src": "tag:taildesk-managed",
+      "accept": ["tag:taildesk-hub:45830"]
+    },
+    {
+      "src": "tag:taildesk-controller",
+      "accept": [
+        "tag:taildesk-managed:45831",
+        "tag:taildesk-managed:21118",
+        "tag:taildesk-hub:45830"
+      ]
+    }
+  ]
+}

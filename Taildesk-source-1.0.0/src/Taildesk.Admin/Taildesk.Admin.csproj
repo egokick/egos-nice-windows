@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>Opticon</AssemblyName>
+    <RootNamespace>Taildesk.Admin</RootNamespace>
+    <ApplicationIcon>opticon.ico</ApplicationIcon>
+    <Product>Opticon</Product>
+    <AssemblyTitle>Opticon</AssemblyTitle>
+    <Description>Privately controlled Windows device command center</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="TailscaleApiClient.cs" />
+    <Resource Include="opticon.ico" />
+    <ProjectReference Include="..\Taildesk.Shared\Taildesk.Shared.csproj" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+</Project>

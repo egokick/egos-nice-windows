@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>Taildesk.Setup</AssemblyName>
+    <RootNamespace>Taildesk.Setup</RootNamespace>
+    <ApplicationIcon>..\..\assets\opticon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Taildesk.Shared\Taildesk.Shared.csproj" />
+  </ItemGroup>
+</Project>

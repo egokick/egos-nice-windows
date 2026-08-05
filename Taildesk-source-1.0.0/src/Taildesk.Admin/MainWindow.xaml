@@ -1,0 +1,362 @@
+<Window x:Class="Taildesk.Admin.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Opticon" Icon="pack://application:,,,/opticon.ico" Width="1280" Height="800" MinWidth="1040" MinHeight="680"
+        WindowStartupLocation="CenterScreen">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="44" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="28" />
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="184" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.ColumnSpan="2" Background="#0D0F11" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+            <Grid Margin="14,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="OPTICON" FontSize="13" FontWeight="Bold" Foreground="{StaticResource AccentBrush}" />
+                    <Border Margin="12,0" Width="1" Height="18" Background="{StaticResource BorderBrush}" />
+                    <TextBlock Text="COMMAND CENTER" FontFamily="Cascadia Mono,Consolas" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Ellipse Width="7" Height="7" Fill="{StaticResource AccentBrush}" Margin="0,0,7,0" />
+                    <TextBlock Text="{Binding Status}" MaxWidth="420" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="#B9C6BE" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="1" Background="{StaticResource RailBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
+            <Grid>
+                <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <StackPanel Margin="0,14,0,0">
+                    <TextBlock Text="WORKSPACE" Margin="16,0,0,8" Style="{StaticResource LabelText}" />
+                    <Button Style="{StaticResource NavButton}" Content="Devices" Tag="0" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Files &amp; media" Tag="1" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Transfers" Tag="2" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Invitations" Tag="3" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Activity log" Tag="4" Click="Navigation_Click" />
+                    <Separator Margin="14,12" Background="{StaticResource BorderBrush}" />
+                    <Button Style="{StaticResource NavButton}" Content="System checks" Tag="5" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Settings" Tag="6" Click="Navigation_Click" />
+                </StackPanel>
+                <Border Grid.Row="1" Margin="12" Padding="10" Background="#121519" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="4">
+                    <StackPanel>
+                        <TextBlock Text="ROLE ENFORCEMENT" FontSize="10" FontWeight="Bold" Foreground="{StaticResource AccentBrush}" />
+                        <TextBlock Text="Self-hosted Headscale tags + per-device credentials" Margin="0,5,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Border>
+
+        <TabControl x:Name="WorkspaceTabs" Grid.Row="1" Grid.Column="1" Style="{StaticResource WorkspaceTabs}" Background="{StaticResource WindowBrush}">
+            <TabItem>
+                <Grid Margin="20">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="Devices" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Live Opticon agents on the private tailnet" Margin="0,4,0,0" Foreground="{StaticResource MutedBrush}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <Button Content="Refresh" Click="Refresh_Click" />
+                            <Button Content="New invite" Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Click="GoToInvites_Click" />
+                        </StackPanel>
+                    </Grid>
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,18,0,10">
+                        <Button Content="Remote into" Style="{StaticResource PrimaryButton}" Click="RemoteControl_Click" />
+                        <Button Content="Browse files" Margin="7,0,0,0" Click="BrowseFiles_Click" />
+                        <Button Content="Use as VPN" Margin="7,0,0,0" Click="UseExitNode_Click" />
+                        <Button Content="Stop VPN" Margin="7,0,0,0" Click="StopExitNode_Click" />
+                    </StackPanel>
+                    <Grid Grid.Row="2">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="320" /></Grid.ColumnDefinitions>
+                        <DataGrid x:Name="DeviceGrid" ItemsSource="{Binding Devices}" SelectedItem="{Binding SelectedDevice}"
+                                  IsReadOnly="True" AlternationCount="2" SelectionChanged="DeviceGrid_SelectionChanged">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="2*" />
+                                <DataGridTextColumn Header="STATE" Binding="{Binding State}" Width="110" />
+                                <DataGridTextColumn Header="MESH IP" Binding="{Binding TailscaleIp}" Width="135" />
+                                <DataGridTextColumn Header="ROLE" Binding="{Binding Role}" Width="175" />
+                                <DataGridTextColumn Header="OS" Binding="{Binding OperatingSystem}" Width="2*" />
+                                <DataGridTextColumn Header="LAST SEEN" Binding="{Binding LastSeen, StringFormat={}{0:g}}" Width="140" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <Border Grid.Column="1" Margin="12,0,0,0" Padding="16" Background="{StaticResource PanelBrush}"
+                                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel DataContext="{Binding SelectedDevice}">
+                                    <TextBlock Text="DEVICE INSPECTOR" Style="{StaticResource LabelText}" />
+                                    <TextBlock Text="{Binding Name, TargetNullValue=No device selected}" Margin="0,8,0,0" FontSize="20" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding HostName}" Margin="0,3,0,16" Foreground="{StaticResource MutedBrush}" />
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="112" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="28" /><RowDefinition Height="28" /><RowDefinition Height="28" />
+                                            <RowDefinition Height="28" /><RowDefinition Height="28" /><RowDefinition Height="28" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="Connection" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Column="1" Text="{Binding State}" />
+                                        <TextBlock Grid.Row="1" Text="Address" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding TailscaleIp}" FontFamily="Cascadia Mono,Consolas" />
+                                        <TextBlock Grid.Row="2" Text="Agent" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding AgentVersion}" />
+                                        <TextBlock Grid.Row="3" Text="Role" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding Role}" />
+                                        <TextBlock Grid.Row="4" Text="Exit provider" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding AdvertisesExitNode}" />
+                                        <TextBlock Grid.Row="5" Text="Credential" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding PendingCredentialRotation}" />
+                                    </Grid>
+                                    <Separator Margin="0,14" Background="{StaticResource BorderBrush}" />
+                                    <TextBlock Text="ACCESS ROLE" Style="{StaticResource LabelText}" />
+                                    <ComboBox x:Name="RoleCombo" Margin="0,7,0,7">
+                                        <ComboBoxItem Content="Managed only" Tag="ManagedOnly" />
+                                        <ComboBoxItem Content="Controller + managed" Tag="ControllerAndManaged" />
+                                    </ComboBox>
+                                    <Button Content="Apply role" Click="ApplyRole_Click" />
+                                    <TextBlock Text="A managed-only machine cannot initiate Opticon or RustDesk sessions to peers." Margin="0,8,0,14"
+                                               TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                                    <Button Content="Enable exit-node service" Click="EnableExitService_Click" />
+                                    <Button Content="Disable exit-node service" Margin="0,7,0,0" Click="DisableExitService_Click" />
+                                    <Button Content="Copy recovery password" Margin="0,14,0,0" Click="CopyPassword_Click" />
+                                    <Separator Margin="0,14" Background="{StaticResource BorderBrush}" />
+                                    <TextBlock Text="DEVICE MEMBERSHIP" Style="{StaticResource LabelText}" />
+                                    <Button Content="Revoke and remove device…" Margin="0,7,0,0" Style="{StaticResource DangerButton}"
+                                            IsEnabled="{Binding DataContext.IsPrimary, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                            Click="RemoveDevice_Click" />
+                                    <TextBlock Text="Disconnects this identity from the tailnet and removes its saved Opticon credentials."
+                                               Margin="0,8,0,0" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Border>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <TabItem>
+                <Grid Margin="20">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                    <TextBlock Text="Files &amp; media" Style="{StaticResource SectionTitle}" />
+                    <TextBlock Grid.Row="1" Margin="0,4,0,18" Text="Open a restricted remote file browser; streams and transfers travel over your private Headscale mesh." Foreground="{StaticResource MutedBrush}" />
+                    <Border Grid.Row="2" Padding="18" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                        <Grid>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Machine" VerticalAlignment="Center" Margin="0,0,12,0" />
+                                <ComboBox Width="300" ItemsSource="{Binding Devices}" DisplayMemberPath="Name" SelectedItem="{Binding SelectedDevice}" />
+                                <Button Content="Open browser" Margin="10,0,0,0" Style="{StaticResource PrimaryButton}" Click="BrowseFiles_Click" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <TextBlock Text="Remote roots are limited to folders selected in the invitation." FontSize="16" />
+                                <TextBlock Text="Downloads, uploads, folder creation, deletion, and media streaming are available in the browser." Margin="0,7,0,0" Foreground="{StaticResource MutedBrush}" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </TabItem>
+
+            <TabItem>
+                <Grid Margin="20">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                    <TextBlock Text="Transfers" Style="{StaticResource SectionTitle}" />
+                    <TextBlock Grid.Row="1" Margin="0,4,0,18" Text="Current and completed Opticon file transfers" Foreground="{StaticResource MutedBrush}" />
+                    <DataGrid Grid.Row="2" ItemsSource="{Binding Transfers}" IsReadOnly="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="STARTED" Binding="{Binding Started, StringFormat={}{0:T}}" Width="95" />
+                            <DataGridTextColumn Header="DEVICE" Binding="{Binding Device}" Width="180" />
+                            <DataGridTextColumn Header="DIRECTION" Binding="{Binding Direction}" Width="110" />
+                            <DataGridTextColumn Header="FILE" Binding="{Binding File}" Width="*" />
+                            <DataGridTextColumn Header="PROGRESS" Binding="{Binding Progress}" Width="100" />
+                            <DataGridTextColumn Header="STATE" Binding="{Binding State}" Width="110" />
+                            <DataGridTextColumn Header="ERROR" Binding="{Binding Error}" Width="2*" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+
+            <TabItem>
+                <Grid Margin="20">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                    <TextBlock Text="Invitations" Style="{StaticResource SectionTitle}" />
+                    <TextBlock Grid.Row="1" Margin="0,4,0,18" Text="Create a personalized, single-use setup link for a new Windows machine." Foreground="{StaticResource MutedBrush}" />
+                    <Border Grid.Row="2" Padding="14" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="210" /><ColumnDefinition Width="220" /><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="MACHINE NAME" Style="{StaticResource LabelText}" />
+                                <TextBox x:Name="InviteNameText" Margin="0,5,10,0" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="INITIAL ROLE" Style="{StaticResource LabelText}" />
+                                <ComboBox x:Name="InviteRoleCombo" Margin="0,5,10,0" SelectedIndex="0">
+                                    <ComboBoxItem Tag="ManagedOnly">
+                                        <TextBlock Text="Managed only" Foreground="#111316" />
+                                    </ComboBoxItem>
+                                    <ComboBoxItem Tag="ControllerAndManaged">
+                                        <TextBlock Text="Controller + managed" Foreground="#111316" />
+                                    </ComboBoxItem>
+                                </ComboBox>
+                            </StackPanel>
+                            <TextBlock Grid.Column="2" Text="Exit node enabled" VerticalAlignment="Bottom" Margin="0,0,10,7" Foreground="{StaticResource AccentBrush}" />
+                            <TextBlock Grid.Column="3" VerticalAlignment="Bottom" Margin="0,0,10,7" Text="Expires in 14 days (single-use)" Foreground="{StaticResource MutedBrush}" />
+                            <Button Grid.Column="4" VerticalAlignment="Bottom" Margin="0,0,8,0" Content="Expire selected" Style="{StaticResource DangerButton}" Click="CancelInvite_Click" />
+                            <Button x:Name="CreateInviteButton" Grid.Column="5" VerticalAlignment="Bottom" Content="Create one-click link" Style="{StaticResource PrimaryButton}" Click="CreateInvite_Click" />
+                            <StackPanel Grid.Row="1" Grid.ColumnSpan="6" Margin="0,15,0,0">
+                                <TextBlock Text="SHARED FOLDERS" Style="{StaticResource LabelText}" />
+                                <WrapPanel Margin="0,7,0,0">
+                                    <CheckBox x:Name="InviteRootDesktopCheck" Content="Desktop" IsChecked="True" Margin="0,0,22,0" />
+                                    <CheckBox x:Name="InviteRootDocumentsCheck" Content="Documents" IsChecked="True" Margin="0,0,22,0" />
+                                    <CheckBox x:Name="InviteRootDownloadsCheck" Content="Downloads" IsChecked="True" Margin="0,0,22,0" />
+                                    <CheckBox x:Name="InviteRootPicturesCheck" Content="Pictures" IsChecked="True" Margin="0,0,22,0" />
+                                    <CheckBox x:Name="InviteRootVideosCheck" Content="Videos" IsChecked="True" />
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <DataGrid x:Name="InviteGrid" Grid.Row="3" Margin="0,12,0,0" ItemsSource="{Binding Invites}" IsReadOnly="True"
+                              MouseDoubleClick="InviteGrid_DoubleClick" PreviewMouseRightButtonDown="InviteGrid_PreviewMouseRightButtonDown">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Copy invitation URL" Click="CopyInviteUrl_Click" />
+                                <MenuItem Header="Extend expiry..." Click="ExtendInvite_Click" />
+                                <Separator />
+                                <MenuItem Header="Expire now" Click="ExpireInvite_Click" />
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="MACHINE" Binding="{Binding DeviceName}" Width="2*" />
+                            <DataGridTextColumn Header="ROLE" Binding="{Binding Role}" Width="180" />
+                            <DataGridTextColumn Header="STATUS" Binding="{Binding Status}" Width="100" />
+                            <DataGridTextColumn Header="CREATED" Binding="{Binding CreatedAt, StringFormat={}{0:g}}" Width="150" />
+                            <DataGridTextColumn Header="EXPIRES" Binding="{Binding ExpiresAt, StringFormat={}{0:g}}" Width="150" />
+                            <DataGridTextColumn Header="INVITATION LINK" Binding="{Binding HostedUrl}" Width="3*" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+
+            <TabItem>
+                <Grid Margin="20">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                    <TextBlock Text="Activity log" Style="{StaticResource SectionTitle}" />
+                    <TextBlock Grid.Row="1" Margin="0,4,0,18" Text="Local command-center activity; secrets are never written here." Foreground="{StaticResource MutedBrush}" />
+                    <ListBox Grid.Row="2" ItemsSource="{Binding LogLines}" Background="#0D0F12" BorderBrush="{StaticResource BorderBrush}"
+                             Foreground="#C8D0D8" FontFamily="Cascadia Mono,Consolas" FontSize="12" />
+                </Grid>
+            </TabItem>
+
+            <TabItem>
+                <Grid Margin="20">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="System checks" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Detect command-center configuration drift before it interrupts enrollment or remote access."
+                                       Margin="0,4,0,0" Foreground="{StaticResource MutedBrush}" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Run all checks" Style="{StaticResource PrimaryButton}"
+                                IsEnabled="{Binding CanRunSystemChecks}" Click="RunSystemChecks_Click" />
+                    </Grid>
+                    <Border Grid.Row="1" Margin="0,18,0,10" Padding="14" Background="{StaticResource PanelBrush}"
+                            BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="{Binding ChecksSummary}" FontSize="17" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding ChecksLastRun}" Margin="0,4,0,0" Foreground="{StaticResource MutedBrush}" />
+                            </StackPanel>
+                            <ProgressBar Grid.Column="1" Width="180" Height="5" IsIndeterminate="{Binding ChecksRunning}"
+                                         VerticalAlignment="Center" />
+                        </Grid>
+                    </Border>
+                    <TextBlock Grid.Row="2" Margin="0,0,0,10" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}"
+                               Text="Failures require attention. Warnings describe non-blocking drift. Checks never display or transmit saved credentials." />
+                    <DataGrid Grid.Row="3" ItemsSource="{Binding SystemChecks}" IsReadOnly="True" CanUserAddRows="False"
+                              AutoGenerateColumns="False" HeadersVisibility="Column">
+                        <DataGrid.RowStyle>
+                            <Style TargetType="DataGridRow">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Status}" Value="PASS"><Setter Property="Foreground" Value="#7EE787" /></DataTrigger>
+                                    <DataTrigger Binding="{Binding Status}" Value="WARNING"><Setter Property="Foreground" Value="#E3B341" /></DataTrigger>
+                                    <DataTrigger Binding="{Binding Status}" Value="FAILURE"><Setter Property="Foreground" Value="#FF7B72" /></DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.RowStyle>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="STATUS" Binding="{Binding Status}" Width="95" />
+                            <DataGridTextColumn Header="AREA" Binding="{Binding Area}" Width="130" />
+                            <DataGridTextColumn Header="CHECK" Binding="{Binding Name}" Width="220" />
+                            <DataGridTextColumn Header="DETAIL" Binding="{Binding Detail}" Width="*" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+            <TabItem>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid Margin="20" MaxWidth="880" HorizontalAlignment="Left">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="Settings" Style="{StaticResource SectionTitle}" />
+                        <TextBlock Grid.Row="1" Margin="0,4,0,18" Text="Command-center identity, Fly-hosted Headscale access, and local tool paths" Foreground="{StaticResource MutedBrush}" />
+                        <Border Grid.Row="2" Padding="18" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="46" /><RowDefinition Height="46" /><RowDefinition Height="46" />
+                                    <RowDefinition Height="46" /><RowDefinition Height="46" /><RowDefinition Height="46" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="Headscale server address" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <TextBox x:Name="TailnetText" Grid.Column="1" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="1" Text="Headscale user ID" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <TextBox x:Name="OAuthIdText" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="2" Text="Admin signing secret" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <PasswordBox x:Name="OAuthSecretText" Grid.Row="2" Grid.Column="1" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="3" Text="This laptop's Tailscale IP" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <TextBox x:Name="CoordinatorIpText" Grid.Row="3" Grid.Column="1" VerticalAlignment="Center" />
+                                <Button Grid.Row="3" Grid.Column="2" Margin="8,0,0,0" Content="Detect" Click="DetectIp_Click" />
+                                <TextBlock Grid.Row="4" Text="Invite output folder" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <TextBox x:Name="InviteFolderText" Grid.Row="4" Grid.Column="1" VerticalAlignment="Center" />
+                                <Button Grid.Row="4" Grid.Column="2" Margin="8,0,0,0" Content="Browse" Click="BrowseInviteFolder_Click" />
+                                <TextBlock Grid.Row="5" Text="Remote engine executable" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <TextBox x:Name="RustDeskPathText" Grid.Row="5" Grid.Column="1" VerticalAlignment="Center" />
+                                <Button Grid.Row="5" Grid.Column="2" Margin="8,0,0,0" Content="Browse" Click="BrowseRustDesk_Click" />
+                            </Grid>
+                        </Border>
+                        <Grid Grid.Row="3" Margin="0,14,0,24">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Content="Test private control API" Click="TestApi_Click" />
+                                <Button Content="Policy instructions" Margin="7,0,0,0" Click="ApplyPolicy_Click" />
+                                <Button Content="Tag this laptop as hub" Margin="7,0,0,0" Click="TagHub_Click" />
+                                <Button Content="Firewall rule" Margin="7,0,0,0" Click="Firewall_Click" />
+                            </StackPanel>
+                            <Button Grid.Column="1" Content="Save settings" Style="{StaticResource PrimaryButton}" Click="SaveSettings_Click" />
+                        </Grid>
+                    </Grid>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+
+        <Border Grid.Row="2" Grid.ColumnSpan="2" Background="#0D0F11" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
+            <Grid Margin="12,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Status}" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+                <TextBlock Grid.Column="1" Text="Agent 45831  ·  Coordinator 45830  ·  RustDesk 21118" VerticalAlignment="Center"
+                           FontFamily="Cascadia Mono,Consolas" FontSize="10" Foreground="#707A84" />
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

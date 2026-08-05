@@ -26,6 +26,7 @@ if /I "%APP_ID%"=="wifidevices" goto :wifiDevices
 if /I "%APP_ID%"=="finance" goto :finance
 if /I "%APP_ID%"=="youtube-sync-tray" goto :youtubeSync
 if /I "%APP_ID%"=="light-dark-toggle" goto :lightDark
+if /I "%APP_ID%"=="taildesk" goto :taildesk
 
 echo No dependency profile is registered for %APP_ID%.
 exit /b 2
@@ -115,6 +116,14 @@ exit /b %ERRORLEVEL%
 :lightDark
 call :restoreDotnet "%APP_DIR%\LightDarkToggle.csproj"
 exit /b %ERRORLEVEL%
+
+:taildesk
+if not exist "%ProgramFiles%\Taildesk\Admin\Taildesk.Admin.exe" (
+    echo Taildesk is not installed. Run Taildesk's Install-CommandCenter.ps1 first.
+    exit /b 2
+)
+echo Taildesk is installed.
+exit /b 0
 
 :restoreDotnet
 set "PROJECT=%~1"

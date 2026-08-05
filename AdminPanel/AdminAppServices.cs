@@ -211,6 +211,20 @@ internal static class AdminAppCatalog
         {
             RuntimeCommandLineRelativePaths =
                 ["start.bat", "start-coder-files.bat", "coder_files_agent.py"]
+        },
+        new(
+            "taildesk",
+            "Opticon",
+            "Privately control and administer your Windows device fleet from this command center.",
+            "Taildesk",
+            AdminAppLogoKind.Embedded,
+            "opticon",
+            "Taildesk")
+        {
+            // Opticon is installed under Program Files and owns its tray lifetime.
+            // The panel deliberately launches it without attempting to terminate it.
+            BatchExitsAfterLaunch = true,
+            SupportsRuntimeControl = false
         }
     ];
 

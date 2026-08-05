@@ -2,6 +2,18 @@
 
 Continuous Transcriber is a fully local Windows microphone transcription service. FFmpeg continuously writes 15-second mono 16 kHz PCM WAV segments, Silero VAD rejects silence and assigns a speech-threshold label, and the CPU-only Parakeet TDT runtime appends recognized English text to UTF-8 transcript files. A single-instance watchdog restarts the worker after a crash or stalled heartbeat.
 
+## Recorder dashboard
+
+Open **Continuous Transcriber → Settings → View dashboard** in the Nice Windows Admin Panel. This starts a separate local dashboard at `http://127.0.0.1:5138/`, adds a **Continuous Transcriber Dashboard** notification-area icon, and opens the dashboard in the default browser. Left-click the icon to reopen the page or use its menu to exit only the dashboard; recording continues independently.
+
+The dashboard joins retained WAV files to transcript lines through each manifest's transcript-line SHA-256, so rotated transcript files and multiple recording sessions appear on one timeline. The range handles filter the transcript, the amber playhead controls the transcript's top position and audio time, transcript rows seek their linked audio, and playback advances automatically across files. **Skip edge silence** omits detected quiet leading and trailing portions without modifying the source WAVs. Search is limited to the selected time range.
+
+For a direct development launch:
+
+```bat
+start-dashboard.bat
+```
+
 ## First run
 
 Requirements:

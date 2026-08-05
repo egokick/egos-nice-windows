@@ -1,0 +1,10 @@
+bin/
+obj/
+artifacts/
+dist/
+*.user
+*.suo
+*.pfx
+*.snk
+*.tdinvite
+Taildesk-Invite-*.zip

@@ -1,7 +1,0 @@
-# Generated local configuration and state. Never commit these files.
-.env
-generated/
-state/
-certs/
-secrets/
-*.log

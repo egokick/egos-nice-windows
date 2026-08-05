@@ -1,0 +1,16 @@
+// Install this file as your Headscale policy after replacing <headscale-user>
+// with the local Headscale user that owns Taildesk administration.
+{
+  "tagOwners": {
+    "tag:taildesk-hub": ["<headscale-user>"],
+    "tag:taildesk-controller": ["<headscale-user>"],
+    "tag:taildesk-managed": ["<headscale-user>"],
+    "tag:taildesk-exit": ["<headscale-user>"],
+  },
+  "acls": [
+    { "action": "accept", "src": ["tag:taildesk-hub"], "dst": ["tag:taildesk-hub:*", "tag:taildesk-controller:*", "tag:taildesk-managed:*"] },
+    { "action": "accept", "src": ["tag:taildesk-controller"], "dst": ["tag:taildesk-hub:*", "tag:taildesk-controller:*", "tag:taildesk-managed:*"] },
+    { "action": "accept", "src": ["tag:taildesk-managed"], "dst": ["tag:taildesk-hub:45830", "tag:taildesk-hub:45831"] },
+    { "action": "accept", "src": ["tag:taildesk-exit"], "dst": ["tag:taildesk-exit:*"] },
+  ],
+}

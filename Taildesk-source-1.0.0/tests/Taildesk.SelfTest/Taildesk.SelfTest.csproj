@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Taildesk.SelfTest</AssemblyName>
+    <RootNamespace>Taildesk.SelfTest</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Taildesk.Shared\Taildesk.Shared.csproj" />
+  </ItemGroup>
+</Project>

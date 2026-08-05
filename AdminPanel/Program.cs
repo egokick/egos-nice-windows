@@ -59,6 +59,7 @@ internal sealed class AdminPanelApplicationContext : ApplicationContext
             executeOnlyOnce: false);
 
         _icon = AdminPanelTrayIconFactory.CreateLightIcon();
+        PreparePanel();
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(new ToolStripMenuItem("Open Admin Panel", null, (_, _) => ShowPanel()));
@@ -113,32 +114,47 @@ internal sealed class AdminPanelApplicationContext : ApplicationContext
 
     private void ShowPanel()
     {
-        if (_panel is null || _panel.IsDisposed)
+        var panel = GetOrCreatePanel();
+        if (panel.WindowState == FormWindowState.Minimized)
         {
-            var panel = new AdminPanelForm();
-            _panel = panel;
-            panel.FormClosed += (_, _) =>
+            panel.WindowState = FormWindowState.Normal;
+        }
+
+        panel.CenterAndFitToCurrentScreen();
+        if (!panel.Visible)
+        {
+            panel.Show();
+        }
+
+        panel.Activate();
+        panel.BringToFront();
+        panel.Update();
+    }
+
+    private void PreparePanel()
+    {
+        var panel = GetOrCreatePanel();
+        panel.CenterAndFitToCurrentScreen();
+        panel.PrepareForFastShow();
+    }
+
+    private AdminPanelForm GetOrCreatePanel()
+    {
+        if (_panel is not null && !_panel.IsDisposed)
+        {
+            return _panel;
+        }
+
+        var panel = new AdminPanelForm();
+        _panel = panel;
+        panel.FormClosed += (_, _) =>
+        {
+            if (ReferenceEquals(_panel, panel))
             {
-                if (ReferenceEquals(_panel, panel))
-                {
-                    _panel = null;
-                }
-            };
-        }
-
-        if (_panel.WindowState == FormWindowState.Minimized)
-        {
-            _panel.WindowState = FormWindowState.Normal;
-        }
-
-        _panel.CenterAndFitToCurrentScreen();
-        if (!_panel.Visible)
-        {
-            _panel.Show();
-        }
-
-        _panel.Activate();
-        _panel.BringToFront();
+                _panel = null;
+            }
+        };
+        return panel;
     }
 
     private void ToggleStartWithWindows(ToolStripMenuItem menuItem)

@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Taildesk.Shared</AssemblyName>
+    <RootNamespace>Taildesk.Shared</RootNamespace>
+  </PropertyGroup>
+</Project>

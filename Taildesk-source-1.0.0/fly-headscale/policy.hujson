@@ -1,0 +1,29 @@
+{
+  "tagOwners": {
+    "tag:taildesk-hub": ["admin@taildesk.local"],
+    "tag:taildesk-controller": ["admin@taildesk.local"],
+    "tag:taildesk-managed": ["admin@taildesk.local"],
+    "tag:taildesk-exit": ["admin@taildesk.local"]
+  },
+  "grants": [
+    {
+      "src": ["tag:taildesk-hub", "tag:taildesk-controller"],
+      "dst": ["tag:taildesk-managed", "tag:taildesk-controller", "tag:taildesk-hub"],
+      "ip": ["tcp:45831", "tcp:21118"]
+    },
+    {
+      "src": ["tag:taildesk-managed", "tag:taildesk-controller"],
+      "dst": ["tag:taildesk-hub"],
+      "ip": ["tcp:45830"]
+    },
+    {
+      "src": ["tag:taildesk-hub", "tag:taildesk-controller"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"]
+    }
+  ],
+  "autoApprovers": {
+    "exitNode": ["tag:taildesk-exit"]
+  }
+}
+

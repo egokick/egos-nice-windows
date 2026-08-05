@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#173b35">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <title>Recorder archive</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="page-shell">
+    <header class="app-header">
+      <div class="brand-mark" aria-hidden="true">
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <div class="header-copy">
+        <p class="eyebrow">CONTINUOUS TRANSCRIBER</p>
+        <h1>Recorder archive</h1>
+        <p id="archiveSummary" class="subhead">Loading your local transcript…</p>
+      </div>
+      <button id="refreshButton" class="icon-button" type="button" title="Refresh archive" aria-label="Refresh archive">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M5.7 9a7 7 0 0 1 11.8-2.5L20 9M4 15l2.5 2.5A7 7 0 0 0 18.3 15"/></svg>
+      </button>
+    </header>
+
+    <section class="transport-card" aria-label="Audio playback">
+      <button id="playButton" class="play-button" type="button" aria-label="Play" disabled>
+        <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5Z"/></svg>
+        <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7h3v10H8zM13 7h3v10h-3z"/></svg>
+      </button>
+      <button id="backButton" class="skip-button" type="button" aria-label="Back 15 seconds" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8v5h5M6.5 12a6 6 0 1 0 2-4.5"/></svg><span>15</span>
+      </button>
+      <button id="forwardButton" class="skip-button" type="button" aria-label="Forward 15 seconds" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8v5h-5M17.5 12a6 6 0 1 1-2-4.5"/></svg><span>15</span>
+      </button>
+      <div class="now-playing">
+        <span id="playbackStatus" class="status-label">READY TO EXPLORE</span>
+        <strong id="playbackTime">Choose a transcript or a point in time</strong>
+      </div>
+      <label class="silence-toggle">
+        <input id="skipSilence" type="checkbox" checked>
+        <span class="toggle-track" aria-hidden="true"><span></span></span>
+        <span><strong>Skip edge silence</strong><small>Flow between recordings</small></span>
+      </label>
+    </section>
+
+    <section class="timeline-card" aria-labelledby="timelineHeading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">TIME RANGE</p>
+          <h2 id="timelineHeading">Move through the day</h2>
+        </div>
+        <output id="cursorOutput" class="cursor-output">—</output>
+      </div>
+
+      <div id="timeline" class="timeline" tabindex="-1" aria-label="Recorder timeline">
+        <div class="timeline-rail"></div>
+        <div id="timelineSelection" class="timeline-selection"></div>
+        <div id="activityMarks" class="activity-marks" aria-hidden="true"></div>
+        <button id="startHandle" class="timeline-handle range-handle start-handle" type="button" role="slider" aria-label="Range start"></button>
+        <button id="cursorHandle" class="timeline-handle cursor-handle" type="button" role="slider" aria-label="Transcript position"><span></span></button>
+        <button id="endHandle" class="timeline-handle range-handle end-handle" type="button" role="slider" aria-label="Range end"></button>
+      </div>
+
+      <div class="range-fields">
+        <label><span>START</span><input id="startInput" type="datetime-local" step="1"></label>
+        <p>Drag either end to focus the transcript. The amber playhead controls the text at the top.</p>
+        <label><span>END</span><input id="endInput" type="datetime-local" step="1"></label>
+      </div>
+    </section>
+
+    <section class="transcript-card" aria-labelledby="transcriptHeading">
+      <div class="transcript-toolbar">
+        <div>
+          <p class="eyebrow">TRANSCRIPT</p>
+          <h2 id="transcriptHeading">What was said</h2>
+        </div>
+        <label class="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
+          <span class="sr-only">Search transcript</span>
+          <input id="searchInput" type="search" placeholder="Search within this range" autocomplete="off">
+          <kbd>Ctrl K</kbd>
+        </label>
+        <span id="matchCount" class="match-count">—</span>
+      </div>
+      <div id="transcriptScroller" class="transcript-scroller" tabindex="0" aria-label="Transcript text">
+        <div id="loadingState" class="empty-state"><span class="loading-wave" aria-hidden="true"></span>Reading local transcripts…</div>
+        <div id="transcriptList" class="transcript-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <audio id="audioPlayer" preload="metadata"></audio>
+  <script src="app.js"></script>
+</body>
+</html>

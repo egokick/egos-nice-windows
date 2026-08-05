@@ -1,0 +1,40 @@
+name: taildesk-local-control
+
+services:
+  caddy:
+    image: caddy:2.10.2
+    restart: "no"
+    ports:
+      - "127.0.0.1:8443:443/tcp"
+      - "127.0.0.1:4443:4443/tcp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./state/caddy/data:/data
+      - ./state/caddy/config:/config
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+
+  headscale:
+    image: headscale/headscale:0.29.3@sha256:0e7f1c6e4ce6c2a2a001103ecd3fa645a045adf30ac8a5234fe037b43000cd72
+    user: "65532:65532"
+    restart: "no"
+    command: ["serve"]
+    read_only: true
+    tmpfs:
+      - /var/run/headscale
+      - /tmp
+    volumes:
+      - ./config.yaml:/etc/headscale/config.yaml:ro
+      - ./policy.hujson:/etc/headscale/policy.hujson:ro
+      - ./state/headscale:/var/lib/headscale
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+
+networks:
+  control:
+    driver: bridge
+

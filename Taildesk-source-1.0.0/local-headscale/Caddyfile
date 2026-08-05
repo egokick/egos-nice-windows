@@ -1,0 +1,28 @@
+{
+    admin off
+}
+
+headscale-controller.stayactive.test {
+    tls internal
+
+    handle /api/v1/* {
+        respond "Not found" 404
+    }
+
+    handle {
+        reverse_proxy headscale:8080
+    }
+}
+
+https://headscale-controller.stayactive.test:4443 {
+    tls internal
+
+    handle /api/v1/* {
+        reverse_proxy headscale:8080
+    }
+
+    handle {
+        respond "Not found" 404
+    }
+}
+

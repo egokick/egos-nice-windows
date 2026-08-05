@@ -10,7 +10,8 @@ internal sealed class AdminPanelForm : Form
     private const int PreferredWidth = 1320;
     private const int MinimumWidth = 900;
     private const int MinimumHeight = 520;
-    private const int GridColumnCount = 3;
+    private const int GridColumnCount = 4;
+    private const double VerticalScreenInsetRatio = 0.10;
 
     private readonly FlowLayoutPanel _appGrid;
     private readonly Panel _titleBar;
@@ -26,6 +27,7 @@ internal sealed class AdminPanelForm : Form
     private bool _dropCommitted;
     private bool _statusIsError;
     private bool _runtimeRefreshInProgress;
+    private bool _activationRefreshQueued;
     private long _runtimeStateVersion;
 
     public AdminPanelForm()
@@ -83,7 +85,7 @@ internal sealed class AdminPanelForm : Form
             AccessibleDescription = "Close the Admin Panel"
         };
         _closeButton.FlatAppearance.BorderSize = 0;
-        _closeButton.Click += (_, _) => Close();
+        _closeButton.Click += (_, _) => DismissToTray();
         _titleBar.Controls.Add(_titleLabel);
         _titleBar.Controls.Add(_closeButton);
 
@@ -101,6 +103,9 @@ internal sealed class AdminPanelForm : Form
         _appGrid.DragOver += AppGridOnDragOver;
         _appGrid.DragDrop += AppGridOnDragDrop;
         _appGrid.ClientSizeChanged += (_, _) => ResizeCardsForGrid();
+        _appGrid.HandleCreated += (_, _) => NativeControlTheme.TryApply(
+            _appGrid.Handle,
+            _palette.IsDark);
 
         foreach (var app in AdminPanelOrderStore.LoadOrderedApps())
         {
@@ -116,22 +121,25 @@ internal sealed class AdminPanelForm : Form
         Controls.Add(_appGrid);
         Controls.Add(_titleBar);
 
-        Shown += (_, _) =>
+        Shown += (_, _) => ResizeCardsForGrid();
+        Activated += (_, _) => QueueActivationRefresh();
+        VisibleChanged += (_, _) =>
         {
-            ResizeCardsForGrid();
-            RefreshAllAppStates();
-            _runtimeStatusTimer.Start();
+            if (Visible)
+            {
+                _runtimeStatusTimer.Start();
+            }
+            else
+            {
+                _runtimeStatusTimer.Stop();
+            }
         };
-        Activated += (_, _) =>
-        {
-            ApplyCurrentTheme();
-            RefreshAllAppStates();
-        };
+        Deactivate += (_, _) => BeginInvoke(DismissWhenFocusMovesOutside);
         KeyDown += (_, args) =>
         {
             if (args.KeyCode == Keys.Escape && _draggedCard is null)
             {
-                Close();
+                DismissToTray();
             }
         };
 
@@ -140,11 +148,32 @@ internal sealed class AdminPanelForm : Form
         CenterAndFitToCurrentScreen();
     }
 
+    public void PrepareForFastShow()
+    {
+        CreateControl();
+        _ = Handle;
+        ResizeCardsForGrid();
+
+        var previousOpacity = Opacity;
+        Opacity = 0;
+        try
+        {
+            Show();
+            Update();
+            Hide();
+        }
+        finally
+        {
+            Opacity = previousOpacity;
+        }
+    }
+
     public void CenterAndFitToCurrentScreen()
     {
         var workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
         var availableWidth = Math.Max(320, workingArea.Width - 24);
-        var availableHeight = Math.Max(320, workingArea.Height);
+        var verticalInset = (int)Math.Round(workingArea.Height * VerticalScreenInsetRatio);
+        var availableHeight = Math.Max(320, workingArea.Height - (verticalInset * 2));
         var width = Math.Min(PreferredWidth, availableWidth);
         var height = Math.Min(GetHeightForAllRows(), availableHeight);
 
@@ -153,9 +182,51 @@ internal sealed class AdminPanelForm : Form
             Math.Min(MinimumHeight, availableHeight));
         Bounds = new Rectangle(
             workingArea.Left + ((workingArea.Width - width) / 2),
-            workingArea.Top + ((workingArea.Height - height) / 2),
+            workingArea.Top + verticalInset + ((availableHeight - height) / 2),
             width,
             height);
+    }
+
+    private void DismissWhenFocusMovesOutside()
+    {
+        if (IsDisposed
+            || ContainsFocus
+            || OwnedForms.Any(form => form.Visible)
+            || _draggedCard is not null)
+        {
+            return;
+        }
+
+        DismissToTray();
+    }
+
+    private void DismissToTray()
+    {
+        if (!IsDisposed && Visible)
+        {
+            Hide();
+        }
+    }
+
+    private void QueueActivationRefresh()
+    {
+        if (_activationRefreshQueued || IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        _activationRefreshQueued = true;
+        BeginInvoke(() =>
+        {
+            _activationRefreshQueued = false;
+            if (IsDisposed || !Visible)
+            {
+                return;
+            }
+
+            ApplyCurrentTheme();
+            RefreshAllAppStates();
+        });
     }
 
     private int GetHeightForAllRows()
@@ -212,6 +283,10 @@ internal sealed class AdminPanelForm : Form
         _closeButton.FlatAppearance.MouseOverBackColor = _palette.CardHover;
         _closeButton.FlatAppearance.MouseDownBackColor = _palette.AccentSoft;
         _appGrid.BackColor = _palette.Window;
+        if (_appGrid.IsHandleCreated)
+        {
+            NativeControlTheme.TryApply(_appGrid.Handle, _palette.IsDark);
+        }
 
         foreach (var card in GetCardsInVisualOrder())
         {
@@ -856,17 +931,17 @@ internal sealed class AdminAppCard : UserControl
         _settingsButton = new Button
         {
             AutoSize = false,
-            Size = new Size(94, 28),
+            Size = new Size(128, 32),
             FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 8f, FontStyle.Bold, GraphicsUnit.Point),
-            Text = "SETTINGS",
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold, GraphicsUnit.Point),
+            Text = "Settings",
             TextAlign = ContentAlignment.MiddleCenter,
             TabStop = true,
             Cursor = Cursors.Hand,
             AccessibleName = $"{definition.DisplayName} settings",
             AccessibleDescription = $"Configure {definition.DisplayName}, including whether it starts with Windows."
         };
-        _settingsButton.FlatAppearance.BorderSize = 0;
+        _settingsButton.FlatAppearance.BorderSize = 1;
         _settingsButton.Click += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
         if (definition.ShowRuntimeStatusBadge)
         {
@@ -1311,29 +1386,28 @@ internal sealed class AdminAppCard : UserControl
     {
         // Setting the card Size in the constructor can raise OnResize before
         // the child controls below have been assigned.
+        var settingsButton = _settingsButton;
         if (_logo is null
             || _dragGrip is null
             || _title is null
-            )
+            || settingsButton is null)
         {
             return;
         }
         _dragGrip.Location = new Point(ClientSize.Width - _dragGrip.Width - 11, 10);
         _title.Bounds = new Rectangle(18, 10, Math.Max(100, ClientSize.Width - 62), _title.Height);
+        settingsButton.Width = Math.Max(112, ClientSize.Width - 36);
+        settingsButton.Location = new Point(
+            (ClientSize.Width - settingsButton.Width) / 2,
+            ClientSize.Height - settingsButton.Height - 14);
         if (_runtimeStatusBadge is not null)
         {
             _runtimeStatusBadge.Location = new Point(
                 (ClientSize.Width - _runtimeStatusBadge.Width) / 2,
-                ClientSize.Height - _runtimeStatusBadge.Height - 13);
-        }
-        if (_settingsButton is not null)
-        {
-            _settingsButton.Location = new Point(
-                ClientSize.Width - _settingsButton.Width - 12,
-                ClientSize.Height - _settingsButton.Height - 12);
+                settingsButton.Top - _runtimeStatusBadge.Height - 10);
         }
 
-        var logoContentBottom = _runtimeStatusBadge?.Top ?? ClientSize.Height - 16;
+        var logoContentBottom = (_runtimeStatusBadge?.Top ?? settingsButton.Top) - 12;
         var logoSize = Math.Max(
             140,
             Math.Min(250, Math.Min(ClientSize.Width - 36, logoContentBottom - _title.Bottom - 12)));
@@ -1353,9 +1427,10 @@ internal sealed class AdminAppCard : UserControl
         }
 
         _settingsButton.BackColor = _palette.AccentSoft;
-        _settingsButton.ForeColor = _palette.Text;
-        _settingsButton.FlatAppearance.MouseOverBackColor = _palette.AccentHover;
-        _settingsButton.FlatAppearance.MouseDownBackColor = _palette.Accent;
+        _settingsButton.ForeColor = _palette.Accent;
+        _settingsButton.FlatAppearance.BorderColor = _palette.Accent;
+        _settingsButton.FlatAppearance.MouseOverBackColor = _palette.Accent;
+        _settingsButton.FlatAppearance.MouseDownBackColor = _palette.AccentHover;
     }
 
     private void ApplyRuntimeStatusPalette()
@@ -1864,4 +1939,35 @@ internal static class DwmWindowTheme
         int attribute,
         ref int attributeValue,
         int attributeSize);
+}
+
+internal static class NativeControlTheme
+{
+    public static void TryApply(IntPtr controlHandle, bool useDarkMode)
+    {
+        if (!OperatingSystem.IsWindows() || controlHandle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        try
+        {
+            _ = SetWindowTheme(
+                controlHandle,
+                useDarkMode ? "DarkMode_Explorer" : "Explorer",
+                null);
+        }
+        catch (DllNotFoundException)
+        {
+        }
+        catch (EntryPointNotFoundException)
+        {
+        }
+    }
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetWindowTheme(
+        IntPtr windowHandle,
+        string? applicationName,
+        string? subIdList);
 }

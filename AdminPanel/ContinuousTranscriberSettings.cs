@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 
@@ -184,7 +185,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
         AccessibleName = Text;
         AccessibleDescription = "Choose how Continuous Transcriber records and processes microphone audio.";
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(520, 368);
+        ClientSize = new Size(520, 418);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -248,19 +249,19 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
 
         var divider = new Panel
         {
-            Bounds = new Rectangle(24, 290, 472, 1),
+            Bounds = new Rectangle(24, 340, 472, 1),
             BackColor = palette.CardBorder
         };
         var cancelButton = CreateDialogButton(
             "Cancel",
-            new Rectangle(274, 310, 104, 38),
+            new Rectangle(274, 360, 104, 38),
             palette.MutedButton,
             palette.Text);
         cancelButton.DialogResult = DialogResult.Cancel;
 
         _startWithWindows = new CheckBox
         {
-            Bounds = new Rectangle(24, 274, 472, 30),
+            Bounds = new Rectangle(24, 294, 472, 30),
             Checked = StartWithWindows,
             Text = "Start with Windows",
             Font = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point),
@@ -271,7 +272,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
 
         var launchButton = CreateDialogButton(
             isRunning ? "Restart" : "Launch",
-            new Rectangle(388, 310, 108, 38),
+            new Rectangle(388, 360, 108, 38),
             palette.Accent,
             palette.AccentText);
         launchButton.AccessibleDescription = isRunning
@@ -289,6 +290,35 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
             Close();
         };
 
+        var dashboardButton = CreateDialogButton(
+            "View dashboard",
+            new Rectangle(24, 360, 144, 38),
+            palette.AccentSoft,
+            palette.Text);
+        dashboardButton.AccessibleDescription =
+            "Start the local Continuous Transcriber dashboard in the notification area and open it in your browser.";
+        dashboardButton.Click += async (_, _) =>
+        {
+            dashboardButton.Enabled = false;
+            dashboardButton.Text = "Opening…";
+            var result = await ContinuousTranscriberDashboardLauncher.LaunchAsync();
+            if (!result.Success)
+            {
+                MessageBox.Show(
+                    this,
+                    result.ErrorMessage,
+                    "Could not open dashboard",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+
+            if (!IsDisposed)
+            {
+                dashboardButton.Enabled = true;
+                dashboardButton.Text = "View dashboard";
+            }
+        };
+
         Controls.AddRange(
         [
             title,
@@ -303,6 +333,7 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
             threadUnit,
             _startWithWindows,
             divider,
+            dashboardButton,
             cancelButton,
             launchButton
         ]);
@@ -376,6 +407,76 @@ internal sealed class ContinuousTranscriberSettingsDialog : Form
         };
         button.FlatAppearance.BorderSize = 0;
         return button;
+    }
+}
+
+internal static class ContinuousTranscriberDashboardLauncher
+{
+    internal readonly record struct LaunchResult(bool Success, string ErrorMessage);
+
+    public static Task<LaunchResult> LaunchAsync()
+    {
+        return Task.Run(() =>
+        {
+            try
+            {
+                var recorderFolder = Path.Combine(
+                    NiceWindowsRepositoryLocator.GetRepositoryRoot(),
+                    "Continuous-transcriber");
+                var launcherPath = Path.Combine(recorderFolder, "start-dashboard.bat");
+                if (!File.Exists(launcherPath))
+                {
+                    return new LaunchResult(false, $"Dashboard launcher not found: {launcherPath}");
+                }
+
+                var commandProcessor = Environment.GetEnvironmentVariable("ComSpec");
+                if (string.IsNullOrWhiteSpace(commandProcessor) || !File.Exists(commandProcessor))
+                {
+                    commandProcessor = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.System),
+                        "cmd.exe");
+                }
+
+                using var process = Process.Start(new ProcessStartInfo
+                {
+                    FileName = commandProcessor,
+                    Arguments = $"/d /c call \"{launcherPath}\"",
+                    WorkingDirectory = recorderFolder,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true
+                });
+                if (process is null)
+                {
+                    return new LaunchResult(false, "Windows did not start the dashboard launcher.");
+                }
+
+                var standardErrorTask = process.StandardError.ReadToEndAsync();
+                var standardOutputTask = process.StandardOutput.ReadToEndAsync();
+                process.WaitForExit();
+                var standardError = standardErrorTask.GetAwaiter().GetResult().Trim();
+                var standardOutput = standardOutputTask.GetAwaiter().GetResult().Trim();
+                if (process.ExitCode == 0)
+                {
+                    return new LaunchResult(true, string.Empty);
+                }
+
+                var details = string.IsNullOrWhiteSpace(standardError) ? standardOutput : standardError;
+                return new LaunchResult(
+                    false,
+                    string.IsNullOrWhiteSpace(details)
+                        ? $"Dashboard launcher exited with code {process.ExitCode}."
+                        : details[^Math.Min(details.Length, 1200)..]);
+            }
+            catch (Exception exception) when (exception is IOException
+                                                 or UnauthorizedAccessException
+                                                 or InvalidOperationException
+                                                 or System.ComponentModel.Win32Exception)
+            {
+                return new LaunchResult(false, exception.Message);
+            }
+        });
     }
 }
 internal sealed class AdminAppSettingsDialog : Form

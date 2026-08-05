@@ -1,0 +1,26 @@
+<Application x:Class="Taildesk.Setup.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <SolidColorBrush x:Key="WindowBrush" Color="#121417" />
+        <SolidColorBrush x:Key="PanelBrush" Color="#1B1F24" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#343B43" />
+        <SolidColorBrush x:Key="AccentBrush" Color="#52D39A" />
+        <SolidColorBrush x:Key="TextBrush" Color="#EDF1F5" />
+        <SolidColorBrush x:Key="MutedBrush" Color="#9AA5AF" />
+        <Style TargetType="Window">
+            <Setter Property="Background" Value="{StaticResource WindowBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="FontFamily" Value="Segoe UI" />
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="#08130E" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="18,9" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+    </Application.Resources>
+</Application>
