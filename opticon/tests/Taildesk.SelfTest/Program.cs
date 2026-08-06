@@ -24,6 +24,7 @@ var tests = new (string Name, Action Body)[]
     ("dependency downloads are version and hash pinned", TestDependencyPins),
     ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
     ("process runner supports commands with inherited standard handles", TestProcessRunnerWithoutCapture),
+    ("process runner applies its deadline to inherited output handles", TestProcessRunnerStreamDeadline),
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
     ("RustDesk installer configures every Windows service profile before validation", TestRustDeskInstallerProfiles),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
@@ -202,6 +203,18 @@ static void TestProcessRunnerWithoutCapture()
     Assert(result.Succeeded, "uncaptured command failed");
     Assert(result.StandardOutput.Length == 0 && result.StandardError.Length == 0,
         "uncaptured command unexpectedly retained redirected output");
+}
+
+static void TestProcessRunnerStreamDeadline()
+{
+    if (!OperatingSystem.IsWindows()) return;
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+    AssertThrows<TimeoutException>(() => ProcessRunner.RunAsync(
+        "cmd.exe",
+        ["/d", "/c", "start \"\" /b cmd.exe /d /c \"ping 127.0.0.1 -n 6 > nul\""],
+        TimeSpan.FromMilliseconds(250)).GetAwaiter().GetResult());
+    Assert(stopwatch.Elapsed < TimeSpan.FromSeconds(3),
+        "the inherited output handle was allowed to outlive the process deadline");
 }
 static void TestRustDeskHardening()
 {
