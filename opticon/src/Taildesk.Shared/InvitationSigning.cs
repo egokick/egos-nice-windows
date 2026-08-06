@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Taildesk.Shared;
@@ -19,11 +20,78 @@ public static class InvitationSigning
             .OfType<X509Certificate2>().FirstOrDefault(item => item.HasPrivateKey)
             ?? throw new InvalidOperationException("The Opticon invitation-signing key is unavailable on this command center.");
         using (certificate)
-        using (var rsa = certificate.GetRSAPrivateKey() ?? throw new InvalidOperationException("The Opticon invitation-signing certificate has no RSA private key."))
+        using (var rsa = GetSigningKey(certificate))
         {
             return rsa.SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
         }
     }
+
+    private static RSA GetSigningKey(X509Certificate2 certificate)
+    {
+        try
+        {
+            return certificate.GetRSAPrivateKey()
+                ?? throw new InvalidOperationException("The Opticon invitation-signing certificate has no RSA private key.");
+        }
+        catch (Exception exception) when (exception.Message.Contains("ephemeral", StringComparison.OrdinalIgnoreCase)
+            && (exception is CryptographicException or ArgumentException))
+        {
+            return OpenEphemeralSigningKey(certificate);
+        }
+    }
+
+    // A certificate-store import can label a persisted CNG key as ephemeral. In
+    // that case X509Certificate2 opens it without the option Windows requires.
+    private static RSA OpenEphemeralSigningKey(X509Certificate2 certificate)
+    {
+        const uint keyProviderInfoProperty = 2;
+        const uint machineKeySet = 0x20;
+
+        uint byteCount = 0;
+        if (!CertGetCertificateContextProperty(certificate.Handle, keyProviderInfoProperty, IntPtr.Zero, ref byteCount) || byteCount == 0)
+            throw new CryptographicException("The Opticon invitation-signing key provider information is unavailable.");
+
+        var buffer = Marshal.AllocHGlobal(checked((int)byteCount));
+        try
+        {
+            if (!CertGetCertificateContextProperty(certificate.Handle, keyProviderInfoProperty, buffer, ref byteCount))
+                throw new CryptographicException("Windows could not read the Opticon invitation-signing key provider information.");
+
+            var keyInfo = Marshal.PtrToStructure<CryptKeyProviderInfo>(buffer);
+            var keyName = Marshal.PtrToStringUni(keyInfo.ContainerName);
+            var providerName = Marshal.PtrToStringUni(keyInfo.ProviderName);
+            if (string.IsNullOrWhiteSpace(keyName) || string.IsNullOrWhiteSpace(providerName) || keyInfo.ProviderType != 0)
+                throw new CryptographicException("The Opticon invitation-signing key is not a supported CNG key.");
+
+            var openOptions = (keyInfo.Flags & machineKeySet) != 0
+                ? CngKeyOpenOptions.MachineKey : CngKeyOpenOptions.None;
+            return new RSACng(CngKey.Open(keyName, new CngProvider(providerName), openOptions));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CryptKeyProviderInfo
+    {
+        public IntPtr ContainerName;
+        public IntPtr ProviderName;
+        public uint ProviderType;
+        public uint Flags;
+        public uint ParameterCount;
+        public IntPtr Parameters;
+        public uint KeySpec;
+    }
+
+    [DllImport("crypt32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CertGetCertificateContextProperty(
+        IntPtr certificateContext,
+        uint propertyId,
+        IntPtr data,
+        ref uint dataSize);
 
     public static bool Verify(ReadOnlySpan<byte> data, ReadOnlySpan<byte> signature)
     {
