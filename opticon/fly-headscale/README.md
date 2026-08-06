@@ -31,6 +31,9 @@ flyctl deploy --remote-only --config fly.toml
 The publisher reads the existing DPAPI-protected Opticon gateway key from the
 local admin configuration. Uploads use authenticated 4 MiB chunks and are
 accepted only when filename, size, and SHA-256 match the deployed manifest.
+The public manifest withholds each new Opticon release until its final verified
+bundle exists on the persistent volume, so deploying metadata before uploading
+cannot displace the last available release or advertise a partial package.
 
 The Fly API token is read only from `C:\source\babelfish\.env` during an
 operator-initiated deployment. It must never be copied into this directory,

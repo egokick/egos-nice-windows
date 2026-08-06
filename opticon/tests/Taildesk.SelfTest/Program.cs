@@ -4,6 +4,15 @@ using System.Text.Json;
 using System.Xml.Linq;
 using Taildesk.Shared;
 
+if (args.Length == 2 && args[0].Equals("--verify-authenticode", StringComparison.Ordinal))
+{
+    await InvitationSigning.VerifyAuthenticodeAsync(args[1]);
+    Console.WriteLine("PASS  pinned Authenticode signature and file digest");
+    return;
+}
+if (args.Length != 0)
+    throw new ArgumentException("Taildesk.SelfTest accepts only --verify-authenticode <path>.");
+
 var tests = new (string Name, Action Body)[]
 {
     ("tokens are random and hash comparisons work", TestTokens),
@@ -18,6 +27,10 @@ var tests = new (string Name, Action Body)[]
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
     ("RustDesk installer configures every Windows service profile before validation", TestRustDeskInstallerProfiles),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
+    ("remote administration contracts reject unpinned or unsafe updates", TestRemoteAdministrationProtocol),
+    ("OpenSSH recovery is fixed-path, Windows-compatible, and independently supervised", TestOpenSshRecoveryDesign),
+    ("runtime tailnet policy keeps administrative SSH hub-only", TestTailnetSshPolicy),
+    ("update journal writes round-trip through atomic persistence", TestUpdateJournalPersistence),
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
     ("path guard permits a child and blocks traversal", TestPathGuard),
     ("WPF style templates match their control target types", TestWpfStyleTemplateTargets),
@@ -197,8 +210,18 @@ static void TestRustDeskHardening()
     Assert(RustDeskConfiguration.IsManagedHostHardened(hardened), "hardened configuration should verify");
     Assert(hardened == RustDeskConfiguration.HardenManagedHost(hardened), "hardening should be idempotent");
     Assert(hardened.Contains("direct-server = 'Y'", StringComparison.Ordinal), "direct server must be enabled");
+    Assert(hardened.Contains("enable-privacy-mode = 'Y'", StringComparison.Ordinal), "managed targets must permit privacy mode");
     Assert(hardened.Contains("whitelist = ','", StringComparison.Ordinal), "RustDesk must not receive an unsupported CIDR whitelist; Windows Firewall enforces the tailnet range");
     Assert(hardened.Contains("unknown = 'preserved'", StringComparison.Ordinal), "unmanaged options must be preserved");
+
+    const string peer = "privacy_mode = false\r\n[options]\r\nunknown = 'preserved'\r\n";
+    var privacyEnabled = RustDeskConfiguration.ConfigurePeerPrivacyMode2(peer, true);
+    Assert(privacyEnabled.Contains("privacy_mode = true", StringComparison.Ordinal), "Mode 2 must enable privacy for the selected peer");
+    Assert(privacyEnabled.Contains("privacy-mode-impl-key = 'privacy_mode_impl_virtual_display'", StringComparison.Ordinal), "Mode 2 must select RustDesk's virtual display implementation");
+    Assert(privacyEnabled.Contains("unknown = 'preserved'", StringComparison.Ordinal), "peer options must be preserved");
+    Assert(privacyEnabled == RustDeskConfiguration.ConfigurePeerPrivacyMode2(privacyEnabled, true), "peer privacy configuration should be idempotent");
+    var privacyDisabled = RustDeskConfiguration.ConfigurePeerPrivacyMode2(privacyEnabled, false);
+    Assert(privacyDisabled.Contains("privacy_mode = false", StringComparison.Ordinal), "the per-device toggle must disable privacy for the selected peer");
 }
 
 static void TestRustDeskInstallerProfiles()
@@ -234,6 +257,137 @@ static void TestControllerRegistryShape()
     var json = JsonSerializer.Serialize(new ControllerDeviceDto(), JsonDefaults.Options);
     Assert(!json.Contains("agentToken", StringComparison.OrdinalIgnoreCase), "controller registry exposes the agent token field");
     Assert(!json.Contains("rustDeskPassword", StringComparison.OrdinalIgnoreCase), "controller registry exposes the RustDesk password field");
+}
+static void TestRemoteAdministrationProtocol()
+{
+    Assert(RemoteAdministrationProtocol.SshPort == 45832, "the isolated SSH port changed unexpectedly");
+    Assert(RemoteAdministrationProtocol.UpdateVersion == 1, "the guarded update protocol changed without a migration");
+    Assert(RemoteAdministrationProtocol.MaximumSshSession == TimeSpan.FromHours(8), "SSH maximum lease is not bounded to eight hours");
+    Assert(RemoteAdministrationProtocol.UpdateCommitWindow <= TimeSpan.FromMinutes(5), "update commit window is too long");
+    Assert(UpdatePackageVerifier.NormalizeVersion("1.2.3.0") == "1.2.3", "four-part Windows file version was not canonicalized");
+    Assert(RemoteAdministrationProtocol.IsTailscaleIpv4("100.64.0.1"), "canonical Tailscale IPv4 was rejected");
+    Assert(RemoteAdministrationProtocol.IsTailscaleIpv4("100.127.255.254"), "upper Tailscale IPv4 was rejected");
+    Assert(!RemoteAdministrationProtocol.IsTailscaleIpv4("100.128.0.1"), "address beyond Tailscale CGNAT range was accepted");
+    Assert(!RemoteAdministrationProtocol.IsTailscaleIpv4("::ffff:100.64.0.1"), "IPv4-mapped IPv6 bypassed strict Tailscale validation");
+    Assert(!RemoteAdministrationProtocol.IsTailscaleIpv4("::6464:1"), "native IPv6 bypassed strict Tailscale validation");
+    Assert(new OpticonReleaseManifest().MinimumGuardianVersion == "1.1.1", "this release does not require the corrected Guardian 1.1.1");
+
+    var futureConfig = JsonSerializer.Deserialize<AgentConfig>(
+        "{\"schemaVersion\":2,\"futureEnrollmentField\":{\"value\":7}}", JsonDefaults.Options)
+        ?? throw new InvalidDataException("extended Agent config did not deserialize");
+    var futureConfigJson = JsonSerializer.Serialize(futureConfig, JsonDefaults.Options);
+    Assert(futureConfigJson.Contains("\"futureEnrollmentField\"", StringComparison.Ordinal),
+        "an atomic maintenance config save would discard unknown enrolled fields");
+
+    var request = new OpticonUpdateRequest
+    {
+        OperationId = Guid.NewGuid(),
+        TargetVersion = "1.2.3",
+        Role = DeviceRole.ManagedOnly,
+        Architecture = "x64",
+        DownloadUrl = "https://opticon.example.test/opticon-bundle-1.2.3-managed-win-x64.zip",
+        PackageSize = 4096,
+        PackageSha256 = new string('a', 64)
+    };
+    UpdatePackageVerifier.ValidateRequest(request);
+    var requestJson = JsonSerializer.Serialize(request, JsonDefaults.Options);
+    Assert(!requestJson.Contains("maintenanceBootstrap", StringComparison.OrdinalIgnoreCase),
+        "an Agent API update request can opt into the privileged legacy maintenance bypass");
+
+    request.DownloadUrl = "http://opticon.example.test/release.zip";
+    AssertThrows<InvalidDataException>(() => UpdatePackageVerifier.ValidateRequest(request));
+    request.DownloadUrl = "https://user:secret@opticon.example.test/release.zip";
+    AssertThrows<InvalidDataException>(() => UpdatePackageVerifier.ValidateRequest(request));
+    request.DownloadUrl = "https://opticon.example.test/release.zip";
+    request.Architecture = "x86";
+    AssertThrows<InvalidDataException>(() => UpdatePackageVerifier.ValidateRequest(request));
+
+    var sshJson = JsonSerializer.Serialize(new SshAccessResponse
+    {
+        SessionId = "lease_123",
+        Host = "100.64.0.25",
+        ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(30),
+        HostPublicKey = "ssh-ed25519 AAAA"
+    }, JsonDefaults.Options);
+    var ssh = JsonSerializer.Deserialize<SshAccessResponse>(sshJson, JsonDefaults.Options);
+    Assert(ssh?.SessionId == "lease_123" && ssh.Host == "100.64.0.25", "SSH lease identity/host did not round-trip");
+}
+static void TestTailnetSshPolicy()
+{
+    string? sourcePath = null;
+    foreach (var root in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+    {
+        var directory = new DirectoryInfo(root);
+        while (directory is not null)
+        {
+            foreach (var relative in new[]
+                     {
+                         Path.Combine("src", "Taildesk.Admin", "TailnetPolicy.cs"),
+                         Path.Combine("opticon", "src", "Taildesk.Admin", "TailnetPolicy.cs")
+                     })
+            {
+                var candidate = Path.Combine(directory.FullName, relative);
+                if (File.Exists(candidate)) { sourcePath = candidate; break; }
+            }
+            if (sourcePath is not null) break;
+            directory = directory.Parent;
+        }
+        if (sourcePath is not null) break;
+    }
+    if (sourcePath is null) throw new InvalidOperationException("Taildesk.Admin TailnetPolicy.cs was not found.");
+    var source = File.ReadAllText(sourcePath);
+    Assert(source.Contains("\"ip\": [\"tcp:45832\"]", StringComparison.Ordinal), "runtime policy does not grant the isolated SSH port");
+    Assert(source.Contains("\"tag:taildesk-managed:45832\"", StringComparison.Ordinal), "runtime policy does not test managed-device SSH denial");
+    Assert(source.Contains("\"tag:taildesk-controller:45832\"", StringComparison.Ordinal), "runtime policy does not test controller SSH denial");
+}
+static void TestUpdateJournalPersistence()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "opticon-update-journal-test-" + Guid.NewGuid().ToString("N"));
+    var path = Path.Combine(directory, "state.json");
+    try
+    {
+        var journal = new UpdateJournal
+        {
+            OperationId = Guid.NewGuid(),
+            Phase = UpdatePhase.Ready,
+            MaintenanceBootstrap = true,
+            SshWasListening = true,
+            GuardianClaimedAt = DateTimeOffset.UtcNow,
+            CurrentVersion = "1.0.0",
+            TargetVersion = "1.1.0",
+            StartedAt = DateTimeOffset.UtcNow,
+            RollbackDirectory = Path.Combine(directory, "agent.rollback"),
+            Message = "verified"
+        };
+        UpdateJournalPersistence.SaveAsync(journal, path).GetAwaiter().GetResult();
+        var loaded = UpdateJournalPersistence.Load(path);
+        Assert(loaded?.OperationId == journal.OperationId && loaded.Phase == UpdatePhase.Ready, "atomic update journal did not round-trip");
+        Assert(loaded!.MaintenanceBootstrap, "maintenance-only Guardian state was not durable");
+        Assert(loaded.ToStatus().MaintenanceBootstrap,
+            "maintenance-only Guardian state was not exposed through authenticated status");
+        Assert(loaded.SshWasListening && loaded.GuardianClaimedAt == journal.GuardianClaimedAt,
+            "Guardian pickup and SSH lifeline requirements were not durable");
+        Assert(loaded.UpdatedAt >= journal.StartedAt, "journal persistence did not stamp its durable update time");
+        Assert(!loaded.ToStatus().RollbackAvailable,
+            "a planned rollback path was reported as a physical rollback copy");
+        Directory.CreateDirectory(loaded.RollbackDirectory);
+        Assert(loaded.ToStatus().RollbackAvailable,
+            "a physical rollback copy was not exposed through authenticated status");
+        Directory.Delete(loaded.RollbackDirectory);
+        Assert(!loaded.ToStatus().RollbackAvailable,
+            "a consumed rollback copy remained exposed through authenticated status");
+
+        var lockPath = Path.Combine(directory, "transaction.lock");
+        using var lease = UpdateJournalCoordination.AcquireAsync(
+            TimeSpan.FromSeconds(1), path: lockPath).GetAwaiter().GetResult();
+        AssertThrows<TimeoutException>(() =>
+            UpdateJournalCoordination.AcquireAsync(
+                TimeSpan.FromMilliseconds(150), path: lockPath).GetAwaiter().GetResult());
+    }
+    finally
+    {
+        try { if (Directory.Exists(directory)) Directory.Delete(directory, true); } catch { }
+    }
 }
 static void TestUploadPolicy()
 {
@@ -306,6 +460,406 @@ static void TestWpfStyleTemplateTargets()
             Assert(templateTarget == styleTarget, $"{styleTarget} style contains a {templateTarget} control template");
         }
     }
+}
+
+static void TestOpenSshRecoveryDesign()
+{
+    DirectoryInfo? root = new(AppContext.BaseDirectory);
+    while (root is not null && !Directory.Exists(Path.Combine(root.FullName, "src", "Taildesk.Agent")))
+        root = root.Parent;
+    if (root is null) throw new InvalidOperationException("Opticon source root was not found.");
+
+    string ReadSource(params string[] parts) => File.ReadAllText(Path.Combine([root.FullName, .. parts]));
+    var launcher = ReadSource("src", "Taildesk.Admin", "SshSessionLauncher.cs");
+    Assert(launcher.Contains("System32", StringComparison.Ordinal)
+           && launcher.Contains("OpenSSH", StringComparison.Ordinal),
+        "SSH launcher must resolve the Windows System32 OpenSSH client");
+    Assert(!launcher.Contains("FindOnPath", StringComparison.Ordinal),
+        "SSH launcher must not execute a PATH-resolved client");
+    var administratorProofIndex = launcher.IndexOf("await VerifyRemoteAdministratorAsync", StringComparison.Ordinal);
+    var requestedCommandIndex = launcher.IndexOf("var remoteCommand = options.PowerShellEncodedCommand", StringComparison.Ordinal);
+    Assert(administratorProofIndex >= 0 && requestedCommandIndex > administratorProofIndex
+           && launcher.Contains("attestation.AdministrativeCapability", StringComparison.Ordinal)
+           && launcher.Contains("attestation.IntegrityRid is < 0x3000 or >= 0x4000", StringComparison.Ordinal),
+        "every SSH shell or command must pass the signed full-administrator attestation before launch");
+    Assert(launcher.Contains("AddressFamily.InterNetwork", StringComparison.Ordinal),
+        "SSH launcher must reject IPv6 before comparing target addresses");
+    var validationIndex = launcher.IndexOf("ValidateCommandOptions(options)", StringComparison.Ordinal);
+    var staleCleanupIndex = launcher.IndexOf("CleanupStaleSessionDirectories()", StringComparison.Ordinal);
+    Assert(validationIndex >= 0 && staleCleanupIndex > validationIndex
+           && launcher.Contains("options.RemoteCommand.Length > MaximumRemoteCommandCharacters", StringComparison.Ordinal)
+           && launcher.Contains("MaximumEncodedPowerShellCharacters = 5600", StringComparison.Ordinal)
+           && launcher.Contains("options.RemoteCommand.Contains('\\0')", StringComparison.Ordinal),
+        "raw and encoded SSH commands must be bounded and reject NUL before key creation or remote provisioning");
+
+    var agentClient = ReadSource("src", "Taildesk.Admin", "AgentClient.cs");
+    Assert(agentClient.Contains("UseProxy = false", StringComparison.Ordinal)
+           && agentClient.Contains("AllowAutoRedirect = false", StringComparison.Ordinal),
+        "authenticated Agent requests must bypass proxies and refuse redirects");
+
+    var cli = ReadSource("src", "Taildesk.Cli", "Program.cs");
+    Assert(cli.Contains("Volatile.Read(ref interactiveSshAttached)", StringComparison.Ordinal)
+           && cli.Contains("_setInteractiveSshAttached(true)", StringComparison.Ordinal)
+           && cli.Contains("_setInteractiveSshAttached(false)", StringComparison.Ordinal),
+        "the CLI must cancel preflight but deliver Ctrl+C to an attached interactive ssh.exe");
+
+    var systemHealth = ReadSource("src", "Taildesk.Admin", "SystemHealthChecker.cs");
+    var nordPowerShell = ReadSource("scripts", "Configure-NordTailscaleSplit.ps1");
+    var nordPython = ReadSource("scripts", "Configure-NordTailscaleSplit.py");
+    Assert(systemHealth.Contains("\"Admin\", \"Cli\", \"opticon.exe\"", StringComparison.Ordinal)
+           && systemHealth.Contains("\"System32\", \"OpenSSH\", \"ssh.exe\"", StringComparison.Ordinal)
+           && nordPowerShell.Contains(@"Admin\Cli\opticon.exe", StringComparison.Ordinal)
+           && nordPowerShell.Contains(@"System32\OpenSSH\ssh.exe", StringComparison.Ordinal)
+           && nordPython.Contains(@"Admin\Cli\opticon.exe", StringComparison.Ordinal)
+           && nordPython.Contains("\"System32\", \"OpenSSH\", \"ssh.exe\"", StringComparison.Ordinal),
+        "NordVPN split tunneling and drift checks must include the Opticon CLI and exact Windows OpenSSH client");
+
+    var manager = ReadSource("src", "Taildesk.Agent", "SshAccessManager.cs");
+    foreach (var unsupported in new[]
+             {
+                 "\"PidFile ", "\"KbdInteractiveAuthentication ", "\"StrictModes ",
+                 "\"X11Forwarding ", "\"PermitTunnel ", "\"PermitUserEnvironment ", "\"PermitUserRC "
+             })
+        Assert(!manager.Contains(unsupported, StringComparison.Ordinal), $"sshd_config contains unsupported {unsupported}");
+    Assert(manager.Contains("AccountName.ToLowerInvariant()", StringComparison.Ordinal),
+        "Windows AllowUsers account must be lowercase");
+    Assert(manager.Contains("AuthorizedKeysFile \\\"", StringComparison.Ordinal)
+           && !manager.Contains("Match Group", StringComparison.OrdinalIgnoreCase)
+           && !manager.Contains("administrators_authorized_keys", StringComparison.OrdinalIgnoreCase),
+        "isolated sshd must use its global absolute authorized_keys file without the stock Administrators Match override");
+    Assert(manager.Contains("*S-1-5-18:F", StringComparison.Ordinal)
+           && manager.Contains("*S-1-5-32-544:F", StringComparison.Ordinal),
+        "administrator authorized_keys ACL must allow only SYSTEM and built-in Administrators");
+    Assert(manager.Contains("RequireSystemOpenSshExecutable", StringComparison.Ordinal)
+           && !manager.Contains("FindOnPath", StringComparison.Ordinal),
+        "SYSTEM SSH binaries must use exact System32 paths");
+    Assert(manager.Contains("_schtasksPath", StringComparison.Ordinal)
+           && manager.Contains("_netshPath", StringComparison.Ordinal)
+           && manager.Contains("_icaclsPath", StringComparison.Ordinal)
+           && manager.Contains("NetLocalGroupDelMembers", StringComparison.Ordinal)
+           && manager.Contains("ErrorMemberNotInAlias", StringComparison.Ordinal),
+        "SYSTEM helpers must use exact paths and the idle SSH account must leave Administrators");
+
+    var setup = ReadSource("src", "Taildesk.Setup", "InstallerServices.cs");
+    Assert(setup.Contains("OpenSSH.Server~~~~0.0.1.0", StringComparison.Ordinal),
+        "Setup must preinstall OpenSSH Server while normal control is healthy");
+    Assert(setup.Contains("OpenSSH.Client~~~~0.0.1.0", StringComparison.Ordinal),
+        "controller-capable Setup must preinstall OpenSSH Client");
+    Assert(setup.Contains("internal static async Task EnsureOpenSshServerCapabilityAsync", StringComparison.Ordinal)
+           && setup.Contains("internal static async Task EnsureOpenSshClientCapabilityAsync", StringComparison.Ordinal),
+        "maintenance mode must be able to invoke both idempotent OpenSSH preflights");
+
+    var adminXaml = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml");
+    var remoteButton = adminXaml.IndexOf("Content=\"Remote into\"", StringComparison.Ordinal);
+    var sshButton = adminXaml.IndexOf("Content=\"Open SSH\"", StringComparison.Ordinal);
+    var browseButton = adminXaml.IndexOf("Content=\"Browse files\"", StringComparison.Ordinal);
+    Assert(remoteButton >= 0 && remoteButton < sshButton && sshButton < browseButton,
+        "Open SSH must be immediately next to Remote into on the Devices page");
+
+    var adminWindow = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml.cs");
+    Assert(adminWindow.Contains("OpenSsh_Click", StringComparison.Ordinal)
+           && adminWindow.Contains("_viewModel.LaunchSshAsync(device)", StringComparison.Ordinal),
+        "the Devices-page Open SSH button must invoke the selected-device launcher");
+
+    Assert(setup.Contains("RemoteAdministrationProtocol.GuardianWatchdogTaskName", StringComparison.Ordinal)
+           && setup.Contains("RemoteAdministrationProtocol.GuardianWatchdogArgument", StringComparison.Ordinal)
+           && setup.Contains("\"MINUTE\", \"/MO\", \"1\"", StringComparison.Ordinal)
+           && setup.Contains("RequireInstalledGuardianWatchdogCompatibilityAsync", StringComparison.Ordinal),
+        "fresh Setup must prove Guardian compatibility and install the minute watchdog before enrollment completes");
+    var setupWatchdogSettings = setup[setup.IndexOf("var watchdogSettings", StringComparison.Ordinal)..setup.IndexOf("var guardianTaskSettings", StringComparison.Ordinal)];
+    Assert(!setupWatchdogSettings.Contains("StartWhenAvailable", StringComparison.Ordinal),
+        "the recurring watchdog must not queue missed StartWhenAvailable runs");
+
+    var maintenance = ReadSource("src", "Taildesk.Setup", "MaintenanceBootstrapCoordinator.cs");
+    Assert(maintenance.Contains("Environment.ProcessPath", StringComparison.Ordinal)
+           && maintenance.Contains("VerifyAuthenticodeAsync(setupExecutable", StringComparison.Ordinal)
+           && maintenance.Contains("setupVersion.Equals", StringComparison.Ordinal),
+        "maintenance must pin its running Setup and bind it to the signed release version");
+    Assert(maintenance.Contains("MaintenanceExpectedTarget", StringComparison.Ordinal)
+           && maintenance.Contains("[\"status\", \"--json\"]", StringComparison.Ordinal)
+           && maintenance.Contains("Environment.SpecialFolder.ProgramFiles", StringComparison.Ordinal)
+           && maintenance.Contains("expected.TailnetDeviceId", StringComparison.Ordinal)
+           && maintenance.Contains("expected.TailscaleIp", StringComparison.Ordinal),
+        "maintenance must bind to the copied Tailnet node and exact Tailscale IPv4 before mutation");
+    Assert(maintenance.Contains("MaintenanceBootstrap = true", StringComparison.Ordinal)
+           && maintenance.Contains("UpdateJournalCoordination.AcquireAsync", StringComparison.Ordinal),
+        "legacy preflight bypass must be local-only and journal replacement must be coordinated");
+    Assert(maintenance.Contains("EnsureRecoveryLifelines(config.BindAddress)", StringComparison.Ordinal)
+           && maintenance.Contains("EnsureOpenSshServerCapabilityAsync", StringComparison.Ordinal),
+        "maintenance must establish recovery lifelines before activation");
+    Assert(maintenance.Contains("LoadOrCreateSidecarAsync", StringComparison.Ordinal)
+           && maintenance.Contains("RequireInstalledGuardianCompatibilityAsync", StringComparison.Ordinal)
+           && maintenance.Contains("Directory.EnumerateFiles(installedRoot", StringComparison.Ordinal)
+           && maintenance.Contains("declaration.Sha256", StringComparison.Ordinal)
+           && !maintenance.Contains("configStore.SaveAsync", StringComparison.Ordinal)
+           && !maintenance.Contains("SaveAsync(config", StringComparison.Ordinal),
+        "maintenance must use the protected update-health sidecar without rewriting agent.json");
+    Assert(maintenance.Contains("Guid.TryParseExact(operationText, \"N\"", StringComparison.Ordinal)
+           && maintenance.Contains("var operationId = _expectedTarget.OperationId", StringComparison.Ordinal),
+        "Setup must strictly parse and journal the exact command-center operation ID");
+    Assert(maintenance.Contains("Replacement Agent protected health sample", StringComparison.Ordinal)
+           && maintenance.Contains("ObserveCandidateAndWaitForExternalCommitAsync", StringComparison.Ordinal)
+           && !maintenance.Contains("UpdateJournalPersistence.RequestCommitAsync", StringComparison.Ordinal),
+        "Setup must keep three protected local samples but have no maintenance commit authority");
+    Assert(maintenance.Contains("RemoteAdministrationProtocol.GuardianWatchdogTaskName", StringComparison.Ordinal)
+           && maintenance.Contains("RemoteAdministrationProtocol.GuardianWatchdogArgument", StringComparison.Ordinal)
+           && maintenance.Contains("\"MINUTE\", \"/MO\", \"1\"", StringComparison.Ordinal),
+        "legacy maintenance must install the minute Guardian watchdog before writing ActivationScheduled");
+    var maintenanceWatchdogSettings = maintenance[maintenance.IndexOf("var watchdogSettings", StringComparison.Ordinal)..maintenance.IndexOf("var settingsCommand", StringComparison.Ordinal)];
+    Assert(!maintenanceWatchdogSettings.Contains("StartWhenAvailable", StringComparison.Ordinal),
+        "the maintenance watchdog must not queue missed StartWhenAvailable runs");
+
+    var bundleBuilder = ReadSource("fly-headscale", "scripts", "Build-OpticonBundles.ps1");
+    Assert(bundleBuilder.Contains("$setupPath", StringComparison.Ordinal)
+           && bundleBuilder.Contains("Get-Item -LiteralPath $setupPath", StringComparison.Ordinal),
+        "the signed inner release manifest must include the root Setup executable");
+    Assert(adminWindow.Contains("BuildMaintenanceBootstrapCommand(release, device, operationId)", StringComparison.Ordinal)
+           && adminWindow.Contains("release-manifest.json", StringComparison.Ordinal)
+           && adminWindow.Contains("RSASignaturePadding]::Pss", StringComparison.Ordinal)
+           && adminWindow.Contains("Signed Setup SHA-256 mismatch", StringComparison.Ordinal)
+           && adminWindow.Contains("InvitationSigning.CertificateThumbprint", StringComparison.Ordinal)
+           && adminWindow.Contains("--expected-tailnet-device-id=", StringComparison.Ordinal)
+           && adminWindow.Contains("--expected-tailscale-ip=", StringComparison.Ordinal)
+           && adminWindow.Contains("--operation-id=", StringComparison.Ordinal),
+        "copied maintenance must verify a pinned signed Setup declaration, selected Tailnet identity, and exact operation before UAC");
+    var signing = ReadSource("src", "Taildesk.Shared", "InvitationSigning.cs");
+    var authenticode = ReadSource("src", "Taildesk.Shared", "AuthenticodeFileVerifier.cs");
+    Assert(signing.Contains("AuthenticodeFileVerifier.VerifyPinned", StringComparison.Ordinal)
+           && authenticode.Contains("trustResult is not Success and not CertificateUntrustedRoot", StringComparison.Ordinal)
+           && authenticode.Contains("FixedTimeEquals(embedded.RawData, expectedSigner.RawData)", StringComparison.Ordinal),
+        "runtime Authenticode checks must accept only valid or exact pinned self-signed signatures and reject all other indeterminate results");
+    var flowStart = adminWindow.IndexOf("if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal);
+    var flowEnd = adminWindow.IndexOf("var explanation =", flowStart, StringComparison.Ordinal);
+    Assert(flowStart >= 0 && flowEnd > flowStart, "maintenance command-center flow was not found");
+    var maintenanceFlow = adminWindow[flowStart..flowEnd];
+    var clipboardIndex = maintenanceFlow.IndexOf("Clipboard.SetText(command)", StringComparison.Ordinal);
+    var confirmationIndex = maintenanceFlow.IndexOf("MessageBoxResult.Yes", StringComparison.Ordinal);
+    var snapshotIndex = maintenanceFlow.IndexOf("SnapshotMaintenanceSshAsync", StringComparison.Ordinal);
+    var remoteIndex = maintenanceFlow.IndexOf("LaunchRemoteControlAsync", StringComparison.Ordinal);
+    var observerIndex = maintenanceFlow.IndexOf("ObserveMaintenanceBootstrapAsync", StringComparison.Ordinal);
+    Assert(confirmationIndex >= 0 && confirmationIndex < clipboardIndex
+           && clipboardIndex < snapshotIndex && snapshotIndex < remoteIndex && remoteIndex < observerIndex,
+        "maintenance must confirm before copying, then snapshot SSH, launch RustDesk, and observe the exact operation");
+
+    var remoteUpdates = ReadSource("src", "Taildesk.Admin", "RemoteDeviceUpdateCoordinator.cs");
+    Assert(remoteUpdates.Contains("ObserveMaintenanceBootstrapAsync", StringComparison.Ordinal)
+           && remoteUpdates.Contains("DateTimeOffset.UtcNow.AddMinutes(30)", StringComparison.Ordinal)
+           && remoteUpdates.Contains("update?.OperationId != operationId", StringComparison.Ordinal)
+           && remoteUpdates.Contains("!update.MaintenanceBootstrap", StringComparison.Ordinal)
+           && remoteUpdates.Contains("CommitUpdateAsync(device, agentToken, operationId", StringComparison.Ordinal),
+        "the command center must bound discovery and commit only the exact maintenance operation");
+    Assert(remoteUpdates.Contains("status.Architecture, release.Architecture", StringComparison.Ordinal)
+           && remoteUpdates.Contains("status.UpdateProtocolVersion == RemoteAdministrationProtocol.UpdateVersion", StringComparison.Ordinal)
+           && remoteUpdates.Contains("status.TailscaleIp, device.TailscaleIp", StringComparison.Ordinal)
+           && remoteUpdates.Contains("status.TailnetDeviceId, device.TailnetDeviceId", StringComparison.Ordinal)
+           && remoteUpdates.Contains("Maintenance external health sample", StringComparison.Ordinal)
+           && remoteUpdates.Contains("RemoteAdministrationProtocol.SshPort", StringComparison.Ordinal),
+        "maintenance commit must require three exact authenticated external identity and recovery samples");
+
+    var updateHealthStore = ReadSource("src", "Taildesk.Shared", "UpdateHealthTokenStore.cs");
+    Assert(updateHealthStore.Contains("SecretScope.LocalMachine", StringComparison.Ordinal)
+           && updateHealthStore.Contains("File.Move(temporary, path, false)", StringComparison.Ordinal)
+           && updateHealthStore.IndexOf("configuredProtectedToken", StringComparison.Ordinal)
+              < updateHealthStore.IndexOf("LoadSidecar", StringComparison.Ordinal),
+        "update health resolution must prefer config and create a DPAPI LocalMachine write-once sidecar");
+
+    var guardian = ReadSource("src", "Taildesk.UpdateGuardian", "GuardianRunner.cs");
+    Assert(guardian.Contains("CommittedBootHealthWindow = TimeSpan.FromMinutes(6.5)", StringComparison.Ordinal)
+           && guardian.Contains("RollbackHealthWindow = TimeSpan.FromMinutes(6.5)", StringComparison.Ordinal)
+           && guardian.Contains("new LifelineSnapshot(journal.SshWasListening)", StringComparison.Ordinal),
+        "committed boot verification must outlast the Agent's five-minute Tailscale bind wait");
+    Assert(guardian.Contains("durable.OperationId != journal.OperationId", StringComparison.Ordinal),
+        "a stale Guardian can overwrite a newer durable transaction");
+    Assert(guardian.Contains("WaitForLegacyRollbackAsync", StringComparison.Ordinal)
+           && guardian.Contains("requiredHealthySamples = 3", StringComparison.Ordinal),
+        "maintenance rollback must accept a signed running legacy Agent without its unavailable health endpoint");
+    Assert(guardian.Contains("UpdatePhase.Downloading or UpdatePhase.Verifying", StringComparison.Ordinal),
+        "interrupted staging must fail durably without blocking later updates");
+    Assert(guardian.Contains("watchdogOnly ? TimeSpan.FromSeconds(3) : TimeSpan.FromMinutes(20)", StringComparison.Ordinal)
+           && guardian.Contains("journal.Phase is UpdatePhase.None", StringComparison.Ordinal)
+           && guardian.Contains("or UpdatePhase.Committed", StringComparison.Ordinal)
+           && guardian.Contains("or UpdatePhase.RolledBack", StringComparison.Ordinal)
+           && guardian.Contains("or UpdatePhase.Failed", StringComparison.Ordinal),
+        "the minute watchdog must use bounded contention and no-op for terminal/non-actionable phases");
+    var guardianProgram = ReadSource("src", "Taildesk.UpdateGuardian", "Program.cs");
+    Assert(guardianProgram.Contains("RemoteAdministrationProtocol.GuardianWatchdogArgument", StringComparison.Ordinal)
+           && guardianProgram.Contains("watchdogOnly ? TimeSpan.Zero : TimeSpan.FromMinutes(2)", StringComparison.Ordinal)
+           && guardianProgram.Contains("new GuardianRunner().RunAsync(watchdogOnly", StringComparison.Ordinal),
+        "full ONSTART mode must wait through a quick watchdog so boot health cannot be suppressed");
+
+    var updateManager = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");
+    Assert(updateManager.Contains("WaitForGuardianPickupAsync", StringComparison.Ordinal)
+           && updateManager.Contains("durable.GuardianClaimedAt is not null", StringComparison.Ordinal),
+        "Task Scheduler success must not be mistaken for Guardian transaction pickup");
+    Assert(updateManager.Contains("RunGuardianTaskForCommitAsync", StringComparison.Ordinal)
+           && updateManager.Contains("durable.OperationId != operationId", StringComparison.Ordinal)
+           && updateManager.Contains("UpdatePhase.Committed or UpdatePhase.RolledBack or UpdatePhase.Failed", StringComparison.Ordinal)
+           && !updateManager.Contains("allowAlreadyRunning", StringComparison.Ordinal),
+        "commit wakeup must require terminal evidence from the exact durable operation");
+    Assert(manager.Contains("SessionTerminationGeneration++", StringComparison.Ordinal)
+           && manager.Contains("terminateAuthenticatedSessions: true", StringComparison.Ordinal),
+        "revocation and expiry must durably request termination of already-authenticated SSH shells");
+
+    var agentProgram = ReadSource("src", "Taildesk.Agent", "Program.cs");
+    Assert(agentProgram.Split("remote?.AddressFamily != AddressFamily.InterNetwork", StringSplitOptions.None).Length == 3,
+        "internal-health and sensitive API authorization must reject mapped/native IPv6 identities");
+    Assert(agentProgram.Contains("var updateHealthToken", StringComparison.Ordinal)
+           && agentProgram.Contains("FixedTimeEquals(healthHeader, updateHealthToken)", StringComparison.Ordinal),
+        "Agent internal health must use the config-first sidecar-capable credential resolver");
+    Assert(agentProgram.Contains("RemoteAdministrationProtocol.IsTailscaleIpv4(coordinator.Host)", StringComparison.Ordinal),
+        "the configured coordinator authorization identity is not canonical Tailscale IPv4");
+    Assert(agentProgram.Contains("SystemRoot = grant.SystemRoot", StringComparison.Ordinal),
+        "the authenticated SSH grant must propagate the exact target SystemRoot for automation");
+    var guardianHealth = ReadSource("src", "Taildesk.UpdateGuardian", "InternalHealthClient.cs");
+    Assert(guardianHealth.Contains("UpdateHealthTokenStore.LoadFromAgentConfigFile()", StringComparison.Ordinal),
+        "Guardian internal health must use the same config-first sidecar fallback");
+
+    var adminToken = ReadSource("src", "Taildesk.UpdateGuardian", "SshAdminToken.cs");
+    Assert(adminToken.Contains("TokenElevationTypeLimited", StringComparison.Ordinal)
+           && adminToken.Contains("SecurityMandatoryHighRid", StringComparison.Ordinal)
+           && adminToken.Contains("BuiltinAdministratorsSid", StringComparison.Ordinal)
+           && adminToken.Contains("ScManagerCreateService", StringComparison.Ordinal)
+           && adminToken.Contains("LocalSystemSid", StringComparison.Ordinal),
+        "the SSH administrator proof must reject filtered/SYSTEM tokens and prove high-integrity SCM access");
+    var daemonUser = ReadSource("src", "Taildesk.UpdateGuardian", "SshDaemonUserContext.cs");
+    Assert(daemonUser.Contains("LogonFullAdministrator", StringComparison.Ordinal)
+           && daemonUser.Contains("CreateProcessAsUserW", StringComparison.Ordinal)
+           && daemonUser.Contains("ScopedProcessPrivilege.Enable(\"SeBackupPrivilege\")", StringComparison.Ordinal)
+           && daemonUser.Contains("ScopedProcessPrivilege.Enable(\"SeRestorePrivilege\")", StringComparison.Ordinal)
+           && daemonUser.Contains("ProfileUnloadAttempts", StringComparison.Ordinal),
+        "Guardian must create sshd with the full dedicated token and safely load/unload its profile");
+
+    var supervisor = ReadSource("src", "Taildesk.UpdateGuardian", "SshSupervisor.cs");
+    Assert(supervisor.Contains("JobObjectLimitKillOnJobClose", StringComparison.Ordinal)
+           && supervisor.Contains("CreateSuspended", StringComparison.Ordinal),
+        "stable guardian must own sshd and shells in a kill-on-close job");
+    Assert(supervisor.Contains("supervisor.lock", StringComparison.Ordinal)
+           && supervisor.Contains("state.lock", StringComparison.Ordinal),
+        "supervisor instance and scoped state locks must remain separate");
+    Assert(supervisor.Contains("sessionTerminationRequired", StringComparison.Ordinal)
+           && supervisor.Contains("state.SessionTerminationGeneration != _observedTerminationGeneration", StringComparison.Ordinal)
+           && supervisor.Contains("_observedActiveSessionIds.Except(activeSessionIds).Any()", StringComparison.Ordinal)
+           && supervisor.Contains("authorizationSetShrank", StringComparison.Ordinal)
+           && supervisor.Contains("await StopDaemonAsync()", StringComparison.Ordinal),
+        "the stable supervisor must restart its kill-on-close job whenever a lease is revoked or expires, even while the agent is offline");
+    Assert(supervisor.Contains("UtcDateTime:yyyyMMddHHmmss}Z", StringComparison.Ordinal),
+        "native authorized-key expiry must use an unambiguous UTC Z timestamp");
+    Assert(supervisor.Contains("TerminateJobObject", StringComparison.Ordinal)
+           && supervisor.Contains("QueryInformationJobObject", StringComparison.Ordinal)
+           && supervisor.Contains("RotateDaemonLogAsync", StringComparison.Ordinal)
+           && supervisor.Contains("MaximumArchivedLogBytes", StringComparison.Ordinal)
+           && supervisor.Contains("LogLevel INFO", StringComparison.Ordinal),
+        "Guardian teardown and SSH logging must remain bounded and fail-closed");
+
+    var app = ReadSource("src", "Taildesk.Admin", "App.xaml.cs");
+    var viewModel = ReadSource("src", "Taildesk.Admin", "MainViewModel.cs");
+    Assert(app.Contains("ShutdownSshSessionsAsync", StringComparison.Ordinal)
+           && viewModel.Contains("session.TerminateAsync", StringComparison.Ordinal)
+           && viewModel.Contains("RemoteRevocationError", StringComparison.Ordinal)
+           && viewModel.Contains("LocalCleanupError", StringComparison.Ordinal),
+        "Command Center shutdown must terminate SSH and report remote/local cleanup independently");
+
+    var buildScript = ReadSource("build.ps1");
+    var hostedBuild = ReadSource("fly-headscale", "scripts", "Build-OpticonBundles.ps1");
+    var installer = ReadSource("installer", "Install-CommandCenter.ps1");
+    Assert(buildScript.Contains("The Opticon solution build failed", StringComparison.Ordinal)
+           && buildScript.Contains("The Opticon self-tests failed", StringComparison.Ordinal)
+           && buildScript.Contains("must contain only the signed opticon.exe", StringComparison.Ordinal)
+           && buildScript.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal)
+           && hostedBuild.Contains("hosted CLI directory must contain only", StringComparison.Ordinal)
+           && hostedBuild.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal),
+        "release packaging must fail on native build/test errors and ship a single signed CLI app");
+    var sourceControllerUpdater = ReadSource("scripts", "Update-InstalledOpticon.ps1");
+    Assert(sourceControllerUpdater.Contains("Install-Opticon.ps1", StringComparison.Ordinal)
+           && sourceControllerUpdater.Contains("exclusive lock", StringComparison.Ordinal)
+           && !sourceControllerUpdater.Contains("Copy-Item (Join-Path $SourceDirectory '*')", StringComparison.Ordinal),
+        "source-triggered controller updates must use the transactional release installer instead of copying over the live UI");
+    const string packageBuildLock = ".opticon-package-build.lock";
+    const string acquirePackageBuildLock = "$packageBuildLock = Enter-OpticonPackageBuildLock";
+    Assert(buildScript.Contains(packageBuildLock, StringComparison.Ordinal)
+           && hostedBuild.Contains(packageBuildLock, StringComparison.Ordinal)
+           && buildScript.Contains("[IO.FileShare]::None", StringComparison.Ordinal)
+           && hostedBuild.Contains("[IO.FileShare]::None", StringComparison.Ordinal)
+           && buildScript.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < buildScript.IndexOf("dotnet build", StringComparison.Ordinal)
+           && hostedBuild.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < hostedBuild.IndexOf("dotnet publish", StringComparison.Ordinal)
+           && buildScript.LastIndexOf("$packageBuildLock.Dispose()", StringComparison.Ordinal) > buildScript.LastIndexOf("Compress-Archive", StringComparison.Ordinal)
+           && hostedBuild.LastIndexOf("$packageBuildLock.Dispose()", StringComparison.Ordinal) > hostedBuild.LastIndexOf("Compress-Archive", StringComparison.Ordinal),
+        "standalone and hosted packaging must share one exclusive lock across every build and publication mutation");
+    var cliPathIntegration = ReadSource("src", "Taildesk.Admin", "CliPathIntegration.cs");
+    var cliProgram = ReadSource("src", "Taildesk.Cli", "Program.cs");
+    const string ownershipMarker = ".opticon-controller-owned";
+    const string readyMarker = ".opticon-controller-ready";
+    const string installLock = ".controller-install.lock";
+
+    Assert(installer.Contains(ownershipMarker, StringComparison.Ordinal)
+           && setup.Contains(ownershipMarker, StringComparison.Ordinal)
+           && cliPathIntegration.Contains(ownershipMarker, StringComparison.Ordinal)
+           && cliProgram.Contains(ownershipMarker, StringComparison.Ordinal),
+        "installers, UI, and CLI must share the exact controller ownership marker");
+    Assert(installer.Contains(readyMarker, StringComparison.Ordinal)
+           && setup.Contains(readyMarker, StringComparison.Ordinal)
+           && cliPathIntegration.Contains(readyMarker, StringComparison.Ordinal)
+           && cliProgram.Contains(readyMarker, StringComparison.Ordinal)
+           && installer.Contains("ControllerReadyMarkerValue)|$version", StringComparison.Ordinal)
+           && setup.Contains("ControllerReadyMarkerValue}|{version}", StringComparison.Ordinal)
+           && cliPathIntegration.Contains("Assembly.GetExecutingAssembly().GetName().Version", StringComparison.Ordinal)
+           && cliProgram.Contains("Assembly.GetExecutingAssembly().GetName().Version", StringComparison.Ordinal),
+        "the durable commit marker must bind the on-disk UI/CLI version to the executing UI or CLI generation");
+
+    Assert(installer.Contains(installLock, StringComparison.Ordinal)
+           && setup.Contains(installLock, StringComparison.Ordinal)
+           && installer.Contains("[IO.FileShare]::None", StringComparison.Ordinal)
+           && setup.Contains("FileShare.None", StringComparison.Ordinal)
+           && cliPathIntegration.Contains("FileShare.Read", StringComparison.Ordinal)
+           && cliProgram.Contains("FileShare.Read", StringComparison.Ordinal),
+        "both installers must take the exclusive persistent lock while UI and CLI hold compatible lifetime reader leases");
+    Assert(installer.IndexOf("$installLock = Enter-ControllerInstallLock", StringComparison.Ordinal)
+               < installer.LastIndexOf("Ensure-OpenSshClientCapability", StringComparison.Ordinal)
+           && installer.LastIndexOf("$installLock.Dispose()", StringComparison.Ordinal)
+               > installer.IndexOf("Install-OpticonPayloadTransaction", StringComparison.Ordinal)
+           && setup.IndexOf("AcquireControllerInstallLockAsync", StringComparison.Ordinal)
+               < setup.IndexOf("CaptureControllerConfiguration", StringComparison.Ordinal),
+        "exclusive installation locking must cover prerequisite mutation, snapshot, swap, and post-commit configuration");
+
+    Assert(installer.Contains("Assert-InstallDestinationPreflight", StringComparison.Ordinal)
+           && installer.Contains("restricted to the canonical directory", StringComparison.Ordinal)
+           && installer.Contains("Assert-OwnedOpticonDirectory", StringComparison.Ordinal)
+           && setup.Contains("RequireOwnedControllerDirectoryAsync", StringComparison.Ordinal)
+           && setup.Contains("legacyExecutables", StringComparison.Ordinal)
+           && setup.Contains("contains a reparse point", StringComparison.Ordinal),
+        "destructive controller swaps must be canonical, ownership guarded, reparse safe, and verify every legacy executable");
+    Assert(installer.Contains("Restore-InterruptedOpticonInstall", StringComparison.Ordinal)
+           && installer.Contains("Assert-CommittedOrLegacyOpticonDirectory -Directory $backup", StringComparison.Ordinal)
+           && installer.Contains("Move-Item -LiteralPath $backup -Destination $destination", StringComparison.Ordinal)
+           && setup.Contains("RequireCommittedOrLegacyControllerDirectoryAsync(backup", StringComparison.Ordinal)
+           && setup.Contains("HasExactControllerReadyMarker(destination)", StringComparison.Ordinal)
+           && setup.Contains("Directory.Move(backup, destination)", StringComparison.Ordinal),
+        "recovery must validate/restore .previous and never discard it for an uncommitted live candidate");
+    Assert(installer.IndexOf("& $ConfigureActivatedPayload", StringComparison.Ordinal)
+               < installer.IndexOf("Write-ControllerReadyMarker -Directory $destination", StringComparison.Ordinal)
+           && setup.IndexOf("await configureActivatedPayload()", StringComparison.Ordinal)
+               < setup.IndexOf("WriteControllerReadyMarker(destination)", StringComparison.Ordinal)
+           && installer.Contains("Restore-ControllerConfigurationSnapshot", StringComparison.Ordinal)
+           && setup.Contains("RestoreControllerConfigurationAsync", StringComparison.Ordinal),
+        "ready is written last and a post-swap configuration failure must roll back payload and restorable configuration");
+
+    Assert(installer.Contains("@($destination, $backup)", StringComparison.Ordinal)
+           && setup.Contains("RequireInstalledControllerProcessesClosed(destination, backup)", StringComparison.Ordinal)
+           && cliPathIntegration.IndexOf("await AcquireControllerLifetimeLeaseAsync", StringComparison.Ordinal)
+               < cliPathIntegration.IndexOf("if (runningRetainedInstall)", StringComparison.Ordinal)
+           && cliProgram.IndexOf("var lease = new FileStream", StringComparison.Ordinal)
+               < cliProgram.IndexOf("if (!await HasExactControllerMarkersAsync", StringComparison.Ordinal),
+        "live and .previous UI/CLI generations must be checked under the shared/exclusive lease before use or deletion");
+
+    Assert(cliPathIntegration.Contains("recordedDirectory.Equals(defaultInstalledDirectory", StringComparison.Ordinal)
+           && cliPathIntegration.Contains("previous = null; // Never remove an unverified", StringComparison.Ordinal)
+           && setup.Contains("previous = null; // Never remove an unverified", StringComparison.Ordinal)
+           && installer.Contains("Test-TrustedRecordedOpticonCliPath", StringComparison.Ordinal)
+           && installer.Contains("CanonicalControllerInstallDirectory", StringComparison.Ordinal)
+           && cliPathIntegration.Contains("if (uiVersion != cliVersion)", StringComparison.Ordinal)
+           && setup.Contains("if (uiVersion != cliVersion)", StringComparison.Ordinal)
+           && installer.Contains("Assert-MatchingOpticonUiCliVersion", StringComparison.Ordinal),
+        "PATH repair must use only the canonical recorded install and exact matching UI/CLI versions");
 }
 
 static string NormalizeTargetType(string value) => value.Replace("{x:Type ", string.Empty, StringComparison.Ordinal).Replace("}", string.Empty, StringComparison.Ordinal).Trim();

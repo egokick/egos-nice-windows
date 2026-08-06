@@ -2,29 +2,25 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$SourceDirectory,
-    [string]$InstallDirectory = "$env:ProgramFiles\Taildesk\Admin",
-    [string]$ControllerIPv4 = '213.188.217.227',
-    [string]$CoordinatorIPv4 = '100.64.0.1'
+    [string]$InstallDirectory = "$env:ProgramFiles\Taildesk\Admin"
 )
 
 $ErrorActionPreference = 'Stop'
-$sourceExecutable = Join-Path $SourceDirectory 'Opticon.exe'
-if (-not (Test-Path -LiteralPath $sourceExecutable)) { throw "Opticon.exe was not found in $SourceDirectory" }
-$signature = Get-AuthenticodeSignature -LiteralPath $sourceExecutable
-if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or $signature.Status -in @('NotSigned','HashMismatch')) {
-    throw 'The staged Opticon executable does not have the pinned publisher signature.'
+$source = [IO.Path]::GetFullPath($SourceDirectory).TrimEnd('\')
+$releaseRoot = [IO.Path]::GetDirectoryName($source)
+if ([string]::IsNullOrWhiteSpace($releaseRoot)) {
+    throw 'The staged Opticon source directory has no release root.'
+}
+$expectedSource = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'App')).TrimEnd('\')
+if (-not $source.Equals($expectedSource, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Refusing a controller update from a source outside an extracted Opticon release App directory.'
 }
 
-Get-Process 'Opticon','Taildesk.Admin' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-New-Item -Path $InstallDirectory -ItemType Directory -Force | Out-Null
-Copy-Item (Join-Path $SourceDirectory '*') $InstallDirectory -Recurse -Force
-
-foreach ($ruleName in @('Opticon Coordinator (Tailscale only)','Taildesk Coordinator (Tailscale only)')) {
-    & netsh.exe advfirewall firewall delete rule "name=$ruleName" | Out-Null
+# Do not copy over a live controller. The adjacent release installer owns the
+# exclusive lock, validates the signed payload, preserves .previous, updates
+# shortcuts/PATH, and writes the durable readiness marker after configuration.
+$transactionalInstaller = Join-Path $releaseRoot 'Install-Opticon.ps1'
+if (-not (Test-Path -LiteralPath $transactionalInstaller -PathType Leaf)) {
+    throw 'The extracted Opticon release has no transactional Install-Opticon.ps1. Rebuild the command center package before repairing it.'
 }
-& netsh.exe advfirewall firewall add rule 'name=Opticon Coordinator (Tailscale only)' 'dir=in' 'action=allow' 'protocol=TCP' 'localport=45830' "localip=$CoordinatorIPv4" 'remoteip=100.64.0.0/10' 'profile=any' 'enable=yes' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Windows could not create the Opticon coordinator firewall rule.' }
-
-$routeInstaller = Join-Path $PSScriptRoot 'Install-TaildeskFlyRouteTask.ps1'
-& $routeInstaller -ControllerIPv4 $ControllerIPv4 | Out-Null
-Write-Host 'Opticon application update completed.' -ForegroundColor Green
+& $transactionalInstaller -InstallDirectory $InstallDirectory -ControllerOnlyRepair

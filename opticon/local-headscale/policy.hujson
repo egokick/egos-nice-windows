@@ -12,6 +12,11 @@
       "ip": ["tcp:45831", "tcp:21118"]
     },
     {
+      "src": ["tag:taildesk-hub"],
+      "dst": ["tag:taildesk-managed", "tag:taildesk-controller", "tag:taildesk-hub"],
+      "ip": ["tcp:45832"]
+    },
+    {
       "src": ["tag:taildesk-managed", "tag:taildesk-controller"],
       "dst": ["tag:taildesk-hub"],
       "ip": ["tcp:45830"]

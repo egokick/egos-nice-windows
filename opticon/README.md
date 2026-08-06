@@ -13,6 +13,7 @@ The design is intended for a small trusted fleet where the operator wants direct
 | **Opticon** | Signed-in primary Windows user | WPF UI, device inventory, invitations, role changes, revocation, transfers, one-click private remote sessions, and exit-node controls |
 | **Coordinator** | Inside the Opticon tray process on `100.64.0.1:45830` | Accepts invitation enrollment, retains the local device registry, and synchronizes controller credentials |
 | **Agent** | SYSTEM scheduled task on each managed PC, TCP `45831` | Restricted file/media API, inventory, enrollment completion, and credential rotation |
+| **Stable Guardian** | SYSTEM scheduled tasks outside the versioned Agent directory | Guards transactional Agent swaps and independently owns isolated just-in-time SSH on target Tailscale TCP `45832` |
 | **Tailscale client** | Windows service on every PC | WireGuard data plane and stable `100.64.0.0/10` addressing, pointed at the private Headscale server |
 | **RustDesk engine** | Hidden Windows service on managed PCs; on-demand viewer on controllers | Desktop capture/input over direct IP at the peer's Tailscale address; no RustDesk ID, API, rendezvous, or relay service is used |
 | **Fly Headscale service** | Always-on Fly Machine | Mesh identity/control plane, embedded DERP relay, and STUN; it does not run Opticon commands |
@@ -42,6 +43,14 @@ On this command-center laptop, the RustDesk host service is disabled and there i
 
 On managed PCs, the RustDesk Windows service must run so unattended sessions and the Windows login screen can be captured. Its tray is hidden; public rendezvous, relay, discovery, update, and hole-punching features are disabled. Windows Firewall permits RustDesk traffic only to Tailscale IPv4 addresses and blocks all external IPv4 and IPv6 destinations. There is no RustDesk server account and no RustDesk-hosted control plane. RustDesk direct-IP framing is carried inside the encrypted Tailscale/WireGuard tunnel; when peers cannot communicate directly, the private DERP service on the operator-controlled Fly app relays that encrypted tunnel.
 
+## Remote maintenance and guarded updates
+
+Opticon protects three recovery lifelines on each managed PC: Tailscale reachability, RustDesk direct remote desktop, and just-in-time administrative SSH. **Open SSH** creates an ephemeral, host-key-pinned lease on TCP `45832`, bound to the target's Tailscale IPv4 address. Headscale policy and Windows Firewall admit only the primary hub's exact Tailscale address; the stable SYSTEM Guardian owns the isolated `sshd` process and expires access independently of the versioned Agent.
+
+**Update Opticon** installs only a signed, role- and architecture-matched Agent/runtime payload on the target. It does not run Setup remotely or replace the stable Guardian, Tailscale, RustDesk, Windows OpenSSH, device identity, credentials, tags, routes, or policy. The Guardian keeps the installed Agent as last-known-good, activates the candidate, and commits it only after repeated authenticated health checks confirm all applicable lifelines. A crash, reboot, lost lifeline, or missed commit rolls back to last-known-good.
+
+Devices enrolled before this maintenance architecture need one signed, attended bootstrap through their existing RustDesk session to install the stable Guardian, OpenSSH containment, and update protocol. Later Agent/runtime releases use the guarded path. Opticon exposes no arbitrary remote-execution Agent API; agents and scripts use the same just-in-time administrative SSH lease through the installed `opticon` CLI. See [`docs/REMOTE-ADMINISTRATION.md`](docs/REMOTE-ADMINISTRATION.md) for exact commands, lease behavior, and rollout details.
+
 ## Authorization and local state
 
 Headscale tags separate managed-only devices, controllers, and the primary hub. The server policy limits which tagged nodes may reach agent/coordinator ports. Opticon adds per-device bearer tokens and RustDesk passwords as an application-layer boundary; those secrets are encrypted locally with Windows DPAPI.
@@ -56,7 +65,7 @@ Important compatibility locations:
 - Fly roaming task on this laptop: `Taildesk Fly Route`
 
 The Fly route task updates only `213.188.217.227/32` through the active physical gateway at startup, sign-in, and every five minutes. This preserves control-plane reachability alongside NordVPN while leaving all other traffic on the normal VPN/default route.
-On this command-center laptop, NordVPN split tunneling is set to **exclude from VPN** only the three Tailscale executables, `Opticon.exe`, and the pinned `rustdesk.exe`. This lets private mesh traffic coexist with NordVPN; RustDesk remains firewall-restricted to Tailscale IPv4, and the Opticon system checks detect drift in this exact set and the NordLynx default route.
+On this command-center laptop, NordVPN split tunneling is set to **exclude from VPN** only the three Tailscale executables, the Opticon UI and CLI (`Opticon.exe` and `Admin\Cli\opticon.exe`), the exact Windows OpenSSH client at `%WINDIR%\System32\OpenSSH\ssh.exe`, and the pinned `rustdesk.exe`. This lets private mesh traffic coexist with NordVPN; RustDesk remains firewall-restricted to Tailscale IPv4, and the Opticon system checks detect drift in this exact set and the NordLynx default route.
 
 
 The **System checks** page is the operational drift guard. It runs automatically after Opticon starts and can be rerun from the sidebar. It validates command-center identity and tags, DPAPI and certificate availability, signed control-plane administration, internet/Fly reachability, DNS and the dedicated route, the protected route task and pinned helper, exact dependency versions and Fly artifacts, coordinator/firewall isolation, RustDesk's controller-only posture, and installed shortcuts. It reports failures without displaying saved credentials.

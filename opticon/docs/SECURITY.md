@@ -4,7 +4,7 @@
 
 - The primary laptop and Tailscale control plane decide role/tag membership.
 - Taildesk's bearer token is a second application-layer check, not a replacement for Tailscale grants.
-- Managed-only machines receive no source grant to Agent or RustDesk ports. They can reach the hub's coordinator port only so a one-time invite can enroll; registry sync separately requires a valid controller token and a current controller role.
+- Managed-only machines receive no source grant to Agent, RustDesk, or SSH ports. They can reach the hub's coordinator port only so a one-time invite can enroll; registry sync separately requires a valid controller token and a current controller role.
 - Nothing listens on a public or LAN IP by design. Do not add router port forwarding.
 
 ## File API controls
@@ -34,11 +34,30 @@
 - Direct-IP access is enabled on managed devices at port 21118; LAN discovery, public rendezvous/relay, automatic updates, UDP/IPv6 punching, and remote configuration changes are disabled.
 - RustDesk's whitelist is restricted to `100.64.0.0/10`; Tailscale grants provide the actual controller/managed authorization.
 - Windows Firewall allows the direct port only at the target's Tailscale local IP and only from the Tailscale address range. Outbound RustDesk traffic to every non-Tailscale IPv4 destination and all IPv6 destinations is blocked.
+- Managed targets permit RustDesk's Windows privacy mode. Each command center stores a per-device preference and configures that peer to use Mode 2's virtual display before connecting; disabling the preference restores ordinary physical-display mirroring for that peer.
 - Opticon launches RustDesk against the selected Tailscale IP and fills its password control through Windows UI Automation. The password is not placed in process arguments or on the clipboard during the normal workflow; manual clipboard copy remains a labeled recovery action.
+
+## Administrative SSH controls
+
+- Just-in-time SSH listens only on the target's Tailscale IPv4 address at TCP `45832`. Headscale grants admit only `tag:taildesk-hub` and Windows Firewall narrows that further to the configured primary hub's exact Tailscale address.
+- The authenticated Agent endpoint records bounded leases and revocation tombstones; the stable, signed SYSTEM Guardian lives outside the swappable Agent directory and independently owns the isolated `sshd` process.
+- Every session uses a new Ed25519 key, a pinned per-target host key, source and UTC expiry restrictions, disabled password/keyboard-interactive authentication, and disabled forwarding. The dedicated administrator account is disabled when no lease is active.
+- The Guardian refreshes authorized keys every five seconds and contains `sshd` plus authenticated children in a kill-on-close Job Object. Revoking or expiring any lease advances a protected termination generation and restarts that job, closing already-authenticated shells even when another lease remains; clients with a still-valid lease may reconnect. Invalid state or lock timeout fails closed. Process loss or reboot kills the contained process tree; the startup task reopens access only if a protected, nonexpired lease still validates.
+- No Agent endpoint accepts a command, script, executable path, or shell fragment. Administrative commands occur only inside the operator-opened, host-key-pinned SSH session.
+
+## Remote update controls
+
+- Normal remote updates contain only the signed target Agent/runtime payload. They never run Setup remotely or replace the stable Guardian, Tailscale, RustDesk, Windows OpenSSH, identity, credentials, tags, routes, or policy.
+- The update verifier enforces the signed release's minimum Guardian version. The stable Guardian verifies its own signature, the exact Agent task and paths, the signed candidate, rollback capacity, and the three recovery lifelines: Tailscale reachability, RustDesk, and SSH when active.
+- A distinct signed SYSTEM watchdog checks nonterminal durable transactions every minute and closes a producer-crash gap before explicit Guardian startup. It never handles terminal boot health, uses a three-second transaction-lock attempt, and cannot suppress the full ONSTART Guardian because full mode waits through a quick watchdog.
+- Activation durably journals each phase, retains the installed Agent as last-known-good, and requires repeated local plus command-center health before an idempotent commit. Crash, reboot, sustained health loss, or a missed commit deadline restores last-known-good.
+- Legacy maintenance verifies the RSA-PSS-signed inner manifest and its exact root Setup size, SHA-256, and publisher declaration before UAC; elevated Setup re-verifies the same declaration and a pinned Authenticode signature. Setup has no commit authority: only the originating command center may commit after three exact authenticated external samples tied to the copied operation, release, device identity, RustDesk, and any active SSH lifeline.
+- Devices that predate this design require one signed, attended maintenance bootstrap through their existing RustDesk session. Stable-Guardian maintenance remains a separate attended operation; it is never smuggled into an Agent update.
 
 ## Remaining risks
 
 - A local administrator on any PC can replace binaries, read machine-level secrets, or install another remote-control product. Taildesk does not defend a machine against its own local administrators.
+- An authorized Opticon SSH shell is deliberately a full elevated local-administrator session and can create persistent machine changes. Ephemeral keys, source-IP policy, attestation, revocation, and lease expiry limit access credentials and exposure time; they cannot contain commands already authorized to run as administrator. Grant CLI/UI access only to trusted operators and agents.
 - The main build artifacts are not publisher-trusted until you apply an organization code-signing certificate. Personalized invitation EXEs are Authenticode-signed with the locally controlled pinned invitation certificate and carry a separately verified signed payload.
 - Registry sync never contains permanent agent/RustDesk credentials. A secondary controller can request credentials only for one device at a time after controller-token plus Tailscale source-IP authentication and an explicit `AuthorizedControllerIds` grant on that target. Revoking the grant or controller tag stops future retrieval/reachability.
 - The coordinator uses HTTP inside the already encrypted Tailscale tunnel. Its bind address and firewall rule must remain Tailscale-only.
@@ -51,9 +70,9 @@
 
 1. Build on a clean, patched Windows runner.
 2. Run `Taildesk.SelfTest` and test real Windows Home targets.
-3. Sign Admin, Agent, and Setup with Authenticode; timestamp signatures.
+3. Sign Admin, Agent, Setup, and the stable Guardian with Authenticode; timestamp signatures.
 4. Scan all published binaries.
 5. Confirm the tailnet policy tests pass and no allow-all ACL/grant remains.
-6. Verify LAN IPs do not expose ports 45830, 45831, or 21118.
-7. Test reboot/logoff, upload cancellation, expired/canceled invite races, role demotion, device removal, and offline credential/shortcut synchronization.
+6. Verify LAN IPs do not expose ports 45830, 45831, 45832, or 21118; verify TCP 45832 accepts only the exact primary hub over Tailscale.
+7. Test SSH expiry/revocation and supervisor termination, forced update rollback, durable commit, reboot/logoff, upload cancellation, expired/canceled invite races, role demotion, device removal, and offline credential/shortcut synchronization.
 8. From a standard-user desktop, install with different administrator credentials at UAC; verify the shortcut, startup entry, Admin data, and Tailscale operator all belong to the original interactive user.

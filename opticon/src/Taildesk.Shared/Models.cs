@@ -40,7 +40,9 @@ public sealed class DeviceRecord
     public string DnsName { get; set; } = string.Empty;
     public string TailscaleIp { get; set; } = string.Empty;
     public string OperatingSystem { get; set; } = string.Empty;
+    public string Architecture { get; set; } = string.Empty;
     public string AgentVersion { get; set; } = string.Empty;
+    public int UpdateProtocolVersion { get; set; }
     public string AgentTokenProtected { get; set; } = string.Empty;
     public string RustDeskPasswordProtected { get; set; } = string.Empty;
     public string ControllerTokenProtected { get; set; } = string.Empty;
@@ -48,12 +50,19 @@ public sealed class DeviceRecord
     public DeviceConnectionState State { get; set; }
     public bool AdvertisesExitNode { get; set; }
     public bool ExitNodeApproved { get; set; }
+    public bool RustDeskReady { get; set; }
+    public bool SshReady { get; set; }
+    public int SshPort { get; set; } = RemoteAdministrationProtocol.SshPort;
+    public UpdateStatusDto? UpdateStatus { get; set; }
     public DateTimeOffset? LastSeen { get; set; }
     public DateTimeOffset EnrolledAt { get; set; } = DateTimeOffset.UtcNow;
     public string Notes { get; set; } = string.Empty;
     public bool PendingCredentialRotation { get; set; }
     public bool PendingRoleSync { get; set; }
     public List<Guid> AuthorizedControllerIds { get; set; } = [];
+
+    [JsonIgnore]
+    public bool PrivacyMode2Enabled { get; set; } = true;
 }
 
 public sealed class InviteRecord
@@ -136,15 +145,21 @@ public sealed class DeviceStatusDto
 {
     public string HostName { get; set; } = string.Empty;
     public string OperatingSystem { get; set; } = string.Empty;
+    public string Architecture { get; set; } = string.Empty;
     public string AgentVersion { get; set; } = string.Empty;
+    public int UpdateProtocolVersion { get; set; }
     public string TailscaleIp { get; set; } = string.Empty;
     public string TailnetDeviceId { get; set; } = string.Empty;
     public bool RustDeskRunning { get; set; }
+    public bool RustDeskReady { get; set; }
+    public bool SshReady { get; set; }
+    public int SshPort { get; set; } = RemoteAdministrationProtocol.SshPort;
     public bool AdvertisesExitNode { get; set; }
     public long FreeDiskBytes { get; set; }
     public long TotalDiskBytes { get; set; }
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset ServerTime { get; set; }
+    public UpdateStatusDto? UpdateStatus { get; set; }
 }
 
 public sealed class RootDto

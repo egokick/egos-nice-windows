@@ -93,7 +93,7 @@ func main() {
 		publicOrigin: "https://" + appName + ".fly.dev", nonces: make(map[string]time.Time)}
 	if err := os.MkdirAll(g.inviteDir, 0700); err != nil { log.Fatal(err) }
 	if err := os.MkdirAll(g.bundleDir, 0700); err != nil { log.Fatal(err) }
-	if err := migrateBundleUploads("/var/lib/headscale", g.bundleDir); err != nil { log.Fatal(err) }
+	if err := migrateBundleUploads("/var/lib/headscale", g.artifactDir, g.bundleDir); err != nil { log.Fatal(err) }
 	if err := g.pruneUndeclaredBundles(); err != nil { log.Fatal(err) }
 
 	server := &http.Server{Addr: "0.0.0.0:8080", Handler: g, ReadHeaderTimeout: 10 * time.Second,
@@ -139,10 +139,15 @@ func (g *gateway) artifact(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
 	name := strings.TrimPrefix(r.URL.Path, artifactPrefix)
 	if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) { http.NotFound(w, r); return }
+	if name == "manifest.json" {
+		g.publicArtifactManifest(w, r)
+		return
+	}
 	path := filepath.Join(g.artifactDir, name)
 	isBundle := strings.HasPrefix(name, "opticon-bundle-")
 	var expected bundleArtifact
 	if isBundle {
+		if !safeBundleFilePattern.MatchString(name) { http.NotFound(w, r); return }
 		var err error
 		expected, err = g.bundleByFile(name)
 		if err != nil { http.NotFound(w, r); return }
@@ -165,6 +170,7 @@ func (g *gateway) artifact(w http.ResponseWriter, r *http.Request) {
 var inviteTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{24,128}$`)
 var inviteHashPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var safeFilePartPattern = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+var safeBundleFilePattern = regexp.MustCompile(`^opticon-bundle-[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.zip$`)
 
 type hostedInvite struct {
 	DeviceName string `json:"deviceName"`
@@ -174,16 +180,75 @@ type hostedInvite struct {
 }
 
 type artifactManifest struct {
+	SchemaVersion int `json:"schemaVersion"`
 	Artifacts []bundleArtifact `json:"artifacts"`
 }
 
 type bundleArtifact struct {
 	Product string `json:"product"`
-	Role string `json:"role"`
+	Version string `json:"version"`
+	Role string `json:"role,omitempty"`
 	Architecture string `json:"architecture"`
 	File string `json:"file"`
 	Size int64 `json:"size"`
 	SHA256 string `json:"sha256"`
+	SignerThumbprint string `json:"signerThumbprint,omitempty"`
+}
+
+func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request) {
+	manifest, err := g.readArtifactManifest()
+	if err != nil { http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable); return }
+	available := make([]bundleArtifact, 0, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Product != "OpticonBundle" || g.bundleIsFinalized(artifact) {
+			available = append(available, artifact)
+		}
+	}
+	manifest.Artifacts = available
+	encoded, err := json.Marshal(manifest)
+	if err != nil { http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable); return }
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
+	w.Header().Set("Content-Disposition", `attachment; filename="manifest.json"`)
+	if r.Method == http.MethodHead { w.WriteHeader(http.StatusOK); return }
+	_, _ = w.Write(encoded)
+}
+
+func (g *gateway) readArtifactManifest() (artifactManifest, error) {
+	data, err := os.ReadFile(filepath.Join(g.artifactDir, "manifest.json"))
+	if err != nil { return artifactManifest{}, err }
+	var manifest artifactManifest
+	if err := json.Unmarshal(data, &manifest); err != nil { return artifactManifest{}, err }
+	if manifest.SchemaVersion != 1 { return artifactManifest{}, errors.New("release manifest schema is unsupported") }
+	seenBundleFiles := make(map[string]struct{})
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Product != "OpticonBundle" { continue }
+		key := strings.ToLower(artifact.File)
+		if _, duplicate := seenBundleFiles[key]; duplicate {
+			return artifactManifest{}, errors.New("release manifest contains a duplicate Opticon bundle filename")
+		}
+		seenBundleFiles[key] = struct{}{}
+	}
+	return manifest, nil
+}
+
+func validBundleArtifact(artifact bundleArtifact) bool {
+	if artifact.Product != "OpticonBundle" || !safeBundleFilePattern.MatchString(artifact.File) ||
+		artifact.Size <= 0 || !inviteHashPattern.MatchString(strings.ToLower(artifact.SHA256)) ||
+		(artifact.Role != "ManagedOnly" && artifact.Role != "ControllerAndManaged") ||
+		(artifact.Architecture != "x64" && artifact.Architecture != "arm64") {
+		return false
+	}
+	version, valid := parseSemanticVersion(artifact.Version)
+	return valid && version.core[0] != "0" && !strings.ContainsAny(artifact.Version, "-+")
+}
+
+func (g *gateway) bundleIsFinalized(artifact bundleArtifact) bool {
+	if !validBundleArtifact(artifact) { return false }
+	info, err := os.Lstat(filepath.Join(g.bundleDir, artifact.File))
+	return err == nil && info.Mode().IsRegular() && info.Size() == artifact.Size
 }
 
 func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +289,7 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 func (g *gateway) bundleAdmin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut && r.Method != http.MethodDelete { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
 	name := strings.TrimPrefix(r.URL.Path, bundleAdminPrefix)
-	if filepath.Base(name) != name || !strings.HasPrefix(name, "opticon-bundle-") || !strings.HasSuffix(name, ".zip") { http.NotFound(w, r); return }
+	if filepath.Base(name) != name || !safeBundleFilePattern.MatchString(name) { http.NotFound(w, r); return }
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBundleChunk))
 	if err != nil { http.Error(w, "invalid chunk", http.StatusBadRequest); return }
 	if !g.authenticate(r, body, time.Now()) { http.Error(w, "unauthorized", http.StatusUnauthorized); return }
@@ -324,35 +389,42 @@ func (g *gateway) readHostedInvite(publicID string) (hostedInvite, string, error
 }
 
 func (g *gateway) bundleForRole(role string) (bundleArtifact, error) {
-	data, err := os.ReadFile(filepath.Join(g.artifactDir, "manifest.json"))
+	manifest, err := g.readArtifactManifest()
 	if err != nil { return bundleArtifact{}, err }
-	var manifest artifactManifest
-	if err := json.Unmarshal(data, &manifest); err != nil { return bundleArtifact{}, err }
+	var selected bundleArtifact
+	found := false
 	for _, artifact := range manifest.Artifacts {
-		if artifact.Product == "OpticonBundle" && artifact.Role == role && artifact.Architecture == "x64" &&
-			filepath.Base(artifact.File) == artifact.File && artifact.Size > 0 && inviteHashPattern.MatchString(strings.ToLower(artifact.SHA256)) {
-			return artifact, nil
+		if validBundleArtifact(artifact) && artifact.Role == role && artifact.Architecture == "x64" && g.bundleIsFinalized(artifact) {
+			if !found {
+				selected = artifact
+				found = true
+				continue
+			}
+			comparison, _ := compareSemanticVersions(artifact.Version, selected.Version)
+			if comparison > 0 {
+				selected = artifact
+			} else if comparison == 0 {
+				return bundleArtifact{}, errors.New("role bundle manifest contains ambiguous precedence-equivalent releases")
+			}
 		}
 	}
+	if found { return selected, nil }
 	return bundleArtifact{}, errors.New("role bundle is not published")
 }
 
 func (g *gateway) bundleByFile(name string) (bundleArtifact, error) {
-	data, err := os.ReadFile(filepath.Join(g.artifactDir, "manifest.json"))
+	if !safeBundleFilePattern.MatchString(name) { return bundleArtifact{}, errors.New("bundle filename is invalid") }
+	manifest, err := g.readArtifactManifest()
 	if err != nil { return bundleArtifact{}, err }
-	var manifest artifactManifest
-	if err := json.Unmarshal(data, &manifest); err != nil { return bundleArtifact{}, err }
 	for _, artifact := range manifest.Artifacts {
-		if artifact.Product == "OpticonBundle" && artifact.File == name && artifact.Size > 0 && inviteHashPattern.MatchString(strings.ToLower(artifact.SHA256)) { return artifact, nil }
+		if validBundleArtifact(artifact) && artifact.File == name { return artifact, nil }
 	}
 	return bundleArtifact{}, errors.New("bundle is not declared")
 }
 
 func (g *gateway) pruneUndeclaredBundles() error {
-	data, err := os.ReadFile(filepath.Join(g.artifactDir, "manifest.json"))
+	manifest, err := g.readArtifactManifest()
 	if err != nil { return err }
-	var manifest artifactManifest
-	if err := json.Unmarshal(data, &manifest); err != nil { return err }
 	declared := make(map[string]struct{})
 	for _, artifact := range manifest.Artifacts {
 		if artifact.Product == "OpticonBundle" && filepath.Base(artifact.File) == artifact.File {
@@ -398,12 +470,16 @@ del "%~f0"
 `
 	replacer := strings.NewReplacer(
 		"__PUBLIC_ID__", publicID[:12],
-		"__INVITE_URL__", origin+invitePublicPrefix+publicID+"/invite.tdinvite",
-		"__BUNDLE_URL__", origin+artifactPrefix+bundle.File,
+		"__INVITE_URL__", powerShellSingleQuoted(origin+invitePublicPrefix+url.PathEscape(publicID)+"/invite.tdinvite"),
+		"__BUNDLE_URL__", powerShellSingleQuoted(origin+artifactPrefix+url.PathEscape(bundle.File)),
 		"__BUNDLE_SIZE__", strconv.FormatInt(bundle.Size, 10),
 		"__BUNDLE_HASH__", strings.ToLower(bundle.SHA256),
 	)
 	return replacer.Replace(template)
+}
+
+func powerShellSingleQuoted(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
 }
 func (g *gateway) admin(w http.ResponseWriter, r *http.Request) {
 	if !isAllowedAdminRoute(r.Method, strings.TrimPrefix(r.URL.Path, adminPrefix)) { http.NotFound(w, r); return }
@@ -450,16 +526,44 @@ func (g *gateway) authenticate(r *http.Request, body []byte, now time.Time) bool
 
 func abs(value int64) int64 { if value < 0 { return -value }; return value }
 
-func migrateBundleUploads(stagingDir, bundleDir string) error {
+func migrateBundleUploads(stagingDir, artifactDir, bundleDir string) error {
+	g := &gateway{artifactDir: artifactDir, bundleDir: bundleDir}
+	if _, err := g.readArtifactManifest(); err != nil { return err }
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil { return err }
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "opticon-bundle-") || !strings.HasSuffix(entry.Name(), ".zip.upload") { continue }
 		finalName := strings.TrimSuffix(entry.Name(), ".upload")
-		if filepath.Base(finalName) != finalName { continue }
-		if err := os.Rename(filepath.Join(stagingDir, entry.Name()), filepath.Join(bundleDir, finalName)); err != nil { return err }
+		source := filepath.Join(stagingDir, entry.Name())
+		expected, declarationErr := g.bundleByFile(finalName)
+		if declarationErr != nil {
+			if err := removeIfExists(source); err != nil { return err }
+			continue
+		}
+		matches, verifyErr := bundleFileMatches(source, expected)
+		if verifyErr != nil { return verifyErr }
+		if !matches {
+			if err := removeIfExists(source); err != nil { return err }
+			continue
+		}
+		if err := os.Chmod(source, 0444); err != nil { return err }
+		if err := os.Rename(source, filepath.Join(bundleDir, finalName)); err != nil { return err }
 	}
 	return nil
+}
+
+func bundleFileMatches(path string, expected bundleArtifact) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil { return false, err }
+	if !info.Mode().IsRegular() || info.Size() != expected.Size { return false, nil }
+	file, err := os.Open(path)
+	if err != nil { return false, err }
+	hasher := sha256.New()
+	_, hashErr := io.Copy(hasher, file)
+	closeErr := file.Close()
+	if hashErr != nil { return false, hashErr }
+	if closeErr != nil { return false, closeErr }
+	return strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), expected.SHA256), nil
 }
 func fixPermissions(root string, uid, gid int) error {
 	if os.Geteuid() != 0 { return errors.New("fix-permissions must run as root") }

@@ -13,12 +13,37 @@ $stage = Join-Path $artifacts "Opticon-CommandCenter-$Runtime"
 $dist = Join-Path $repo 'dist'
 $selfContained = if ($FrameworkDependent) { 'false' } else { 'true' }
 
+function Enter-OpticonPackageBuildLock {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [TimeSpan]$Timeout = [TimeSpan]::FromMinutes(30)
+    )
+
+    $null = [IO.Directory]::CreateDirectory((Split-Path $Path -Parent))
+    $deadline = [DateTime]::UtcNow.Add($Timeout)
+    while ($true) {
+        try {
+            return [IO.File]::Open($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Timed out waiting for another Opticon package build to release $Path."
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
+$packageBuildLock = Enter-OpticonPackageBuildLock (Join-Path $artifacts '.opticon-package-build.lock')
+try {
+
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     throw '.NET 8 SDK is required. Install it from https://dotnet.microsoft.com/download/dotnet/8.0'
 }
 
 dotnet build (Join-Path $repo 'Taildesk.sln') -c Release -p:EnableWindowsTargeting=true
+if ($LASTEXITCODE -ne 0) { throw 'The Opticon solution build failed.' }
 dotnet run --project (Join-Path $repo 'tests/Taildesk.SelfTest/Taildesk.SelfTest.csproj') -c Release -p:EnableWindowsTargeting=true
+if ($LASTEXITCODE -ne 0) { throw 'The Opticon self-tests failed.' }
 
 if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
@@ -35,20 +60,38 @@ $publishArgs = @(
     '-p:DebugType=None',
     '-p:EnableCompressionInSingleFile=true',
     '-p:DebugSymbols=false',
-    '-p:EnableWindowsTargeting=true'
+    '-p:EnableWindowsTargeting=true',
+    '-p:IncludeSourceRevisionInInformationalVersion=false'
 )
 
-foreach ($project in @('Taildesk.Agent', 'Taildesk.Admin', 'Taildesk.Setup', 'Taildesk.InviteLauncher')) {
+foreach ($project in @('Taildesk.Agent', 'Taildesk.Admin', 'Taildesk.Cli', 'Taildesk.Setup', 'Taildesk.InviteLauncher', 'Taildesk.UpdateGuardian')) {
     $projectFile = Join-Path $repo "src/$project/$project.csproj"
     $output = Join-Path $publish $project.Replace('Taildesk.', '')
     dotnet publish $projectFile @publishArgs -o $output
+    if ($LASTEXITCODE -ne 0) { throw "Publishing $project failed." }
+}
+
+$cliPublished = Join-Path $publish 'Cli/Taildesk.OpticonCli.exe'
+$cliCommand = Join-Path $publish 'Cli/opticon.exe'
+if (-not (Test-Path -LiteralPath $cliPublished -PathType Leaf)) { throw 'The Opticon CLI apphost was not published.' }
+Move-Item -LiteralPath $cliPublished -Destination $cliCommand -Force
+$referencedAdminRuntimeConfig = Join-Path $publish 'Cli/Opticon.runtimeconfig.json'
+if (Test-Path -LiteralPath $referencedAdminRuntimeConfig -PathType Leaf) {
+    Remove-Item -LiteralPath $referencedAdminRuntimeConfig -Force
+}
+$cliFiles = @(Get-ChildItem -LiteralPath (Join-Path $publish 'Cli') -File)
+if ($cliFiles.Count -ne 1 -or $cliFiles[0].Name -ne 'opticon.exe') {
+    throw 'The published CLI directory must contain only the signed opticon.exe single-file app.'
 }
 
 $app = Join-Path $stage 'App'
 Copy-Item (Join-Path $publish 'Admin/*') $app -Recurse -Force
+Copy-Item (Join-Path $publish 'Cli') (Join-Path $app 'Cli') -Recurse -Force
 Copy-Item (Join-Path $publish 'Setup') (Join-Path $app 'Payload/Setup') -Recurse -Force
 Copy-Item (Join-Path $publish 'Agent') (Join-Path $app 'Payload/Agent') -Recurse -Force
 Copy-Item (Join-Path $publish 'Admin') (Join-Path $app 'Payload/Admin') -Recurse -Force
+Copy-Item (Join-Path $publish 'Cli') (Join-Path $app 'Payload/Admin/Cli') -Recurse -Force
+Copy-Item (Join-Path $publish 'UpdateGuardian') (Join-Path $app 'Payload/UpdateGuardian') -Recurse -Force
 Copy-Item (Join-Path $publish 'InviteLauncher') (Join-Path $app 'Payload/InviteLauncher') -Recurse -Force
 
 $signingThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
@@ -78,3 +121,6 @@ $zip = Join-Path $dist "Opticon-CommandCenter-$Runtime.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Built $zip" -ForegroundColor Green
+} finally {
+    $packageBuildLock.Dispose()
+}

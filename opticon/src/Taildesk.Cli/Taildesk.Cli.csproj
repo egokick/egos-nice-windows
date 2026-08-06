@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Taildesk.OpticonCli</AssemblyName>
+    <RootNamespace>Taildesk.Cli</RootNamespace>
+    <Product>Opticon CLI</Product>
+    <AssemblyTitle>Opticon CLI</AssemblyTitle>
+    <Description>Agent-friendly command-line access to the Opticon command center</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Taildesk.Admin\Taildesk.Admin.csproj" />
+    <ProjectReference Include="..\Taildesk.Shared\Taildesk.Shared.csproj" />
+  </ItemGroup>
+</Project>

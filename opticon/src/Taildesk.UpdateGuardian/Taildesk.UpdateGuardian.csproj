@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Taildesk.UpdateGuardian</AssemblyName>
+    <RootNamespace>Taildesk.UpdateGuardian</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Taildesk.Shared\Taildesk.Shared.csproj" />
+  </ItemGroup>
+</Project>

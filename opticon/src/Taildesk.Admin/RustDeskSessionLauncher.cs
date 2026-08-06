@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Windows.Automation;
+using Taildesk.Shared;
 
 namespace Taildesk.Admin;
 
@@ -12,6 +13,7 @@ internal static class RustDeskSessionLauncher
         string executable,
         string tailscaleIp,
         string password,
+        bool privacyMode2Enabled,
         CancellationToken cancellationToken)
     {
         using (var probe = new TcpClient())
@@ -36,6 +38,7 @@ internal static class RustDeskSessionLauncher
                     exception);
             }
         }
+        ConfigurePeerPrivacyMode2(tailscaleIp, privacyMode2Enabled);
 
         var existingProcessIds = Process.GetProcessesByName("rustdesk")
             .Select(process => process.Id)
@@ -57,6 +60,37 @@ internal static class RustDeskSessionLauncher
         throw new InvalidOperationException(
             "The private viewer opened, but Opticon could not securely locate its password prompt. " +
             "Use 'Copy recovery password' for this session; the password was not placed in the process command line or clipboard.");
+    }
+
+    private static void ConfigurePeerPrivacyMode2(string tailscaleIp, bool enabled)
+    {
+        var peerDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "RustDesk", "config", "peers");
+        Directory.CreateDirectory(peerDirectory);
+        var peerFile = Path.Combine(peerDirectory, tailscaleIp + ".toml");
+        var existing = File.Exists(peerFile) ? File.ReadAllText(peerFile) : string.Empty;
+        var configured = RustDeskConfiguration.ConfigurePeerPrivacyMode2(existing, enabled);
+        var temporaryFile = peerFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temporaryFile, configured, new System.Text.UTF8Encoding(false));
+            File.Move(temporaryFile, peerFile, true);
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                $"Opticon could not {(enabled ? "enable" : "disable")} RustDesk Privacy Mode 2 for {tailscaleIp}.",
+                exception);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(temporaryFile)) File.Delete(temporaryFile);
+            }
+            catch { }
+        }
     }
 
     private static bool TrySubmitPassword(HashSet<int> existingProcessIds, int launchedProcessId, string password)

@@ -8,8 +8,20 @@
     "tag:taildesk-exit": ["<headscale-user>"],
   },
   "acls": [
-    { "action": "accept", "src": ["tag:taildesk-hub"], "dst": ["tag:taildesk-hub:*", "tag:taildesk-controller:*", "tag:taildesk-managed:*"] },
-    { "action": "accept", "src": ["tag:taildesk-controller"], "dst": ["tag:taildesk-hub:*", "tag:taildesk-controller:*", "tag:taildesk-managed:*"] },
+    {
+      "action": "accept",
+      "src": ["tag:taildesk-hub"],
+      "dst": [
+        "tag:taildesk-hub:45831,21118,45832", "tag:taildesk-controller:45831,21118,45832", "tag:taildesk-managed:45831,21118,45832"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": ["tag:taildesk-controller"],
+      "dst": [
+        "tag:taildesk-hub:45831,21118", "tag:taildesk-controller:45831,21118", "tag:taildesk-managed:45831,21118"
+      ]
+    },
     { "action": "accept", "src": ["tag:taildesk-managed"], "dst": ["tag:taildesk-hub:45830", "tag:taildesk-hub:45831"] },
     { "action": "accept", "src": ["tag:taildesk-exit"], "dst": ["tag:taildesk-exit:*"] },
   ],

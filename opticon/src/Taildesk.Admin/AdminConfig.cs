@@ -10,7 +10,7 @@ public enum AdminMode
 
 public sealed class AdminConfig
 {
-    public int SchemaVersion { get; set; } = 4;
+    public int SchemaVersion { get; set; } = 5;
     public AdminMode Mode { get; set; } = AdminMode.Primary;
     public bool SetupComplete { get; set; }
     public string HeadscaleApiUrl { get; set; } = string.Empty;
@@ -26,6 +26,7 @@ public sealed class AdminConfig
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RustDesk", "rustdesk.exe");
     public List<DeviceRecord> Devices { get; set; } = [];
     public List<InviteRecord> Invites { get; set; } = [];
+    public Dictionary<Guid, bool> PrivacyMode2ByDevice { get; set; } = [];
 }
 
 public sealed class AdminState
@@ -43,6 +44,12 @@ public sealed class AdminState
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         Config = await _store.LoadAsync(cancellationToken);
+        Config.PrivacyMode2ByDevice ??= [];
+        if (Config.SchemaVersion < 5)
+        {
+            Config.SchemaVersion = 5;
+            await SaveAsync(cancellationToken);
+        }
         if (string.IsNullOrWhiteSpace(Config.InviteOutputDirectory) || PrivateStorage.IsOneDrivePath(Config.InviteOutputDirectory))
         {
             Config.InviteOutputDirectory = PrivateStorage.InviteDirectory;

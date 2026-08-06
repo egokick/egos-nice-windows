@@ -5,6 +5,7 @@ namespace Taildesk.Shared;
 public static class RustDeskConfiguration
 {
     public const string PrivateRendezvousServer = "127.0.0.1:21116";
+    public const string PrivacyMode2Implementation = "privacy_mode_impl_virtual_display";
 
     public static IReadOnlyDictionary<string, string> ManagedHostOptions { get; } =
         new Dictionary<string, string>(StringComparer.Ordinal)
@@ -18,6 +19,7 @@ public static class RustDeskConfiguration
             ["enable-keyboard"] = "Y",
             ["enable-clipboard"] = "Y",
             ["enable-file-transfer"] = "Y",
+            ["enable-privacy-mode"] = "Y",
             ["approve-mode"] = "password",
             ["verification-method"] = "use-permanent-password",
             ["allow-only-conn-window-open"] = "N",
@@ -70,6 +72,24 @@ public static class RustDeskConfiguration
     public static bool IsManagedHostHardened(string content) =>
         string.Equals(Normalize(content), Normalize(HardenManagedHost(content)), StringComparison.Ordinal);
 
+    public static string ConfigurePeerPrivacyMode2(string? existing, bool enabled)
+    {
+        var lines = Regex.Split((existing ?? string.Empty).Replace("\r\n", "\n"), "\n").ToList();
+        while (lines.Count > 0 && lines[^1].Length == 0) lines.RemoveAt(lines.Count - 1);
+
+        SetTopLevelRaw(lines, "privacy_mode", enabled ? "true" : "false");
+        var sectionStart = lines.FindIndex(line => line.Trim().Equals("[options]", StringComparison.OrdinalIgnoreCase));
+        if (sectionStart < 0)
+        {
+            if (lines.Count > 0 && lines[^1].Length > 0) lines.Add(string.Empty);
+            lines.Add("[options]");
+            sectionStart = lines.Count - 1;
+        }
+
+        SetSectionRaw(lines, sectionStart, "privacy-mode-impl-key", $"'{PrivacyMode2Implementation}'");
+        return string.Join("\r\n", lines) + "\r\n";
+    }
+
     private static void SetTopLevel(List<string> lines, string key, string value)
     {
         var firstSection = lines.FindIndex(line => line.TrimStart().StartsWith("[", StringComparison.Ordinal));
@@ -82,6 +102,33 @@ public static class RustDeskConfiguration
             return;
         }
         lines.Insert(0, $"{key} = '{value}'");
+    }
+
+    private static void SetTopLevelRaw(List<string> lines, string key, string value)
+    {
+        var firstSection = lines.FindIndex(line => line.TrimStart().StartsWith("[", StringComparison.Ordinal));
+        if (firstSection < 0) firstSection = lines.Count;
+        var pattern = "^\\s*" + Regex.Escape(key) + "\\s*=";
+        for (var index = 0; index < firstSection; index++)
+        {
+            if (!Regex.IsMatch(lines[index], pattern, RegexOptions.IgnoreCase)) continue;
+            lines[index] = $"{key} = {value}";
+            return;
+        }
+        lines.Insert(0, $"{key} = {value}");
+    }
+
+    private static void SetSectionRaw(List<string> lines, int sectionStart, string key, string value)
+    {
+        var sectionEnd = FindSectionEnd(lines, sectionStart);
+        var pattern = "^\\s*" + Regex.Escape(key) + "\\s*=";
+        for (var index = sectionStart + 1; index < sectionEnd; index++)
+        {
+            if (!Regex.IsMatch(lines[index], pattern, RegexOptions.IgnoreCase)) continue;
+            lines[index] = $"{key} = {value}";
+            return;
+        }
+        lines.Insert(sectionEnd, $"{key} = {value}");
     }
 
     private static int FindSectionEnd(List<string> lines, int sectionStart)

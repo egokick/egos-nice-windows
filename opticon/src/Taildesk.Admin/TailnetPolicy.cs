@@ -18,6 +18,11 @@ public static class TailnetPolicy
           "ip": ["tcp:45831", "tcp:21118"]
         },
         {
+          "src": ["tag:taildesk-hub"],
+          "dst": ["tag:taildesk-managed", "tag:taildesk-controller", "tag:taildesk-hub"],
+          "ip": ["tcp:45832"]
+        },
+        {
           "src": ["tag:taildesk-managed", "tag:taildesk-controller"],
           "dst": ["tag:taildesk-hub"],
           "ip": ["tcp:45830"]
@@ -37,8 +42,11 @@ public static class TailnetPolicy
           "deny": [
             "tag:taildesk-managed:45831",
             "tag:taildesk-managed:21118",
+            "tag:taildesk-managed:45832",
             "tag:taildesk-controller:45831",
-            "tag:taildesk-controller:21118"
+            "tag:taildesk-controller:21118",
+            "tag:taildesk-controller:45832",
+            "tag:taildesk-hub:45832"
           ]
         },
         {
@@ -51,6 +59,19 @@ public static class TailnetPolicy
             "tag:taildesk-managed:45831",
             "tag:taildesk-managed:21118",
             "tag:taildesk-hub:45830"
+          ],
+          "deny": [
+            "tag:taildesk-managed:45832",
+            "tag:taildesk-controller:45832",
+            "tag:taildesk-hub:45832"
+          ]
+        },
+        {
+          "src": "tag:taildesk-hub",
+          "accept": [
+            "tag:taildesk-managed:45832",
+            "tag:taildesk-controller:45832",
+            "tag:taildesk-hub:45832"
           ]
         }
       ]

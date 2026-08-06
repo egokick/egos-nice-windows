@@ -49,12 +49,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _darkIcon;
     private readonly System.Windows.Forms.Timer _scheduleTimer;
     private readonly System.Windows.Forms.Timer _displaySettingsTimer;
+    private readonly System.Windows.Forms.Timer _temporaryDimmingTimer;
+    private readonly GlobalSpacebarShortcutService _spacebarShortcutService;
     private readonly SynchronizationContext _uiContext;
     private readonly object _brightnessUpdateLock = new();
 
     private AppSettings _settings;
     private readonly Dictionary<string, int> _pendingBrightness = new(StringComparer.OrdinalIgnoreCase);
     private bool _brightnessUpdateRunning;
+    private bool _isDimmingTemporarilyDisabled;
 
     public TrayApplicationContext()
     {
@@ -142,6 +145,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
             RefreshDisplayControls(refreshBrightness: true, refreshDimming: true, showDimmingError: false);
         };
 
+        _temporaryDimmingTimer = new System.Windows.Forms.Timer
+        {
+            Interval = (int)TimeSpan.FromSeconds(10).TotalMilliseconds
+        };
+        _temporaryDimmingTimer.Tick += (_, _) => RestoreTemporaryDimming();
+
+        _spacebarShortcutService = new GlobalSpacebarShortcutService();
+        _spacebarShortcutService.FiveSpacePresses += (_, _) =>
+            _uiContext.Post(_ => TemporarilyDisableExtraDimming(), null);
+
         SystemEvents.DisplaySettingsChanged += SystemEventsOnDisplaySettingsChanged;
         ApplyTimedThemeIfEnabled(showBalloon: false);
         SynchronizeMonitorControls();
@@ -155,6 +168,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _scheduleTimer.Dispose();
         _displaySettingsTimer.Stop();
         _displaySettingsTimer.Dispose();
+        _temporaryDimmingTimer.Stop();
+        _temporaryDimmingTimer.Dispose();
+        _spacebarShortcutService.Dispose();
         SystemEvents.DisplaySettingsChanged -= SystemEventsOnDisplaySettingsChanged;
         _softwareDimmingService.Dispose();
         _notifyIcon.Visible = false;
@@ -366,7 +382,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 var initialDimming = GetConfiguredDimming(monitor.Id);
                 group = new MonitorControlGroup(monitor, initialDimming);
                 group.BrightnessChanged += (_, _) => QueueBrightnessUpdate(group.ControlId, group.Brightness);
-                group.DimmingChanged += (_, _) => ApplyExtraDimming(group.ControlId, group.DimmingPercent);
+                group.DimmingChanged += (_, _) => HandleDimmingChanged(group.ControlId, group.DimmingPercent);
                 _monitorControls.Add(monitor.Id, group);
                 _monitorControlHosts.Add(monitor.Id, CreateSliderHost(group));
             }
@@ -403,7 +419,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 }
             }
 
-            if (refreshDimming && !group.IsDimmingInteracting)
+            if (refreshDimming && !_isDimmingTemporarilyDisabled && !group.IsDimmingInteracting)
             {
                 ApplyExtraDimming(
                     controlId,
@@ -429,9 +445,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
         return readings.Count > 0;
     }
 
+    private void HandleDimmingChanged(string controlId, int dimmingPercent)
+    {
+        CancelTemporaryDimmingSuspension();
+        ApplyExtraDimming(controlId, dimmingPercent);
+    }
+
     private void ApplyExtraDimming(string controlId, int dimmingPercent, bool saveSetting = true, bool showError = true)
     {
-        dimmingPercent = Math.Clamp(dimmingPercent, 0, 90);
+        dimmingPercent = Math.Clamp(dimmingPercent, 0, 99);
         var updated = false;
         foreach (var monitorId in GetTargetMonitorIds(controlId))
         {
@@ -485,6 +507,48 @@ internal sealed class TrayApplicationContext : ApplicationContext
         return string.Equals(controlId, AllMonitorsId, StringComparison.OrdinalIgnoreCase)
             ? Screen.AllScreens.Select(screen => screen.DeviceName).ToArray()
             : [controlId];
+    }
+
+    private void TemporarilyDisableExtraDimming()
+    {
+        if (!_monitorControls.Keys.Any(controlId => GetConfiguredDimming(controlId) > 0))
+        {
+            return;
+        }
+
+        foreach (var screen in Screen.AllScreens)
+        {
+            _softwareDimmingService.TrySetDimming(screen.DeviceName, 0);
+        }
+
+        _isDimmingTemporarilyDisabled = true;
+        _temporaryDimmingTimer.Stop();
+        _temporaryDimmingTimer.Start();
+        ShowInfoBalloon("Extra dimming temporarily disabled for 10 seconds.");
+    }
+
+    private void RestoreTemporaryDimming()
+    {
+        if (!_isDimmingTemporarilyDisabled)
+        {
+            return;
+        }
+
+        _temporaryDimmingTimer.Stop();
+        _isDimmingTemporarilyDisabled = false;
+        SynchronizeMonitorControls();
+        RefreshDisplayControls(refreshBrightness: false, refreshDimming: true, showDimmingError: false);
+    }
+
+    private void CancelTemporaryDimmingSuspension()
+    {
+        if (!_isDimmingTemporarilyDisabled)
+        {
+            return;
+        }
+
+        _temporaryDimmingTimer.Stop();
+        _isDimmingTemporarilyDisabled = false;
     }
 
     private void SystemEventsOnDisplaySettingsChanged(object? sender, EventArgs e)
@@ -995,13 +1059,13 @@ internal sealed class DimmingSliderControl : UserControl
         _trackBar = new TrackBar
         {
             Minimum = 0,
-            Maximum = 90,
+            Maximum = 99,
             TickFrequency = 10,
             LargeChange = 10,
             SmallChange = 1,
             AutoSize = false,
             Bounds = new Rectangle(10, 30, 340, 36),
-            Value = Math.Clamp(dimmingPercent, 0, 90)
+            Value = Math.Clamp(dimmingPercent, 0, 99)
         };
         _trackBar.Scroll += (_, _) =>
         {
@@ -1037,7 +1101,7 @@ internal sealed class DimmingSliderControl : UserControl
     public void SetAvailable(int dimmingPercent)
     {
         _trackBar.Enabled = true;
-        _trackBar.Value = Math.Clamp(dimmingPercent, 0, 90);
+        _trackBar.Value = Math.Clamp(dimmingPercent, 0, 99);
         UpdateValueLabel();
     }
 
@@ -1304,6 +1368,72 @@ internal static class StartupService
     }
 }
 
+internal sealed class GlobalSpacebarShortcutService : IDisposable
+{
+    private const int WhKeyboardLl = 13;
+    private const int WmKeyUp = 0x0101;
+    private const int WmSysKeyUp = 0x0105;
+    private const int VkSpace = 0x20;
+    private const long SequenceWindowMilliseconds = 2000;
+
+    private readonly LowLevelKeyboardProc _hookProcedure;
+    private IntPtr _hookHandle;
+    private int _spacePressCount;
+    private long _lastSpacePressMilliseconds;
+
+    public GlobalSpacebarShortcutService()
+    {
+        _hookProcedure = HookCallback;
+        _hookHandle = SetWindowsHookEx(WhKeyboardLl, _hookProcedure, IntPtr.Zero, 0);
+    }
+
+    public event EventHandler? FiveSpacePresses;
+
+    public void Dispose()
+    {
+        if (_hookHandle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        UnhookWindowsHookEx(_hookHandle);
+        _hookHandle = IntPtr.Zero;
+    }
+
+    private IntPtr HookCallback(int code, IntPtr message, IntPtr data)
+    {
+        if (code >= 0
+            && (message == (IntPtr)WmKeyUp || message == (IntPtr)WmSysKeyUp)
+            && Marshal.ReadInt32(data) == VkSpace)
+        {
+            var now = Environment.TickCount64;
+            _spacePressCount = now - _lastSpacePressMilliseconds <= SequenceWindowMilliseconds
+                ? _spacePressCount + 1
+                : 1;
+            _lastSpacePressMilliseconds = now;
+
+            if (_spacePressCount == 5)
+            {
+                _spacePressCount = 0;
+                FiveSpacePresses?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        return CallNextHookEx(_hookHandle, code, message, data);
+    }
+
+    private delegate IntPtr LowLevelKeyboardProc(int code, IntPtr message, IntPtr data);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc procedure, IntPtr module, uint threadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hookHandle);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hookHandle, int code, IntPtr message, IntPtr data);
+}
 internal sealed class AppSettings
 {
     public bool TimedModeEnabled { get; set; }
@@ -1327,7 +1457,7 @@ internal sealed class AppSettings
 
     public void SetDimmingForMonitor(string monitorId, int dimmingPercent)
     {
-        dimmingPercent = Math.Clamp(dimmingPercent, 0, 90);
+        dimmingPercent = Math.Clamp(dimmingPercent, 0, 99);
         ExtraDimmingByMonitor ??= new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         ExtraDimmingByMonitor[monitorId] = dimmingPercent;
     }
@@ -1336,11 +1466,11 @@ internal sealed class AppSettings
     {
         LightHour = NormalizeHour(LightHour);
         DarkHour = NormalizeHour(DarkHour);
-        ExtraDimmingPercent = Math.Clamp(ExtraDimmingPercent, 0, 90);
+        ExtraDimmingPercent = Math.Clamp(ExtraDimmingPercent, 0, 99);
         ExtraDimmingByMonitor = new Dictionary<string, int>(
             (ExtraDimmingByMonitor ?? new Dictionary<string, int>()).ToDictionary(
                 pair => pair.Key,
-                pair => Math.Clamp(pair.Value, 0, 90),
+                pair => Math.Clamp(pair.Value, 0, 99),
                 StringComparer.OrdinalIgnoreCase),
             StringComparer.OrdinalIgnoreCase);
     }

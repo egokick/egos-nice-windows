@@ -45,15 +45,32 @@ function Get-LatestSourceWriteTime {
     return $newest
 }
 
+function Test-ControllerInstallationReady {
+    $controllerRoot = Join-Path $env:ProgramFiles 'Taildesk'
+    $requiredFiles = @(
+        (Join-Path $controllerRoot '.controller-install.lock'),
+        (Join-Path $controllerRoot 'Admin\.opticon-controller-owned'),
+        (Join-Path $controllerRoot 'Admin\.opticon-controller-ready')
+    )
+
+    return ($requiredFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0
+}
+
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
 $installedOpticon = Get-InstalledOpticonPath
 $latestSourceWriteTime = Get-LatestSourceWriteTime
+$controllerInstallationReady = Test-ControllerInstallationReady
 if ($null -ne $installedOpticon -and
-    $latestSourceWriteTime -le (Get-Item -LiteralPath $installedOpticon).LastWriteTimeUtc) {
+    $latestSourceWriteTime -le (Get-Item -LiteralPath $installedOpticon).LastWriteTimeUtc -and
+    $controllerInstallationReady) {
     exit 0
 }
 
-Write-Host 'Opticon source changes detected; rebuilding and installing the updated command center...' -ForegroundColor Cyan
+if ($controllerInstallationReady) {
+    Write-Host 'Opticon source changes detected; rebuilding and installing the updated command center...' -ForegroundColor Cyan
+} else {
+    Write-Host 'Opticon installation integrity files are missing; rebuilding and repairing the command center...' -ForegroundColor Yellow
+}
 & (Join-Path $SourceRoot 'build.ps1')
 if ($LASTEXITCODE -ne 0) { throw "Opticon build failed with exit code $LASTEXITCODE." }
 
@@ -62,8 +79,26 @@ if (-not (Test-Path -LiteralPath (Join-Path $stagedApp 'Opticon.exe'))) {
     throw "The Opticon build did not produce its staged app at '$stagedApp'."
 }
 
-$updateScript = Join-Path $SourceRoot 'scripts\Update-InstalledOpticon.ps1'
-$command = "& '$($updateScript.Replace("'", "''"))' -SourceDirectory '$($stagedApp.Replace("'", "''"))'"
+$transactionalInstaller = Join-Path $SourceRoot 'artifacts\Opticon-CommandCenter-win-x64\Install-Opticon.ps1'
+if (-not (Test-Path -LiteralPath $transactionalInstaller -PathType Leaf)) {
+    throw "The Opticon build completed without its transactional installer at '$transactionalInstaller'."
+}
+$repairLogDirectory = Join-Path $env:LOCALAPPDATA 'Opticon\Logs'
+$repairLog = Join-Path $repairLogDirectory 'controller-repair.log'
+$escapedInstaller = $transactionalInstaller.Replace("'", "''")
+$escapedLogDirectory = $repairLogDirectory.Replace("'", "''")
+$escapedLog = $repairLog.Replace("'", "''")
+$command = @"
+`$ErrorActionPreference = 'Stop'
+New-Item -ItemType Directory -Path '$escapedLogDirectory' -Force | Out-Null
+try {
+    & '$escapedInstaller' -ControllerOnlyRepair *>&1 | Tee-Object -FilePath '$escapedLog' -Append
+    exit 0
+} catch {
+    (`$_ | Format-List * -Force | Out-String) | Tee-Object -FilePath '$escapedLog' -Append | Out-Host
+    exit 1
+}
+"@
 $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
 $updater = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand

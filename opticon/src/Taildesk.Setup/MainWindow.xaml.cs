@@ -11,6 +11,8 @@ public partial class MainWindow : Window
     private string _hostedFragmentKey = string.Empty;
     private CancellationTokenSource? _cancellation;
     private bool _installationRunning;
+    private bool _maintenanceMode;
+    private MaintenanceExpectedTarget? _maintenanceTarget;
 
     public MainWindow()
     {
@@ -22,6 +24,28 @@ public partial class MainWindow : Window
     {
         try
         {
+            var arguments = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            _maintenanceMode = arguments
+                .Any(argument => argument.Equals("--maintenance", StringComparison.OrdinalIgnoreCase));
+            if (_maintenanceMode)
+            {
+                _maintenanceTarget = MaintenanceExpectedTarget.Parse(arguments);
+                Title = "Opticon Agent maintenance";
+                var target = await MaintenanceBootstrapCoordinator.LoadTargetSummaryAsync(_maintenanceTarget);
+                DeviceNameText.Text = target.DeviceName;
+                RoleText.Text = target.Role == DeviceRole.ManagedOnly
+                    ? "Remote control target only"
+                    : "Can manage other machines and be managed";
+                CoordinatorText.Text = target.CoordinatorUrl;
+                ExpiresText.Text = $"Installed Agent {target.CurrentVersion}; signed release required";
+                InstallButton.Content = "Run Agent maintenance";
+                AppendLog("Existing enrollment loaded. Device identity and credentials will not be replaced.");
+                AppendLog("Maintenance updates only the Opticon Agent through the fail-safe Guardian.");
+                AppendLog("Tailscale and RustDesk remain installed and running as recovery lifelines.");
+                await RunInstallAsync();
+                return;
+            }
+
             _invitePath = ResolveInvitePath();
             if (!string.IsNullOrWhiteSpace(_hostedFragmentKey))
             {
@@ -48,7 +72,9 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             InstallButton.IsEnabled = false;
-            StatusText.Text = "The invitation cannot be used.";
+            StatusText.Text = _maintenanceMode
+                ? "Maintenance could not validate this selected device."
+                : "The invitation cannot be used.";
             AppendLog("ERROR: " + exception.Message);
         }
     }
@@ -60,7 +86,7 @@ public partial class MainWindow : Window
 
     private async Task RunInstallAsync()
     {
-        if (_invite is null || _installationRunning)
+        if ((!_maintenanceMode && _invite is null) || _installationRunning)
         {
             return;
         }
@@ -77,14 +103,30 @@ public partial class MainWindow : Window
 
         try
         {
-            var installer = new InstallCoordinator(_invite, Path.GetDirectoryName(_invitePath)!, progress);
-            await installer.InstallAsync(_cancellation.Token);
+            if (_maintenanceMode)
+            {
+                var maintenance = new MaintenanceBootstrapCoordinator(
+                    AppContext.BaseDirectory, progress,
+                    _maintenanceTarget ?? throw new InvalidOperationException("Maintenance target arguments were not validated."));
+                await maintenance.RunAsync(_cancellation.Token);
+                InstallProgress.Value = 100;
+                StatusText.Text = "The signed Opticon Agent update is committed.";
+            }
+            else
+            {
+                var installer = new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)!, progress);
+                await installer.InstallAsync(_cancellation.Token);
+                StatusText.Text = "Connected. This machine is ready.";
+            }
             AppendLog("Setup finished successfully.");
             InstallButton.Content = "Close";
             InstallButton.IsEnabled = true;
             InstallButton.Click -= InstallButton_Click;
             InstallButton.Click += (_, _) => Close();
-            try { File.Delete(_invitePath); } catch { }
+            if (!_maintenanceMode)
+            {
+                try { File.Delete(_invitePath); } catch { }
+            }
         }
         catch (ExistingTailscaleSessionException exception)
         {
@@ -96,7 +138,7 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var installer = new InstallCoordinator(_invite, Path.GetDirectoryName(_invitePath)!, progress, allowTailscaleReauthentication: true);
+                    var installer = new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)!, progress, allowTailscaleReauthentication: true);
                     await installer.InstallAsync(_cancellation.Token);
                     AppendLog("Setup finished successfully.");
                     InstallProgress.Value = 100;

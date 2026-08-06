@@ -12,6 +12,7 @@ public partial class App : System.Windows.Application
     private RegisteredWaitHandle? _activationRegistration;
     private System.Windows.Forms.NotifyIcon? _trayIcon;
     private System.Drawing.Icon? _trayIconImage;
+    private MainViewModel? _viewModel;
     public bool ExitRequested { get; private set; }
 
     public AdminState State { get; } = new();
@@ -40,8 +41,20 @@ public partial class App : System.Windows.Application
         try
         {
             await State.InitializeAsync();
+            try
+            {
+                await CliPathIntegration.EnsureForCurrentUserAsync();
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    "Opticon opened, but its signed CLI could not be added to this user's PATH. " +
+                    "You can still use the UI and repair the command-center installation.\n\n" + exception.Message,
+                    "Opticon CLI unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
             Headscale = new HeadscaleApiClient(State);
-            var window = new MainWindow(new MainViewModel(State, Headscale, Agents, Transfers));
+            _viewModel = new MainViewModel(State, Headscale, Agents, Transfers);
+            var window = new MainWindow(_viewModel);
             MainWindow = window;
             window.Show();
             CreateTrayIcon();
@@ -127,6 +140,16 @@ public partial class App : System.Windows.Application
 
     private async void Application_Exit(object sender, ExitEventArgs e)
     {
+        if (_viewModel is not null)
+        {
+            using var sshShutdown = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            try { await _viewModel.ShutdownSshSessionsAsync(sshShutdown.Token); }
+            catch
+            {
+                // Each target lease also has an independent expiry. Shutdown must
+                // remain bounded if a target is unreachable during revocation.
+            }
+        }
         if (_coordinator is not null) await _coordinator.DisposeAsync();
         if (_trayIcon is not null)
         {

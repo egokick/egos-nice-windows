@@ -1,3 +1,4 @@
+import os
 import sqlite3
 
 
@@ -7,6 +8,8 @@ APPS = (
     ("tailscale-ipn", r"C:\Program Files\Tailscale\tailscale-ipn.exe"),
     ("tailscale", r"C:\Program Files\Tailscale\tailscale.exe"),
     ("Opticon", r"C:\Program Files\Taildesk\Admin\Opticon.exe"),
+    ("opticon-cli", r"C:\Program Files\Taildesk\Admin\Cli\opticon.exe"),
+    ("ssh", os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32", "OpenSSH", "ssh.exe")),
     ("rustdesk", r"C:\Program Files\RustDesk\rustdesk.exe"),
 )
 

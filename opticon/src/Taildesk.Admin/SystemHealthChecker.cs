@@ -379,6 +379,9 @@ public sealed class SystemHealthChecker
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale-ipn.exe"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe"),
             Path.Combine(AppPaths.InstallDirectory, "Admin", "Opticon.exe"),
+            Path.Combine(AppPaths.InstallDirectory, "Admin", "Cli", "opticon.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                "System32", "OpenSSH", "ssh.exe"),
             Environment.ExpandEnvironmentVariables(config.RustDeskPath)
         };
         var nordAppsValid = snapshot.NordSplitApps.Length == expectedNordApps.Length
@@ -387,8 +390,8 @@ public sealed class SystemHealthChecker
                         && snapshot.NordSplitEnabled && snapshot.NordSplitMode.Equals("vpnDisabledForApps", StringComparison.OrdinalIgnoreCase)
                         && nordAppsValid;
         add("Network", "NordVPN and private mesh coexistence", nordValid ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
-            nordValid ? "NordVPN is the default route and excludes only Tailscale, Opticon, and the pinned RustDesk controller."
-                : "NordVPN must be running as the default route with split tunneling set to exclude exactly the three Tailscale executables, Opticon, and RustDesk.");
+            nordValid ? "NordVPN is the default route and excludes only Tailscale, the Opticon UI/CLI, Windows OpenSSH, and the pinned RustDesk controller."
+                : "NordVPN must be running as the default route with split tunneling set to exclude exactly the three Tailscale executables, Opticon UI and CLI, the Windows OpenSSH client, and RustDesk.");
 
 
         var rustDeskPresent = File.Exists(Environment.ExpandEnvironmentVariables(config.RustDeskPath));

@@ -69,7 +69,11 @@
                     </Grid>
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,18,0,10">
                         <Button Content="Remote into" Style="{StaticResource PrimaryButton}" Click="RemoteControl_Click" />
+                        <Button Content="Open SSH" Margin="7,0,0,0" Click="OpenSsh_Click"
+                                IsEnabled="{Binding DataContext.IsPrimary, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" />
                         <Button Content="Browse files" Margin="7,0,0,0" Click="BrowseFiles_Click" />
+                        <Button Content="Update Opticon" Margin="7,0,0,0" Click="UpdateOpticon_Click"
+                                IsEnabled="{Binding DataContext.IsPrimary, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" />
                         <Button Content="Use as VPN" Margin="7,0,0,0" Click="UseExitNode_Click" />
                         <Button Content="Stop VPN" Margin="7,0,0,0" Click="StopExitNode_Click" />
                     </StackPanel>
@@ -98,6 +102,7 @@
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="28" /><RowDefinition Height="28" /><RowDefinition Height="28" />
                                             <RowDefinition Height="28" /><RowDefinition Height="28" /><RowDefinition Height="28" />
+                                            <RowDefinition Height="28" /><RowDefinition Height="28" />
                                         </Grid.RowDefinitions>
                                         <TextBlock Text="Connection" Style="{StaticResource LabelText}" />
                                         <TextBlock Grid.Column="1" Text="{Binding State}" />
@@ -105,13 +110,24 @@
                                         <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding TailscaleIp}" FontFamily="Cascadia Mono,Consolas" />
                                         <TextBlock Grid.Row="2" Text="Agent" Style="{StaticResource LabelText}" />
                                         <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding AgentVersion}" />
-                                        <TextBlock Grid.Row="3" Text="Role" Style="{StaticResource LabelText}" />
-                                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding Role}" />
-                                        <TextBlock Grid.Row="4" Text="Exit provider" Style="{StaticResource LabelText}" />
-                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding AdvertisesExitNode}" />
-                                        <TextBlock Grid.Row="5" Text="Credential" Style="{StaticResource LabelText}" />
-                                        <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding PendingCredentialRotation}" />
+                                        <TextBlock Grid.Row="3" Text="Architecture" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding Architecture}" />
+                                        <TextBlock Grid.Row="4" Text="Update" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding UpdateStatus.Phase, TargetNullValue=Ready}" />
+                                        <TextBlock Grid.Row="5" Text="Role" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding Role}" />
+                                        <TextBlock Grid.Row="6" Text="Exit provider" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding AdvertisesExitNode}" />
+                                        <TextBlock Grid.Row="7" Text="Credential" Style="{StaticResource LabelText}" />
+                                        <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding PendingCredentialRotation}" />
                                     </Grid>
+                                    <Separator Margin="0,14" Background="{StaticResource BorderBrush}" />
+                                    <TextBlock Text="REMOTE PRIVACY" Style="{StaticResource LabelText}" />
+                                    <CheckBox x:Name="PrivacyMode2Toggle" Margin="0,8,0,0"
+                                              Content="Blank physical display (Mode 2)" IsChecked="{Binding PrivacyMode2Enabled, Mode=OneWay}"
+                                              Click="PrivacyMode2_Click" />
+                                    <TextBlock Text="Applies to the next RustDesk connection to this device. Turn it off to mirror the physical display normally."
+                                               Margin="0,7,0,0" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" />
                                     <Separator Margin="0,14" Background="{StaticResource BorderBrush}" />
                                     <TextBlock Text="ACCESS ROLE" Style="{StaticResource LabelText}" />
                                     <ComboBox x:Name="RoleCombo" Margin="0,7,0,7">
@@ -372,7 +388,7 @@
             <Grid Margin="12,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                 <TextBlock Text="{Binding Status}" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedBrush}" />
-                <TextBlock Grid.Column="1" Text="Agent 45831  ·  Coordinator 45830  ·  RustDesk 21118" VerticalAlignment="Center"
+                <TextBlock Grid.Column="1" Text="Agent 45831  ·  Coordinator 45830  ·  SSH 45832 (hub only)  ·  RustDesk 21118" VerticalAlignment="Center"
                            FontFamily="Cascadia Mono,Consolas" FontSize="10" Foreground="#707A84" />
             </Grid>
         </Border>

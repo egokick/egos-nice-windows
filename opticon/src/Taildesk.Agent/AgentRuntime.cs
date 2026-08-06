@@ -9,12 +9,16 @@ public sealed class AgentRuntime
 {
     private readonly AgentState _state;
     private readonly TailscaleCli _tailscale;
+    private readonly UpdateManager _updates;
+    private readonly SshAccessManager _ssh;
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
-    public AgentRuntime(AgentState state, TailscaleCli tailscale)
+    public AgentRuntime(AgentState state, TailscaleCli tailscale, UpdateManager updates, SshAccessManager ssh)
     {
         _state = state;
         _tailscale = tailscale;
+        _updates = updates;
+        _ssh = ssh;
     }
 
     public async Task<DeviceStatusDto> GetStatusAsync(CancellationToken cancellationToken)
@@ -31,20 +35,28 @@ public sealed class AgentRuntime
 
         var systemDrive = DriveInfo.GetDrives().FirstOrDefault(drive => drive.IsReady && drive.Name.StartsWith(
             Path.GetPathRoot(Environment.SystemDirectory) ?? "C:\\", StringComparison.OrdinalIgnoreCase));
+        var ssh = await _ssh.GetStatusAsync(cancellationToken);
+        var rustDeskReady = UpdateManager.IsRustDeskReady();
 
         return new DeviceStatusDto
         {
             HostName = Environment.MachineName,
             OperatingSystem = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
-            AgentVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.0.0",
+            Architecture = UpdateManager.CurrentArchitecture,
+            AgentVersion = UpdateManager.CurrentVersion,
+            UpdateProtocolVersion = RemoteAdministrationProtocol.UpdateVersion,
             TailscaleIp = tailscale.Ip,
             TailnetDeviceId = tailscale.DeviceId,
-            RustDeskRunning = Process.GetProcessesByName("rustdesk").Length > 0,
+            RustDeskRunning = rustDeskReady,
+            RustDeskReady = rustDeskReady,
+            SshReady = ssh.Listening,
+            SshPort = RemoteAdministrationProtocol.SshPort,
             AdvertisesExitNode = _state.Config.AdvertiseExitNode,
             FreeDiskBytes = systemDrive?.AvailableFreeSpace ?? 0,
             TotalDiskBytes = systemDrive?.TotalSize ?? 0,
             StartedAt = _startedAt,
-            ServerTime = DateTimeOffset.UtcNow
+            ServerTime = DateTimeOffset.UtcNow,
+            UpdateStatus = _updates.GetStatus()
         };
     }
 

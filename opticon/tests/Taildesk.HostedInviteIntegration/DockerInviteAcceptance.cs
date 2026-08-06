@@ -19,7 +19,11 @@ internal static class DockerInviteAcceptance
     {
         var repository = FindRepository();
         var manifest = await LoadManifestAsync(Path.Combine(repository, "fly-headscale", "artifacts", "manifest.json"));
-        var bundle = manifest.Single(item => item.Product == "OpticonBundle" && item.Role == nameof(DeviceRole.ManagedOnly));
+        var bundle = manifest
+                         .Where(item => item.Product == "OpticonBundle" && item.Role == nameof(DeviceRole.ManagedOnly))
+                         .OrderByDescending(item => UpdatePackageVerifier.ParseVersion(item.Version))
+                         .FirstOrDefault()
+                     ?? throw new InvalidDataException("The current managed-only bundle is not published.");
         var dependencies = manifest.Where(item => item.Product is "Tailscale" or "RustDesk").ToArray();
         if (dependencies.Count(item => item.Architecture == "x64") != 2)
             throw new InvalidDataException("The release manifest must declare exactly two x64 setup dependencies.");

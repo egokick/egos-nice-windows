@@ -71,6 +71,93 @@ public partial class MainWindow : Window
         await RunAsync(() => _viewModel.LaunchRemoteControlAsync(device));
     }
 
+    private async void OpenSsh_Click(object sender, RoutedEventArgs e)
+    {
+        DeviceRecord device;
+        try { device = RequireDevice(); }
+        catch (Exception exception) { ShowError(exception); return; }
+        await RunAsync(() => _viewModel.LaunchSshAsync(device));
+    }
+
+    private async void UpdateOpticon_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var device = RequireDevice();
+            var release = await _viewModel.FindUpdateAsync(device);
+            if (release is null)
+            {
+                MessageBox.Show($"{device.Name} already has the newest compatible signed Opticon Agent release.",
+                    "Opticon Agent update", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (release.RequiresMaintenanceBootstrap)
+            {
+                var operationId = Guid.NewGuid();
+                var command = BuildMaintenanceBootstrapCommand(release, device, operationId);
+                var instructions =
+                    $"{device.Name} runs an Agent that predates the guarded update API. Opticon will not send arbitrary commands to it.\n\n" +
+                    "Opticon selected this immutable role-specific bundle:\n" +
+                    $"{release.DownloadUri.AbsoluteUri}\nSHA-256: {release.Sha256}\n" +
+                    $"Operation: {operationId:N}\n\n" +
+                    "Choose Yes to copy a size-, SHA-256-, publisher-, Tailnet-device-, Tailscale-address-, and operation-pinned PowerShell command, snapshot recovery, open Remote into, and let this command center watch for the exact candidate for up to 30 minutes. The command verifies the extracted Setup signature before requesting elevation. Then, in the remote Windows session:\n" +
+                    "1. Open PowerShell.\n" +
+                    "2. Paste the copied command and press Enter.\n" +
+                    "3. Approve the one UAC prompt for Taildesk.Setup.exe.\n" +
+                    "4. Keep RustDesk, Setup, and this Opticon window open through the terminal result.\n\n" +
+                    "Setup must pass three protected local samples but cannot commit. This command center alone requires three authenticated external samples for the exact operation, release, architecture, IP, Tailnet identity, RustDesk, and any snapshotted SSH listener. If confirmation is lost or late, no commit is sent and the Guardian rolls back.\n\n" +
+                    "The one-time bootstrap keeps enrollment, Tailscale, RustDesk, routes, credentials, and Admin unchanged. Later Agent releases use the guarded update path.";
+                if (MessageBox.Show(
+                        instructions,
+                        "One-time signed Agent bootstrap",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                    return;
+
+                System.Windows.Clipboard.SetText(command);
+                var sshWasListening = await _viewModel.SnapshotMaintenanceSshAsync(device);
+                await _viewModel.LaunchRemoteControlAsync(device);
+                var maintenanceResult = await _viewModel.ObserveMaintenanceBootstrapAsync(
+                    device, release, operationId, sshWasListening);
+                var maintenanceMessage = maintenanceResult.Phase == UpdatePhase.Committed
+                    ? $"Opticon Agent {maintenanceResult.TargetVersion} is externally verified and committed on {device.Name}."
+                    : $"The maintenance candidate was not committed. {device.Name} reported {maintenanceResult.Phase}.\n\n{maintenanceResult.Message}";
+                MessageBox.Show(
+                    maintenanceMessage,
+                    "One-time signed Agent bootstrap",
+                    MessageBoxButton.OK,
+                    maintenanceResult.Phase == UpdatePhase.Committed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                return;
+            }
+
+            var explanation =
+                $"Update '{device.Name}' from Opticon Agent {device.AgentVersion} to {release.Version}?\n\n" +
+                "Opticon will first download and fully verify the release while the current Agent and recovery lifelines remain active. " +
+                "The stable SYSTEM Guardian, installed outside the versioned Agent, then swaps only the signed Agent/runtime directory. Tailscale, RustDesk, Guardian-owned SSH, credentials, and routes are not changed.\n\n" +
+                "The new Agent must pass repeated command-center and local checks for every applicable recovery lifeline. If it crashes, loses a lifeline, the PC reboots, or this command center cannot send the final commit, the Guardian automatically restores the previous Agent.";
+            if (MessageBox.Show(explanation, "Guarded Opticon Agent update", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+
+            var result = await _viewModel.UpdateDeviceAsync(device, release);
+            var message = result.Phase == UpdatePhase.Committed
+                ? $"Opticon Agent {result.TargetVersion} is healthy and committed on {device.Name}. The prior Agent remains available locally for boot-time recovery."
+                : $"The candidate was not committed. {device.Name} reported {result.Phase} and remains on Opticon Agent {result.CurrentVersion}.\n\n{result.Message}";
+            MessageBox.Show(message, "Opticon Agent update",
+                MessageBoxButton.OK, result.Phase == UpdatePhase.Committed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        }
+        catch (Exception exception) { ShowError(exception); }
+    }
+
+    private async void PrivacyMode2_Click(object sender, RoutedEventArgs e)
+    {
+        DeviceRecord device;
+        try { device = RequireDevice(); }
+        catch (Exception exception) { ShowError(exception); return; }
+        var enabled = PrivacyMode2Toggle.IsChecked == true;
+        await RunAsync(() => _viewModel.SetPrivacyMode2Async(device, enabled));
+    }
+
     private void BrowseFiles_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -343,6 +430,61 @@ public partial class MainWindow : Window
         RustDeskPathText.Text = _viewModel.Config.RustDeskPath;
         var editable = _viewModel.Config.Mode == AdminMode.Primary;
         TailnetText.IsEnabled = OAuthIdText.IsEnabled = OAuthSecretText.IsEnabled = CoordinatorIpText.IsEnabled = editable;
+    }
+
+    private static string BuildMaintenanceBootstrapCommand(
+        OpticonUpdateRelease release,
+        DeviceRecord device,
+        Guid operationId)
+    {
+        if (operationId == Guid.Empty)
+            throw new InvalidOperationException("Maintenance requires a non-empty operation ID.");
+        if (string.IsNullOrWhiteSpace(device.TailnetDeviceId)
+            || device.TailnetDeviceId.Length > 256
+            || device.TailnetDeviceId.Any(character => char.IsWhiteSpace(character) || char.IsControl(character)))
+            throw new InvalidOperationException(
+                "The selected registry record has no valid Tailscale device identity. Refresh devices before copying maintenance.");
+        if (!AgentClient.IsTailscaleIp(device.TailscaleIp))
+            throw new InvalidOperationException("The selected device has no canonical Tailscale IPv4 address.");
+        var suffix = Guid.NewGuid().ToString("N")[..12];
+        var url = release.DownloadUri.AbsoluteUri.Replace("'", "''", StringComparison.Ordinal);
+        var size = release.Size.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var certificateBase64 = Convert.ToBase64String(InvitationSigning.PinnedCertificate.RawData);
+        return "$ErrorActionPreference='Stop';"
+               + "$d=Join-Path $env:TEMP 'Opticon-Maintenance-" + suffix + "';"
+               + "$z=$d+'.zip';"
+               + "New-Item -ItemType Directory -Path $d -ErrorAction Stop|Out-Null;"
+               + "Invoke-WebRequest -UseBasicParsing -Uri '" + url + "' -OutFile $z;"
+               + "if((Get-Item -LiteralPath $z).Length -ne " + size + "){throw 'Downloaded Opticon bundle size mismatch.'};"
+               + "$h=(Get-FileHash -LiteralPath $z -Algorithm SHA256).Hash.ToLowerInvariant();"
+               + "if($h -ne '" + release.Sha256 + "'){throw 'Downloaded Opticon bundle SHA-256 mismatch.'};"
+               + "Expand-Archive -LiteralPath $z -DestinationPath $d -Force;"
+               + "$m=Join-Path $d 'release-manifest.json';$q=Join-Path $d 'release-manifest.sig';"
+               + "if(!(Test-Path -LiteralPath $m) -or !(Test-Path -LiteralPath $q)){throw 'Signed release metadata is missing.'};"
+               + "$mb=[IO.File]::ReadAllBytes($m);"
+               + "$sb=[Convert]::FromBase64String([IO.File]::ReadAllText($q).Trim());"
+               + "$cert=New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,[Convert]::FromBase64String('"
+               + certificateBase64
+               + "'));"
+               + "try{$rsa=[Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert);"
+               + "if(!$rsa){throw 'Pinned release certificate has no RSA key.'};"
+               + "try{if(!$rsa.VerifyData($mb,$sb,[Security.Cryptography.HashAlgorithmName]::SHA256,[Security.Cryptography.RSASignaturePadding]::Pss)){throw 'Release manifest signature is invalid.'}}finally{$rsa.Dispose()}}finally{$cert.Dispose()};"
+               + "$j=[Text.Encoding]::UTF8.GetString($mb)|ConvertFrom-Json;"
+               + "$f=@($j.files|Where-Object {$_.path -ceq 'Taildesk.Setup.exe'});"
+               + "if($j.schemaVersion -ne 1 -or $j.updateProtocolVersion -ne 1 -or $f.Count -ne 1){throw 'Signed Setup declaration is missing or ambiguous.'};"
+               + "if(([string]$f[0].signerThumbprint) -ne '"
+               + InvitationSigning.CertificateThumbprint
+               + "'){throw 'Signed Setup publisher pin is invalid.'};"
+               + "$s=Join-Path $d 'Taildesk.Setup.exe';"
+               + "if(!(Test-Path -LiteralPath $s)){throw 'Taildesk.Setup.exe is missing from the signed bundle.'};"
+               + "if((Get-Item -LiteralPath $s).Length -ne [long]$f[0].size){throw 'Signed Setup size mismatch.'};"
+               + "$sh=(Get-FileHash -LiteralPath $s -Algorithm SHA256).Hash.ToLowerInvariant();"
+               + "if($sh -ne ([string]$f[0].sha256).ToLowerInvariant()){throw 'Signed Setup SHA-256 mismatch.'};"
+               + "$a=@('--maintenance','--expected-tailnet-device-id="
+               + device.TailnetDeviceId.Replace("'", "''", StringComparison.Ordinal)
+               + "','--expected-tailscale-ip=" + device.TailscaleIp
+               + "','--operation-id=" + operationId.ToString("N") + "');"
+               + "Start-Process -FilePath $s -ArgumentList $a -Verb RunAs -Wait";
     }
 
     private DeviceRecord RequireDevice() => _viewModel.SelectedDevice ?? throw new InvalidOperationException("Select a device first.");

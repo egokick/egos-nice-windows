@@ -13,6 +13,8 @@ $tailscaleApps = @(
     @{ Name = 'tailscale-ipn'; DisplayName = 'Tailscale'; Path = (Join-Path $tailscaleRoot 'tailscale-ipn.exe') },
     @{ Name = 'tailscale'; DisplayName = 'Tailscale CLI'; Path = (Join-Path $tailscaleRoot 'tailscale.exe') },
     @{ Name = 'Opticon'; DisplayName = 'Opticon'; Path = 'C:\Program Files\Taildesk\Admin\Opticon.exe' },
+    @{ Name = 'opticon-cli'; DisplayName = 'Opticon CLI'; Path = 'C:\Program Files\Taildesk\Admin\Cli\opticon.exe' },
+    @{ Name = 'ssh'; DisplayName = 'Windows OpenSSH Client'; Path = (Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe') },
     @{ Name = 'rustdesk'; DisplayName = 'RustDesk Remote Desktop'; Path = 'C:\Program Files\RustDesk\rustdesk.exe' }
 )
 

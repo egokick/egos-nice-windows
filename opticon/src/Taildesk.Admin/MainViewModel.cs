@@ -14,6 +14,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly HeadscaleApiClient _headscale;
     private readonly AgentClient _agents;
     private readonly TransferManager _transfers;
+    private readonly OpticonReleaseClient _releases = new();
+    private readonly RemoteDeviceUpdateCoordinator _deviceUpdates;
+    private readonly SemaphoreSlim _updateGate = new(1, 1);
+    private readonly HashSet<SshSessionHandle> _sshSessions = [];
     private DeviceRecord? _selectedDevice;
     private string _status = "Ready";
     private bool _busy;
@@ -28,6 +32,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _headscale = headscale;
         _agents = agents;
         _transfers = transfers;
+        _deviceUpdates = new RemoteDeviceUpdateCoordinator(agents);
         Transfers = transfers.Items;
     }
 
@@ -50,6 +55,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         ReplaceInvites();
         if (Config.SetupComplete) await RefreshAsync(cancellationToken);
+    }
+
+    public async Task ShutdownSshSessionsAsync(CancellationToken cancellationToken = default)
+    {
+        SshSessionHandle[] sessions;
+        lock (_sshSessions) sessions = [.. _sshSessions];
+        if (sessions.Length == 0) return;
+
+        await Task.WhenAll(sessions.Select(session => session.TerminateAsync(cancellationToken)));
     }
 
     public async Task RunSystemChecksAsync(CancellationToken cancellationToken = default)
@@ -353,6 +367,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Log("Stopped using a remote exit node.");
     }
 
+    public async Task SetPrivacyMode2Async(DeviceRecord device, bool enabled, CancellationToken cancellationToken = default)
+    {
+        device.PrivacyMode2Enabled = enabled;
+        Config.PrivacyMode2ByDevice[device.Id] = enabled;
+        await _state.SaveAsync(cancellationToken);
+        Status = $"Privacy Mode 2: {(enabled ? "on" : "off")} for {device.Name}";
+        Log($"RustDesk Privacy Mode 2 will be {(enabled ? "enabled" : "disabled")} when opening {device.Name}.");
+        Changed(nameof(SelectedDevice));
+    }
+
     public async Task LaunchRemoteControlAsync(DeviceRecord device, CancellationToken cancellationToken = default)
     {
         if (!File.Exists(Config.RustDeskPath)) throw new FileNotFoundException("RustDesk was not found. Set its path in Settings.");
@@ -360,9 +384,149 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (device.State == DeviceConnectionState.Offline)
             throw new InvalidOperationException($"{device.Name} is offline. Wake or power on the device and wait for it to reconnect to the private network.");
         var password = GetRustDeskPassword(device);
-        await RustDeskSessionLauncher.LaunchAsync(Config.RustDeskPath, device.TailscaleIp, password, cancellationToken);
+        await RustDeskSessionLauncher.LaunchAsync(
+            Config.RustDeskPath,
+            device.TailscaleIp,
+            password,
+            device.PrivacyMode2Enabled,
+            cancellationToken);
         Status = $"Remote session: {device.Name}";
         Log($"Opened a private direct-IP remote session to {device.Name} through its Tailscale address.");
+    }
+
+    public async Task LaunchSshAsync(DeviceRecord device, CancellationToken cancellationToken = default)
+    {
+        RequirePrimary();
+        RequireLiveAgent(device, "SSH");
+        var token = GetAgentToken(device);
+        var requestedLifetime = TimeSpan.FromHours(1);
+        var handle = await SshSessionLauncher.LaunchAsync(
+            new SshSessionLaunchOptions
+            {
+                ExpectedHost = device.TailscaleIp,
+                RequestedLifetime = requestedLifetime
+            },
+            async (publicKey, lifetime, innerCancellation) =>
+            {
+                var requestedAt = DateTimeOffset.UtcNow;
+                var response = await _agents.OpenSshAsync(device, token, new SshAccessRequest
+                {
+                    PublicKey = publicKey,
+                    ExpiresAt = requestedAt.Add(lifetime)
+                }, innerCancellation);
+                if (response.ExpiresAt > requestedAt.Add(lifetime).AddSeconds(10))
+                    throw new InvalidDataException("The target granted a longer SSH lease than requested.");
+                return response;
+            },
+            (sessionId, innerCancellation) => _agents.RevokeSshAsync(device, token, sessionId, innerCancellation),
+            cancellationToken);
+
+        lock (_sshSessions) _sshSessions.Add(handle);
+        _ = ObserveSshSessionAsync(device.Name, handle);
+        Status = $"Administrative SSH: {device.Name}";
+        Log($"Opened a host-key-pinned, one-hour administrative SSH lease to {device.Name}. The target revokes it when ssh.exe exits or the independent expiry deadline is reached.");
+    }
+
+    public async Task<OpticonUpdateRelease?> FindUpdateAsync(
+        DeviceRecord device,
+        CancellationToken cancellationToken = default)
+    {
+        RequirePrimary();
+        RequireLiveAgent(device, "remote update");
+        Status = $"Checking signed Opticon Agent releases for {device.Name}...";
+        return await _releases.FindUpdateAsync(Config, device, cancellationToken);
+    }
+
+    public async Task<bool> SnapshotMaintenanceSshAsync(
+        DeviceRecord device,
+        CancellationToken cancellationToken = default)
+    {
+        RequirePrimary();
+        RequireLiveAgent(device, "maintenance recovery snapshot");
+        var listening = await AgentClient.ProbeTcpAsync(
+            device.TailscaleIp, RemoteAdministrationProtocol.SshPort,
+            TimeSpan.FromSeconds(5), cancellationToken);
+        Log(listening
+            ? $"Snapshotted the administrative SSH listener on {device.Name}; the replacement must preserve it."
+            : $"No administrative SSH listener was active on {device.Name} immediately before maintenance.");
+        return listening;
+    }
+
+    public async Task<UpdateStatusDto> ObserveMaintenanceBootstrapAsync(
+        DeviceRecord device,
+        OpticonUpdateRelease release,
+        Guid operationId,
+        bool sshWasListening,
+        CancellationToken cancellationToken = default)
+    {
+        RequirePrimary();
+        RequireLiveAgent(device, "maintenance confirmation");
+        if (!await _updateGate.WaitAsync(0, cancellationToken))
+            throw new InvalidOperationException("Another guarded device update is already running from this command center.");
+        Busy = true;
+        try
+        {
+            var progress = new Progress<string>(message =>
+            {
+                Status = message;
+                Log(message);
+            });
+            var result = await _deviceUpdates.ObserveMaintenanceBootstrapAsync(
+                device, GetAgentToken(device), release, operationId, sshWasListening,
+                progress, cancellationToken);
+            device.UpdateStatus = result;
+            if (result.Phase == UpdatePhase.Committed) device.AgentVersion = result.TargetVersion;
+            Status = result.Phase switch
+            {
+                UpdatePhase.Committed => $"Opticon Agent {result.TargetVersion} committed on {device.Name}",
+                UpdatePhase.RolledBack => $"{device.Name} safely rolled back to Opticon {result.CurrentVersion}",
+                _ => $"Maintenance on {device.Name}: {result.Phase}"
+            };
+            await _state.SaveAsync(cancellationToken);
+            return result;
+        }
+        finally
+        {
+            Busy = false;
+            _updateGate.Release();
+        }
+    }
+
+    public async Task<UpdateStatusDto> UpdateDeviceAsync(
+        DeviceRecord device,
+        OpticonUpdateRelease release,
+        CancellationToken cancellationToken = default)
+    {
+        RequirePrimary();
+        RequireLiveAgent(device, "remote update");
+        if (!await _updateGate.WaitAsync(0, cancellationToken))
+            throw new InvalidOperationException("Another guarded device update is already running from this command center.");
+        Busy = true;
+        try
+        {
+            var progress = new Progress<string>(message =>
+            {
+                Status = message;
+                Log(message);
+            });
+            var result = await _deviceUpdates.UpdateAsync(
+                device, GetAgentToken(device), release, progress, cancellationToken);
+            device.UpdateStatus = result;
+            if (result.Phase == UpdatePhase.Committed) device.AgentVersion = result.TargetVersion;
+            Status = result.Phase switch
+            {
+                UpdatePhase.Committed => $"Opticon Agent {result.TargetVersion} committed on {device.Name}",
+                UpdatePhase.RolledBack => $"{device.Name} safely rolled back to Opticon {result.CurrentVersion}",
+                _ => $"Update on {device.Name}: {result.Phase}"
+            };
+            await _state.SaveAsync(cancellationToken);
+            return result;
+        }
+        finally
+        {
+            Busy = false;
+            _updateGate.Release();
+        }
     }
 
     public async Task<InviteBundleResult> CreateInviteAsync(
@@ -566,8 +730,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
             var status = await _agents.GetStatusAsync(device, GetAgentToken(device), cancellationToken);
             device.State = DeviceConnectionState.Online;
             device.LastSeen = DateTimeOffset.UtcNow;
+            device.HostName = status.HostName;
+            device.OperatingSystem = status.OperatingSystem;
+            device.Architecture = status.Architecture;
             device.AgentVersion = status.AgentVersion;
+            device.UpdateProtocolVersion = status.UpdateProtocolVersion;
             device.AdvertisesExitNode = status.AdvertisesExitNode;
+            device.RustDeskReady = status.RustDeskReady;
+            device.SshReady = status.SshReady;
+            device.SshPort = status.SshPort;
+            device.UpdateStatus = status.UpdateStatus;
+            if (AgentClient.IsTailscaleIp(status.TailscaleIp)) device.TailscaleIp = status.TailscaleIp;
         }
         catch
         {
@@ -622,7 +795,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         var selectedId = SelectedDevice?.Id;
         Devices.Clear();
-        foreach (var device in devices.OrderByDescending(device => device.State == DeviceConnectionState.Online).ThenBy(device => device.Name)) Devices.Add(device);
+        foreach (var device in devices.OrderByDescending(device => device.State == DeviceConnectionState.Online).ThenBy(device => device.Name))
+        {
+            device.PrivacyMode2Enabled = !Config.PrivacyMode2ByDevice.TryGetValue(device.Id, out var enabled) || enabled;
+            Devices.Add(device);
+        }
         SelectedDevice = Devices.FirstOrDefault(device => device.Id == selectedId) ?? Devices.FirstOrDefault();
     }
 
@@ -630,6 +807,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         Invites.Clear();
         foreach (var invite in Config.Invites.OrderByDescending(invite => invite.CreatedAt)) Invites.Add(invite);
+    }
+
+    private async Task ObserveSshSessionAsync(string deviceName, SshSessionHandle handle)
+    {
+        try
+        {
+            var exitCode = await handle.Completion;
+            Log($"Administrative SSH to {deviceName} closed (ssh.exe exit {exitCode}).");
+            if (handle.RemoteRevocationError is not null)
+                Log($"Immediate SSH revocation could not be confirmed for {deviceName}; its independent lease expiry remains in force: {handle.RemoteRevocationError.Message}");
+            if (handle.LocalCleanupError is not null)
+                Log($"The ephemeral local SSH key directory for {deviceName} could not be removed and will be retried as stale data on the next SSH launch: {handle.LocalCleanupError.Message}");
+        }
+        catch (Exception exception)
+        {
+            Log($"SSH session monitor for {deviceName} ended unexpectedly: {exception.Message}");
+        }
+        finally
+        {
+            lock (_sshSessions) _sshSessions.Remove(handle);
+        }
+    }
+
+    private static void RequireLiveAgent(DeviceRecord device, string operation)
+    {
+        if (!AgentClient.IsTailscaleIp(device.TailscaleIp))
+            throw new InvalidOperationException("The selected device has no valid Tailscale IPv4 address.");
+        if (device.State != DeviceConnectionState.Online)
+            throw new InvalidOperationException($"{operation} requires a live Opticon Agent on {device.Name}; Tailscale-only or offline state is not sufficient.");
     }
 
     private void RequirePrimary()

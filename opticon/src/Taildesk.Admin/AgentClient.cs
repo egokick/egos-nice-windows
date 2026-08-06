@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Net.Http.Json;
 using Taildesk.Shared;
 
@@ -9,7 +10,14 @@ namespace Taildesk.Admin;
 
 public sealed class AgentClient
 {
-    private readonly HttpClient _http = new() { Timeout = Timeout.InfiniteTimeSpan };
+    private readonly HttpClient _http = new(new SocketsHttpHandler
+    {
+        UseProxy = false,
+        AllowAutoRedirect = false
+    })
+    {
+        Timeout = Timeout.InfiniteTimeSpan
+    };
 
     public async Task<DeviceStatusDto> GetStatusAsync(DeviceRecord device, string token, CancellationToken cancellationToken = default) =>
         await GetAsync<DeviceStatusDto>(device, token, "api/v1/status", cancellationToken);
@@ -87,6 +95,74 @@ public sealed class AgentClient
     public async Task SetRoleAsync(DeviceRecord device, string token, DeviceRole role, CancellationToken cancellationToken = default) =>
         await SendJsonAsync(device, token, HttpMethod.Post, "api/v1/security/role", new RoleChangeRequest { Role = role }, cancellationToken);
 
+    public Task<SshAccessResponse> OpenSshAsync(
+        DeviceRecord device,
+        string token,
+        SshAccessRequest request,
+        CancellationToken cancellationToken = default) =>
+        SendJsonResultAsync<SshAccessResponse>(
+            device, token, HttpMethod.Post, "api/v1/ssh/access", request, TimeSpan.FromMinutes(20), cancellationToken);
+
+    public Task RevokeSshAsync(
+        DeviceRecord device,
+        string token,
+        string sessionId,
+        CancellationToken cancellationToken = default) =>
+        SendJsonAsync(device, token, HttpMethod.Post, "api/v1/ssh/revoke",
+            new SshRevokeRequest { SessionId = sessionId }, cancellationToken);
+
+    public Task<UpdateStatusDto> PrepareUpdateAsync(
+        DeviceRecord device,
+        string token,
+        OpticonUpdateRequest request,
+        CancellationToken cancellationToken = default) =>
+        SendJsonResultAsync<UpdateStatusDto>(
+            device, token, HttpMethod.Post, "api/v1/update/prepare", request, TimeSpan.FromMinutes(30), cancellationToken);
+
+    public Task<UpdateStatusDto> ActivateUpdateAsync(
+        DeviceRecord device,
+        string token,
+        Guid operationId,
+        CancellationToken cancellationToken = default) =>
+        SendJsonResultAsync<UpdateStatusDto>(device, token, HttpMethod.Post, "api/v1/update/activate",
+            new UpdateOperationRequest { OperationId = operationId }, TimeSpan.FromMinutes(2), cancellationToken);
+
+    public Task<UpdateStatusDto> CommitUpdateAsync(
+        DeviceRecord device,
+        string token,
+        Guid operationId,
+        CancellationToken cancellationToken = default) =>
+        SendJsonResultAsync<UpdateStatusDto>(device, token, HttpMethod.Post, "api/v1/update/commit",
+            new UpdateOperationRequest { OperationId = operationId }, TimeSpan.FromMinutes(2), cancellationToken);
+
+    public Task<UpdateStatusDto> GetUpdateStatusAsync(
+        DeviceRecord device,
+        string token,
+        CancellationToken cancellationToken = default) =>
+        GetAsync<UpdateStatusDto>(device, token, "api/v1/update/status", cancellationToken);
+
+    public static async Task<bool> ProbeTcpAsync(
+        string tailscaleIp,
+        int port,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsTailscaleIp(tailscaleIp))
+            throw new InvalidOperationException("Opticon refuses to probe a non-Tailscale address.");
+        if (port is not 21118 && port != RemoteAdministrationProtocol.SshPort)
+            throw new ArgumentOutOfRangeException(nameof(port), "Only Opticon recovery-channel ports may be probed.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        linked.CancelAfter(timeout);
+        try
+        {
+            using var client = new TcpClient(AddressFamily.InterNetwork);
+            await client.ConnectAsync(System.Net.IPAddress.Parse(tailscaleIp), port, linked.Token);
+            return true;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
+        catch (SocketException) { return false; }
+    }
+
     private async Task<T> GetAsync<T>(DeviceRecord device, string token, string relative, CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -108,6 +184,25 @@ public sealed class AgentClient
         await EnsureSuccessAsync(response, timeout.Token);
     }
 
+    private async Task<T> SendJsonResultAsync<T>(
+        DeviceRecord device,
+        string token,
+        HttpMethod method,
+        string relative,
+        object body,
+        TimeSpan requestTimeout,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(requestTimeout);
+        using var request = CreateRequest(device, token, method, relative);
+        request.Content = JsonContent.Create(body, options: JsonDefaults.Options);
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        await EnsureSuccessAsync(response, timeout.Token);
+        return await response.Content.ReadFromJsonAsync<T>(JsonDefaults.Options, timeout.Token)
+               ?? throw new InvalidDataException("The agent returned an empty response.");
+    }
+
     private static HttpRequestMessage CreateRequest(DeviceRecord device, string token, HttpMethod method, string relative)
     {
         if (!IsTailscaleIp(device.TailscaleIp))
@@ -121,12 +216,8 @@ public sealed class AgentClient
 
     private static Uri BaseUri(DeviceRecord device) => new($"http://{device.TailscaleIp}:45831/");
 
-    public static bool IsTailscaleIp(string value)
-    {
-        if (!System.Net.IPAddress.TryParse(value, out var address)) return false;
-        var bytes = address.MapToIPv4().GetAddressBytes();
-        return bytes[0] == 100 && bytes[1] is >= 64 and <= 127;
-    }
+    public static bool IsTailscaleIp(string value) =>
+        RemoteAdministrationProtocol.IsTailscaleIpv4(value);
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {

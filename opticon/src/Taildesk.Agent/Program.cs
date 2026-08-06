@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.RateLimiting;
@@ -23,9 +24,10 @@ if (string.IsNullOrWhiteSpace(config.AgentTokenHash) || config.SharedRoots.Count
     return;
 }
 
-if (!IPAddress.TryParse(config.BindAddress, out var configuredAddress))
+if (!RemoteAdministrationProtocol.IsTailscaleIpv4(config.BindAddress)
+    || !IPAddress.TryParse(config.BindAddress, out var configuredAddress))
 {
-    Console.Error.WriteLine("Taildesk Agent has an invalid Tailscale bind address.");
+    Console.Error.WriteLine("Taildesk Agent requires a canonical IPv4 address in Tailscale's 100.64.0.0/10 range.");
     return;
 }
 
@@ -54,6 +56,9 @@ builder.Services.AddSingleton<TailscaleCli>();
 builder.Services.AddSingleton<AgentRuntime>();
 builder.Services.AddSingleton(new PathGuard(config.SharedRoots));
 builder.Services.AddSingleton<FileOperations>();
+builder.Services.AddSingleton<UpdateManager>();
+builder.Services.AddSingleton<SshAccessManager>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<SshAccessManager>());
 builder.Services.AddHttpClient(nameof(EnrollmentWorker), client => client.Timeout = TimeSpan.FromSeconds(20));
 builder.Services.AddHostedService<EnrollmentWorker>();
 builder.Services.AddRateLimiter(options =>
@@ -72,10 +77,26 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+var updateHealthToken =
+    await app.Services.GetRequiredService<UpdateManager>().EnsureHealthTokenAsync();
 
 app.UseRateLimiter();
 app.Use(async (context, next) =>
 {
+    if (string.Equals(context.Request.Path.Value, "/internal/update-health", StringComparison.Ordinal))
+    {
+        var remote = context.Connection.RemoteIpAddress;
+        var healthHeader = context.Request.Headers["X-Opticon-Update-Health"].ToString();
+        if (remote?.AddressFamily != AddressFamily.InterNetwork || !remote.Equals(configuredAddress)
+            || !SecurityHelpers.FixedTimeEquals(healthHeader, updateHealthToken))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+        await next();
+        return;
+    }
+
     if (string.Equals(context.Request.Path.Value, "/api/v1/media", StringComparison.Ordinal))
     {
         await next();
@@ -97,15 +118,20 @@ app.Use(async (context, next) =>
 app.Use(async (context, next) =>
 {
     var sensitive = context.Request.Path.StartsWithSegments("/api/v1/security")
+                    || context.Request.Path.StartsWithSegments("/api/v1/ssh")
+                    || context.Request.Path.StartsWithSegments("/api/v1/update")
                     || string.Equals(context.Request.Path.Value, "/api/v1/actions/exit-node", StringComparison.Ordinal);
     if (sensitive)
     {
-        var remote = context.Connection.RemoteIpAddress?.MapToIPv4();
+        var remote = context.Connection.RemoteIpAddress;
         var coordinatorHost = Uri.TryCreate(config.CoordinatorUrl, UriKind.Absolute, out var coordinator)
+            && RemoteAdministrationProtocol.IsTailscaleIpv4(coordinator.Host)
             && IPAddress.TryParse(coordinator.Host, out var coordinatorAddress)
-            ? coordinatorAddress.MapToIPv4()
+            ? coordinatorAddress
             : null;
-        if (remote is null || coordinatorHost is null || !remote.Equals(coordinatorHost))
+        if (remote?.AddressFamily != AddressFamily.InterNetwork
+            || coordinatorHost is null
+            || !remote.Equals(coordinatorHost))
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             await context.Response.WriteAsJsonAsync(new { error = "This operation is restricted to the primary command center." });
@@ -137,9 +163,25 @@ app.Use(async (context, next) =>
         context.Response.StatusCode = StatusCodes.Status409Conflict;
         await context.Response.WriteAsJsonAsync(new { error = exception.Message });
     }
+    catch (InvalidDataException exception)
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(new { error = exception.Message });
+    }
+    catch (ArgumentException exception)
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(new { error = exception.Message });
+    }
+    catch (InvalidOperationException exception)
+    {
+        context.Response.StatusCode = StatusCodes.Status409Conflict;
+        await context.Response.WriteAsJsonAsync(new { error = exception.Message });
+    }
 });
 
 app.MapGet("/healthz", () => Results.Ok(new { service = "taildesk-agent", status = "ok" }));
+app.MapGet("/internal/update-health", (UpdateManager updates) => Results.Ok(updates.GetInternalHealth()));
 app.MapGet("/api/v1/status", async (AgentRuntime runtime, CancellationToken cancellationToken) =>
     Results.Ok(await runtime.GetStatusAsync(cancellationToken)));
 app.MapGet("/api/v1/roots", (FileOperations files) => Results.Ok(files.GetRoots()));
@@ -215,6 +257,58 @@ app.MapPost("/api/v1/security/role", async (RoleChangeRequest request, AgentRunt
     await runtime.SetRoleAsync(request.Role, cancellationToken);
     return Results.NoContent();
 });
+
+app.MapGet("/api/v1/ssh/status", async (SshAccessManager ssh, CancellationToken cancellationToken) =>
+    Results.Ok(await ssh.GetStatusAsync(cancellationToken)));
+app.MapPost("/api/v1/ssh/access", async (
+    SshAccessRequest request,
+    HttpContext context,
+    SshAccessManager ssh,
+    CancellationToken cancellationToken) =>
+{
+    var caller = context.Connection.RemoteIpAddress
+                 ?? throw new UnauthorizedAccessException("The SSH caller address is unavailable.");
+    var lifetime = request.ExpiresAt - DateTimeOffset.UtcNow;
+    if (lifetime <= TimeSpan.Zero || lifetime > RemoteAdministrationProtocol.MaximumSshSession)
+        throw new ArgumentOutOfRangeException(nameof(request.ExpiresAt), "The SSH lease expiry is outside the allowed window.");
+    var grant = await ssh.ProvisionAsync(caller, request.PublicKey, lifetime, cancellationToken);
+    return Results.Ok(new SshAccessResponse
+    {
+        SessionId = grant.SessionId,
+        UserName = grant.UserName,
+        Port = grant.Port,
+        Host = grant.Host,
+        ExpiresAt = grant.ExpiresAt,
+        HostPublicKey = grant.HostPublicKey,
+        SystemRoot = grant.SystemRoot
+    });
+});
+app.MapPost("/api/v1/ssh/revoke", async (
+    SshRevokeRequest request,
+    HttpContext context,
+    SshAccessManager ssh,
+    CancellationToken cancellationToken) =>
+{
+    var caller = context.Connection.RemoteIpAddress
+                 ?? throw new UnauthorizedAccessException("The SSH caller address is unavailable.");
+    await ssh.RevokeAsync(caller, request.SessionId, cancellationToken);
+    return Results.NoContent();
+});
+
+app.MapGet("/api/v1/update/status", (UpdateManager updates) => Results.Ok(
+    updates.GetStatus() ?? new UpdateStatusDto
+    {
+        Phase = UpdatePhase.None,
+        CurrentVersion = UpdateManager.CurrentVersion,
+        UpdatedAt = DateTimeOffset.UtcNow,
+        Message = "No Opticon update is staged."
+    }));
+app.MapPost("/api/v1/update/prepare", async (OpticonUpdateRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
+    Results.Ok(await updates.PrepareAsync(request, cancellationToken)));
+app.MapPost("/api/v1/update/activate", async (UpdateOperationRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
+    Results.Ok(await updates.ActivateAsync(request.OperationId, cancellationToken)));
+app.MapPost("/api/v1/update/commit", async (UpdateOperationRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
+    Results.Ok(await updates.RequestCommitAsync(request.OperationId, cancellationToken)));
 
 await app.RunAsync();
 

@@ -116,9 +116,13 @@ static async Task VerifyLandingUsesCurrentBundleAsync(string invitationUrl, Devi
     if (manifestPath is null) throw new FileNotFoundException("The local Fly artifact manifest was not found.");
 
     using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath));
-    var artifact = manifest.RootElement.GetProperty("artifacts").EnumerateArray().First(item =>
-        item.GetProperty("product").GetString() == "OpticonBundle"
-        && item.GetProperty("role").GetString() == role.ToString());
+    var artifact = manifest.RootElement.GetProperty("artifacts").EnumerateArray()
+        .Where(item => item.GetProperty("product").GetString() == "OpticonBundle"
+                       && item.GetProperty("role").GetString() == role.ToString())
+        .OrderByDescending(item => UpdatePackageVerifier.ParseVersion(
+            item.GetProperty("version").GetString() ?? string.Empty))
+        .FirstOrDefault();
+    if (artifact.ValueKind == JsonValueKind.Undefined) throw new InvalidDataException("The current role bundle is not published.");
     var file = artifact.GetProperty("file").GetString()!;
     var hash = artifact.GetProperty("sha256").GetString()!;
     var size = artifact.GetProperty("size").GetInt64().ToString();

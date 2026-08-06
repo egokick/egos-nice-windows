@@ -1,10 +1,11 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Taildesk.Shared;
 
 public sealed class AgentConfig
 {
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; } = 2;
     public Guid DeviceId { get; set; } = Guid.NewGuid();
     public int ApiPort { get; set; } = 45831;
     public string BindAddress { get; set; } = string.Empty;
@@ -12,6 +13,7 @@ public sealed class AgentConfig
     public DeviceRole Role { get; set; } = DeviceRole.ManagedOnly;
     public string AgentTokenHash { get; set; } = string.Empty;
     public string MediaSigningKeyProtected { get; set; } = string.Empty;
+    public string UpdateHealthTokenProtected { get; set; } = string.Empty;
     public string CoordinatorUrl { get; set; } = string.Empty;
     public Guid? PendingInviteId { get; set; }
     public Guid? CompletedInviteId { get; set; }
@@ -25,8 +27,14 @@ public sealed class AgentConfig
     public int MaxConcurrentUploads { get; set; } = 2;
     public int MaxUploadDurationMinutes { get; set; } = 24 * 60;
 
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalProperties { get; set; }
+
     [JsonIgnore]
     public string MediaSigningKey => SecretProtector.Unprotect(MediaSigningKeyProtected, SecretScope.LocalMachine);
+
+    [JsonIgnore]
+    public string UpdateHealthToken => SecretProtector.Unprotect(UpdateHealthTokenProtected, SecretScope.LocalMachine);
 
     [JsonIgnore]
     public string PendingInviteSecret => SecretProtector.Unprotect(PendingInviteSecretProtected, SecretScope.LocalMachine);

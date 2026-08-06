@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,17 +21,19 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	root := t.TempDir()
 	inviteDir := filepath.Join(root, "invites")
 	artifactDir := filepath.Join(root, "artifacts")
+	bundleDir := filepath.Join(root, "bundles")
 	if err := os.MkdirAll(inviteDir, 0700); err != nil { t.Fatal(err) }
 	if err := os.MkdirAll(artifactDir, 0700); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
 	bundleBytes := []byte("signed reusable bundle fixture")
 	bundleHash := sha256.Sum256(bundleBytes)
-	bundle := bundleArtifact{Product: "OpticonBundle", Role: "ManagedOnly", Architecture: "x64", File: "managed.zip", Size: int64(len(bundleBytes)), SHA256: hex.EncodeToString(bundleHash[:])}
-	manifest, _ := json.Marshal(artifactManifest{Artifacts: []bundleArtifact{bundle}})
+	bundle := bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.0.0-managed-win-x64.zip", Size: int64(len(bundleBytes)), SHA256: hex.EncodeToString(bundleHash[:])}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{bundle}})
 	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(artifactDir, bundle.File), bundleBytes, 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(bundleDir, bundle.File), bundleBytes, 0444); err != nil { t.Fatal(err) }
 
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	g := &gateway{adminSecret: secret, inviteDir: inviteDir, artifactDir: artifactDir, publicOrigin: "https://opticon.example.test", nonces: make(map[string]time.Time)}
+	g := &gateway{adminSecret: secret, inviteDir: inviteDir, artifactDir: artifactDir, bundleDir: bundleDir, publicOrigin: "https://opticon.example.test", nonces: make(map[string]time.Time)}
 	publicID := strings.Repeat("A", 24)
 	idHash := sha256.Sum256([]byte(publicID))
 	ciphertext := bytes.Repeat([]byte{0x5a}, 96)
@@ -46,6 +49,10 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	if !strings.Contains(landing, "Mom &amp; Dad PC") || !strings.Contains(landing, bundle.SHA256) { t.Fatal("landing page omitted escaped device or bundle pin") }
 	if strings.Contains(landing, "private-fragment-test") { t.Fatal("landing page leaked a fragment key") }
 
+	bundleResult := httptest.NewRecorder(); g.ServeHTTP(bundleResult, httptest.NewRequest(http.MethodGet, artifactPrefix+bundle.File, nil))
+	if bundleResult.Code != http.StatusOK || !bytes.Equal(bundleResult.Body.Bytes(), bundleBytes) {
+		t.Fatal("landing page bundle was not downloadable from finalized storage")
+	}
 	downloadResult := httptest.NewRecorder(); g.ServeHTTP(downloadResult, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID+"/invite.tdinvite", nil))
 	if downloadResult.Code != http.StatusOK || !bytes.Equal(downloadResult.Body.Bytes(), ciphertext) { t.Fatal("encrypted invitation download changed") }
 
@@ -56,6 +63,106 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	if missingResult.Code != http.StatusNotFound { t.Fatal("deleted invitation remained public") }
 }
 
+func TestBundleForRoleSelectsHighestSemanticVersion(t *testing.T) {
+	root := t.TempDir()
+	bundleDir := filepath.Join(root, "bundles")
+	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
+	hash := strings.Repeat("a", 64)
+	prior := bundleArtifact{Product: "OpticonBundle", Version: "1.9.9", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.9.9-managed-win-x64.zip", Size: 10, SHA256: hash}
+	candidate := bundleArtifact{Product: "OpticonBundle", Version: "1.10.0-rc.2", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.10.0-rc.2-managed-win-x64.zip", Size: 10, SHA256: hash}
+	current := bundleArtifact{Product: "OpticonBundle", Version: "1.10.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.10.0-managed-win-x64.zip", Size: 10, SHA256: hash}
+	pending := bundleArtifact{Product: "OpticonBundle", Version: "2.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-2.0.0-managed-win-x64.zip", Size: 10, SHA256: hash}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{
+		prior, candidate, current, pending,
+		{Product: "OpticonBundle", Version: "01.99.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-01.99.0-managed-win-x64.zip", Size: 10, SHA256: hash},
+		{Product: "OpticonBundle", Version: "99.0.0", Role: "ManagedOnly", Architecture: "arm64", File: "opticon-bundle-99.0.0-managed-win-arm64.zip", Size: 10, SHA256: hash},
+	}})
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
+	for _, artifact := range []bundleArtifact{prior, candidate, current} {
+		if err := os.WriteFile(filepath.Join(bundleDir, artifact.File), bytes.Repeat([]byte{'x'}, 10), 0444); err != nil { t.Fatal(err) }
+	}
+	selected, err := (&gateway{artifactDir: root, bundleDir: bundleDir}).bundleForRole("ManagedOnly")
+	if err != nil { t.Fatal(err) }
+	if selected.File != current.File || selected.Version != current.Version {
+		t.Fatalf("selected %s %s instead of highest finalized stable semantic release", selected.File, selected.Version)
+	}
+}
+
+func TestValidBundleArtifactRequiresStableSupportedVersion(t *testing.T) {
+	base := bundleArtifact{
+		Product: "OpticonBundle", Role: "ManagedOnly", Architecture: "x64",
+		File: "opticon-bundle-test-managed-win-x64.zip", Size: 1024,
+		SHA256: strings.Repeat("a", 64),
+	}
+	cases := []struct {
+		version string
+		valid bool
+	}{
+		{version: "1.0.0", valid: true},
+		{version: "10.200.300", valid: true},
+		{version: "0.9.0"},
+		{version: "1.0.0-rc.1"},
+		{version: "1.0.0+build.1"},
+		{version: "1.0"},
+		{version: "01.0.0"},
+	}
+	for _, item := range cases {
+		artifact := base
+		artifact.Version = item.version
+		if actual := validBundleArtifact(artifact); actual != item.valid {
+			t.Fatalf("stable release validation for %q returned %v", item.version, actual)
+		}
+	}
+}
+
+func TestBundleForRoleRejectsAmbiguousEquivalentRelease(t *testing.T) {
+	root := t.TempDir()
+	bundleDir := filepath.Join(root, "bundles")
+	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
+	hash := strings.Repeat("b", 64)
+	first := bundleArtifact{Product: "OpticonBundle", Version: "2.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-2.0.0-first-managed-win-x64.zip", Size: 10, SHA256: hash}
+	second := bundleArtifact{Product: "OpticonBundle", Version: "2.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-2.0.0-second-managed-win-x64.zip", Size: 10, SHA256: hash}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{first, second}})
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
+	for _, artifact := range []bundleArtifact{first, second} {
+		if err := os.WriteFile(filepath.Join(bundleDir, artifact.File), bytes.Repeat([]byte{'x'}, 10), 0444); err != nil { t.Fatal(err) }
+	}
+	if _, err := (&gateway{artifactDir: root, bundleDir: bundleDir}).bundleForRole("ManagedOnly"); err == nil {
+		t.Fatal("precedence-equivalent conflicting releases were accepted")
+	}
+}
+
+func TestDuplicateBundleFilenameFailsBeforeServingSelectionOrUpload(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := filepath.Join(root, "artifacts")
+	bundleDir := filepath.Join(root, "bundles")
+	if err := os.MkdirAll(artifactDir, 0700); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
+	payload := []byte("duplicate bundle fixture")
+	digest := sha256.Sum256(payload)
+	fileName := "opticon-bundle-duplicate-win-x64.zip"
+	first := bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: fileName, Size: int64(len(payload)), SHA256: hex.EncodeToString(digest[:])}
+	second := bundleArtifact{Product: "OpticonBundle", Version: "2.0.0", Role: "ControllerAndManaged", Architecture: "x64", File: fileName, Size: int64(len(payload)), SHA256: hex.EncodeToString(digest[:])}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{first, second}})
+	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(bundleDir, fileName), payload, 0444); err != nil { t.Fatal(err) }
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	g := &gateway{adminSecret: secret, artifactDir: artifactDir, bundleDir: bundleDir, nonces: make(map[string]time.Time)}
+	if _, err := g.readArtifactManifest(); err == nil { t.Fatal("duplicate bundle filename passed central manifest validation") }
+	if _, err := g.bundleForRole("ManagedOnly"); err == nil { t.Fatal("duplicate bundle filename reached role selection") }
+	if _, err := g.bundleByFile(fileName); err == nil { t.Fatal("duplicate bundle filename reached file selection") }
+
+	public := httptest.NewRecorder(); g.ServeHTTP(public, httptest.NewRequest(http.MethodGet, artifactPrefix+"manifest.json", nil))
+	if public.Code != http.StatusServiceUnavailable { t.Fatalf("duplicate manifest was served with status %d", public.Code) }
+	uploadPath := bundleAdminPrefix + fileName + "?offset=0&total=" + strconv.FormatInt(first.Size, 10) + "&sha256=" + first.SHA256
+	upload := signedRouteRequest(secret, http.MethodPut, uploadPath, "duplicate-upload-nonce-0123", payload)
+	uploadResult := httptest.NewRecorder(); g.ServeHTTP(uploadResult, upload)
+	if uploadResult.Code != http.StatusNotFound { t.Fatalf("duplicate manifest authorized upload with status %d", uploadResult.Code) }
+	if _, err := os.Stat(filepath.Join(bundleDir, fileName+".upload")); !os.IsNotExist(err) {
+		t.Fatal("duplicate manifest created an upload staging file")
+	}
+}
+
 func TestBundleUploadRequiresHMACAndManifestPins(t *testing.T) {
 	root := t.TempDir()
 	artifactDir := filepath.Join(root, "artifacts")
@@ -64,8 +171,8 @@ func TestBundleUploadRequiresHMACAndManifestPins(t *testing.T) {
 	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
 	payload := []byte("a signed reusable Opticon bundle")
 	digest := sha256.Sum256(payload)
-	artifact := bundleArtifact{Product: "OpticonBundle", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-test.zip", Size: int64(len(payload)), SHA256: hex.EncodeToString(digest[:])}
-	manifest, _ := json.Marshal(artifactManifest{Artifacts: []bundleArtifact{artifact}})
+	artifact := bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-test.zip", Size: int64(len(payload)), SHA256: hex.EncodeToString(digest[:])}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{artifact}})
 	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	g := &gateway{adminSecret: secret, artifactDir: artifactDir, bundleDir: bundleDir, nonces: make(map[string]time.Time)}
@@ -102,7 +209,7 @@ func TestPruneUndeclaredBundlesPreservesCurrentArtifacts(t *testing.T) {
 	if err := os.MkdirAll(artifactDir, 0700); err != nil { t.Fatal(err) }
 	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
 	current := "opticon-bundle-current-managed-win-x64.zip"
-	manifest, _ := json.Marshal(artifactManifest{Artifacts: []bundleArtifact{{Product: "OpticonBundle", File: current}}})
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{{Product: "OpticonBundle", File: current}}})
 	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
 	for _, name := range []string{current, current + ".upload", "opticon-bundle-old-managed-win-x64.zip", "opticon-bundle-old-controller-win-x64.zip.upload", "unrelated.data"} {
 		if err := os.WriteFile(filepath.Join(bundleDir, name), []byte(name), 0600); err != nil { t.Fatal(err) }
@@ -115,6 +222,23 @@ func TestPruneUndeclaredBundlesPreservesCurrentArtifacts(t *testing.T) {
 	for _, name := range []string{"opticon-bundle-old-managed-win-x64.zip", "opticon-bundle-old-controller-win-x64.zip.upload"} {
 		if _, err := os.Stat(filepath.Join(bundleDir, name)); !os.IsNotExist(err) { t.Fatalf("obsolete bundle %q was not removed", name) }
 	}
+}
+
+func TestPruneRejectsUnknownManifestSchemaBeforeDeleting(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := filepath.Join(root, "artifacts")
+	bundleDir := filepath.Join(root, "bundles")
+	if err := os.MkdirAll(artifactDir, 0700); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
+	name := "opticon-bundle-current-managed-win-x64.zip"
+	path := filepath.Join(bundleDir, name)
+	if err := os.WriteFile(path, []byte("preserve me"), 0600); err != nil { t.Fatal(err) }
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 2})
+	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
+	if err := (&gateway{artifactDir: artifactDir, bundleDir: bundleDir}).pruneUndeclaredBundles(); err == nil {
+		t.Fatal("unknown manifest schema was accepted for destructive pruning")
+	}
+	if _, err := os.Stat(path); err != nil { t.Fatalf("bundle was deleted before manifest validation: %v", err) }
 }
 func TestArtifactRejectsUndeclaredOrWrongSizedBundle(t *testing.T) {
 	root := t.TempDir()
@@ -131,21 +255,105 @@ func TestArtifactRejectsUndeclaredOrWrongSizedBundle(t *testing.T) {
 	if result.Code != http.StatusNotFound { t.Fatal("undeclared stale bundle remained downloadable") }
 
 	digest := sha256.Sum256([]byte("stale"))
-	declared := bundleArtifact{Product: "OpticonBundle", File: name, Size: 999, SHA256: hex.EncodeToString(digest[:])}
-	manifest, _ = json.Marshal(artifactManifest{Artifacts: []bundleArtifact{declared}})
+	declared := bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: name, Size: 999, SHA256: hex.EncodeToString(digest[:])}
+	manifest, _ = json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{declared}})
 	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
 	result = httptest.NewRecorder(); g.ServeHTTP(result, httptest.NewRequest(http.MethodGet, artifactPrefix+name, nil))
 	if result.Code != http.StatusNotFound { t.Fatal("wrong-sized bundle remained downloadable") }
 }
+
+func TestPublicManifestOnlyAdvertisesFinalizedBundlesAndPreservesPins(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := filepath.Join(root, "artifacts")
+	bundleDir := filepath.Join(root, "bundles")
+	if err := os.MkdirAll(artifactDir, 0700); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
+	hash := strings.Repeat("c", 64)
+	dependency := bundleArtifact{Product: "Tailscale", Version: "1.2.3", Architecture: "x64", File: "tailscale.msi", Size: 50, SHA256: hash, SignerThumbprint: "PINNED-SIGNER"}
+	ready := bundleArtifact{Product: "OpticonBundle", Version: "1.1.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.1.0-managed-win-x64.zip", Size: 16, SHA256: hash}
+	pending := bundleArtifact{Product: "OpticonBundle", Version: "1.2.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.2.0-managed-win-x64.zip", Size: 16, SHA256: hash}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{dependency, ready, pending}})
+	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(bundleDir, ready.File), bytes.Repeat([]byte{'r'}, 16), 0444); err != nil { t.Fatal(err) }
+	g := &gateway{artifactDir: artifactDir, bundleDir: bundleDir}
+
+	get := httptest.NewRecorder(); g.ServeHTTP(get, httptest.NewRequest(http.MethodGet, artifactPrefix+"manifest.json", nil))
+	if get.Code != http.StatusOK { t.Fatalf("manifest returned %d: %s", get.Code, get.Body.String()) }
+	if get.Header().Get("Cache-Control") != "no-store, max-age=0" { t.Fatal("public manifest was cacheable") }
+	var published artifactManifest
+	if err := json.Unmarshal(get.Body.Bytes(), &published); err != nil { t.Fatal(err) }
+	if published.SchemaVersion != 1 { t.Fatalf("schema version changed to %d", published.SchemaVersion) }
+	if len(published.Artifacts) != 2 { t.Fatalf("published %d records instead of dependency plus finalized bundle", len(published.Artifacts)) }
+	if published.Artifacts[0].SignerThumbprint != dependency.SignerThumbprint { t.Fatal("dependency signer pin was stripped") }
+	if published.Artifacts[1].File != ready.File { t.Fatalf("unexpected bundle was published: %s", published.Artifacts[1].File) }
+	if strings.Contains(get.Body.String(), pending.File) { t.Fatal("not-yet-finalized bundle was advertised") }
+
+	head := httptest.NewRecorder(); g.ServeHTTP(head, httptest.NewRequest(http.MethodHead, artifactPrefix+"manifest.json", nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Length") != get.Header().Get("Content-Length") {
+		t.Fatal("manifest HEAD response did not preserve GET metadata without a body")
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, pending.File), bytes.Repeat([]byte{'p'}, 15), 0600); err != nil { t.Fatal(err) }
+	wrongSize := httptest.NewRecorder(); g.ServeHTTP(wrongSize, httptest.NewRequest(http.MethodGet, artifactPrefix+"manifest.json", nil))
+	if strings.Contains(wrongSize.Body.String(), pending.File) { t.Fatal("wrong-sized bundle was advertised") }
+	if err := os.WriteFile(filepath.Join(bundleDir, pending.File), bytes.Repeat([]byte{'p'}, 16), 0444); err != nil { t.Fatal(err) }
+	finalized := httptest.NewRecorder(); g.ServeHTTP(finalized, httptest.NewRequest(http.MethodGet, artifactPrefix+"manifest.json", nil))
+	if !strings.Contains(finalized.Body.String(), pending.File) { t.Fatal("finalized bundle did not become visible") }
+}
+
+func TestUnsafeBundleFilenameCannotReachInstallerCommand(t *testing.T) {
+	root := t.TempDir()
+	bundleDir := filepath.Join(root, "bundles")
+	if err := os.MkdirAll(bundleDir, 0700); err != nil { t.Fatal(err) }
+	unsafeName := "opticon-bundle-x';Start-Process calc;#.zip"
+	artifact := bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: unsafeName, Size: 10, SHA256: strings.Repeat("d", 64)}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{artifact}})
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(bundleDir, unsafeName), bytes.Repeat([]byte{'x'}, 10), 0600); err != nil { t.Fatal(err) }
+	g := &gateway{artifactDir: root, bundleDir: bundleDir}
+	if _, err := g.bundleForRole("ManagedOnly"); err == nil { t.Fatal("unsafe bundle filename was selected") }
+	result := httptest.NewRecorder(); g.ServeHTTP(result, httptest.NewRequest(http.MethodGet, artifactPrefix+"manifest.json", nil))
+	if result.Code != http.StatusOK || strings.Contains(result.Body.String(), unsafeName) { t.Fatal("unsafe bundle filename was publicly advertised") }
+	command := buildInstallerCommand("https://opticon.example.test", strings.Repeat("B", 24), artifact)
+	escapedURL := powerShellSingleQuoted("https://opticon.example.test" + artifactPrefix + url.PathEscape(unsafeName))
+	if !strings.Contains(command, "Get-OpticonFile '"+escapedURL+"' $bundle") {
+		t.Fatal("bundle URL was not path-encoded and contained as one PowerShell string literal")
+	}
+}
+
+func TestMigrateBundleUploadsRequiresManifestSizeAndHash(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := filepath.Join(root, "artifacts")
+	stagingDir := filepath.Join(root, "staging")
+	bundleDir := filepath.Join(root, "bundles")
+	for _, directory := range []string{artifactDir, stagingDir, bundleDir} {
+		if err := os.MkdirAll(directory, 0700); err != nil { t.Fatal(err) }
+	}
+	goodBytes := []byte("verified legacy upload")
+	goodHash := sha256.Sum256(goodBytes)
+	badBytes := []byte("tampered legacy upload")
+	badHash := sha256.Sum256([]byte("different signed bytes"))
+	good := bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-good-managed-win-x64.zip", Size: int64(len(goodBytes)), SHA256: hex.EncodeToString(goodHash[:])}
+	bad := bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ControllerAndManaged", Architecture: "x64", File: "opticon-bundle-bad-controller-win-x64.zip", Size: int64(len(badBytes)), SHA256: hex.EncodeToString(badHash[:])}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{good, bad}})
+	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(stagingDir, good.File+".upload"), goodBytes, 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(stagingDir, bad.File+".upload"), badBytes, 0600); err != nil { t.Fatal(err) }
+	if err := migrateBundleUploads(stagingDir, artifactDir, bundleDir); err != nil { t.Fatal(err) }
+	stored, err := os.ReadFile(filepath.Join(bundleDir, good.File))
+	if err != nil || !bytes.Equal(stored, goodBytes) { t.Fatal("verified legacy upload was not migrated") }
+	if _, err := os.Stat(filepath.Join(bundleDir, bad.File)); !os.IsNotExist(err) { t.Fatal("hash-mismatched legacy upload became final") }
+	if _, err := os.Stat(filepath.Join(stagingDir, bad.File+".upload")); !os.IsNotExist(err) { t.Fatal("invalid legacy upload was not discarded") }
+}
+
 func TestInstallerCommandPinsBundleAndSetupSigner(t *testing.T) {
-	bundle := bundleArtifact{File: "managed.zip", Size: 12345, SHA256: strings.Repeat("a", 64)}
+	bundle := bundleArtifact{File: "opticon-bundle-test-managed-win-x64.zip", Size: 12345, SHA256: strings.Repeat("a", 64)}
 	command := buildInstallerCommand("https://opticon.example.test", strings.Repeat("B", 24), bundle)
 	for _, expected := range []string{"12345", bundle.SHA256, "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53", "__OPTICON_FRAGMENT_KEY__", "https://opticon.example.test/opticon/i/"} {
 		if !strings.Contains(command, expected) { t.Fatalf("installer command omitted %s", expected) }
 	}
 }
 func TestInstallerCommandPrefersCurlAndRetainsWebRequestFallback(t *testing.T) {
-	bundle := bundleArtifact{File: "managed.zip", Size: 12345, SHA256: strings.Repeat("a", 64)}
+	bundle := bundleArtifact{File: "opticon-bundle-test-managed-win-x64.zip", Size: 12345, SHA256: strings.Repeat("a", 64)}
 	command := buildInstallerCommand("https://opticon.example.test", strings.Repeat("B", 24), bundle)
 	for _, expected := range []string{"Get-Command curl.exe", "--retry 3", "$ProgressPreference='SilentlyContinue'", "Invoke-WebRequest"} {
 		if !strings.Contains(command, expected) { t.Fatalf("installer command omitted download behavior %s", expected) }

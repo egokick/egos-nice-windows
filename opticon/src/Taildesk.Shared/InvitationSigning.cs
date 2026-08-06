@@ -40,13 +40,11 @@ public static class InvitationSigning
         if (!result.Succeeded) throw new InvalidOperationException("Windows could not Authenticode-sign the invitation: " + result.StandardError.Trim());
     }
 
-    public static async Task VerifyAuthenticodeAsync(string path, CancellationToken cancellationToken = default)
+    public static Task VerifyAuthenticodeAsync(string path, CancellationToken cancellationToken = default)
     {
-        var pathBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(Path.GetFullPath(path)));
-        var command = $"$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{pathBase64}'));$s=Get-AuthenticodeSignature -LiteralPath $p;if(-not $s.SignerCertificate){{exit 9}};if($s.Status -in @('HashMismatch','NotSigned')){{exit 10}};$s.SignerCertificate.Thumbprint";
-        var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
-        var result = await ProcessRunner.RunAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedCommand], TimeSpan.FromSeconds(45), cancellationToken);
-        if (!result.Succeeded || !result.StandardOutput.Trim().Equals(CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("The Opticon invitation executable is unsigned, altered, or signed by an unexpected key.");
+        cancellationToken.ThrowIfCancellationRequested();
+        AuthenticodeFileVerifier.VerifyPinned(path, PinnedCertificate);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
     }
 }

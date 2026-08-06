@@ -10,7 +10,7 @@ internal sealed class SoftwareDimmingService : IDisposable
     public bool TrySetDimming(string monitorId, int dimmingPercent)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        dimmingPercent = Math.Clamp(dimmingPercent, 0, 90);
+        dimmingPercent = Math.Clamp(dimmingPercent, 0, 99);
 
         try
         {
@@ -100,7 +100,7 @@ internal sealed class DimmingOverlayForm : Form
 
     public void SetDimming(int dimmingPercent)
     {
-        dimmingPercent = Math.Clamp(dimmingPercent, 0, 90);
+        dimmingPercent = Math.Clamp(dimmingPercent, 0, 99);
         if (dimmingPercent == 0)
         {
             Hide();
