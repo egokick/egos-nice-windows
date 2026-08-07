@@ -638,18 +638,21 @@ internal sealed class MaintenanceBootstrapCoordinator
                 StringComparer.OrdinalIgnoreCase);
         var sourceVersion = UpdatePackageVerifier.ParseVersion(ReadVersion(sourceGuardian, "release Guardian"));
         var installedVersion = UpdatePackageVerifier.ParseVersion(ReadVersion(installedGuardian, "installed Guardian"));
-        if (installedVersion > sourceVersion)
+        var minimumVersion = UpdatePackageVerifier.ParseVersion(manifest.MinimumGuardianVersion);
+        if (installedVersion != sourceVersion)
         {
-            if (installed.Count == 1 && installed.ContainsKey("Taildesk.UpdateGuardian.exe"))
+            if (installedVersion >= minimumVersion
+                && installed.Count == 1
+                && installed.ContainsKey("Taildesk.UpdateGuardian.exe"))
                 return;
+            if (installedVersion < minimumVersion)
+                throw new InvalidOperationException(
+                    $"The installed stable Guardian {installedVersion} predates this release's required Guardian {minimumVersion} and was not overwritten. " +
+                    "Use attended stable-Guardian maintenance before updating the Agent.");
             throw new InvalidOperationException(
-                "The newer stable Guardian has companion files this signed release cannot attest. " +
+                $"The stable Guardian {installedVersion} has companion files this signed release cannot attest. " +
                 "Use attended stable-Guardian maintenance before updating the Agent.");
         }
-        if (installedVersion < sourceVersion)
-            throw new InvalidOperationException(
-                "The installed stable Guardian predates this release's recovery/watchdog contract and was not overwritten. " +
-                "Use attended stable-Guardian maintenance before updating the Agent.");
 
         var declared = manifest.Files
             .Where(file => NormalizeBundlePath(file.Path).StartsWith(prefix, StringComparison.Ordinal))

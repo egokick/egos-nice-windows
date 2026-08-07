@@ -100,10 +100,11 @@ public sealed class InstallCoordinator
                 RequireInstalledControllerProcessesClosed(installedController, installedController + ".previous");
             }
 
-            // The signed Agent and stable guardian payloads are trusted before
-            // servicing Windows. No Tailscale, RustDesk, enrollment, journal,
-            // or installed Opticon state has been changed at this point.
-            _progress.Report(new InstallProgress(6, "Checking the Windows OpenSSH recovery component…"));
+            // Prove or install the stable Guardian before changing recovery,
+            // network, remote-access, enrollment, or Agent state. A compatible
+            // signed Guardian remains pinned even when Setup itself is newer.
+            await InstallGuardianAsync(guardianPayload, cancellationToken);
+            _progress.Report(new InstallProgress(7, "Checking the Windows OpenSSH recovery component…"));
             await EnsureOpenSshServerCapabilityAsync(cancellationToken);
             if (_invite.Role == DeviceRole.ControllerAndManaged)
                 await EnsureOpenSshClientCapabilityAsync(cancellationToken);
@@ -162,7 +163,7 @@ public sealed class InstallCoordinator
                 if (!await WaitForListeningPortAsync(21118, TimeSpan.FromSeconds(90), cancellationToken))
                     throw new InvalidOperationException("RustDesk did not open its private direct-access listener on TCP 21118 after an automatic repair.");
             }
-            await InstallAgentAsync(agentPayload, guardianPayload, snapshot.Ip, cancellationToken);
+            await InstallAgentAsync(agentPayload, snapshot.Ip, cancellationToken);
             await ConfigureFirewallAsync(snapshot.Ip, rustDesk, cancellationToken);
             OpticonComponentIntegration.Integrate(_userProfile, installedNetworkComponent, rustDeskInstallation.InstalledByOpticon);
 
@@ -445,9 +446,8 @@ public sealed class InstallCoordinator
     }
 
     private async Task InstallAgentAsync(
-        string source, string guardianSource, string tailscaleIp, CancellationToken cancellationToken)
+        string source, string tailscaleIp, CancellationToken cancellationToken)
     {
-        await InstallGuardianAsync(guardianSource, cancellationToken);
         _progress.Report(new InstallProgress(70, "Installing the Opticon background agent…"));
         var destination = Path.Combine(AppPaths.InstallDirectory, "Agent");
         _ = await ProcessRunner.RunAsync("schtasks.exe", ["/End", "/TN", "Taildesk Agent"], TimeSpan.FromSeconds(15), cancellationToken);
@@ -501,21 +501,25 @@ public sealed class InstallCoordinator
 
     private async Task InstallGuardianAsync(string source, CancellationToken cancellationToken)
     {
-        _progress.Report(new InstallProgress(69, "Installing the fail-safe update guardian..."));
+        _progress.Report(new InstallProgress(6, "Checking the fail-safe update guardian..."));
         var sourceExecutable = Path.Combine(source, "Taildesk.UpdateGuardian.exe");
         if (!File.Exists(sourceExecutable))
             throw new FileNotFoundException("The signed update guardian payload is missing.", sourceExecutable);
         await InvitationSigning.VerifyAuthenticodeAsync(sourceExecutable, cancellationToken);
 
         // The guardian is deliberately outside the swappable Agent directory.
-        // Never hot-overwrite an installed, signed guardian: releases declare a
-        // minimum guardian version and fail closed until explicit stable-guardian
-        // maintenance has completed.
+        // Keep a compatible signed Guardian stable across ordinary Setup and
+        // Agent releases; its product version need not equal the Setup version.
         var destination = AppPaths.UpdateGuardianInstallDirectory;
         var installedExecutable = Path.Combine(destination, "Taildesk.UpdateGuardian.exe");
         if (!File.Exists(installedExecutable)) CopyDirectory(source, destination);
         await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
         await RequireInstalledGuardianWatchdogCompatibilityAsync(source, destination, cancellationToken);
+        var installedVersion = UpdatePackageVerifier.NormalizeVersion(
+            FileVersionInfo.GetVersionInfo(installedExecutable).ProductVersion ?? string.Empty);
+        _progress.Report(new InstallProgress(
+            6,
+            $"Signed stable Guardian {installedVersion} supports the watchdog contract; keeping it pinned."));
 
         var taskCommand = $"\"{installedExecutable}\"";
         var task = await ProcessRunner.RunAsync("schtasks.exe",
@@ -558,23 +562,29 @@ public sealed class InstallCoordinator
             FileVersionInfo.GetVersionInfo(sourceExecutable).ProductVersion ?? string.Empty));
         var installedVersion = UpdatePackageVerifier.ParseVersion(UpdatePackageVerifier.NormalizeVersion(
             FileVersionInfo.GetVersionInfo(installedExecutable).ProductVersion ?? string.Empty));
+        var minimumWatchdogVersion = UpdatePackageVerifier.ParseVersion(
+            RemoteAdministrationProtocol.MinimumWatchdogGuardianVersion);
+        if (sourceVersion < minimumWatchdogVersion)
+            throw new InvalidOperationException(
+                $"This Setup carries Guardian {sourceVersion}, but watchdog mode requires {minimumWatchdogVersion} or newer.");
         var installedFiles = Directory.EnumerateFiles(installedDirectory, "*", SearchOption.AllDirectories)
             .ToDictionary(
                 path => Path.GetRelativePath(installedDirectory, path).Replace('\\', '/'),
                 StringComparer.OrdinalIgnoreCase);
-        if (installedVersion > sourceVersion)
+        if (installedVersion != sourceVersion)
         {
-            if (installedFiles.Count == 1
+            if (RemoteAdministrationProtocol.SupportsGuardianWatchdog(installedVersion)
+                && installedFiles.Count == 1
                 && installedFiles.ContainsKey("Taildesk.UpdateGuardian.exe"))
                 return;
+            if (installedVersion < minimumWatchdogVersion)
+                throw new InvalidOperationException(
+                    $"The existing stable Guardian {installedVersion} predates watchdog support {minimumWatchdogVersion} and was not overwritten. " +
+                    "Complete attended stable-Guardian maintenance before reinstalling Opticon.");
             throw new InvalidOperationException(
-                "The newer stable Guardian has companion files this Setup cannot attest. " +
+                $"The stable Guardian {installedVersion} has companion files this Setup cannot attest. " +
                 "Complete attended stable-Guardian maintenance before reinstalling Opticon.");
         }
-        if (installedVersion < sourceVersion)
-            throw new InvalidOperationException(
-                "The existing stable Guardian predates this Setup's watchdog contract and was not overwritten. " +
-                "Complete attended stable-Guardian maintenance before reinstalling Opticon.");
 
         var sourceFiles = Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
             .ToDictionary(

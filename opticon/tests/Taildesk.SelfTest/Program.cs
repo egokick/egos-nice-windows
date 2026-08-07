@@ -325,7 +325,12 @@ static void TestRemoteAdministrationProtocol()
     Assert(!RemoteAdministrationProtocol.IsTailscaleIpv4("100.128.0.1"), "address beyond Tailscale CGNAT range was accepted");
     Assert(!RemoteAdministrationProtocol.IsTailscaleIpv4("::ffff:100.64.0.1"), "IPv4-mapped IPv6 bypassed strict Tailscale validation");
     Assert(!RemoteAdministrationProtocol.IsTailscaleIpv4("::6464:1"), "native IPv6 bypassed strict Tailscale validation");
-    Assert(new OpticonReleaseManifest().MinimumGuardianVersion == "1.1.1", "this release does not require the corrected Guardian 1.1.1");
+    Assert(new OpticonReleaseManifest().MinimumGuardianVersion == RemoteAdministrationProtocol.MinimumWatchdogGuardianVersion,
+        "the release Guardian floor must match the watchdog compatibility contract");
+    Assert(!RemoteAdministrationProtocol.SupportsGuardianWatchdog(new Version(1, 1, 1))
+           && RemoteAdministrationProtocol.SupportsGuardianWatchdog(new Version(1, 1, 2))
+           && RemoteAdministrationProtocol.SupportsGuardianWatchdog(new Version(1, 1, 20)),
+        "Guardian watchdog compatibility must use the contract floor rather than the current Setup version");
 
     var futureConfig = JsonSerializer.Deserialize<AgentConfig>(
         "{\"schemaVersion\":2,\"futureEnrollmentField\":{\"value\":7}}", JsonDefaults.Options)
@@ -862,9 +867,17 @@ static void TestOpenSshRecoveryDesign()
 
     Assert(setup.Contains("RemoteAdministrationProtocol.GuardianWatchdogTaskName", StringComparison.Ordinal)
            && setup.Contains("RemoteAdministrationProtocol.GuardianWatchdogArgument", StringComparison.Ordinal)
+           && setup.Contains("RemoteAdministrationProtocol.MinimumWatchdogGuardianVersion", StringComparison.Ordinal)
            && setup.Contains("\"MINUTE\", \"/MO\", \"1\"", StringComparison.Ordinal)
            && setup.Contains("RequireInstalledGuardianWatchdogCompatibilityAsync", StringComparison.Ordinal),
         "fresh Setup must prove Guardian compatibility and install the minute watchdog before enrollment completes");
+    var setupGuardianPreflight = setup.IndexOf("await InstallGuardianAsync(guardianPayload", StringComparison.Ordinal);
+    Assert(setupGuardianPreflight >= 0
+           && setupGuardianPreflight < setup.IndexOf("await EnsureOpenSshServerCapabilityAsync", StringComparison.Ordinal),
+        "fresh Setup must prove Guardian compatibility before changing recovery or network state");
+    Assert(setup.Contains("SupportsGuardianWatchdog(installedVersion)", StringComparison.Ordinal)
+           && !setup.Contains("if (installedVersion < sourceVersion)", StringComparison.Ordinal),
+        "fresh Setup must retain an older signed Guardian that supports the watchdog contract");
     var setupWatchdogSettings = setup[setup.IndexOf("var watchdogSettings", StringComparison.Ordinal)..setup.IndexOf("var guardianTaskSettings", StringComparison.Ordinal)];
     Assert(!setupWatchdogSettings.Contains("StartWhenAvailable", StringComparison.Ordinal),
         "the recurring watchdog must not queue missed StartWhenAvailable runs");

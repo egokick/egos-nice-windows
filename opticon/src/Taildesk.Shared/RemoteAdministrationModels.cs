@@ -11,12 +11,16 @@ public static class RemoteAdministrationProtocol
     public const string GuardianTaskName = "Taildesk Update Guardian";
     public const string GuardianWatchdogTaskName = "Taildesk Update Guardian Watchdog";
     public const string GuardianWatchdogArgument = "--update-watchdog";
+    public const string MinimumWatchdogGuardianVersion = "1.1.2";
     public const string SshSupervisorTaskName = "Taildesk Opticon SSH Supervisor";
     public const string SshAccountName = "OpticonRemoteAdmin";
     public const string SshAdminProbeArgument = "--ssh-admin-probe";
     public const int SshAdminProbeVersion = 1;
     public static readonly TimeSpan MaximumSshSession = TimeSpan.FromHours(8);
     public static readonly TimeSpan UpdateCommitWindow = TimeSpan.FromMinutes(5);
+
+    public static bool SupportsGuardianWatchdog(Version version) =>
+        version >= UpdatePackageVerifier.ParseVersion(MinimumWatchdogGuardianVersion);
 
     public static bool IsTailscaleIpv4(string value)
     {
@@ -166,7 +170,7 @@ public sealed class OpticonReleaseManifest
     public DeviceRole Role { get; set; }
     public string Architecture { get; set; } = string.Empty;
     public int UpdateProtocolVersion { get; set; } = RemoteAdministrationProtocol.UpdateVersion;
-    public string MinimumGuardianVersion { get; set; } = "1.1.1";
+    public string MinimumGuardianVersion { get; set; } = RemoteAdministrationProtocol.MinimumWatchdogGuardianVersion;
     public List<OpticonReleaseFile> Files { get; set; } = [];
 }
 
