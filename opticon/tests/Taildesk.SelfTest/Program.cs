@@ -784,6 +784,16 @@ static void TestOpenSshRecoveryDesign()
     Assert(agentUpdateDownload.Contains("UseProxy = false", StringComparison.Ordinal)
            && agentUpdateDownload.Contains("Last error:", StringComparison.Ordinal),
         "Agent artifact downloads must bypass ambient proxies and preserve bounded network diagnostics");
+    var agentDownloadComplete = agentUpdateDownload.IndexOf("offset == expectedSize", StringComparison.Ordinal);
+    var agentDownloadRange = agentUpdateDownload.IndexOf("new RangeHeaderValue(offset", StringComparison.Ordinal);
+    var agentDownloadFlush = agentUpdateDownload.IndexOf("await output.FlushAsync", StringComparison.Ordinal);
+    var agentDownloadMove = agentUpdateDownload.IndexOf("File.Move(partial, destination", agentDownloadFlush, StringComparison.Ordinal);
+    var agentDownloadScopeEnd = agentUpdateDownload.LastIndexOf('}', agentDownloadMove);
+    Assert(agentDownloadComplete >= 0 && agentDownloadComplete < agentDownloadRange
+           && agentUpdateDownload.Contains("RequestedRangeNotSatisfiable", StringComparison.Ordinal)
+           && agentDownloadFlush >= 0 && agentDownloadScopeEnd > agentDownloadFlush
+           && agentDownloadMove > agentDownloadScopeEnd,
+        "Agent resume must promote a complete partial without an EOF range and dispose its stream before the atomic move");
     var administratorProofIndex = launcher.IndexOf("await VerifyRemoteAdministratorAsync", StringComparison.Ordinal);
     var requestedCommandIndex = launcher.IndexOf("var remoteCommand = options.PowerShellEncodedCommand", StringComparison.Ordinal);
     Assert(administratorProofIndex >= 0 && requestedCommandIndex > administratorProofIndex

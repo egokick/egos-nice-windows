@@ -295,13 +295,6 @@ public sealed class UpdateManager
         var partial = destination + ".partial";
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         Exception? last = null;
-        using var handler = new HttpClientHandler
-        {
-            CheckCertificateRevocationList = true,
-            UseProxy = false,
-            AllowAutoRedirect = false
-        };
-        using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         for (var attempt = 1; attempt <= MaximumDownloadAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -309,6 +302,11 @@ public sealed class UpdateManager
             {
                 var offset = File.Exists(partial) ? new FileInfo(partial).Length : 0;
                 if (offset > expectedSize) { File.Delete(partial); offset = 0; }
+                if (offset == expectedSize)
+                {
+                    File.Move(partial, destination, true);
+                    return;
+                }
                 using var request = new HttpRequestMessage(HttpMethod.Get, uri);
                 if (offset > 0) request.Headers.Range = new RangeHeaderValue(offset, null);
                 using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
@@ -319,23 +317,38 @@ public sealed class UpdateManager
                 }
                 else if (offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
                 {
+                    if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+                        File.Delete(partial);
                     response.EnsureSuccessStatusCode();
                     throw new InvalidDataException("The release server did not honor the resumable download range.");
                 }
+                if (offset > 0)
+                {
+                    var range = response.Content.Headers.ContentRange;
+                    if (range?.From != offset || range.Length != expectedSize)
+                        throw new InvalidDataException("The release server returned mismatched resumable range metadata.");
+                }
                 response.EnsureSuccessStatusCode();
                 await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-                await using var output = new FileStream(partial, offset == 0 ? FileMode.Create : FileMode.Append,
-                    FileAccess.Write, FileShare.Read, 1024 * 1024, true);
-                var buffer = new byte[1024 * 1024];
                 long total = offset;
-                int read;
-                while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+                await using (var output = new FileStream(
+                                 partial,
+                                 offset == 0 ? FileMode.Create : FileMode.Append,
+                                 FileAccess.Write,
+                                 FileShare.Read,
+                                 1024 * 1024,
+                                 true))
                 {
-                    total += read;
-                    if (total > expectedSize) throw new InvalidDataException("The release server sent more bytes than declared.");
-                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    var buffer = new byte[1024 * 1024];
+                    int read;
+                    while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+                    {
+                        total += read;
+                        if (total > expectedSize) throw new InvalidDataException("The release server sent more bytes than declared.");
+                        await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    }
+                    await output.FlushAsync(cancellationToken);
                 }
-                await output.FlushAsync(cancellationToken);
                 if (total != expectedSize) throw new IOException($"The release download stopped at {total} of {expectedSize} bytes.");
                 File.Move(partial, destination, true);
                 return;
