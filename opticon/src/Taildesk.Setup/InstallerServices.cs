@@ -513,7 +513,7 @@ public sealed class InstallCoordinator
         var destination = AppPaths.UpdateGuardianInstallDirectory;
         var installedExecutable = Path.Combine(destination, "Taildesk.UpdateGuardian.exe");
         if (!File.Exists(installedExecutable)) CopyDirectory(source, destination);
-        else await StableGuardianMaintenance.UpgradeIfOlderAsync(source, destination, cancellationToken);
+        else await StableGuardianMaintenance.ReconcileSignedReleaseAsync(source, destination, cancellationToken);
         await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
         await RequireInstalledGuardianWatchdogCompatibilityAsync(source, destination, cancellationToken);
         var installedVersion = UpdatePackageVerifier.NormalizeVersion(

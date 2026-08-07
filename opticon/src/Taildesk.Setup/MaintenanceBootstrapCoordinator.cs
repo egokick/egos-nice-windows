@@ -401,7 +401,7 @@ internal sealed class MaintenanceBootstrapCoordinator
             if (!File.Exists(installedExecutable))
                 throw new InvalidDataException("An incomplete existing Guardian installation blocks maintenance; it was not overwritten.");
             await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
-            await StableGuardianMaintenance.UpgradeIfOlderAsync(sourceDirectory, destination, cancellationToken);
+            await StableGuardianMaintenance.ReconcileSignedReleaseAsync(sourceDirectory, destination, cancellationToken);
             await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
             ValidateGuardianVersion(installedExecutable, manifest.MinimumGuardianVersion);
             return;

@@ -904,8 +904,11 @@ static void TestOpenSshRecoveryDesign()
     Assert(stableGuardianMaintenance.Contains("UpdateJournalCoordination.AcquireAsync", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("InvitationSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("File.Replace(staged, installed, backup", StringComparison.Ordinal)
-           && stableGuardianMaintenance.Contains("File.Replace(backup, installedExecutable, failed", StringComparison.Ordinal),
-        "attended Setup must atomically upgrade and roll back an older signed stable Guardian outside active updates");
+           && stableGuardianMaintenance.Contains("File.Replace(backup, installedExecutable, failed", StringComparison.Ordinal)
+           && stableGuardianMaintenance.Contains("RequireRecognizedInstalledFiles", StringComparison.Ordinal)
+           && stableGuardianMaintenance.Contains("Guid.TryParseExact", StringComparison.Ordinal)
+           && stableGuardianMaintenance.Contains("FilesMatchAsync", StringComparison.Ordinal),
+        "attended Setup must atomically reconcile and roll back a signed stable Guardian while cleaning only recognized transaction residue");
     var setupWatchdogSettings = setup[setup.IndexOf("var watchdogSettings", StringComparison.Ordinal)..setup.IndexOf("var guardianTaskSettings", StringComparison.Ordinal)];
     Assert(!setupWatchdogSettings.Contains("StartWhenAvailable", StringComparison.Ordinal),
         "the recurring watchdog must not queue missed StartWhenAvailable runs");

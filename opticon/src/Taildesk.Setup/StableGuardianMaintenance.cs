@@ -7,7 +7,7 @@ internal static class StableGuardianMaintenance
 {
     private const string ExecutableName = "Taildesk.UpdateGuardian.exe";
 
-    public static async Task UpgradeIfOlderAsync(
+    public static async Task ReconcileSignedReleaseAsync(
         string sourceDirectory,
         string installedDirectory,
         CancellationToken cancellationToken)
@@ -17,20 +17,30 @@ internal static class StableGuardianMaintenance
         if (!File.Exists(sourceExecutable) || !File.Exists(installedExecutable))
             throw new FileNotFoundException("Stable Guardian maintenance requires both signed executables.");
 
-        var sourceVersion = ReadVersion(sourceExecutable);
-        var installedVersion = ReadVersion(installedExecutable);
-        if (installedVersion >= sourceVersion) return;
-
         RequireSingleExecutable(sourceDirectory, "signed release Guardian");
-        RequireSingleExecutable(installedDirectory, "installed stable Guardian");
         await InvitationSigning.VerifyAuthenticodeAsync(sourceExecutable, cancellationToken);
         await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
+
+        var sourceVersion = ReadVersion(sourceExecutable);
+        var installedVersion = ReadVersion(installedExecutable);
+        var installedFiles = RequireRecognizedInstalledFiles(installedDirectory);
+        var contentMatches = await FilesMatchAsync(sourceExecutable, installedExecutable, cancellationToken);
+        if (installedVersion > sourceVersion || contentMatches)
+        {
+            await DeleteMaintenanceArtifactsAsync(installedFiles, cancellationToken);
+            return;
+        }
 
         EnsureNoActiveUpdate();
         using var coordination = await UpdateJournalCoordination.AcquireAsync(
             TimeSpan.FromMinutes(2),
             cancellationToken);
         EnsureNoActiveUpdate();
+
+        // A prior successful ReplaceFile can leave its now-unused rollback
+        // artifact behind if antivirus briefly holds it. These exact names are
+        // private transaction residue, never runnable Guardian companions.
+        await DeleteMaintenanceArtifactsAsync(installedFiles, cancellationToken);
 
         foreach (var taskName in new[]
                  {
@@ -65,8 +75,10 @@ internal static class StableGuardianMaintenance
             await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
             if (ReadVersion(installedExecutable) != sourceVersion)
                 throw new InvalidDataException("The promoted stable Guardian version does not match the signed release.");
+            if (!await FilesMatchAsync(sourceExecutable, installedExecutable, cancellationToken))
+                throw new InvalidDataException("The promoted stable Guardian does not match the signed release.");
 
-            try { File.Delete(backup); } catch { }
+            await DeleteWithRetryAsync(backup, cancellationToken);
         }
         catch
         {
@@ -127,6 +139,67 @@ internal static class StableGuardianMaintenance
         if (files.Length != 1 || !files[0].Equals(ExecutableName, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException(
                 $"The {description} contains companion files and cannot be atomically upgraded by this Setup.");
+    }
+
+    private static string[] RequireRecognizedInstalledFiles(string directory)
+    {
+        var files = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories).ToArray();
+        foreach (var path in files)
+        {
+            var relative = Path.GetRelativePath(directory, path).Replace('\\', '/');
+            if (relative.Equals(ExecutableName, StringComparison.OrdinalIgnoreCase)) continue;
+            if (relative.Contains('/') || !IsMaintenanceArtifact(relative))
+                throw new InvalidOperationException(
+                    "The installed stable Guardian contains an unrecognized companion file and was not changed.");
+        }
+        return files.Where(path => !Path.GetFileName(path).Equals(ExecutableName, StringComparison.OrdinalIgnoreCase)).ToArray();
+    }
+
+    private static bool IsMaintenanceArtifact(string fileName)
+    {
+        foreach (var marker in new[] { ".upgrade-", ".backup-", ".failed-" })
+        {
+            var prefix = ExecutableName + marker;
+            if (fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                && Guid.TryParseExact(fileName[prefix.Length..], "N", out _))
+                return true;
+        }
+        return false;
+    }
+
+    private static async Task DeleteMaintenanceArtifactsAsync(
+        IEnumerable<string> paths,
+        CancellationToken cancellationToken)
+    {
+        foreach (var path in paths)
+            await DeleteWithRetryAsync(path, cancellationToken);
+    }
+
+    private static async Task DeleteWithRetryAsync(string path, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; File.Exists(path); attempt++)
+        {
+            try { File.Delete(path); }
+            catch (IOException) when (attempt < 10) { }
+            catch (UnauthorizedAccessException) when (attempt < 10) { }
+            if (!File.Exists(path)) return;
+            if (attempt >= 10)
+                throw new IOException($"Windows kept a stable Guardian maintenance artifact locked: {Path.GetFileName(path)}");
+            await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+        }
+    }
+
+    private static async Task<bool> FilesMatchAsync(
+        string left,
+        string right,
+        CancellationToken cancellationToken)
+    {
+        if (new FileInfo(left).Length != new FileInfo(right).Length) return false;
+        await using var leftInput = File.OpenRead(left);
+        await using var rightInput = File.OpenRead(right);
+        var leftHash = await System.Security.Cryptography.SHA256.HashDataAsync(leftInput, cancellationToken);
+        var rightHash = await System.Security.Cryptography.SHA256.HashDataAsync(rightInput, cancellationToken);
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(leftHash, rightHash);
     }
 
     private static void EnsureNoActiveUpdate()
