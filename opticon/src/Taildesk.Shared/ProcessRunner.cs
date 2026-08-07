@@ -84,12 +84,18 @@ public static class ProcessRunner
                 throw new ProcessTimeoutException(
                     executable,
                     timeout!.Value,
-                    await outputTask,
-                    await errorTask);
+                    await ReadCompletedOutputAsync(outputTask),
+                    await ReadCompletedOutputAsync(errorTask));
             }
             throw;
         }
         return new ProcessResult(process.ExitCode, outputTask.Result, errorTask.Result);
+    }
+
+    private static async Task<string> ReadCompletedOutputAsync(Task<string> outputTask)
+    {
+        try { return await outputTask; }
+        catch (OperationCanceledException) { return string.Empty; }
     }
 
     public static string? FindOnPath(params string[] executableNames)

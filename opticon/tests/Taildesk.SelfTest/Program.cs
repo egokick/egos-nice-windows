@@ -392,6 +392,10 @@ static void TestReleaseDistributionDesign()
            && template.Contains("TLSv1.2_2021", StringComparison.Ordinal),
         "CloudFront infrastructure no longer enforces the private TLS-only S3 boundary");
     Assert(publisher.Contains("--checksum-algorithm", StringComparison.Ordinal)
+           && publisher.Contains("--metadata", StringComparison.Ordinal)
+           && publisher.Contains("sha256=$hash", StringComparison.Ordinal)
+           && publisher.Contains("--checksum-mode", StringComparison.Ordinal)
+           && publisher.Contains("Add-Type -AssemblyName System.Net.Http", StringComparison.Ordinal)
            && publisher.Contains("max_concurrent_requests = 20", StringComparison.Ordinal)
            && publisher.Contains("Invoke-CloudFrontVerification", StringComparison.Ordinal)
            && publisher.Contains("Refusing to overwrite immutable", StringComparison.Ordinal),

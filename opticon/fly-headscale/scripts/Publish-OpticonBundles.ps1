@@ -11,6 +11,7 @@ param(
 # This script deliberately has no AWS credentials parameter.  The operator's
 # authenticated AWS CLI provides short-lived publishing authority only.
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Net.Http
 $expectedAccount = "053663732727"
 $bucket = "opticon-053663732727"
 $flyRoot = Split-Path $PSScriptRoot -Parent
@@ -18,12 +19,6 @@ $repo = Split-Path $flyRoot -Parent
 $ArtifactDirectory = if ([string]::IsNullOrWhiteSpace($ArtifactDirectory)) { Join-Path $flyRoot "artifacts" } else { $ArtifactDirectory }
 $manifestPath = Join-Path $ArtifactDirectory "manifest.json"
 
-function ConvertTo-Base64Hash([string]$Hex) {
-    if ($Hex -notmatch '^[a-fA-F0-9]{64}$') { throw "Expected a SHA-256 hex digest." }
-    $bytes = New-Object byte[] 32
-    for ($i = 0; $i -lt 32; $i++) { $bytes[$i] = [Convert]::ToByte($Hex.Substring($i * 2, 2), 16) }
-    [Convert]::ToBase64String($bytes)
-}
 function Get-NextReleaseVersion {
     $keys = @(aws s3api list-objects-v2 --bucket $bucket --prefix "opticon/releases/" --query "Contents[].Key" --output json | ConvertFrom-Json)
     if ($LASTEXITCODE -ne 0) { throw "Could not list published Opticon releases." }
@@ -127,9 +122,16 @@ try {
             $objectExists = $LASTEXITCODE -eq 0
         } finally { $ErrorActionPreference = $savedPreference }
         if ($objectExists) { throw "Refusing to overwrite immutable release object s3://$bucket/$key." }
-        Invoke-Aws @("s3", "cp", $path, "s3://$bucket/$key", "--expected-size", "$($info.Length)", "--content-type", "application/zip", "--cache-control", "public, max-age=31536000, immutable", "--sse", "AES256", "--checksum-algorithm", "SHA256", "--only-show-errors")
-        $head = aws s3api head-object --bucket $bucket --key $key --output json | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0 -or $head.ContentLength -ne $info.Length -or $head.ChecksumSHA256 -ne (ConvertTo-Base64Hash $hash)) { throw "S3 verification failed for $key." }
+        Invoke-Aws @("s3", "cp", $path, "s3://$bucket/$key", "--expected-size", "$($info.Length)", "--content-type", "application/zip", "--cache-control", "public, max-age=31536000, immutable", "--sse", "AES256", "--checksum-algorithm", "SHA256", "--metadata", "sha256=$hash", "--only-show-errors")
+        $head = aws s3api head-object --bucket $bucket --key $key --checksum-mode ENABLED --output json | ConvertFrom-Json
+        # Multipart uploads expose a composite native checksum.  Preserve it,
+        # and separately require the operator-calculated full-file SHA-256 in
+        # immutable S3 metadata before CloudFront verification can begin.
+        if ($LASTEXITCODE -ne 0 -or $head.ContentLength -ne $info.Length -or
+            -not ([string]$head.Metadata.sha256).Equals($hash, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::IsNullOrWhiteSpace([string]$head.ChecksumSHA256)) {
+            throw "S3 verification failed for $key."
+        }
         $url = "https://$($output.DistributionDomainName)/$key"
         $deadline = [DateTime]::UtcNow.AddMinutes(12)
         do {
