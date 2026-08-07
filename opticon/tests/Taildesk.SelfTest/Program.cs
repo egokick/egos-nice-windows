@@ -398,10 +398,15 @@ static void TestReleaseDistributionDesign()
            && publisher.Contains("Add-Type -AssemblyName System.Net.Http", StringComparison.Ordinal)
            && publisher.Contains("max_concurrent_requests = 20", StringComparison.Ordinal)
            && publisher.Contains("Invoke-CloudFrontVerification", StringComparison.Ordinal)
+           && publisher.Contains("FullStreamVerified", StringComparison.Ordinal)
+           && publisher.Contains("Publish-ManifestAtomically", StringComparison.Ordinal)
+           && !publisher.Contains("flyctl deploy", StringComparison.Ordinal)
            && publisher.Contains("Refusing to overwrite immutable", StringComparison.Ordinal),
-        "publisher no longer enforces parallel immutable S3 upload and CloudFront verification");
+        "publisher no longer enforces immutable S3 upload, bounded CloudFront readback, and atomic manifest publication");
     Assert(gateway.Contains("validCloudFrontDownloadURL", StringComparison.Ordinal)
            && gateway.Contains("bundleDownloadURL", StringComparison.Ordinal)
+           && gateway.Contains("releaseManifestAdmin", StringComparison.Ordinal)
+           && gateway.Contains("writeFileAtomically", StringComparison.Ordinal)
            && client.Contains(".cloudfront.net", StringComparison.Ordinal),
         "manifest clients do not tightly validate CloudFront download URLs");
     Assert(agent.Contains("UseProxy = false", StringComparison.Ordinal)

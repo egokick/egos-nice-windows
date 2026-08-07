@@ -5,7 +5,6 @@ artifacts/*.zip
 artifacts/*.zip.*
 artifacts/hosted-build/
 artifacts/hosted-bundle-stage/
-# Keep legacy bootstrap executables out of ordinary gateway deployments. The
-# current signed bootstrap must remain beside the public manifest.
+# Signed bootstraps are immutable CloudFront release objects. Legacy gateway
+# images retain their baked fallback, but future builds never carry one.
 artifacts/opticon-bootstrap-*.exe
-!artifacts/opticon-bootstrap-1.1.17.exe

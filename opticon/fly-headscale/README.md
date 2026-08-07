@@ -19,9 +19,10 @@ decrypts and verifies the signed invitation. Hosted ciphertext expires after
 The command center can extend an active invitation without changing its URL;
 it rotates the one-use Headscale key and replaces the signed encrypted envelope.
 
-Large Opticon ZIPs live in a private S3 bucket and are served through
-CloudFront. Fly retains only the small public manifest and legacy volume files
-as a migration fallback. Provision once, then publish from this directory:
+Large Opticon ZIPs and signed bootstraps live in a private S3 bucket and are
+served through CloudFront. Fly retains the small public manifest on its
+persistent volume plus legacy files as a migration fallback. Provision once,
+deploy gateway changes when needed, then publish releases from this directory:
 
 ```powershell
 ..\infrastructure\aws\Provision-OpticonReleaseDistribution.ps1
@@ -29,11 +30,14 @@ as a migration fallback. Provision once, then publish from this directory:
 ```
 
 The publisher uses the authenticated operator AWS CLI only: it chooses the next
-unpublished patch version, signs both bundles, uploads immutable multipart S3
-objects with SHA-256 checksums, performs CloudFront HEAD/range/full-stream hash
-verification, and only then deploys Fly's manifest. It never reads or needs the
-gateway HMAC key. The old HMAC chunk route remains only as a deprecated fallback.
+unpublished patch version, signs both bundles and the bootstrap, uploads
+immutable S3 objects with SHA-256 checksums, verifies every object with
+CloudFront HEAD/range requests, and full-stream hashes the smaller bundle. It
+then sends only the small manifest to an authenticated atomic gateway endpoint;
+ordinary releases do not build an image or roll a Fly machine. The endpoint is
+signed with the same DPAPI-protected HMAC credential already used by the local
+command center. The old HMAC chunk route remains only as a migration fallback.
 
-The Fly API token is read only from `C:\source\babelfish\.env` during an
-operator-initiated deployment. It must never be copied into this directory,
-the container image, Opticon configuration, or an invitation.
+The Fly API token is needed only for operator-initiated gateway deployments. It
+must never be copied into this directory, the container image, Opticon
+configuration, or an invitation.

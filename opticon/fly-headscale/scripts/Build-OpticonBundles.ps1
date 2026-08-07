@@ -240,12 +240,39 @@ $executables = [ordered]@{
     Cli = "opticon.exe"
     UpdateGuardian = "Taildesk.UpdateGuardian.exe"
 }
+$commandCenterPublish = Join-Path $repo "artifacts\publish-$Runtime"
+$buildInputs = @(Get-ChildItem -LiteralPath (Join-Path $repo "src") -File -Recurse |
+    Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' })
+$buildInputs += @(Get-ChildItem -LiteralPath $repo -File |
+    Where-Object { $_.Name -like "Directory.Build.*" -or $_.Name -like "Directory.Packages.*" })
+$latestSourceWrite = ($buildInputs | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
+$reuseCommandCenterPublish = $true
+foreach ($component in $executables.Keys) {
+    $candidateDirectory = Join-Path $commandCenterPublish $component
+    $candidateExecutable = Join-Path $candidateDirectory $executables[$component]
+    if (-not (Test-Path -LiteralPath $candidateExecutable -PathType Leaf) -or
+        (Get-Item -LiteralPath $candidateExecutable).VersionInfo.ProductVersion -ne $Version -or
+        (Get-Item -LiteralPath $candidateExecutable).LastWriteTimeUtc -lt $latestSourceWrite) {
+        $reuseCommandCenterPublish = $false
+        break
+    }
+}
+if ($reuseCommandCenterPublish) {
+    Write-Host "Reusing the current $Version command-center component publish outputs." -ForegroundColor Cyan
+    foreach ($component in $executables.Keys) {
+        $output = Join-Path $buildRoot $component
+        New-Item -Path $output -ItemType Directory -Force | Out-Null
+        Copy-Item -Path (Join-Path $commandCenterPublish "$component\*") -Destination $output -Recurse -Force
+    }
+}
 foreach ($component in $executables.Keys) {
     $project = Join-Path $repo "src\Taildesk.$component\Taildesk.$component.csproj"
     $output = Join-Path $buildRoot $component
-    dotnet publish $project @publishArguments -o $output
-    if ($LASTEXITCODE -ne 0) { throw "Publishing $component failed." }
-    if ($component -eq "Cli") {
+    if (-not $reuseCommandCenterPublish) {
+        dotnet publish $project @publishArguments -o $output
+        if ($LASTEXITCODE -ne 0) { throw "Publishing $component failed." }
+    }
+    if ($component -eq "Cli" -and -not $reuseCommandCenterPublish) {
         $publishedCli = Join-Path $output "Taildesk.OpticonCli.exe"
         if (-not (Test-Path -LiteralPath $publishedCli -PathType Leaf)) { throw "The Opticon CLI apphost was not published." }
         Move-Item -LiteralPath $publishedCli -Destination (Join-Path $output "opticon.exe") -Force
@@ -274,6 +301,16 @@ foreach ($component in $executables.Keys) {
 $bootstrapFile = "opticon-bootstrap-$Version.exe"
 $bootstrapPath = Join-Path $artifactDirectory $bootstrapFile
 Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $bootstrapPath -Force
+$bootstrapInfo = Get-Item -LiteralPath $bootstrapPath
+$bootstrapRecord = [pscustomobject]@{
+    product = "OpticonBootstrap"
+    version = $Version
+    architecture = "x64"
+    file = $bootstrapFile
+    size = $bootstrapInfo.Length
+    sha256 = (Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    signerThumbprint = $CertificateThumbprint.ToUpperInvariant()
+}
 
 function Write-SignedReleaseManifest {
     param(
@@ -439,7 +476,7 @@ foreach ($artifact in $retained) {
         throw "Retained rollback bundle verification failed for $($artifact.file)."
     }
 }
-$manifest.artifacts = @($manifest.artifacts | Where-Object { $_.product -ne "OpticonBundle" }) + @($retained)
+$manifest.artifacts = @($manifest.artifacts | Where-Object { $_.product -notin @("OpticonBundle", "OpticonBootstrap") }) + @($retained) + @($bootstrapRecord)
 $json = $manifest | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($manifestPath, $json, (New-Object Text.UTF8Encoding($false)))
 $retained | Format-Table role, version, file, size, sha256 -AutoSize

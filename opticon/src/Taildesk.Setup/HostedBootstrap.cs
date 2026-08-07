@@ -60,7 +60,7 @@ internal static class HostedBootstrapper
             throw new InvalidDataException("The Opticon release manifest contains an invalid bundle record.");
 
         report("Downloading and verifying the signed Opticon release…");
-        await DownloadAsync(client, $"{Origin}/opticon/artifacts/v1/{Uri.EscapeDataString(bundle.File)}", bundlePath, bundle.Size, bundle.Sha256);
+        await DownloadAsync(client, ResolveBundleUrl(bundle), bundlePath, bundle.Size, bundle.Sha256);
         var releaseDirectory = Path.Combine(directory, "release");
         if (Directory.Exists(releaseDirectory)) Directory.Delete(releaseDirectory, true);
         ZipFile.ExtractToDirectory(bundlePath, releaseDirectory);
@@ -73,6 +73,23 @@ internal static class HostedBootstrapper
         start.ArgumentList.Add("--hosted-invite=" + invitePath);
         start.ArgumentList.Add("--invite-key=" + bootstrap.PrivateKey);
         if (Process.Start(start) is null) throw new InvalidOperationException("Signed Opticon Setup could not be started.");
+    }
+
+    private static string ResolveBundleUrl(ArtifactRecordDto bundle)
+    {
+        if (string.IsNullOrWhiteSpace(bundle.DownloadUrl))
+            return $"{Origin}/opticon/artifacts/v1/{Uri.EscapeDataString(bundle.File)}";
+        if (!Uri.TryCreate(bundle.DownloadUrl, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps
+            || uri.IsDefaultPort is false
+            || uri.UserInfo.Length != 0
+            || uri.Query.Length != 0
+            || uri.Fragment.Length != 0
+            || !uri.Host.EndsWith(".cloudfront.net", StringComparison.OrdinalIgnoreCase)
+            || uri.Host[..^".cloudfront.net".Length].Length == 0
+            || uri.AbsolutePath != $"/opticon/releases/{Uri.EscapeDataString(bundle.Version)}/{Uri.EscapeDataString(bundle.File)}")
+            throw new InvalidDataException("The Opticon release manifest contains an unsafe CloudFront download URL.");
+        return uri.AbsoluteUri;
     }
 
     private static async Task DownloadAsync(HttpClient client, string url, string destination, long? expectedSize, string? expectedHash)

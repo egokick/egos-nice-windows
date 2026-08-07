@@ -33,6 +33,7 @@ const (
 	artifactPrefix = "/opticon/artifacts/v1/"
 	inviteAdminPrefix = "/opticon/v1/invitations/"
 	bundleAdminPrefix = "/opticon/v1/bundles/"
+	releaseAdminPath = "/opticon/v1/releases/manifest"
 	invitePublicPrefix = "/opticon/i/"
 	maxInviteBody = 64 << 10
 	maxBundleChunk = 4 << 20
@@ -44,6 +45,7 @@ type gateway struct {
 	adminSecret []byte
 	headscaleKey string
 	artifactDir string
+	manifestPath string
 	bundleDir string
 	inviteDir string
 	publicOrigin string
@@ -51,6 +53,7 @@ type gateway struct {
 	nonceMu sync.Mutex
 	inviteMu sync.Mutex
 	bundleMu sync.Mutex
+	manifestMu sync.RWMutex
 }
 
 func main() {
@@ -90,9 +93,11 @@ func main() {
 	if appName == "" { log.Fatal("FLY_APP_NAME is missing") }
 	g := &gateway{proxy: proxy, adminSecret: []byte(secret), headscaleKey: headscaleKey,
 		artifactDir: "/opt/opticon/artifacts", bundleDir: "/var/lib/headscale/opticon-artifacts", inviteDir: "/var/lib/headscale/opticon-invites",
+		manifestPath: "/var/lib/headscale/opticon-release/manifest.json",
 		publicOrigin: "https://" + appName + ".fly.dev", nonces: make(map[string]time.Time)}
 	if err := os.MkdirAll(g.inviteDir, 0700); err != nil { log.Fatal(err) }
 	if err := os.MkdirAll(g.bundleDir, 0700); err != nil { log.Fatal(err) }
+	if err := seedDynamicManifest(g.manifestPath, filepath.Join(g.artifactDir, "manifest.json")); err != nil { log.Fatal(err) }
 	if err := migrateBundleUploads("/var/lib/headscale", g.artifactDir, g.bundleDir); err != nil { log.Fatal(err) }
 	// Legacy volume bundles are retained as an emergency migration fallback.
 	// New releases are selected through immutable CloudFront URLs instead.
@@ -111,6 +116,7 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 	if r.URL.Path == "/health" { g.health(w, r); return }
 	if r.URL.Path == "/robots.txt" { w.Header().Set("Content-Type", "text/plain"); _, _ = io.WriteString(w, "User-agent: *\nDisallow: /\n"); return }
+	if r.URL.Path == releaseAdminPath { g.releaseManifestAdmin(w, r); return }
 	if strings.HasPrefix(r.URL.Path, artifactPrefix) { g.artifact(w, r); return }
 	if strings.HasPrefix(r.URL.Path, inviteAdminPrefix) { g.invitationAdmin(w, r); return }
 	if strings.HasPrefix(r.URL.Path, bundleAdminPrefix) { g.bundleAdmin(w, r); return }
@@ -172,6 +178,7 @@ var inviteTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{24,128}$`)
 var inviteHashPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var safeFilePartPattern = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 var safeBundleFilePattern = regexp.MustCompile(`^opticon-bundle-[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.zip$`)
+var safeBootstrapFilePattern = regexp.MustCompile(`^opticon-bootstrap-[0-9]+\.[0-9]+\.[0-9]+\.exe$`)
 
 type hostedInvite struct {
 	DeviceName string `json:"deviceName"`
@@ -219,21 +226,153 @@ func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request)
 }
 
 func (g *gateway) readArtifactManifest() (artifactManifest, error) {
-	data, err := os.ReadFile(filepath.Join(g.artifactDir, "manifest.json"))
+	g.manifestMu.RLock()
+	defer g.manifestMu.RUnlock()
+	return g.readArtifactManifestUnlocked()
+}
+
+func (g *gateway) readArtifactManifestUnlocked() (artifactManifest, error) {
+	data, err := os.ReadFile(g.artifactManifestPath())
 	if err != nil { return artifactManifest{}, err }
 	var manifest artifactManifest
 	if err := json.Unmarshal(data, &manifest); err != nil { return artifactManifest{}, err }
-	if manifest.SchemaVersion != 1 { return artifactManifest{}, errors.New("release manifest schema is unsupported") }
-	seenBundleFiles := make(map[string]struct{})
+	if err := validateArtifactManifest(manifest); err != nil { return artifactManifest{}, err }
+	return manifest, nil
+}
+
+func (g *gateway) artifactManifestPath() string {
+	if g.manifestPath != "" { return g.manifestPath }
+	return filepath.Join(g.artifactDir, "manifest.json")
+}
+
+func validateArtifactManifest(manifest artifactManifest) error {
+	if manifest.SchemaVersion != 1 { return errors.New("release manifest schema is unsupported") }
+	if len(manifest.Artifacts) < 1 || len(manifest.Artifacts) > 64 { return errors.New("release manifest artifact count is invalid") }
+	seenFiles := make(map[string]struct{})
+	for _, artifact := range manifest.Artifacts {
+		key := strings.ToLower(artifact.File)
+		if key == "" { return errors.New("release manifest contains an empty filename") }
+		if _, duplicate := seenFiles[key]; duplicate {
+			return errors.New("release manifest contains a duplicate artifact filename")
+		}
+		seenFiles[key] = struct{}{}
+		if artifact.Product == "OpticonBundle" && (!validBundleArtifact(artifact) || (artifact.DownloadURL != "" && !validCloudFrontDownloadURL(artifact))) {
+			return errors.New("release manifest contains an invalid Opticon bundle")
+		}
+		if artifact.Product == "OpticonBootstrap" && !validBootstrapArtifact(artifact) {
+			return errors.New("release manifest contains an invalid Opticon bootstrap")
+		}
+	}
+	return nil
+}
+
+func seedDynamicManifest(target, fallback string) error {
+	if _, err := os.Stat(target); err == nil { return nil } else if !os.IsNotExist(err) { return err }
+	data, err := os.ReadFile(fallback)
+	if err != nil { return err }
+	var manifest artifactManifest
+	if err := json.Unmarshal(data, &manifest); err != nil { return err }
+	if err := validateArtifactManifest(manifest); err != nil { return err }
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil { return err }
+	return writeFileAtomically(target, data)
+}
+
+func writeFileAtomically(path string, data []byte) error {
+	temporary := path + ".tmp"
+	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil { return err }
+	if _, err = file.Write(data); err == nil { err = file.Sync() }
+	if closeErr := file.Close(); err == nil { err = closeErr }
+	if err != nil { _ = os.Remove(temporary); return err }
+	if err := os.Rename(temporary, path); err != nil { _ = os.Remove(temporary); return err }
+	return nil
+}
+
+func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxAdminBody))
+	if err != nil { http.Error(w, "invalid manifest", http.StatusBadRequest); return }
+	if !g.authenticate(r, body, time.Now()) { http.Error(w, "unauthorized", http.StatusUnauthorized); return }
+	var next artifactManifest
+	if err := json.Unmarshal(body, &next); err != nil || validateArtifactManifest(next) != nil {
+		http.Error(w, "invalid manifest", http.StatusBadRequest); return
+	}
+	g.manifestMu.Lock()
+	defer g.manifestMu.Unlock()
+	current, err := g.readArtifactManifestUnlocked()
+	if err != nil { http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable); return }
+	currentVersion, currentOK := highestBundleVersion(current)
+	nextVersion, nextOK := highestBundleVersion(next)
+	if !nextOK { http.Error(w, "manifest has no published release", http.StatusBadRequest); return }
+	if !completeCloudFrontRelease(next, nextVersion) { http.Error(w, "manifest release is incomplete", http.StatusBadRequest); return }
+	if currentOK {
+		comparison, valid := compareSemanticVersions(nextVersion, currentVersion)
+		if !valid || comparison < 0 { http.Error(w, "release downgrade refused", http.StatusConflict); return }
+		if comparison == 0 && !sameReleaseArtifacts(current, next, currentVersion) { http.Error(w, "release version is immutable", http.StatusConflict); return }
+	}
+	if !samePinnedDependencies(current, next) { http.Error(w, "pinned dependencies changed", http.StatusConflict); return }
+	err = writeFileAtomically(g.artifactManifestPath(), body)
+	if err != nil { http.Error(w, "storage unavailable", http.StatusInternalServerError); return }
+	writeJSON(w, http.StatusCreated, map[string]any{"published": true, "version": nextVersion})
+}
+
+func sameReleaseArtifacts(left, right artifactManifest, version string) bool {
+	encode := func(manifest artifactManifest) map[string]string {
+		result := make(map[string]string)
+		for _, artifact := range manifest.Artifacts {
+			if artifact.Version != version || (artifact.Product != "OpticonBundle" && artifact.Product != "OpticonBootstrap") { continue }
+			encoded, _ := json.Marshal(artifact)
+			result[artifact.Product+"|"+artifact.Role+"|"+artifact.Architecture] = string(encoded)
+		}
+		return result
+	}
+	a, b := encode(left), encode(right)
+	if len(a) != len(b) { return false }
+	for key, value := range a { if b[key] != value { return false } }
+	return true
+}
+
+func completeCloudFrontRelease(manifest artifactManifest, version string) bool {
+	roles := make(map[string]bool)
+	bootstrapCount := 0
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Version != version { continue }
+		switch artifact.Product {
+		case "OpticonBundle":
+			if !validBundleArtifact(artifact) || !validCloudFrontDownloadURL(artifact) || roles[artifact.Role] { return false }
+			roles[artifact.Role] = true
+		case "OpticonBootstrap":
+			if !validBootstrapArtifact(artifact) { return false }
+			bootstrapCount++
+		}
+	}
+	return len(roles) == 2 && roles["ManagedOnly"] && roles["ControllerAndManaged"] && bootstrapCount == 1
+}
+
+func highestBundleVersion(manifest artifactManifest) (string, bool) {
+	selected := ""
 	for _, artifact := range manifest.Artifacts {
 		if artifact.Product != "OpticonBundle" { continue }
-		key := strings.ToLower(artifact.File)
-		if _, duplicate := seenBundleFiles[key]; duplicate {
-			return artifactManifest{}, errors.New("release manifest contains a duplicate Opticon bundle filename")
-		}
-		seenBundleFiles[key] = struct{}{}
+		if selected == "" { selected = artifact.Version; continue }
+		if comparison, valid := compareSemanticVersions(artifact.Version, selected); valid && comparison > 0 { selected = artifact.Version }
 	}
-	return manifest, nil
+	return selected, selected != ""
+}
+
+func samePinnedDependencies(left, right artifactManifest) bool {
+	encode := func(manifest artifactManifest) map[string]string {
+		result := make(map[string]string)
+		for _, artifact := range manifest.Artifacts {
+			if artifact.Product == "OpticonBundle" || artifact.Product == "OpticonBootstrap" { continue }
+			encoded, _ := json.Marshal(artifact)
+			result[artifact.Product+"|"+artifact.Architecture+"|"+artifact.File] = string(encoded)
+		}
+		return result
+	}
+	a, b := encode(left), encode(right)
+	if len(a) != len(b) { return false }
+	for key, value := range a { if b[key] != value { return false } }
+	return true
 }
 
 func validBundleArtifact(artifact bundleArtifact) bool {
@@ -253,6 +392,19 @@ func validCloudFrontDownloadURL(artifact bundleArtifact) bool {
 	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || u.Port() != "" { return false }
 	host := strings.ToLower(u.Hostname())
 	if !regexp.MustCompile(`^[a-z0-9-]+\.cloudfront\.net$`).MatchString(host) { return false }
+	return u.EscapedPath() == "/opticon/releases/"+url.PathEscape(artifact.Version)+"/"+url.PathEscape(artifact.File)
+}
+
+func validBootstrapArtifact(artifact bundleArtifact) bool {
+	if artifact.Product != "OpticonBootstrap" || artifact.Architecture != "x64" || artifact.Size <= 0 ||
+		!safeBootstrapFilePattern.MatchString(artifact.File) || !inviteHashPattern.MatchString(strings.ToLower(artifact.SHA256)) {
+		return false
+	}
+	version, valid := parseSemanticVersion(artifact.Version)
+	if !valid || version.core[0] == "0" || strings.ContainsAny(artifact.Version, "-+") { return false }
+	u, err := url.Parse(artifact.DownloadURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || u.Port() != "" { return false }
+	if !regexp.MustCompile(`^[a-z0-9-]+\.cloudfront\.net$`).MatchString(strings.ToLower(u.Hostname())) { return false }
 	return u.EscapedPath() == "/opticon/releases/"+url.PathEscape(artifact.Version)+"/"+url.PathEscape(artifact.File)
 }
 
@@ -466,6 +618,7 @@ func (g *gateway) invitationLanding(w http.ResponseWriter, r *http.Request, publ
 	filePart := safeFilePartPattern.ReplaceAllString(invite.DeviceName, "-")
 	if filePart == "" { filePart = "device" }
 	bootstrap := artifactPrefix + "opticon-bootstrap-" + url.PathEscape(bundle.Version) + ".exe"
+	if published, err := g.bootstrapForVersion(bundle.Version); err == nil { bootstrap = published.DownloadURL }
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'")
 	if r.Method == http.MethodHead { return }
@@ -474,6 +627,15 @@ func (g *gateway) invitationLanding(w http.ResponseWriter, r *http.Request, publ
 	return
 	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}button{background:#52d39a;color:#08130e;border:0;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px;cursor:pointer}.muted{color:#9da7b1}code{color:#52d39a}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p id="status">Your tiny one-click starter will download automatically. Open it, then approve the Windows administrator prompt.</p><button id="download">Download starter</button><p class="muted">The link expires at <code>%s</code>. It can enroll only one machine. No router changes are required.</p><script>const key=location.hash.slice(1);const status=document.getElementById('status');const button=document.getElementById('download');const template=%s;function download(){if(!/^[A-Za-z0-9_-]{32,128}$/.test(key)){status.textContent='This invitation link is incomplete. Ask for a new link.';button.disabled=true;return;}const blob=new Blob([template.replace('__OPTICON_FRAGMENT_KEY__',key)],{type:'application/octet-stream'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='Install-Opticon-%s.cmd';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000);status.textContent='Downloaded. Open Install-Opticon-%s.cmd to continue.';}button.addEventListener('click',download);setTimeout(download,350);</script></body></html>`, html.EscapeString(invite.DeviceName), invite.ExpiresAt.Local().Format(time.RFC1123), string(commandJSON), filePart, filePart)
 	_, _ = io.WriteString(w, page)
+}
+
+func (g *gateway) bootstrapForVersion(version string) (bundleArtifact, error) {
+	manifest, err := g.readArtifactManifest()
+	if err != nil { return bundleArtifact{}, err }
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Product == "OpticonBootstrap" && artifact.Version == version && validBootstrapArtifact(artifact) { return artifact, nil }
+	}
+	return bundleArtifact{}, errors.New("release bootstrap is not published")
 }
 
 func buildInstallerCommand(origin, publicID string, bundle bundleArtifact) string {
