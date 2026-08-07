@@ -28,6 +28,53 @@ function Test-ControllerInstallationReady {
     return ($requiredFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0
 }
 
+function Get-InstalledOpticonProcessIds {
+    param([Parameter(Mandatory)][string]$InstalledPath)
+
+    $expected = [IO.Path]::GetFullPath($InstalledPath)
+    $ids = @()
+    foreach ($process in @(Get-Process -Name 'Opticon','Taildesk.Admin' -ErrorAction SilentlyContinue)) {
+        try {
+            if ([IO.Path]::GetFullPath($process.MainModule.FileName).Equals(
+                    $expected, [StringComparison]::OrdinalIgnoreCase)) {
+                $ids += $process.Id
+            }
+        } catch {
+            throw "Opticon could not verify running process $($process.ProcessName) ($($process.Id)); exit Opticon from its notification-area icon and try again."
+        } finally {
+            $process.Dispose()
+        }
+    }
+    return @($ids)
+}
+
+function Request-InstalledOpticonShutdown {
+    param([Parameter(Mandatory)][string]$InstalledPath)
+
+    $processIds = @(Get-InstalledOpticonProcessIds -InstalledPath $InstalledPath)
+    if ($processIds.Count -eq 0) { return }
+
+    try {
+        $shutdownEvent = [Threading.EventWaitHandle]::OpenExisting(
+            'Local\Taildesk.Admin.ShutdownForUpdate')
+    } catch [Threading.WaitHandleCannotBeOpenedException] {
+        throw "The running Opticon command center predates automatic source-update handoff. Exit Opticon once from its notification-area icon, then start it from the Admin Panel again."
+    }
+    try { [void]$shutdownEvent.Set() }
+    finally { $shutdownEvent.Dispose() }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(35)
+    do {
+        $remaining = @($processIds | Where-Object {
+            Get-Process -Id $_ -ErrorAction SilentlyContinue
+        })
+        if ($remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw "Opticon did not finish its bounded SSH-session cleanup before the local update. Exit it from its notification-area icon, then try again."
+}
+
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
 $fingerprintHelper = Join-Path $PSScriptRoot 'Get-OpticonSourceFingerprint.ps1'
 if (-not (Test-Path -LiteralPath $fingerprintHelper -PathType Leaf)) {
@@ -99,6 +146,9 @@ try {
 "@
 $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
 $repairWorkingDirectory = Join-Path $env:SystemRoot 'Temp'
+if ($null -ne $installedOpticon) {
+    Request-InstalledOpticonShutdown -InstalledPath $installedOpticon
+}
 $updater = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
 ) -WorkingDirectory $repairWorkingDirectory

@@ -1024,8 +1024,15 @@ static void TestOpenSshRecoveryDesign()
     var mainWindow = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml.cs");
     Assert(mainWindow.Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal)
            && mainWindow.Contains("$ph.UseProxy=$false", StringComparison.Ordinal)
-           && mainWindow.Contains("canRecoverDownload", StringComparison.Ordinal),
-        "legacy download failures must offer a direct, pinned, externally observed maintenance recovery path");
+           && mainWindow.Contains("requiresAttendedMaintenance", StringComparison.Ordinal)
+           && mainWindow.Contains("requires update guardian", StringComparison.Ordinal),
+        "legacy download and Guardian-contract failures must offer a direct, pinned, externally observed maintenance recovery path");
+    var adminApp = ReadSource("src", "Taildesk.Admin", "App.xaml.cs");
+    var incrementalRebuild = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "rebuild-if-source-changed.ps1"));
+    Assert(adminApp.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("Request-InstalledOpticonShutdown", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal),
+        "source-triggered controller rebuilds must request a graceful Command Center shutdown before swapping the installed payload");
     var agentUpdateDownload = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");
     Assert(agentUpdateDownload.Contains("UseProxy = false", StringComparison.Ordinal)
            && agentUpdateDownload.Contains("Last error:", StringComparison.Ordinal),

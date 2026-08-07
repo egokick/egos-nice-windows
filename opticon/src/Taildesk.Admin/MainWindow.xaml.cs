@@ -169,21 +169,25 @@ public partial class MainWindow : Window
             var message = result.Phase == UpdatePhase.Committed
                 ? $"Opticon Agent {result.TargetVersion} is healthy and committed on {device.Name}. The prior Agent remains available locally for boot-time recovery."
                 : $"The candidate was not committed. {device.Name} reported {result.Phase} and remains on Opticon Agent {result.CurrentVersion}.\n\n{result.Message}";
-            var canRecoverDownload = result.Phase == UpdatePhase.Failed
-                                     && result.Message.Contains("download", StringComparison.OrdinalIgnoreCase);
+            var requiresAttendedMaintenance = result.Phase == UpdatePhase.Failed
+                                              && (result.Message.Contains("download", StringComparison.OrdinalIgnoreCase)
+                                                  || (result.Message.Contains("requires update guardian", StringComparison.OrdinalIgnoreCase)
+                                                      && result.Message.Contains("installed is", StringComparison.OrdinalIgnoreCase)));
             var response = MessageBox.Show(
-                message + (canRecoverDownload
-                    ? "\n\nChoose Yes to use the signed one-time recovery path. Opticon will copy a direct-download command, open the remote desktop, and visibly watch the exact candidate through commit or rollback."
+                message + (requiresAttendedMaintenance
+                    ? "\n\nChoose Yes to use the signed attended-maintenance path. Opticon will copy a direct-download command, open the remote desktop, update the stable Guardian and Agent together, and visibly watch the exact candidate through commit or rollback."
                     : string.Empty),
                 "Opticon Agent update",
-                canRecoverDownload ? MessageBoxButton.YesNo : MessageBoxButton.OK,
+                requiresAttendedMaintenance ? MessageBoxButton.YesNo : MessageBoxButton.OK,
                 result.Phase == UpdatePhase.Committed ? MessageBoxImage.Information : MessageBoxImage.Warning);
-            if (canRecoverDownload && response == MessageBoxResult.Yes)
+            if (requiresAttendedMaintenance && response == MessageBoxResult.Yes)
             {
                 await RunMaintenanceBootstrapAsync(
                     device,
                     release with { RequiresMaintenanceBootstrap = true },
-                    $"{device.Name}'s installed Agent could not download the signed release through its legacy network path.");
+                    result.Message.Contains("requires update guardian", StringComparison.OrdinalIgnoreCase)
+                        ? $"{device.Name}'s stable Guardian must be upgraded together with the signed Agent release."
+                        : $"{device.Name}'s installed Agent could not download the signed release through its legacy network path.");
             }
         }
         catch (Exception exception) { ShowError(exception); }

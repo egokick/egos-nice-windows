@@ -6,10 +6,13 @@ public partial class App : System.Windows.Application
 {
     private const string SingleInstanceMutexName = "Local\\Taildesk.Admin.SingleInstance";
     private const string ActivationEventName = "Local\\Taildesk.Admin.Activate";
+    private const string ShutdownForUpdateEventName = "Local\\Taildesk.Admin.ShutdownForUpdate";
     private CoordinatorServer? _coordinator;
     private Mutex? _singleInstance;
     private EventWaitHandle? _activationEvent;
     private RegisteredWaitHandle? _activationRegistration;
+    private EventWaitHandle? _shutdownForUpdateEvent;
+    private RegisteredWaitHandle? _shutdownForUpdateRegistration;
     private System.Windows.Forms.NotifyIcon? _trayIcon;
     private System.Drawing.Icon? _trayIconImage;
     private MainViewModel? _viewModel;
@@ -34,6 +37,14 @@ public partial class App : System.Windows.Application
         _activationRegistration = ThreadPool.RegisterWaitForSingleObject(
             _activationEvent,
             (_, _) => Dispatcher.BeginInvoke(ShowCommandCenter),
+            null,
+            Timeout.Infinite,
+            false);
+        _shutdownForUpdateEvent = new EventWaitHandle(
+            false, EventResetMode.AutoReset, ShutdownForUpdateEventName);
+        _shutdownForUpdateRegistration = ThreadPool.RegisterWaitForSingleObject(
+            _shutdownForUpdateEvent,
+            (_, _) => Dispatcher.BeginInvoke(ExitFromTray),
             null,
             Timeout.Infinite,
             false);
@@ -157,6 +168,8 @@ public partial class App : System.Windows.Application
             _trayIcon.Dispose();
         }
         _trayIconImage?.Dispose();
+        _shutdownForUpdateRegistration?.Unregister(null);
+        _shutdownForUpdateEvent?.Dispose();
         _activationRegistration?.Unregister(null);
         _activationEvent?.Dispose();
         _singleInstance?.Dispose();
