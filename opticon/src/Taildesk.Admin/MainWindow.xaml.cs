@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using Taildesk.Shared;
 
@@ -194,12 +195,12 @@ public partial class MainWindow : Window
     private async void DisableExitService_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(() => _viewModel.SetExitAdvertisementAsync(RequireDevice(), false));
 
-    private void CopyPassword_Click(object sender, RoutedEventArgs e)
+    private async void CopyPassword_Click(object sender, RoutedEventArgs e)
     {
         try
         {
             var password = _viewModel.GetRustDeskPassword(RequireDevice());
-            System.Windows.Clipboard.SetText(password);
+            await SetClipboardTextAsync(password);
             _viewModel.Status = "Recovery password copied; clipboard clears in 60 seconds";
             ClearClipboardLater(password);
         }
@@ -270,7 +271,7 @@ public partial class MainWindow : Window
                     exitNode: true,
                     allowedRoots);
                 InviteNameText.Clear();
-                System.Windows.Clipboard.SetText(result.InvitationUrl);
+                await SetClipboardTextAsync(result.InvitationUrl);
                 MessageBox.Show($"One-click invitation link created and copied to the clipboard:\n\n{result.InvitationUrl}\n\nSend this link to the target machine. It expires in 14 days and can enroll only one machine.",
                     "Invitation link ready", MessageBoxButton.OK, MessageBoxImage.Information);
             });
@@ -282,11 +283,15 @@ public partial class MainWindow : Window
         }
     }
 
-    private void InviteGrid_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    private async void InviteGrid_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if ((sender as DataGrid)?.SelectedItem is not InviteRecord invite) return;
-        if (!string.IsNullOrWhiteSpace(invite.HostedUrl)) CopyInviteUrl(invite);
-        else if (File.Exists(invite.BundlePath)) RevealFile(invite.BundlePath);
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(invite.HostedUrl)) await CopyInviteUrlAsync(invite);
+            else if (File.Exists(invite.BundlePath)) RevealFile(invite.BundlePath);
+        }
+        catch (Exception exception) { ShowError(exception); }
     }
 
     private void InviteGrid_PreviewMouseRightButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -300,16 +305,17 @@ public partial class MainWindow : Window
         }
     }
 
-    private void CopyInviteUrl_Click(object sender, RoutedEventArgs e)
+    private async void CopyInviteUrl_Click(object sender, RoutedEventArgs e)
     {
         if (InviteGrid.SelectedItem is not InviteRecord invite) { ShowError(new InvalidOperationException("Select an invitation first.")); return; }
-        CopyInviteUrl(invite);
+        try { await CopyInviteUrlAsync(invite); }
+        catch (Exception exception) { ShowError(exception); }
     }
 
-    private void CopyInviteUrl(InviteRecord invite)
+    private async Task CopyInviteUrlAsync(InviteRecord invite)
     {
         if (string.IsNullOrWhiteSpace(invite.HostedUrl)) { ShowError(new InvalidOperationException("This invitation no longer has an active URL.")); return; }
-        System.Windows.Clipboard.SetText(invite.HostedUrl);
+        await SetClipboardTextAsync(invite.HostedUrl);
         _viewModel.Status = $"Invitation URL copied: {invite.DeviceName}";
     }
 
@@ -515,7 +521,7 @@ public partial class MainWindow : Window
                 MessageBoxImage.Warning) != MessageBoxResult.Yes)
             return;
 
-        System.Windows.Clipboard.SetText(command);
+        await SetClipboardTextAsync(command);
         var sshWasListening = await _viewModel.SnapshotMaintenanceSshAsync(device);
         await _viewModel.LaunchRemoteControlAsync(device);
         var progressWindow = new UpdateProgressWindow(device.Name, device.AgentVersion, release.Version)
@@ -546,6 +552,45 @@ public partial class MainWindow : Window
     }
 
     private DeviceRecord RequireDevice() => _viewModel.SelectedDevice ?? throw new InvalidOperationException("Select a device first.");
+
+    private static async Task SetClipboardTextAsync(
+        string value,
+        CancellationToken cancellationToken = default)
+    {
+        const int clipboardBusy = unchecked((int)0x800401D0);
+        ExternalException? last = null;
+        for (var attempt = 1; attempt <= 20; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                System.Windows.Clipboard.SetDataObject(value, copy: true);
+                return;
+            }
+            catch (ExternalException exception) when (exception.HResult == clipboardBusy)
+            {
+                last = exception;
+                // SetDataObject can publish the data before OLE reports that a
+                // competing clipboard owner prevented the final flush.
+                try
+                {
+                    if (System.Windows.Clipboard.ContainsText()
+                        && string.Equals(System.Windows.Clipboard.GetText(), value, StringComparison.Ordinal))
+                        return;
+                }
+                catch (ExternalException verificationException) when (verificationException.HResult == clipboardBusy)
+                {
+                    last = verificationException;
+                }
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(500, attempt * 50)), cancellationToken);
+        }
+
+        throw new InvalidOperationException(
+            "Windows kept the clipboard busy for several seconds. Close any clipboard-history, synchronization, or remote-control overlay and try again; no maintenance command was started.",
+            last);
+    }
 
     private async Task RunAsync(Func<Task> action)
     {

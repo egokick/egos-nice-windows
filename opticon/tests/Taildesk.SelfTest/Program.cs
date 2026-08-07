@@ -978,7 +978,7 @@ static void TestOpenSshRecoveryDesign()
     var flowEnd = adminWindow.IndexOf("private DeviceRecord RequireDevice", flowStart, StringComparison.Ordinal);
     Assert(flowStart >= 0 && flowEnd > flowStart, "maintenance command-center flow was not found");
     var maintenanceFlow = adminWindow[flowStart..flowEnd];
-    var clipboardIndex = maintenanceFlow.IndexOf("Clipboard.SetText(command)", StringComparison.Ordinal);
+    var clipboardIndex = maintenanceFlow.IndexOf("await SetClipboardTextAsync(command)", StringComparison.Ordinal);
     var confirmationIndex = maintenanceFlow.IndexOf("MessageBoxResult.Yes", StringComparison.Ordinal);
     var snapshotIndex = maintenanceFlow.IndexOf("SnapshotMaintenanceSshAsync", StringComparison.Ordinal);
     var remoteIndex = maintenanceFlow.IndexOf("LaunchRemoteControlAsync", StringComparison.Ordinal);
@@ -986,6 +986,11 @@ static void TestOpenSshRecoveryDesign()
     Assert(confirmationIndex >= 0 && confirmationIndex < clipboardIndex
            && clipboardIndex < snapshotIndex && snapshotIndex < remoteIndex && remoteIndex < observerIndex,
         "maintenance must confirm before copying, then snapshot SSH, launch RustDesk, and observe the exact operation");
+    Assert(adminWindow.Contains("clipboardBusy = unchecked((int)0x800401D0)", StringComparison.Ordinal)
+           && adminWindow.Contains("attempt <= 20", StringComparison.Ordinal)
+           && adminWindow.Contains("Clipboard.SetDataObject(value, copy: true)", StringComparison.Ordinal)
+           && adminWindow.Contains("no maintenance command was started", StringComparison.Ordinal),
+        "security-sensitive clipboard handoffs must tolerate transient Windows clipboard ownership and fail clearly before maintenance");
 
     var remoteUpdates = ReadSource("src", "Taildesk.Admin", "RemoteDeviceUpdateCoordinator.cs");
     Assert(remoteUpdates.Contains("ObserveMaintenanceBootstrapAsync", StringComparison.Ordinal)
