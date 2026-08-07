@@ -20,39 +20,32 @@ public sealed class FileOperations
 
     public FileListingDto List(string root, string? relativePath)
     {
-        var fullPath = _paths.Resolve(root, relativePath);
-        if (!Directory.Exists(fullPath))
+        using var directoryLease = _paths.Acquire(root, relativePath);
+        if (!directoryLease.IsDirectory)
         {
             throw new IOException("The requested path is not a directory.");
         }
 
         var entries = new List<FileEntryDto>();
-        foreach (var item in new DirectoryInfo(fullPath).EnumerateFileSystemInfos())
+        foreach (var item in directoryLease.Enumerate())
         {
-            try
+            if (item.Name.StartsWith(".taildesk-upload-", StringComparison.OrdinalIgnoreCase)
+                && item.Name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
             {
-                if (item.Name.StartsWith(".taildesk-upload-", StringComparison.OrdinalIgnoreCase)
-                    && item.Name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if ((item.Attributes & (FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint)) != 0)
-                {
-                    continue;
-                }
-
-                var isDirectory = (item.Attributes & FileAttributes.Directory) != 0;
-                entries.Add(new FileEntryDto
-                {
-                    Name = item.Name,
-                    RelativePath = Normalize(Path.GetRelativePath(GetRootPath(root), item.FullName)),
-                    IsDirectory = isDirectory,
-                    Size = isDirectory ? 0 : ((FileInfo)item).Length,
-                    LastWriteTime = item.LastWriteTimeUtc
-                });
+                continue;
             }
-            catch (UnauthorizedAccessException)
+            if (item.IsHiddenOrSystem || item.IsReparsePoint)
             {
-                // Skip filesystem entries the service account cannot read.
+                continue;
             }
+            entries.Add(new FileEntryDto
+            {
+                Name = item.Name,
+                RelativePath = Normalize(Path.Combine(relativePath ?? string.Empty, item.Name)),
+                IsDirectory = item.IsDirectory,
+                Size = item.IsDirectory ? 0 : item.Size,
+                LastWriteTime = item.LastWriteTime
+            });
         }
 
         return new FileListingDto
@@ -63,15 +56,15 @@ public sealed class FileOperations
         };
     }
 
-    public FileStream OpenRead(string root, string relativePath)
+    public Stream OpenRead(string root, string relativePath)
     {
-        var path = _paths.Resolve(root, relativePath);
-        if (!File.Exists(path))
+        var lease = _paths.Acquire(root, relativePath, readFile: true);
+        try { return lease.OpenReadStream(); }
+        catch
         {
-            throw new FileNotFoundException("The requested file was not found.");
+            lease.Dispose();
+            throw;
         }
-
-        return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
 
     public async Task<string> UploadAsync(
@@ -86,32 +79,64 @@ public sealed class FileOperations
         bool overwrite,
         CancellationToken cancellationToken)
     {
-        var (directory, destination, temporary) = ResolveUpload(
-            root, destinationDirectory, fileName, transferId, totalLength);
-        if (!overwrite && File.Exists(destination))
-            throw new IOException("A file with that name already exists.");
-        var existingLength = ResumableTransferFile.GetValidatedLength(temporary, totalLength);
-        if (offset != existingLength)
-            throw new IOException($"The resumable upload offset changed; the Agent has {existingLength} bytes. Resume the transfer again.");
-        if (expectedLength < 0 || expectedLength != totalLength - offset)
-            throw new IOException("The upload body length does not match its resumable range.");
-        var drive = new DriveInfo(Path.GetPathRoot(directory)!);
-        if (drive.AvailableFreeSpace - _config.MinimumFreeSpaceBytes < totalLength - existingLength)
-            throw new IOException("The destination does not have enough free space while preserving its configured reserve.");
+        var (safeName, temporaryName) = ValidateUpload(fileName, transferId, totalLength);
+        using var directoryLease = _paths.Acquire(root, destinationDirectory);
+        if (!directoryLease.IsDirectory)
+        {
+            throw new DirectoryNotFoundException("The destination directory does not exist.");
+        }
+        ThrowIfDestinationExists(directoryLease, safeName, overwrite);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(Math.Clamp(_config.MaxUploadDurationMinutes, 1, 7 * 24 * 60)));
         await _uploadSlots.WaitAsync(timeout.Token);
+        PathLease? temporaryLease = null;
         try
         {
-            await ResumableTransferFile.AppendToLengthAsync(
-                temporary, source, offset, totalLength, _config.MaxUploadBytes, timeout.Token);
+            temporaryLease = directoryLease.OpenOrCreateFile(temporaryName);
+            var existingLength = temporaryLease.Length;
+            if (existingLength < 0 || existingLength > totalLength)
+                throw new IOException("The resumable upload partial has an invalid length.");
+            if (offset != existingLength)
+                throw new IOException($"The resumable upload offset changed; the Agent has {existingLength} bytes. Resume the transfer again.");
+            if (expectedLength < 0 || expectedLength != totalLength - offset)
+                throw new IOException("The upload body length does not match its resumable range.");
 
-            File.Move(temporary, destination, overwrite);
-            return Normalize(Path.GetRelativePath(GetRootPath(root), destination));
+            var drive = new DriveInfo(Path.GetPathRoot(directoryLease.FullPath)!);
+            if (drive.AvailableFreeSpace - _config.MinimumFreeSpaceBytes < totalLength - existingLength)
+                throw new IOException("The destination does not have enough free space while preserving its configured reserve.");
+
+            await using (var output = temporaryLease.OpenWriteStream())
+            {
+                output.Position = offset;
+                var buffer = new byte[1024 * 1024];
+                long written = 0;
+                int read;
+                while ((read = await source.ReadAsync(buffer, timeout.Token)) > 0)
+                {
+                    written += read;
+                    if (written > expectedLength || offset + written > _config.MaxUploadBytes)
+                        throw new IOException("The upload exceeded its declared or configured size.");
+                    await output.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
+                }
+                if (written != expectedLength)
+                    throw new IOException("The upload ended before its declared size was received.");
+                await output.FlushAsync(timeout.Token);
+                output.Flush(flushToDisk: true);
+            }
+
+            if (temporaryLease.Length != totalLength)
+                throw new IOException("The resumable upload did not reach its declared size.");
+
+            DeleteDestinationForPromotion(directoryLease, safeName, overwrite);
+            temporaryLease.RenameTo(directoryLease, safeName);
+            temporaryLease.Dispose();
+            temporaryLease = null;
+            return Normalize(Path.Combine(destinationDirectory, safeName));
         }
         finally
         {
+            temporaryLease?.Dispose();
             _uploadSlots.Release();
         }
     }
@@ -126,8 +151,7 @@ public sealed class FileOperations
         CancellationToken cancellationToken)
     {
         var transferId = Guid.NewGuid();
-        var (_, _, temporary) = ResolveUpload(
-            root, destinationDirectory, fileName, transferId, expectedLength);
+        var temporaryName = $".taildesk-upload-{transferId:N}.partial";
         try
         {
             return await UploadAsync(
@@ -136,7 +160,18 @@ public sealed class FileOperations
         }
         finally
         {
-            try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+            try
+            {
+                using var directoryLease = _paths.Acquire(root, destinationDirectory);
+                if (directoryLease.TryOpenChild(temporaryName, delete: true, out var temporaryLease))
+                {
+                    using (temporaryLease) temporaryLease!.Delete();
+                }
+            }
+            catch
+            {
+                // Best effort cleanup preserves the legacy non-resumable contract.
+            }
         }
     }
 
@@ -148,86 +183,100 @@ public sealed class FileOperations
         long totalLength,
         bool overwrite)
     {
-        var (_, destination, temporary) = ResolveUpload(
-            root, destinationDirectory, fileName, transferId, totalLength);
-        if (!overwrite && File.Exists(destination))
-            throw new IOException("A file with that name already exists.");
-        var received = ResumableTransferFile.GetValidatedLength(temporary, totalLength);
-        return new UploadStatusDto { BytesReceived = received, TotalBytes = totalLength };
-    }
-
-    private (string Directory, string Destination, string Temporary) ResolveUpload(
-        string root,
-        string destinationDirectory,
-        string fileName,
-        Guid transferId,
-        long totalLength)
-    {
-        if (transferId == Guid.Empty) throw new IOException("The upload transfer ID is invalid.");
-        if (totalLength <= 0 || totalLength > _config.MaxUploadBytes)
-            throw new IOException("The upload size is outside this machine's configured limit.");
-        var directory = _paths.Resolve(root, destinationDirectory);
-        if (!Directory.Exists(directory))
+        var (safeName, temporaryName) = ValidateUpload(fileName, transferId, totalLength);
+        using var directoryLease = _paths.Acquire(root, destinationDirectory);
+        if (!directoryLease.IsDirectory)
             throw new DirectoryNotFoundException("The destination directory does not exist.");
-        var safeName = Path.GetFileName(fileName);
-        if (string.IsNullOrWhiteSpace(safeName) || !safeName.Equals(fileName, StringComparison.Ordinal))
-            throw new IOException("The file name is invalid.");
-        var destination = _paths.Resolve(root, Path.Combine(destinationDirectory, safeName), mustExist: false);
-        var temporary = _paths.Resolve(
-            root,
-            Path.Combine(destinationDirectory, $".taildesk-upload-{transferId:N}.partial"),
-            mustExist: false);
-        return (directory, destination, temporary);
+        ThrowIfDestinationExists(directoryLease, safeName, overwrite);
+
+        long received = 0;
+        if (directoryLease.TryOpenChild(temporaryName, delete: false, out var temporaryLease))
+        {
+            using (temporaryLease)
+            {
+                if (temporaryLease!.IsDirectory)
+                    throw new IOException("The resumable upload partial is not a file.");
+                received = temporaryLease.Length;
+            }
+        }
+        if (received < 0 || received > totalLength)
+            throw new IOException("The resumable upload partial has an invalid length.");
+        return new UploadStatusDto { BytesReceived = received, TotalBytes = totalLength };
     }
 
     public void CreateDirectory(string root, string relativePath)
     {
-        var path = _paths.Resolve(root, relativePath, mustExist: false);
-        Directory.CreateDirectory(path);
+        var parentPath = Path.GetDirectoryName(relativePath) ?? string.Empty;
+        var directoryName = Path.GetFileName(relativePath);
+        using var parentLease = _paths.Acquire(root, parentPath);
+        if (!parentLease.IsDirectory) throw new DirectoryNotFoundException("The parent directory does not exist.");
+        parentLease.CreateDirectory(directoryName);
+        using var createdLease = parentLease.OpenChild(directoryName);
+        if (!createdLease.IsDirectory) throw new IOException("The requested directory path is occupied by a file.");
     }
 
     public void Delete(string root, string relativePath, bool recursive)
     {
-        var path = _paths.Resolve(root, relativePath);
+        using var lease = _paths.Acquire(root, relativePath, delete: true);
+        var path = lease.FullPath;
         var rootPath = GetRootPath(root);
         if (path.Equals(rootPath, StringComparison.OrdinalIgnoreCase))
         {
             throw new UnauthorizedAccessException("A shared root cannot be deleted.");
         }
 
-        if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-        else
-        {
-            if (recursive) EnsureTreeHasNoReparsePoints(path);
-            Directory.Delete(path, recursive);
-        }
+        if (lease.IsDirectory && recursive) DeleteTree(lease);
+        else lease.Delete();
     }
 
     public string ResolveFile(string root, string relativePath) => _paths.Resolve(root, relativePath);
+
+    private (string SafeName, string TemporaryName) ValidateUpload(string fileName, Guid transferId, long totalLength)
+    {
+        if (transferId == Guid.Empty) throw new IOException("The upload transfer ID is invalid.");
+        if (totalLength <= 0 || totalLength > _config.MaxUploadBytes)
+            throw new IOException("The upload size is outside this machine's configured limit.");
+        var safeName = Path.GetFileName(fileName);
+        if (string.IsNullOrWhiteSpace(safeName) || !safeName.Equals(fileName, StringComparison.Ordinal))
+            throw new IOException("The file name is invalid.");
+        return (safeName, $".taildesk-upload-{transferId:N}.partial");
+    }
+
+    private static void ThrowIfDestinationExists(PathLease directoryLease, string safeName, bool overwrite)
+    {
+        if (!directoryLease.TryOpenChild(safeName, delete: false, out var destinationLease)) return;
+        using (destinationLease)
+        {
+            if (!overwrite) throw new IOException("A file with that name already exists.");
+            if (destinationLease!.IsDirectory) throw new IOException("The upload destination is a directory.");
+        }
+    }
+
+    private static void DeleteDestinationForPromotion(PathLease directoryLease, string safeName, bool overwrite)
+    {
+        if (!directoryLease.TryOpenChild(safeName, delete: overwrite, out var destinationLease)) return;
+        using (destinationLease)
+        {
+            if (!overwrite) throw new IOException("A file with that name already exists.");
+            if (destinationLease!.IsDirectory) throw new IOException("The upload destination is a directory.");
+            destinationLease.Delete();
+        }
+    }
 
     private string GetRootPath(string root) => _paths.Resolve(root, string.Empty);
 
     private static string Normalize(string path) => path.Replace('\\', '/').TrimStart('/');
 
-    private static void EnsureTreeHasNoReparsePoints(string directory)
+    private static void DeleteTree(PathLease directoryLease)
     {
-        var pending = new Stack<string>();
-        pending.Push(directory);
-        while (pending.Count > 0)
+        foreach (var entry in directoryLease.Enumerate())
         {
-            var current = pending.Pop();
-            foreach (var entry in Directory.EnumerateFileSystemEntries(current))
-            {
-                var attributes = File.GetAttributes(entry);
-                if ((attributes & FileAttributes.ReparsePoint) != 0)
-                {
-                    throw new UnauthorizedAccessException("Recursive deletion stops at links and junctions.");
-                }
-                if ((attributes & FileAttributes.Directory) != 0) pending.Push(entry);
-            }
+            if (entry.IsReparsePoint)
+                throw new UnauthorizedAccessException("Recursive deletion stops at links and junctions.");
+            using var childLease = directoryLease.OpenChild(entry.Name, delete: true);
+            if (childLease.IsDirectory) DeleteTree(childLease);
+            else childLease.Delete();
         }
+        directoryLease.Delete();
     }
 }

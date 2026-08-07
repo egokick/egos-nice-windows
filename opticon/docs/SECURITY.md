@@ -11,8 +11,8 @@
 
 - Requests name a configured root ID and relative path; arbitrary absolute paths are unsupported.
 - Rooted, UNC, device, alternate-data-stream, and escaping paths are rejected.
-- Existing path components with `FileAttributes.ReparsePoint` are rejected to block symlink/junction escapes.
-- Uploads stream into a random partial file inside the validated destination, flush, then atomically move into place. Canceled uploads remove the partial file.
+- Shared roots are opened as verified Windows directory handles. Listings, reads, creates, promotions, and deletions resolve relative to those handles with reparse traversal disabled, so renaming or replacing a checked pathname cannot redirect a later SYSTEM operation.
+- Uploads stream into a random partial file created relative to the verified destination handle, flush, then promote that same handle without overwriting an unexpected destination. Canceled uploads delete the partial through its verified handle.
 - Two concurrent uploads are allowed per Agent. Declared length is mandatory; the default ceiling is 256 GiB, a 5 GiB disk reserve is enforced, bytes cannot exceed the declaration, and each upload has a 24-hour cancellation deadline. This permits files larger than 20 GiB without permitting unbounded requests.
 - Media URLs carry an HMAC over HTTP method, root, relative path, expiry, and nonce, expire after five minutes, and revalidate the path when opened.
 
@@ -26,7 +26,7 @@
 - The personalized payload is RSA-PSS signed and AES-GCM encrypted. Fly receives only ciphertext; the decryption key remains in the URL fragment and is not included in HTTP requests.
 - Reusable role bundles are private S3 objects readable only by a specific CloudFront Origin Access Control distribution. The Fly-hosted manifest permits only exact HTTPS CloudFront URLs with safe immutable version/file paths; the starter verifies pinned size, SHA-256, and the Setup Authenticode certificate; Setup verifies the signed invitation and signed Agent/Admin payloads. Direct S3 access is blocked, and neither S3 nor CloudFront is trusted for executable integrity.
 - Extending an active invitation preserves its URL while rotating the one-use Headscale key and replacing the signed encrypted payload. Manual expiry revokes the key and deletes the ciphertext.
-- Successful enrollment marks the local invitation redeemed and expired, revokes its key, and deletes the Fly object with bounded retries. The command center retries cleanup on refresh after a transient Fly failure; coordinator one-use state rejects any replay regardless.
+- Successful enrollment durably commits the device and marks the local invitation redeemed before revoking its key and deleting the Fly object. If the success response is lost, only an exact retry with the same invitation secret, node identity, address, host, OS, and Agent version is accepted; all different replays remain rejected. The command center retries hosted-object cleanup after a transient failure.
 
 ## RustDesk controls
 
@@ -60,8 +60,9 @@
 - An authorized Opticon SSH shell is deliberately a full elevated local-administrator session and can create persistent machine changes. Ephemeral keys, source-IP policy, attestation, revocation, and lease expiry limit access credentials and exposure time; they cannot contain commands already authorized to run as administrator. Grant CLI/UI access only to trusted operators and agents.
 - The main build artifacts are not publisher-trusted until you apply an organization code-signing certificate. Personalized invitation EXEs are Authenticode-signed with the locally controlled pinned invitation certificate and carry a separately verified signed payload.
 - Registry sync never contains permanent agent/RustDesk credentials. A secondary controller can request credentials only for one device at a time after controller-token plus Tailscale source-IP authentication and an explicit `AuthorizedControllerIds` grant on that target. Revoking the grant or controller tag stops future retrieval/reachability.
-- The coordinator uses HTTP inside the already encrypted Tailscale tunnel. Its bind address and firewall rule must remain Tailscale-only.
+- The coordinator uses HTTP inside the already encrypted Tailscale tunnel. Its bind address and firewall rule must remain Tailscale-only; enrollment and registry clients bypass ambient system proxies and reject redirects so invitation secrets and controller bearers stay on the direct Tailscale path.
 - Role, credential-rotation, and exit-node Agent actions additionally require the request to originate from the configured primary hub's Tailscale IP.
+- Credential rotation is a durable operation-ID transaction. The command center saves the pending credentials first, the Agent temporarily permits the previous token only to replay that exact rotation, and an explicit commit retires the old token. Either side can recover after a lost response or restart without losing the only working token/password pair.
 - Fly exposes only required Tailscale protocol routes, immutable pinned installers, health, the tiny no-store release manifest, and an HMAC-authenticated exact administrative allowlist. The Headscale bearer is Fly-internal; helper pages and raw /api routes return 404. Large new bundles bypass Fly and use S3/CloudFront transport, while all existing cryptographic verification remains mandatory. Headscale nodes have no default expiry, so long-offline durable tagged machines can reconnect automatically.
 - The coordinator is not a Windows service. Its availability depends on the primary interactive user remaining signed in with Taildesk running; locking that session is supported. Do not enable insecure automatic Windows logon merely to approximate pre-logon service availability.
 - Command-center installation may be elevated with a different administrator identity, but shortcuts and Tailscale operator access are resolved to the Explorer owner in the invoking session. Admin itself must subsequently be launched unelevated by that interactive user so its current-user DPAPI secrets and configuration stay in the intended profile.

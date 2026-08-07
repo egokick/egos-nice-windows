@@ -156,9 +156,28 @@ public sealed class AgentClient
     public async Task SetExitNodeAsync(DeviceRecord device, string token, bool enabled, CancellationToken cancellationToken = default) =>
         await SendJsonAsync(device, token, HttpMethod.Post, "api/v1/actions/exit-node", new ExitNodeRequest { Enabled = enabled }, cancellationToken);
 
-    public async Task RotateCredentialsAsync(DeviceRecord device, string oldToken, string newToken, string newPassword, CancellationToken cancellationToken = default) =>
-        await SendJsonAsync(device, oldToken, HttpMethod.Post, "api/v1/security/rotate",
-            new CredentialRotationRequest { NewAgentToken = newToken, NewRustDeskPassword = newPassword }, cancellationToken);
+    public async Task RotateCredentialsAsync(
+        DeviceRecord device,
+        string authorizationToken,
+        Guid operationId,
+        string newToken,
+        string newPassword,
+        CancellationToken cancellationToken = default) =>
+        await SendJsonAsync(device, authorizationToken, HttpMethod.Post, "api/v1/security/rotate",
+            new CredentialRotationRequest
+            {
+                OperationId = operationId,
+                NewAgentToken = newToken,
+                NewRustDeskPassword = newPassword
+            }, cancellationToken);
+
+    public async Task CommitCredentialRotationAsync(
+        DeviceRecord device,
+        string newToken,
+        Guid operationId,
+        CancellationToken cancellationToken = default) =>
+        await SendJsonAsync(device, newToken, HttpMethod.Post, "api/v1/security/rotate/commit",
+            new CredentialRotationCommitRequest { OperationId = operationId }, cancellationToken);
 
     public async Task SetRoleAsync(DeviceRecord device, string token, DeviceRole role, CancellationToken cancellationToken = default) =>
         await SendJsonAsync(device, token, HttpMethod.Post, "api/v1/security/role", new RoleChangeRequest { Role = role }, cancellationToken);

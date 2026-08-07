@@ -28,7 +28,7 @@ public sealed record CreatedPreAuthKey(string Id, string Key);
 public sealed class HeadscaleApiClient
 {
     private readonly AdminState _state;
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(30));
 
     public HeadscaleApiClient(AdminState state)
     {
@@ -102,9 +102,9 @@ public sealed class HeadscaleApiClient
         await EnsureSuccessAsync(response, cancellationToken);
     }
 
-    public async Task ApproveAdvertisedRoutesAsync(string deviceId, CancellationToken cancellationToken = default)
+    public async Task ApproveExitNodeRoutesAsync(string deviceId, CancellationToken cancellationToken = default)
     {
-        using var response = await SendAsync(HttpMethod.Post, $"api/v1/node/{Uri.EscapeDataString(deviceId)}/approve_routes", new { routes = System.Array.Empty<string>() }, cancellationToken);
+        using var response = await SendAsync(HttpMethod.Post, $"api/v1/node/{Uri.EscapeDataString(deviceId)}/approve_routes", new { routes = HeadscaleRoutes.ExitNode }, cancellationToken);
         await EnsureSuccessAsync(response, cancellationToken);
     }
 

@@ -59,7 +59,8 @@ builder.Services.AddSingleton<FileOperations>();
 builder.Services.AddSingleton<UpdateManager>();
 builder.Services.AddSingleton<SshAccessManager>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<SshAccessManager>());
-builder.Services.AddHttpClient(nameof(EnrollmentWorker), client => client.Timeout = TimeSpan.FromSeconds(20));
+builder.Services.AddHttpClient(nameof(EnrollmentWorker), client => client.Timeout = TimeSpan.FromSeconds(20))
+    .ConfigurePrimaryHttpMessageHandler(DirectHttp.CreateHandler);
 builder.Services.AddHostedService<EnrollmentWorker>();
 builder.Services.AddRateLimiter(options =>
 {
@@ -105,7 +106,8 @@ app.Use(async (context, next) =>
 
     var header = context.Request.Headers.Authorization.ToString();
     var token = header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? header[7..].Trim() : string.Empty;
-    if (!SecurityHelpers.FixedTimeEquals(SecurityHelpers.HashToken(token), config.AgentTokenHash))
+    var isRotationRequest = string.Equals(context.Request.Path.Value, "/api/v1/security/rotate", StringComparison.Ordinal);
+    if (!CredentialRotationState.CanAuthenticate(config, token, isRotationRequest, DateTimeOffset.UtcNow))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         await context.Response.WriteAsJsonAsync(new { error = "A valid Taildesk agent token is required." });
@@ -311,7 +313,12 @@ app.MapPost("/api/v1/actions/exit-node", async (ExitNodeRequest request, AgentRu
 });
 app.MapPost("/api/v1/security/rotate", async (CredentialRotationRequest request, AgentRuntime runtime, CancellationToken cancellationToken) =>
 {
-    await runtime.RotateCredentialsAsync(request.NewAgentToken, request.NewRustDeskPassword, cancellationToken);
+    await runtime.RotateCredentialsAsync(request.OperationId, request.NewAgentToken, request.NewRustDeskPassword, cancellationToken);
+    return Results.NoContent();
+});
+app.MapPost("/api/v1/security/rotate/commit", async (CredentialRotationCommitRequest request, AgentRuntime runtime, CancellationToken cancellationToken) =>
+{
+    await runtime.CommitCredentialRotationAsync(request.OperationId, cancellationToken);
     return Results.NoContent();
 });
 app.MapPost("/api/v1/security/role", async (RoleChangeRequest request, AgentRuntime runtime, CancellationToken cancellationToken) =>

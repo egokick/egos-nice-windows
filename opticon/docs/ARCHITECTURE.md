@@ -21,7 +21,7 @@ The command-center installer resolves the Explorer owner in the invoking Windows
 4. Setup decrypts and verifies the invitation, checks expiry, installs verified dependencies, consumes the key with `tailscale up --auth-key=â€¦ --hostname=â€¦ --unattended=true`, and verifies the exact tailnet plus mutually exclusive role/exit tags.
 5. Setup binds Agent and Windows Firewall rules to the assigned `100.x` address.
 6. Agent repeatedly posts the invitation secret and its actual Tailscale identity to the coordinator until accepted.
-7. Coordinator checks invitation hash, expiry, one-use state, remote Tailscale source IP, and reported address, then revokes the auth key, commits the device, marks the invitation redeemed/expired, and deletes its hosted ciphertext.
+7. Coordinator checks invitation hash, expiry, one-use state, remote Tailscale source IP, and reported address, then durably commits the device and marks the invitation redeemed/expired before revoking the auth key and deleting its hosted ciphertext. An exact retry after a lost response returns the already-committed success.
 8. Agent deletes its pending enrollment secret; Setup deletes `invite.tdinvite`.
 
 If Tailscale already has an identity, a first install pauses for explicit permission before logging it out; this prevents an unused invite key from surviving an apparent acceptance. A partial retry may reuse only the same invitation's recorded session, and only after exact tailnet/role/exit-tag verification. Install state records the completed invite ID, making a retry after a late enrollment idempotent.

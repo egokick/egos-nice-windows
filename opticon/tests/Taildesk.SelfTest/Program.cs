@@ -38,6 +38,12 @@ var tests = new (string Name, Action Body)[]
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
     ("cancelled uploads retain an authenticated byte offset and resume", TestResumableUpload),
     ("path guard permits a child and blocks traversal", TestPathGuard),
+    ("exit-node approval contains both internet default routes", TestExitNodeApprovalRoutes),
+    ("private HTTP transport bypasses proxies and redirects", TestDirectHttpTransport),
+    ("enrollment retries accept only the exact committed identity", TestEnrollmentReplayPolicy),
+    ("credential rotation survives an ambiguous response", TestCredentialRotationState),
+    ("failed durable collection mutations roll back in memory", TestDurableCollectionMutation),
+    ("guarded path leases prevent component replacement", TestPathLease),
     ("WPF style templates match their control target types", TestWpfStyleTemplateTargets),
     ("WPF controls keep explicit accessible foreground/background pairs", TestWpfContrastContract),
     ("DPAPI current-user and machine scopes round-trip", TestDpapi)
@@ -612,6 +618,180 @@ static void TestPathGuard()
     finally
     {
         Directory.Delete(temporary, true);
+    }
+}
+
+static void TestExitNodeApprovalRoutes()
+{
+    Assert(HeadscaleRoutes.ExitNode.Count == 2, "exit-node approval must contain exactly two default routes");
+    Assert(HeadscaleRoutes.ExitNode.Contains("0.0.0.0/0", StringComparer.Ordinal), "IPv4 default route is missing");
+    Assert(HeadscaleRoutes.ExitNode.Contains("::/0", StringComparer.Ordinal), "IPv6 default route is missing");
+    Assert(!HeadscaleRoutes.ExitNode.Any(string.IsNullOrWhiteSpace), "exit-node approval contains an empty route");
+}
+
+static void TestDirectHttpTransport()
+{
+    using var handler = DirectHttp.CreateHandler();
+    Assert(!handler.UseProxy, "private HTTP transport inherited the system proxy");
+    Assert(!handler.AllowAutoRedirect, "private HTTP transport follows redirects");
+}
+
+static void TestEnrollmentReplayPolicy()
+{
+    var secret = SecurityHelpers.CreateToken();
+    var device = new DeviceRecord
+    {
+        TailnetDeviceId = "node-42",
+        TailscaleIp = "100.90.0.42",
+        HostName = "WORKSHOP",
+        DnsName = "workshop.example.ts.net",
+        OperatingSystem = "Windows",
+        AgentVersion = "1.2.3"
+    };
+    var invite = new InviteRecord
+    {
+        Id = Guid.NewGuid(),
+        InviteSecretHash = SecurityHelpers.HashToken(secret),
+        RedeemedAt = DateTimeOffset.UtcNow,
+        EnrolledDeviceId = device.Id
+    };
+    var request = new EnrollmentRequest
+    {
+        InviteId = invite.Id,
+        InviteSecret = secret,
+        TailnetDeviceId = device.TailnetDeviceId,
+        TailscaleIp = device.TailscaleIp,
+        HostName = device.HostName,
+        DnsName = device.DnsName,
+        OperatingSystem = device.OperatingSystem,
+        AgentVersion = device.AgentVersion
+    };
+
+    Assert(EnrollmentReplayPolicy.IsExactAcceptedReplay(invite, device, request), "the exact committed retry was rejected");
+    request.TailscaleIp = "100.90.0.43";
+    Assert(!EnrollmentReplayPolicy.IsExactAcceptedReplay(invite, device, request), "a different Tailscale address was accepted");
+    request.TailscaleIp = device.TailscaleIp;
+    request.InviteSecret = SecurityHelpers.CreateToken();
+    Assert(!EnrollmentReplayPolicy.IsExactAcceptedReplay(invite, device, request), "a different invitation secret was accepted");
+}
+
+static void TestCredentialRotationState()
+{
+    var oldToken = SecurityHelpers.CreateToken();
+    var newToken = SecurityHelpers.CreateToken();
+    var password = SecurityHelpers.CreateHumanPassword();
+    var operationId = Guid.NewGuid();
+    var started = DateTimeOffset.UtcNow;
+    var config = new AgentConfig { AgentTokenHash = SecurityHelpers.HashToken(oldToken) };
+
+    CredentialRotationState.Begin(config, operationId, newToken, password, started);
+    Assert(CredentialRotationState.IsExactAppliedRotation(config, operationId, newToken, password), "the applied operation was not replayable");
+    Assert(CredentialRotationState.CanAuthenticate(config, newToken, false, started), "the new token was not active");
+    Assert(CredentialRotationState.CanAuthenticate(config, oldToken, true, started), "the prior token could not retry the exact rotation");
+    Assert(!CredentialRotationState.CanAuthenticate(config, oldToken, false, started), "the prior token retained general API access");
+    Assert(!CredentialRotationState.CanAuthenticate(
+            config, oldToken, true, started.Add(CredentialRotationState.PreviousTokenGracePeriod).AddSeconds(1)),
+        "the prior token survived its bounded replay window");
+    Assert(!CredentialRotationState.IsExactAppliedRotation(config, operationId, newToken, password + "x"), "a changed retry payload was accepted");
+
+    var durable = JsonSerializer.Deserialize<AgentConfig>(
+        JsonSerializer.Serialize(config, JsonDefaults.Options), JsonDefaults.Options)
+        ?? throw new InvalidDataException("credential rotation state did not deserialize");
+    Assert(CredentialRotationState.IsExactAppliedRotation(durable, operationId, newToken, password), "durable pending rotation was not recoverable");
+    CredentialRotationState.Commit(durable, operationId);
+    CredentialRotationState.Commit(durable, operationId);
+    Assert(!CredentialRotationState.CanAuthenticate(durable, oldToken, true, started), "the prior token survived commit");
+    Assert(CredentialRotationState.CanAuthenticate(durable, newToken, false, started), "commit retired the new token");
+}
+
+static void TestDurableCollectionMutation()
+{
+    var values = new List<string>();
+    using var gate = new SemaphoreSlim(1, 1);
+    AssertThrows<InvalidOperationException>(() => DurableCollectionMutation.AddAsync(
+        values, "ghost", gate, _ => throw new InvalidOperationException("simulated persistence failure")).GetAwaiter().GetResult());
+    Assert(values.Count == 0, "a failed persistence operation left a ghost record in memory");
+    DurableCollectionMutation.AddAsync(values, "durable", gate, _ => Task.CompletedTask).GetAwaiter().GetResult();
+    Assert(values.SequenceEqual(["durable"]), "a successful durable collection mutation was lost");
+}
+
+static void TestPathLease()
+{
+    if (!OperatingSystem.IsWindows()) return;
+    var temporary = Path.Combine(Path.GetTempPath(), "taildesk-path-lease-" + Guid.NewGuid().ToString("N"));
+    var child = Path.Combine(temporary, "child");
+    var moved = Path.Combine(temporary, "moved");
+    Directory.CreateDirectory(child);
+    File.WriteAllText(Path.Combine(child, "proof.txt"), "guarded");
+    try
+    {
+        var guard = new PathGuard(new Dictionary<string, string> { ["test"] = temporary });
+        using (var lease = guard.Acquire("test", "child"))
+        {
+            Assert(lease.IsDirectory, "directory lease did not identify its target");
+            Directory.Move(child, moved);
+            try { Directory.CreateDirectory(child); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+            using var created = lease.CreateFile("leased.txt");
+            using (var writer = new StreamWriter(created.OpenWriteStream(), leaveOpen: false))
+                writer.Write("original-directory");
+            created.RenameTo(lease, "promoted.txt");
+            Assert(File.Exists(Path.Combine(moved, "promoted.txt")), "relative create or rename escaped to the replacement pathname");
+            Assert(!File.Exists(Path.Combine(child, "promoted.txt")), "relative create or rename used the replacement pathname");
+            Assert(lease.Enumerate().Any(entry => entry.Name == "promoted.txt" && entry.Size > 0),
+                "handle-based enumeration did not observe the promoted file");
+
+            using (var partial = lease.OpenOrCreateFile(".taildesk-upload-test.partial"))
+            {
+                using var output = partial.OpenWriteStream();
+                output.Write("first"u8);
+            }
+            using (var resumed = lease.OpenOrCreateFile(".taildesk-upload-test.partial"))
+            {
+                Assert(resumed.Length == 5, "guarded resumable file lost its retained byte offset");
+                using (var output = resumed.OpenWriteStream())
+                {
+                    output.Position = resumed.Length;
+                    output.Write("-second"u8);
+                }
+                resumed.RenameTo(lease, "resumed.txt");
+            }
+            Assert(File.ReadAllText(Path.Combine(moved, "resumed.txt")) == "first-second",
+                "guarded resumable append or promotion changed the payload");
+        }
+        if (Directory.Exists(child)) Directory.Delete(child, true);
+        Directory.Move(moved, child);
+
+        var readParentMoved = false;
+        using (var stream = guard.Acquire("test", "child\\proof.txt", readFile: true).OpenReadStream())
+        {
+            try { Directory.Move(child, moved); readParentMoved = true; }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+            if (readParentMoved)
+            {
+                try
+                {
+                    Directory.CreateDirectory(child);
+                    File.WriteAllText(Path.Combine(child, "proof.txt"), "replacement");
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+            }
+            using var reader = new StreamReader(stream, leaveOpen: true);
+            Assert(reader.ReadToEnd() == "guarded", "guarded read returned the wrong file");
+        }
+        if (readParentMoved)
+        {
+            if (Directory.Exists(child)) Directory.Delete(child, true);
+            Directory.Move(moved, child);
+        }
+
+        using (var deleteLease = guard.Acquire("test", "child\\proof.txt", delete: true))
+            deleteLease.Delete();
+        Assert(!File.Exists(Path.Combine(child, "proof.txt")), "handle-based deletion did not remove the verified file");
+    }
+    finally
+    {
+        try { if (Directory.Exists(temporary)) Directory.Delete(temporary, true); } catch { }
     }
 }
 
