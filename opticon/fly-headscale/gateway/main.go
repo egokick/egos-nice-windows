@@ -94,7 +94,8 @@ func main() {
 	if err := os.MkdirAll(g.inviteDir, 0700); err != nil { log.Fatal(err) }
 	if err := os.MkdirAll(g.bundleDir, 0700); err != nil { log.Fatal(err) }
 	if err := migrateBundleUploads("/var/lib/headscale", g.artifactDir, g.bundleDir); err != nil { log.Fatal(err) }
-	if err := g.pruneUndeclaredBundles(); err != nil { log.Fatal(err) }
+	// Legacy volume bundles are retained as an emergency migration fallback.
+	// New releases are selected through immutable CloudFront URLs instead.
 
 	server := &http.Server{Addr: "0.0.0.0:8080", Handler: g, ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
@@ -193,6 +194,7 @@ type bundleArtifact struct {
 	Size int64 `json:"size"`
 	SHA256 string `json:"sha256"`
 	SignerThumbprint string `json:"signerThumbprint,omitempty"`
+	DownloadURL string `json:"downloadUrl,omitempty"`
 }
 
 func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request) {
@@ -200,7 +202,7 @@ func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request)
 	if err != nil { http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable); return }
 	available := make([]bundleArtifact, 0, len(manifest.Artifacts))
 	for _, artifact := range manifest.Artifacts {
-		if artifact.Product != "OpticonBundle" || g.bundleIsFinalized(artifact) {
+		if artifact.Product != "OpticonBundle" || g.bundleIsAvailable(artifact) {
 			available = append(available, artifact)
 		}
 	}
@@ -243,6 +245,19 @@ func validBundleArtifact(artifact bundleArtifact) bool {
 	}
 	version, valid := parseSemanticVersion(artifact.Version)
 	return valid && version.core[0] != "0" && !strings.ContainsAny(artifact.Version, "-+")
+}
+
+func validCloudFrontDownloadURL(artifact bundleArtifact) bool {
+	if artifact.DownloadURL == "" { return false }
+	u, err := url.Parse(artifact.DownloadURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || u.Port() != "" { return false }
+	host := strings.ToLower(u.Hostname())
+	if !regexp.MustCompile(`^[a-z0-9-]+\.cloudfront\.net$`).MatchString(host) { return false }
+	return u.EscapedPath() == "/opticon/releases/"+url.PathEscape(artifact.Version)+"/"+url.PathEscape(artifact.File)
+}
+
+func (g *gateway) bundleIsAvailable(artifact bundleArtifact) bool {
+	return validBundleArtifact(artifact) && (validCloudFrontDownloadURL(artifact) || g.bundleIsFinalized(artifact))
 }
 
 func (g *gateway) bundleIsFinalized(artifact bundleArtifact) bool {
@@ -394,7 +409,7 @@ func (g *gateway) bundleForRole(role string) (bundleArtifact, error) {
 	var selected bundleArtifact
 	found := false
 	for _, artifact := range manifest.Artifacts {
-		if validBundleArtifact(artifact) && artifact.Role == role && artifact.Architecture == "x64" && g.bundleIsFinalized(artifact) {
+		if validBundleArtifact(artifact) && artifact.Role == role && artifact.Architecture == "x64" && g.bundleIsAvailable(artifact) {
 			if !found {
 				selected = artifact
 				found = true
@@ -471,11 +486,16 @@ del "%~f0"
 	replacer := strings.NewReplacer(
 		"__PUBLIC_ID__", publicID[:12],
 		"__INVITE_URL__", powerShellSingleQuoted(origin+invitePublicPrefix+url.PathEscape(publicID)+"/invite.tdinvite"),
-		"__BUNDLE_URL__", powerShellSingleQuoted(origin+artifactPrefix+url.PathEscape(bundle.File)),
+		"__BUNDLE_URL__", powerShellSingleQuoted(bundleDownloadURL(origin, bundle)),
 		"__BUNDLE_SIZE__", strconv.FormatInt(bundle.Size, 10),
 		"__BUNDLE_HASH__", strings.ToLower(bundle.SHA256),
 	)
 	return replacer.Replace(template)
+}
+
+func bundleDownloadURL(origin string, bundle bundleArtifact) string {
+	if validCloudFrontDownloadURL(bundle) { return bundle.DownloadURL }
+	return origin + artifactPrefix + url.PathEscape(bundle.File)
 }
 
 func powerShellSingleQuoted(value string) string {

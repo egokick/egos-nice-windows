@@ -19,21 +19,20 @@ decrypts and verifies the signed invitation. Hosted ciphertext expires after
 The command center can extend an active invitation without changing its URL;
 it rotates the one-use Headscale key and replaces the signed encrypted envelope.
 
-Large Opticon ZIPs live on the persistent volume rather than in the container
-image. Rebuild/deploy them from this directory with:
+Large Opticon ZIPs live in a private S3 bucket and are served through
+CloudFront. Fly retains only the small public manifest and legacy volume files
+as a migration fallback. Provision once, then publish from this directory:
 
 ```powershell
-.\scripts\Build-OpticonBundles.ps1
-flyctl deploy --remote-only --config fly.toml
+..\infrastructure\aws\Provision-OpticonReleaseDistribution.ps1
 .\scripts\Publish-OpticonBundles.ps1
 ```
 
-The publisher reads the existing DPAPI-protected Opticon gateway key from the
-local admin configuration. Uploads use authenticated 4 MiB chunks and are
-accepted only when filename, size, and SHA-256 match the deployed manifest.
-The public manifest withholds each new Opticon release until its final verified
-bundle exists on the persistent volume, so deploying metadata before uploading
-cannot displace the last available release or advertise a partial package.
+The publisher uses the authenticated operator AWS CLI only: it chooses the next
+unpublished patch version, signs both bundles, uploads immutable multipart S3
+objects with SHA-256 checksums, performs CloudFront HEAD/range/full-stream hash
+verification, and only then deploys Fly's manifest. It never reads or needs the
+gateway HMAC key. The old HMAC chunk route remains only as a deprecated fallback.
 
 The Fly API token is read only from `C:\source\babelfish\.env` during an
 operator-initiated deployment. It must never be copied into this directory,

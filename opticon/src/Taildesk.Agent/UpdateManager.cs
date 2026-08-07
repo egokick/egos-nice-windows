@@ -290,7 +290,12 @@ public sealed class UpdateManager
         var partial = destination + ".partial";
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         Exception? last = null;
-        using var handler = new HttpClientHandler { CheckCertificateRevocationList = true };
+        using var handler = new HttpClientHandler
+        {
+            CheckCertificateRevocationList = true,
+            UseProxy = false,
+            AllowAutoRedirect = false
+        };
         using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         for (var attempt = 1; attempt <= MaximumDownloadAttempts; attempt++)
         {

@@ -193,4 +193,7 @@ public sealed class ArtifactRecordDto
     public string File { get; set; } = string.Empty;
     public long Size { get; set; }
     public string Sha256 { get; set; } = string.Empty;
+    // Optional during the Fly-volume migration.  New immutable bundles use an
+    // absolute, CloudFront HTTPS URL rather than the control-plane origin.
+    public string DownloadUrl { get; set; } = string.Empty;
 }

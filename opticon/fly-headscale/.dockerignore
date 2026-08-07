@@ -1,2 +1,7 @@
 README.md
-artifacts/opticon-bundle-*.zip
+# Only the small public manifest belongs in the gateway image. Bundles and
+# staging outputs are private S3/CloudFront publishing inputs.
+artifacts/*.zip
+artifacts/*.zip.*
+artifacts/hosted-build/
+artifacts/hosted-bundle-stage/

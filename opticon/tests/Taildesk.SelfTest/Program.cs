@@ -28,6 +28,7 @@ var tests = new (string Name, Action Body)[]
     ("RustDesk installer configures every Windows service profile before validation", TestRustDeskInstallerProfiles),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
     ("remote administration contracts reject unpinned or unsafe updates", TestRemoteAdministrationProtocol),
+    ("release distribution keeps signed bundles private and CloudFront-addressed", TestReleaseDistributionDesign),
     ("OpenSSH recovery is fixed-path, Windows-compatible, and independently supervised", TestOpenSshRecoveryDesign),
     ("runtime tailnet policy keeps administrative SSH hub-only", TestTailnetSshPolicy),
     ("update journal writes round-trip through atomic persistence", TestUpdateJournalPersistence),
@@ -311,6 +312,44 @@ static void TestRemoteAdministrationProtocol()
     }, JsonDefaults.Options);
     var ssh = JsonSerializer.Deserialize<SshAccessResponse>(sshJson, JsonDefaults.Options);
     Assert(ssh?.SessionId == "lease_123" && ssh.Host == "100.64.0.25", "SSH lease identity/host did not round-trip");
+}
+static void TestReleaseDistributionDesign()
+{
+    DirectoryInfo? root = null;
+    foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+    {
+        for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "Taildesk.sln"))) { root = directory; break; }
+        }
+        if (root is not null) break;
+    }
+    Assert(root is not null, "could not find the Opticon source root for release-distribution checks");
+    string Read(params string[] parts) => File.ReadAllText(Path.Combine([root!.FullName, .. parts]));
+    var template = Read("infrastructure", "aws", "opticon-release-distribution.yaml");
+    var publisher = Read("fly-headscale", "scripts", "Publish-OpticonBundles.ps1");
+    var gateway = Read("fly-headscale", "gateway", "main.go");
+    var client = Read("src", "Taildesk.Admin", "OpticonReleaseClient.cs");
+    var agent = Read("src", "Taildesk.Agent", "UpdateManager.cs");
+    Assert(template.Contains("BucketOwnerEnforced", StringComparison.Ordinal)
+           && template.Contains("BlockPublicPolicy: true", StringComparison.Ordinal)
+           && template.Contains("DenyInsecureTransport", StringComparison.Ordinal)
+           && template.Contains("OriginAccessControl", StringComparison.Ordinal)
+           && template.Contains("TLSv1.2_2021", StringComparison.Ordinal),
+        "CloudFront infrastructure no longer enforces the private TLS-only S3 boundary");
+    Assert(publisher.Contains("--checksum-algorithm", StringComparison.Ordinal)
+           && publisher.Contains("max_concurrent_requests = 20", StringComparison.Ordinal)
+           && publisher.Contains("Invoke-CloudFrontVerification", StringComparison.Ordinal)
+           && publisher.Contains("Refusing to overwrite immutable", StringComparison.Ordinal),
+        "publisher no longer enforces parallel immutable S3 upload and CloudFront verification");
+    Assert(gateway.Contains("validCloudFrontDownloadURL", StringComparison.Ordinal)
+           && gateway.Contains("bundleDownloadURL", StringComparison.Ordinal)
+           && client.Contains(".cloudfront.net", StringComparison.Ordinal),
+        "manifest clients do not tightly validate CloudFront download URLs");
+    Assert(agent.Contains("UseProxy = false", StringComparison.Ordinal)
+           && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
+           && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
+        "Agent release downloader does not retain the required direct HTTPS behavior");
 }
 static void TestTailnetSshPolicy()
 {
