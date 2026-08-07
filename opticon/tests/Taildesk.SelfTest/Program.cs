@@ -385,6 +385,8 @@ static void TestReleaseDistributionDesign()
     var gateway = Read("fly-headscale", "gateway", "main.go");
     var client = Read("src", "Taildesk.Admin", "OpticonReleaseClient.cs");
     var agent = Read("src", "Taildesk.Agent", "UpdateManager.cs");
+    var hostedBootstrap = Read("src", "Taildesk.Setup", "HostedBootstrap.cs");
+    var setupWindow = Read("src", "Taildesk.Setup", "MainWindow.xaml.cs");
     Assert(template.Contains("BucketOwnerEnforced", StringComparison.Ordinal)
            && template.Contains("BlockPublicPolicy: true", StringComparison.Ordinal)
            && template.Contains("DenyInsecureTransport", StringComparison.Ordinal)
@@ -413,6 +415,11 @@ static void TestReleaseDistributionDesign()
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
         "Agent release downloader does not retain the required direct HTTPS behavior");
+    Assert(hostedBootstrap.Contains("start.Environment[InvitePathEnvironmentVariable]", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("start.Environment[InviteKeyEnvironmentVariable]", StringComparison.Ordinal)
+           && setupWindow.Contains("GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)", StringComparison.Ordinal)
+           && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal),
+        "hosted bootstrap no longer has a consumed child-environment fallback when Windows drops Setup arguments");
 }
 static void TestTailnetSshPolicy()
 {

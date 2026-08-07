@@ -12,6 +12,8 @@ internal sealed record HostedBootstrap(string PublicId, string PrivateKey);
 internal static class HostedBootstrapper
 {
     private const string Origin = "https://taildesk-egokick-control.fly.dev";
+    internal const string InvitePathEnvironmentVariable = "OPTICON_HOSTED_INVITE_PATH";
+    internal const string InviteKeyEnvironmentVariable = "OPTICON_HOSTED_INVITE_KEY";
     private static readonly Regex NamePattern = new(
         "^Install-Opticon-(?<id>[A-Za-z0-9_-]{24,128})--(?<key>[A-Za-z0-9_-]{32,128})$",
         RegexOptions.CultureInvariant);
@@ -72,6 +74,8 @@ internal static class HostedBootstrapper
         var start = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = releaseDirectory };
         start.ArgumentList.Add("--hosted-invite=" + invitePath);
         start.ArgumentList.Add("--invite-key=" + bootstrap.PrivateKey);
+        start.Environment[InvitePathEnvironmentVariable] = invitePath;
+        start.Environment[InviteKeyEnvironmentVariable] = bootstrap.PrivateKey;
         if (Process.Start(start) is null) throw new InvalidOperationException("Signed Opticon Setup could not be started.");
     }
 

@@ -187,12 +187,19 @@ public partial class MainWindow : Window
     {
         var arguments = Environment.GetCommandLineArgs();
         var hosted = arguments.FirstOrDefault(value => value.StartsWith("--hosted-invite=", StringComparison.OrdinalIgnoreCase));
-        if (hosted is not null)
+        var hostedPath = hosted is null
+            ? Environment.GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)
+            : hosted[16..].Trim('"');
+        if (!string.IsNullOrWhiteSpace(hostedPath))
         {
-            var keyArgument = arguments.FirstOrDefault(value => value.StartsWith("--invite-key=", StringComparison.OrdinalIgnoreCase))
-                              ?? throw new InvalidDataException("The hosted invitation is missing its private link key.");
-            _hostedFragmentKey = keyArgument[13..].Trim('"');
-            var hostedPath = hosted[16..].Trim('"');
+            var keyArgument = arguments.FirstOrDefault(value => value.StartsWith("--invite-key=", StringComparison.OrdinalIgnoreCase));
+            _hostedFragmentKey = keyArgument is null
+                ? Environment.GetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable) ?? string.Empty
+                : keyArgument[13..].Trim('"');
+            Environment.SetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable, null);
+            Environment.SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null);
+            if (string.IsNullOrWhiteSpace(_hostedFragmentKey))
+                throw new InvalidDataException("The hosted invitation is missing its private link key.");
             return File.Exists(hostedPath) ? Path.GetFullPath(hostedPath) : throw new FileNotFoundException("The encrypted hosted invitation was not downloaded.");
         }
         var argument = arguments.FirstOrDefault(value => value.StartsWith("--invite=", StringComparison.OrdinalIgnoreCase));
