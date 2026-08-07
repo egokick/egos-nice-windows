@@ -38,11 +38,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _typeTextMenuItem;
     private readonly ToolStripMenuItem _chromeCursorInputStayAwakeMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
+    private readonly ToolStripMenuItem _keepOnWhenLidIsClosedMenuItem;
     private readonly ToolStripMenuItem _dimScreenMenuItem;
     private readonly ToolStripMenuItem _enableAfterInactivityMenuItem;
     private readonly ToolStripControlHost _idleThresholdHost;
     private readonly ToolStripMenuItem _editTextMenuItem;
-    private readonly ToolStripMenuItem _openAgentChannelMenuItem;
     private readonly ToolStripMenuItem _openWorkVmMenuItem;
     private readonly ToolStripMenuItem _switchBluetoothToVmMenuItem;
     private readonly ToolStripMenuItem _returnBluetoothToLaptopMenuItem;
@@ -56,6 +56,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ActivitySessionController _activityController;
     private readonly IUserActivityMonitor _userActivityMonitor;
     private readonly ChromeCursorInputStayAwakeService _chromeCursorInputStayAwakeService;
+    private readonly LidClosedPowerPolicyService _lidClosedPowerPolicyService;
     private readonly DockerWorkService _dockerWorkService;
     private readonly RemoteHubOidcAccessTokenProvider _remoteHubAccessTokenProvider;
     private readonly IRemoteFleetClient _remoteFleetClient;
@@ -82,6 +83,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _activityController = new ActivitySessionController(new SystemIdleMonitor(), new SystemMonitorBrightnessService());
         _userActivityMonitor = new UserActivityMonitor();
         _chromeCursorInputStayAwakeService = new ChromeCursorInputStayAwakeService();
+        _lidClosedPowerPolicyService = new LidClosedPowerPolicyService();
         _dockerWorkService = new DockerWorkService();
         _remoteHubAccessTokenProvider = new RemoteHubOidcAccessTokenProvider(GetRemoteHubOidcConfiguration);
         _remoteFleetClient = new LocalDisplayRemoteFleetClient(
@@ -139,6 +141,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _startupMenuItem.Click += (_, _) => ToggleStartup();
 
+        _keepOnWhenLidIsClosedMenuItem = new ToolStripMenuItem("keep on when lid is closed")
+        {
+            CheckOnClick = true
+        };
+        _keepOnWhenLidIsClosedMenuItem.Click += (_, _) => ToggleKeepOnWhenLidIsClosed();
+
         _dimScreenMenuItem = new ToolStripMenuItem("Dim screen when active")
         {
             CheckOnClick = true
@@ -157,9 +165,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _editTextMenuItem = new ToolStripMenuItem("Edit text file");
         _editTextMenuItem.Click += (_, _) => OpenTextFile();
-
-        _openAgentChannelMenuItem = new ToolStripMenuItem("Open AI Chat");
-        _openAgentChannelMenuItem.Click += (_, _) => OpenAgentChannel();
 
         _openWorkVmMenuItem = new ToolStripMenuItem("Open VM");
         _openWorkVmMenuItem.Click += (_, _) => OpenWorkVm();
@@ -185,6 +190,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _contextMenu.RegisterStickyItem(_typeTextMenuItem);
         _contextMenu.RegisterStickyItem(_chromeCursorInputStayAwakeMenuItem);
         _contextMenu.RegisterStickyItem(_startupMenuItem);
+        _contextMenu.RegisterStickyItem(_keepOnWhenLidIsClosedMenuItem);
         _contextMenu.RegisterStickyItem(_dimScreenMenuItem);
         _contextMenu.RegisterStickyItem(_enableAfterInactivityMenuItem);
         _contextMenu.Items.Add(_activeMenuItem);
@@ -193,11 +199,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _contextMenu.Items.Add(_typeTextMenuItem);
         _contextMenu.Items.Add(_chromeCursorInputStayAwakeMenuItem);
         _contextMenu.Items.Add(_startupMenuItem);
+        _contextMenu.Items.Add(_keepOnWhenLidIsClosedMenuItem);
         _contextMenu.Items.Add(_dimScreenMenuItem);
         _contextMenu.Items.Add(_enableAfterInactivityMenuItem);
         _contextMenu.Items.Add(_idleThresholdHost);
         _contextMenu.Items.Add(_editTextMenuItem);
-        _contextMenu.Items.Add(_openAgentChannelMenuItem);
         _contextMenu.Items.Add(new ToolStripSeparator());
         _contextMenu.Items.Add(_remotesMenuController.MenuItem);
         _contextMenu.Items.Add(new ToolStripSeparator());
@@ -219,6 +225,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RefreshUi();
         EnsureChromeCursorInputBridgeRegistered();
         EnsureStartupPreference();
+        EnsureKeepOnWhenLidIsClosedPreference();
         ApplyRunnerState();
         QueueDockerWorkStatusRefresh();
         _remotesMenuController.QueueRefresh();
@@ -462,29 +469,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private void OpenAgentChannel()
-    {
-        try
-        {
-            var executablePath = AgentChannelLauncher.GetExecutablePath();
-            if (!File.Exists(executablePath))
-            {
-                ShowErrorBalloon("AI Chat is not built yet. Build AgentChannel first.");
-                return;
-            }
-
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = executablePath,
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex)
-        {
-            ShowErrorBalloon($"Could not open AI Chat: {ex.Message}");
-        }
-    }
-
     private void OpenWorkVm()
     {
         BeginDockerWorkAction(
@@ -520,6 +504,46 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
             ShowErrorBalloon($"Startup update failed: {ex.Message}");
+        }
+    }
+
+    private void ToggleKeepOnWhenLidIsClosed()
+    {
+        var enabled = _keepOnWhenLidIsClosedMenuItem.Checked;
+        try
+        {
+            // Reapply every part of the policy on every click. This corrects changes made in
+            // Windows Settings or by another power-plan tool while StayActive is running.
+            _lidClosedPowerPolicyService.SetKeepAwakeWhenLidClosed(enabled);
+            UpdateSettings(settings => settings.KeepOnWhenLidIsClosedEnabled = enabled);
+            RefreshUi();
+            ShowInfoBalloon(enabled
+                ? "This laptop will stay awake with the lid closed on battery and AC power."
+                : "Closing the lid will now sleep the laptop; it will hibernate after a while.");
+        }
+        catch (Exception ex)
+        {
+            _keepOnWhenLidIsClosedMenuItem.Checked = GetSettingsSnapshot().KeepOnWhenLidIsClosedEnabled;
+            ShowErrorBalloon($"Could not update the lid-close power policy: {ex.Message}");
+        }
+    }
+
+    private void EnsureKeepOnWhenLidIsClosedPreference()
+    {
+        if (!GetSettingsSnapshot().KeepOnWhenLidIsClosedEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            // A power-plan editor can overwrite the active scheme. Reassert this saved choice
+            // whenever StayActive starts, then RefreshUi verifies both AC/DC sleep timeouts.
+            _lidClosedPowerPolicyService.SetKeepAwakeWhenLidClosed(true);
+        }
+        catch (Exception ex)
+        {
+            ShowErrorBalloon($"Could not restore the lid-close power policy: {ex.Message}");
         }
     }
 
@@ -765,6 +789,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _chromeCursorInputStayAwakeMenuItem.Checked =
             settings.ChromeCursorInputStayAwakeEnabled;
         _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
+        _keepOnWhenLidIsClosedMenuItem.Checked = settings.KeepOnWhenLidIsClosedEnabled
+            && _lidClosedPowerPolicyService.IsKeepAwakeWhenLidClosedConfigured();
         _dimScreenMenuItem.Checked = settings.DimScreenWhenActiveEnabled;
         _enableAfterInactivityMenuItem.Checked = settings.EnableAfterInactivityEnabled;
         _idleThresholdControl.TotalSeconds = settings.EnableAfterInactivitySeconds;
@@ -950,6 +976,8 @@ internal sealed class AppSettings
 
     public bool ChromeCursorInputStayAwakeEnabled { get; set; }
 
+    public bool KeepOnWhenLidIsClosedEnabled { get; set; }
+
     public bool DimScreenWhenActiveEnabled { get; set; }
 
     public bool EnableAfterInactivityEnabled { get; set; }
@@ -1042,6 +1070,7 @@ internal sealed class AppSettings
             JiggleMouseEnabled = JiggleMouseEnabled,
             TypeTextEnabled = TypeTextEnabled,
             ChromeCursorInputStayAwakeEnabled = ChromeCursorInputStayAwakeEnabled,
+            KeepOnWhenLidIsClosedEnabled = KeepOnWhenLidIsClosedEnabled,
             DimScreenWhenActiveEnabled = DimScreenWhenActiveEnabled,
             EnableAfterInactivityEnabled = EnableAfterInactivityEnabled,
             EnableAfterInactivitySeconds = EnableAfterInactivitySeconds,
@@ -1109,23 +1138,6 @@ internal static class StartupService
         {
             key.DeleteValue(AppName, throwOnMissingValue: false);
         }
-    }
-}
-
-internal static class AgentChannelLauncher
-{
-    public static string GetExecutablePath()
-    {
-        var baseDirectory = AppContext.BaseDirectory;
-        var candidates = new[]
-        {
-            Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "..", "AgentChannel", "bin", "Release", "net10.0-windows", "AgentChannel.exe")),
-            Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "..", "AgentChannel", "bin", "Debug", "net10.0-windows", "AgentChannel.exe")),
-            Path.GetFullPath(Path.Combine(baseDirectory, "..", "AgentChannel", "AgentChannel.exe")),
-            Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? baseDirectory, "AgentChannel.exe")
-        };
-
-        return candidates.FirstOrDefault(File.Exists) ?? candidates[0];
     }
 }
 

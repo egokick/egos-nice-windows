@@ -413,7 +413,11 @@ public sealed class InstallCoordinator
         EnsureSuccess(failureFlag, "RustDesk non-crash failure recovery could not be configured");
 
 
-        var password = await ProcessRunner.RunAsync(rustDesk, ["--password", _invite.RustDeskPassword], TimeSpan.FromSeconds(15), cancellationToken);
+        // RustDesk 1.4.x can launch a long-lived child while setting the password.
+        // Do not redirect its inherited handles: they would otherwise keep Setup
+        // waiting after the password command itself has completed.
+        var password = await ProcessRunner.RunAsync(rustDesk, ["--password", _invite.RustDeskPassword],
+            TimeSpan.FromSeconds(15), cancellationToken, captureOutput: false);
         EnsureSuccess(password, "RustDesk password provisioning failed");
 
         _ = await ProcessRunner.RunAsync("sc.exe", ["stop", "RustDesk"], TimeSpan.FromSeconds(30), cancellationToken);

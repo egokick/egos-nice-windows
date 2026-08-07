@@ -57,20 +57,23 @@ public static class ProcessRunner
             throw new InvalidOperationException($"Could not start {executable}.");
         }
 
-        var outputTask = captureOutput
-            ? process.StandardOutput.ReadToEndAsync(cancellationToken)
-            : Task.FromResult(string.Empty);
-        var errorTask = captureOutput
-            ? process.StandardError.ReadToEndAsync(cancellationToken)
-            : Task.FromResult(string.Empty);
         using var timeoutSource = timeout.HasValue ? new CancellationTokenSource(timeout.Value) : null;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
             timeoutSource?.Token ?? CancellationToken.None);
+        // A process can exit while a child it spawned still owns its redirected
+        // handles.  Read the streams under the same deadline as the process so
+        // that this case is reported as a timeout rather than hanging forever.
+        var outputTask = captureOutput
+            ? process.StandardOutput.ReadToEndAsync(linked.Token)
+            : Task.FromResult(string.Empty);
+        var errorTask = captureOutput
+            ? process.StandardError.ReadToEndAsync(linked.Token)
+            : Task.FromResult(string.Empty);
 
         try
         {
-            await process.WaitForExitAsync(linked.Token);
+            await Task.WhenAll(process.WaitForExitAsync(linked.Token), outputTask, errorTask);
         }
         catch (OperationCanceledException)
         {
@@ -86,8 +89,7 @@ public static class ProcessRunner
             }
             throw;
         }
-
-        return new ProcessResult(process.ExitCode, await outputTask, await errorTask);
+        return new ProcessResult(process.ExitCode, outputTask.Result, errorTask.Result);
     }
 
     public static string? FindOnPath(params string[] executableNames)
