@@ -59,6 +59,46 @@ public partial class MainWindow : Window
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await RunAsync(() => _viewModel.RefreshAsync());
     private async void RunSystemChecks_Click(object sender, RoutedEventArgs e) => await _viewModel.RunSystemChecksAsync();
 
+    private void TransferGrid_PreviewMouseRightButtonDown(
+        object sender,
+        System.Windows.Input.MouseButtonEventArgs e)
+    {
+        DependencyObject? current = e.OriginalSource as DependencyObject;
+        while (current is not null && current is not DataGridRow)
+            current = System.Windows.Media.VisualTreeHelper.GetParent(current);
+        if (current is DataGridRow row)
+        {
+            row.IsSelected = true;
+            row.Focus();
+        }
+    }
+
+    private void TransferGrid_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        var transfer = TransferGrid.SelectedItem as TransferRow;
+        ResumeTransferMenuItem.IsEnabled = transfer?.CanResume == true;
+        CancelTransferMenuItem.IsEnabled = transfer?.CanCancel == true;
+    }
+
+    private void ResumeTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (TransferGrid.SelectedItem is not TransferRow transfer)
+                throw new InvalidOperationException("Select a transfer to resume.");
+            _viewModel.ResumeTransfer(transfer);
+            _viewModel.Status = $"Resuming {transfer.File} on {transfer.Device}";
+        }
+        catch (Exception exception) { ShowError(exception); }
+    }
+
+    private void CancelTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        if (TransferGrid.SelectedItem is not TransferRow transfer) return;
+        _viewModel.CancelTransfer(transfer);
+        _viewModel.Status = $"Cancelling {transfer.File} on {transfer.Device}";
+    }
+
     private void DeviceGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         RoleCombo.SelectedIndex = _viewModel.SelectedDevice?.Role == DeviceRole.ControllerAndManaged ? 1 : 0;

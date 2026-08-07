@@ -15,7 +15,6 @@ public partial class FileManagerWindow : Window
     private string _currentPath = string.Empty;
     private bool _loading;
     private bool _working;
-    private bool _operationWasCancelled;
     private CancellationTokenSource? _operationCancellation;
 
     public FileManagerWindow(DeviceRecord device, string token, AgentClient client, TransferManager transfers)
@@ -28,6 +27,8 @@ public partial class FileManagerWindow : Window
         Title = $"Files — {device.Name}";
         DeviceText.Text = $"{device.Name}  {device.TailscaleIp}";
         Loaded += FileManagerWindow_Loaded;
+        // Browser operations belong to this window. File transfers belong to
+        // the application-wide TransferManager and deliberately survive close.
         Closed += (_, _) => _operationCancellation?.Cancel();
     }
 
@@ -73,7 +74,7 @@ public partial class FileManagerWindow : Window
         }
     }
 
-    private async void Download_Click(object sender, RoutedEventArgs e)
+    private void Download_Click(object sender, RoutedEventArgs e)
     {
         try
         {
@@ -82,25 +83,25 @@ public partial class FileManagerWindow : Window
             using var dialog = new System.Windows.Forms.FolderBrowserDialog { Description = "Choose a local download folder", UseDescriptionForTitle = true };
             if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
             var destination = Path.Combine(dialog.SelectedPath, entry.Name);
-            await RunAsync(() => _transfers.DownloadAsync(_client, _device, _token, CurrentRoot.Id, entry.RelativePath, destination,
-                    _operationCancellation!.Token),
-                $"Downloaded {entry.Name}.");
+            _transfers.StartDownload(
+                _client, _device, _token, CurrentRoot.Id, entry.RelativePath, destination);
+            StatusText.Text = $"Downloading {entry.Name} in Transfers; you can close this window.";
         }
         catch (Exception exception) { ShowError(exception); }
     }
 
-    private async void Upload_Click(object sender, RoutedEventArgs e)
+    private void Upload_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Multiselect = true, CheckFileExists = true, Title = $"Send files to {_device.Name}" };
-        if (dialog.ShowDialog(this) != true) return;
-        foreach (var file in dialog.FileNames)
+        try
         {
-            await RunAsync(() => _transfers.UploadAsync(_client, _device, _token, file, CurrentRoot.Id, _currentPath, overwrite: false,
-                    _operationCancellation!.Token),
-                $"Uploaded {Path.GetFileName(file)}.");
-            if (_operationWasCancelled) break;
+            var dialog = new OpenFileDialog { Multiselect = true, CheckFileExists = true, Title = $"Send files to {_device.Name}" };
+            if (dialog.ShowDialog(this) != true) return;
+            foreach (var file in dialog.FileNames)
+                _transfers.StartUpload(
+                    _client, _device, _token, file, CurrentRoot.Id, _currentPath, overwrite: false);
+            StatusText.Text = $"Started {dialog.FileNames.Length} upload(s) in Transfers; you can close this window.";
         }
-        await LoadFilesAsync();
+        catch (Exception exception) { ShowError(exception); }
     }
 
     private async void Open_Click(object sender, RoutedEventArgs e)
@@ -170,13 +171,12 @@ public partial class FileManagerWindow : Window
         try
         {
             _working = true;
-            _operationWasCancelled = false;
             _operationCancellation = new CancellationTokenSource();
             StatusText.Text = "Working…";
             await action();
             if (success is not null) StatusText.Text = success;
         }
-        catch (OperationCanceledException) { _operationWasCancelled = true; StatusText.Text = "Operation canceled"; }
+        catch (OperationCanceledException) { StatusText.Text = "Operation canceled"; }
         catch (Exception exception) { ShowError(exception); }
         finally
         {

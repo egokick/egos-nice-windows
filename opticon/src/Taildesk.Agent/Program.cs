@@ -178,6 +178,41 @@ app.Use(async (context, next) =>
         context.Response.StatusCode = StatusCodes.Status409Conflict;
         await context.Response.WriteAsJsonAsync(new { error = exception.Message });
     }
+    catch (TimeoutException exception)
+    {
+        context.Response.StatusCode = StatusCodes.Status504GatewayTimeout;
+        await context.Response.WriteAsJsonAsync(new { error = exception.Message });
+    }
+    catch (System.ComponentModel.Win32Exception exception)
+    {
+        context.Response.StatusCode = StatusCodes.Status409Conflict;
+        await context.Response.WriteAsJsonAsync(new { error = exception.Message });
+    }
+    catch (AggregateException exception)
+    {
+        var detail = string.Join(" | ", exception.Flatten().InnerExceptions
+            .Select(item => item.Message)
+            .Where(message => !string.IsNullOrWhiteSpace(message))
+            .Distinct(StringComparer.Ordinal));
+        context.Response.StatusCode = StatusCodes.Status409Conflict;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            error = string.IsNullOrWhiteSpace(detail) ? exception.Message : $"{exception.Message}: {detail}"
+        });
+    }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+    {
+        // The peer closed the request; there is no response channel left.
+    }
+    catch (Exception exception)
+    {
+        app.Logger.LogError(exception, "Unhandled Opticon Agent request failure {TraceIdentifier}", context.TraceIdentifier);
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            error = $"Unexpected Agent failure ({context.TraceIdentifier}): {exception.GetBaseException().Message}"
+        });
+    }
 });
 
 app.MapGet("/healthz", () => Results.Ok(new { service = "taildesk-agent", status = "ok" }));
@@ -196,15 +231,42 @@ app.MapPost("/api/v1/files/upload", async (
     string root,
     string path,
     string fileName,
+    Guid? transferId,
+    long? totalLength,
+    long? offset,
     bool? overwrite,
     FileOperations files,
     CancellationToken cancellationToken) =>
 {
-    if (request.ContentLength is not long length || length <= 0) return Results.StatusCode(StatusCodes.Status411LengthRequired);
+    if (request.ContentLength is not long length || length < 0) return Results.StatusCode(StatusCodes.Status411LengthRequired);
     if (length > config.MaxUploadBytes) return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
-    var uploaded = await files.UploadAsync(root, path, fileName, request.Body, length, overwrite == true, cancellationToken);
+    string uploaded;
+    if (transferId is not null && totalLength is not null && offset is not null)
+    {
+        uploaded = await files.UploadAsync(
+            root, path, fileName, transferId.Value, totalLength.Value, offset.Value,
+            request.Body, length, overwrite == true, cancellationToken);
+    }
+    else if (transferId is null && totalLength is null && offset is null)
+    {
+        uploaded = await files.UploadLegacyAsync(
+            root, path, fileName, request.Body, length, overwrite == true, cancellationToken);
+    }
+    else
+    {
+        return Results.BadRequest(new { error = "The resumable upload parameters must be supplied together." });
+    }
     return Results.Ok(new { relativePath = uploaded });
 });
+app.MapGet("/api/v1/files/upload-status", (
+    string root,
+    string path,
+    string fileName,
+    Guid transferId,
+    long totalLength,
+    bool? overwrite,
+    FileOperations files) =>
+    Results.Ok(files.GetUploadStatus(root, path, fileName, transferId, totalLength, overwrite == true)));
 app.MapPost("/api/v1/files/mkdir", (CreateDirectoryRequest request, FileOperations files) =>
 {
     files.CreateDirectory(request.Root, request.RelativePath);

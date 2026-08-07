@@ -31,6 +31,9 @@ public sealed class FileOperations
         {
             try
             {
+                if (item.Name.StartsWith(".taildesk-upload-", StringComparison.OrdinalIgnoreCase)
+                    && item.Name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 if ((item.Attributes & (FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint)) != 0)
                 {
                     continue;
@@ -75,57 +78,34 @@ public sealed class FileOperations
         string root,
         string destinationDirectory,
         string fileName,
+        Guid transferId,
+        long totalLength,
+        long offset,
         Stream source,
         long expectedLength,
         bool overwrite,
         CancellationToken cancellationToken)
     {
-        var directory = _paths.Resolve(root, destinationDirectory);
-        if (!Directory.Exists(directory))
-        {
-            throw new DirectoryNotFoundException("The destination directory does not exist.");
-        }
-
-        var safeName = Path.GetFileName(fileName);
-        if (string.IsNullOrWhiteSpace(safeName) || !safeName.Equals(fileName, StringComparison.Ordinal))
-        {
-            throw new IOException("The file name is invalid.");
-        }
-
-        var destination = _paths.Resolve(root, Path.Combine(destinationDirectory, safeName), mustExist: false);
+        var (directory, destination, temporary) = ResolveUpload(
+            root, destinationDirectory, fileName, transferId, totalLength);
         if (!overwrite && File.Exists(destination))
-        {
             throw new IOException("A file with that name already exists.");
-        }
-
-        if (expectedLength <= 0 || expectedLength > _config.MaxUploadBytes)
-            throw new IOException("The upload size is outside this machine's configured limit.");
+        var existingLength = ResumableTransferFile.GetValidatedLength(temporary, totalLength);
+        if (offset != existingLength)
+            throw new IOException($"The resumable upload offset changed; the Agent has {existingLength} bytes. Resume the transfer again.");
+        if (expectedLength < 0 || expectedLength != totalLength - offset)
+            throw new IOException("The upload body length does not match its resumable range.");
         var drive = new DriveInfo(Path.GetPathRoot(directory)!);
-        if (drive.AvailableFreeSpace - _config.MinimumFreeSpaceBytes < expectedLength)
+        if (drive.AvailableFreeSpace - _config.MinimumFreeSpaceBytes < totalLength - existingLength)
             throw new IOException("The destination does not have enough free space while preserving its configured reserve.");
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(Math.Clamp(_config.MaxUploadDurationMinutes, 1, 7 * 24 * 60)));
         await _uploadSlots.WaitAsync(timeout.Token);
-        var temporary = Path.Combine(directory, $".taildesk-upload-{Guid.NewGuid():N}.partial");
         try
         {
-            await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024,
-                             FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.WriteThrough))
-            {
-                var buffer = new byte[1024 * 1024];
-                long written = 0;
-                int read;
-                while ((read = await source.ReadAsync(buffer, timeout.Token)) > 0)
-                {
-                    written += read;
-                    if (written > expectedLength || written > _config.MaxUploadBytes)
-                        throw new IOException("The upload exceeded its declared or configured size.");
-                    await output.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
-                }
-                if (written != expectedLength) throw new IOException("The upload ended before its declared size was received.");
-                await output.FlushAsync(timeout.Token);
-            }
+            await ResumableTransferFile.AppendToLengthAsync(
+                temporary, source, offset, totalLength, _config.MaxUploadBytes, timeout.Token);
 
             File.Move(temporary, destination, overwrite);
             return Normalize(Path.GetRelativePath(GetRootPath(root), destination));
@@ -133,8 +113,71 @@ public sealed class FileOperations
         finally
         {
             _uploadSlots.Release();
+        }
+    }
+
+    public async Task<string> UploadLegacyAsync(
+        string root,
+        string destinationDirectory,
+        string fileName,
+        Stream source,
+        long expectedLength,
+        bool overwrite,
+        CancellationToken cancellationToken)
+    {
+        var transferId = Guid.NewGuid();
+        var (_, _, temporary) = ResolveUpload(
+            root, destinationDirectory, fileName, transferId, expectedLength);
+        try
+        {
+            return await UploadAsync(
+                root, destinationDirectory, fileName, transferId, expectedLength, 0,
+                source, expectedLength, overwrite, cancellationToken);
+        }
+        finally
+        {
             try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
         }
+    }
+
+    public UploadStatusDto GetUploadStatus(
+        string root,
+        string destinationDirectory,
+        string fileName,
+        Guid transferId,
+        long totalLength,
+        bool overwrite)
+    {
+        var (_, destination, temporary) = ResolveUpload(
+            root, destinationDirectory, fileName, transferId, totalLength);
+        if (!overwrite && File.Exists(destination))
+            throw new IOException("A file with that name already exists.");
+        var received = ResumableTransferFile.GetValidatedLength(temporary, totalLength);
+        return new UploadStatusDto { BytesReceived = received, TotalBytes = totalLength };
+    }
+
+    private (string Directory, string Destination, string Temporary) ResolveUpload(
+        string root,
+        string destinationDirectory,
+        string fileName,
+        Guid transferId,
+        long totalLength)
+    {
+        if (transferId == Guid.Empty) throw new IOException("The upload transfer ID is invalid.");
+        if (totalLength <= 0 || totalLength > _config.MaxUploadBytes)
+            throw new IOException("The upload size is outside this machine's configured limit.");
+        var directory = _paths.Resolve(root, destinationDirectory);
+        if (!Directory.Exists(directory))
+            throw new DirectoryNotFoundException("The destination directory does not exist.");
+        var safeName = Path.GetFileName(fileName);
+        if (string.IsNullOrWhiteSpace(safeName) || !safeName.Equals(fileName, StringComparison.Ordinal))
+            throw new IOException("The file name is invalid.");
+        var destination = _paths.Resolve(root, Path.Combine(destinationDirectory, safeName), mustExist: false);
+        var temporary = _paths.Resolve(
+            root,
+            Path.Combine(destinationDirectory, $".taildesk-upload-{transferId:N}.partial"),
+            mustExist: false);
+        return (directory, destination, temporary);
     }
 
     public void CreateDirectory(string root, string relativePath)

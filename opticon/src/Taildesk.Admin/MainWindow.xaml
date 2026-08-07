@@ -183,7 +183,15 @@
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <TextBlock Text="Transfers" Style="{StaticResource SectionTitle}" />
                     <TextBlock Grid.Row="1" Margin="0,4,0,18" Text="Current and completed Opticon file transfers" Foreground="{StaticResource MutedBrush}" />
-                    <DataGrid Grid.Row="2" ItemsSource="{Binding Transfers}" IsReadOnly="True">
+                    <DataGrid x:Name="TransferGrid" Grid.Row="2" ItemsSource="{Binding Transfers}" IsReadOnly="True"
+                              PreviewMouseRightButtonDown="TransferGrid_PreviewMouseRightButtonDown"
+                              ContextMenuOpening="TransferGrid_ContextMenuOpening">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem x:Name="ResumeTransferMenuItem" Header="Resume" Click="ResumeTransfer_Click" />
+                                <MenuItem x:Name="CancelTransferMenuItem" Header="Cancel" Click="CancelTransfer_Click" />
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="STARTED" Binding="{Binding Started, StringFormat={}{0:T}}" Width="95" />
                             <DataGridTextColumn Header="DEVICE" Binding="{Binding Device}" Width="180" />

@@ -17,67 +17,173 @@ public sealed class TransferRow : INotifyPropertyChanged
     public string File { get; init; } = string.Empty;
     public TransferDirection Direction { get; init; }
     public DateTimeOffset Started { get; } = DateTimeOffset.Now;
-    public TransferState State { get => _state; set { _state = value; Changed(); Changed(nameof(Progress)); } }
-    public long Current { get => _current; set { _current = value; Changed(); Changed(nameof(Progress)); } }
-    public long Total { get => _total; set { _total = value; Changed(); Changed(nameof(Progress)); } }
-    public string Error { get => _error; set { _error = value; Changed(); } }
+    public TransferState State
+    {
+        get => _state;
+        internal set
+        {
+            _state = value;
+            Changed();
+            Changed(nameof(Progress));
+            Changed(nameof(CanCancel));
+            Changed(nameof(CanResume));
+        }
+    }
+    public long Current { get => _current; internal set { _current = value; Changed(); Changed(nameof(Progress)); } }
+    public long Total { get => _total; internal set { _total = value; Changed(); Changed(nameof(Progress)); } }
+    public string Error { get => _error; internal set { _error = value; Changed(); } }
     public string Progress => Total <= 0 ? State.ToString() : $"{Current * 100 / Math.Max(1, Total)}%";
+    public bool CanCancel => State is TransferState.Queued or TransferState.Running;
+    public bool CanResume => State is TransferState.Cancelled or TransferState.Failed;
+
+    internal TransferOperation? Operation { get; init; }
+    internal CancellationTokenSource? Cancellation { get; set; }
+    internal int Executing;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(property));
 }
 
+internal abstract record TransferOperation(AgentClient Client, DeviceRecord Device, string Token);
+
+internal sealed record DownloadTransferOperation(
+    AgentClient Client,
+    DeviceRecord Device,
+    string Token,
+    string Root,
+    string RemotePath,
+    string LocalPath) : TransferOperation(Client, Device, Token);
+
+internal sealed record UploadTransferOperation(
+    AgentClient Client,
+    DeviceRecord Device,
+    string Token,
+    string LocalPath,
+    string Root,
+    string DestinationDirectory,
+    bool Overwrite,
+    long SourceLength,
+    DateTime SourceLastWriteTimeUtc) : TransferOperation(Client, Device, Token);
+
 public sealed class TransferManager
 {
     public ObservableCollection<TransferRow> Items { get; } = [];
 
-    public async Task DownloadAsync(AgentClient client, DeviceRecord device, string token, string root, string remotePath,
-        string localPath, CancellationToken cancellationToken = default)
+    public TransferRow StartDownload(
+        AgentClient client,
+        DeviceRecord device,
+        string token,
+        string root,
+        string remotePath,
+        string localPath)
     {
-        var row = new TransferRow { Device = device.Name, File = Path.GetFileName(remotePath), Direction = TransferDirection.Download };
+        var row = new TransferRow
+        {
+            Device = device.Name,
+            File = Path.GetFileName(remotePath),
+            Direction = TransferDirection.Download,
+            Operation = new DownloadTransferOperation(client, device, token, root, remotePath, localPath)
+        };
         Items.Insert(0, row);
-        row.State = TransferState.Running;
-        try
-        {
-            await client.DownloadAsync(device, token, root, remotePath, localPath,
-                new Progress<(long Current, long Total)>(value => { row.Current = value.Current; row.Total = value.Total; }), cancellationToken);
-            row.State = TransferState.Completed;
-        }
-        catch (OperationCanceledException)
-        {
-            row.State = TransferState.Cancelled;
-            throw;
-        }
-        catch (Exception exception)
-        {
-            row.Error = exception.Message;
-            row.State = TransferState.Failed;
-            throw;
-        }
+        Start(row);
+        return row;
     }
 
-    public async Task UploadAsync(AgentClient client, DeviceRecord device, string token, string localPath, string root,
-        string destinationDirectory, bool overwrite, CancellationToken cancellationToken = default)
+    public TransferRow StartUpload(
+        AgentClient client,
+        DeviceRecord device,
+        string token,
+        string localPath,
+        string root,
+        string destinationDirectory,
+        bool overwrite)
     {
-        var row = new TransferRow { Device = device.Name, File = Path.GetFileName(localPath), Direction = TransferDirection.Upload };
+        var source = new FileInfo(localPath);
+        var row = new TransferRow
+        {
+            Device = device.Name,
+            File = Path.GetFileName(localPath),
+            Direction = TransferDirection.Upload,
+            Total = source.Length,
+            Operation = new UploadTransferOperation(
+                client, device, token, localPath, root, destinationDirectory, overwrite,
+                source.Length, source.LastWriteTimeUtc)
+        };
         Items.Insert(0, row);
+        Start(row);
+        return row;
+    }
+
+    public void Cancel(TransferRow row)
+    {
+        if (!Items.Contains(row) || !row.CanCancel) return;
+        row.Cancellation?.Cancel();
+    }
+
+    public void Resume(TransferRow row)
+    {
+        if (!Items.Contains(row)) throw new InvalidOperationException("The selected transfer is no longer available.");
+        if (!row.CanResume) throw new InvalidOperationException("Only a cancelled or failed transfer can be resumed.");
+        Start(row);
+    }
+
+    private static void Start(TransferRow row)
+    {
+        if (row.Operation is null) throw new InvalidOperationException("The transfer no longer has resumable operation details.");
+        if (Interlocked.CompareExchange(ref row.Executing, 1, 0) != 0)
+            throw new InvalidOperationException("The selected transfer is already running.");
+        _ = RunAsync(row);
+    }
+
+    private static async Task RunAsync(TransferRow row)
+    {
+        using var cancellation = new CancellationTokenSource();
+        row.Cancellation = cancellation;
+        row.Error = string.Empty;
         row.State = TransferState.Running;
+        var progress = new Progress<(long Current, long Total)>(value =>
+        {
+            row.Current = value.Current;
+            row.Total = value.Total;
+        });
         try
         {
-            await client.UploadAsync(device, token, localPath, root, destinationDirectory, overwrite,
-                new Progress<(long Current, long Total)>(value => { row.Current = value.Current; row.Total = value.Total; }), cancellationToken);
+            switch (row.Operation)
+            {
+                case DownloadTransferOperation download:
+                    await download.Client.DownloadAsync(
+                        download.Device, download.Token, download.Root, download.RemotePath,
+                        download.LocalPath, progress, cancellation.Token);
+                    break;
+                case UploadTransferOperation upload:
+                    var source = new FileInfo(upload.LocalPath);
+                    if (!source.Exists
+                        || source.Length != upload.SourceLength
+                        || source.LastWriteTimeUtc != upload.SourceLastWriteTimeUtc)
+                        throw new IOException(
+                            "The local source file changed after this transfer started. Start a new upload instead of resuming it.");
+                    await upload.Client.UploadAsync(
+                        upload.Device, upload.Token, row.Id, upload.LocalPath, upload.Root,
+                        upload.DestinationDirectory, upload.Overwrite, progress, cancellation.Token);
+                    break;
+                default:
+                    throw new InvalidOperationException("The transfer operation type is unsupported.");
+            }
             row.State = TransferState.Completed;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
             row.State = TransferState.Cancelled;
-            throw;
         }
         catch (Exception exception)
         {
             row.Error = exception.Message;
             row.State = TransferState.Failed;
-            throw;
+        }
+        finally
+        {
+            row.Cancellation = null;
+            Interlocked.Exchange(ref row.Executing, 0);
         }
     }
 }

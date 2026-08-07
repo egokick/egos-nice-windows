@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Net.Http.Json;
+using System.Net;
 using System.Text.Json;
 using Taildesk.Shared;
 
@@ -42,44 +43,92 @@ public sealed class AgentClient
     public async Task DownloadAsync(DeviceRecord device, string token, string root, string remotePath, string localPath,
         IProgress<(long Current, long Total)>? progress, CancellationToken cancellationToken = default)
     {
+        var temporary = localPath + ".taildesk-partial";
+        var offset = File.Exists(temporary) ? new FileInfo(temporary).Length : 0;
         using var request = CreateRequest(device, token, HttpMethod.Get,
             $"api/v1/files/download?root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(remotePath)}");
+        if (offset > 0) request.Headers.Range = new RangeHeaderValue(offset, null);
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        await EnsureSuccessAsync(response, cancellationToken);
-        var total = response.Content.Headers.ContentLength ?? 0;
-        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var temporary = localPath + ".taildesk-partial";
-        try
+        if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable
+            && offset > 0
+            && response.Content.Headers.ContentRange?.Length == offset)
         {
-            await using (var output = new FileStream(
-                             temporary,
-                             FileMode.Create,
-                             FileAccess.Write,
-                             FileShare.None,
-                             1024 * 1024,
-                             true))
-            {
-                await CopyWithProgressAsync(input, output, total, progress, cancellationToken);
-                await output.FlushAsync(cancellationToken);
-            }
             File.Move(temporary, localPath, true);
+            progress?.Report((offset, offset));
+            return;
         }
-        finally
+        await EnsureSuccessAsync(response, cancellationToken);
+        if (offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
+            offset = 0;
+        if (response.StatusCode == HttpStatusCode.PartialContent
+            && response.Content.Headers.ContentRange?.From != offset)
+            throw new InvalidDataException("The Agent returned a different download resume offset.");
+        var total = response.Content.Headers.ContentRange?.Length
+                    ?? (response.Content.Headers.ContentLength is long remaining ? offset + remaining : 0);
+        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+        await using (var output = new FileStream(
+                         temporary,
+                         offset == 0 ? FileMode.Create : FileMode.Open,
+                         FileAccess.Write,
+                         FileShare.None,
+                         1024 * 1024,
+                         true))
         {
-            try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+            output.Position = offset;
+            await CopyWithProgressAsync(input, output, offset, total, progress, cancellationToken);
+            await output.FlushAsync(cancellationToken);
         }
+        if (total > 0 && new FileInfo(temporary).Length != total)
+            throw new IOException("The download ended before the complete remote file was received.");
+        File.Move(temporary, localPath, true);
     }
 
-    public async Task UploadAsync(DeviceRecord device, string token, string localPath, string root, string destinationDirectory,
+    public async Task UploadAsync(DeviceRecord device, string token, Guid transferId, string localPath, string root, string destinationDirectory,
         bool overwrite, IProgress<(long Current, long Total)>? progress, CancellationToken cancellationToken = default)
     {
         await using var file = new FileStream(localPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, true);
-        using var content = new ProgressStreamContent(file, progress, cancellationToken);
-        var url = $"api/v1/files/upload?root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(destinationDirectory)}&fileName={Uri.EscapeDataString(Path.GetFileName(localPath))}&overwrite={overwrite.ToString().ToLowerInvariant()}";
+        var fileName = Path.GetFileName(localPath);
+        var common = $"root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(destinationDirectory)}&fileName={Uri.EscapeDataString(fileName)}&transferId={transferId:D}&totalLength={file.Length}&overwrite={overwrite.ToString().ToLowerInvariant()}";
+        var status = await TryGetUploadStatusAsync(
+            device, token, $"api/v1/files/upload-status?{common}", cancellationToken);
+        if (status is null)
+        {
+            progress?.Report((0, file.Length));
+            using var legacyContent = new ProgressStreamContent(file, 0, file.Length, progress, cancellationToken);
+            var legacyUrl = $"api/v1/files/upload?root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(destinationDirectory)}&fileName={Uri.EscapeDataString(fileName)}&overwrite={overwrite.ToString().ToLowerInvariant()}";
+            using var legacyRequest = CreateRequest(device, token, HttpMethod.Post, legacyUrl);
+            legacyRequest.Content = legacyContent;
+            using var legacyResponse = await _http.SendAsync(
+                legacyRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            await EnsureSuccessAsync(legacyResponse, cancellationToken);
+            return;
+        }
+        if (status.TotalBytes != file.Length || status.BytesReceived < 0 || status.BytesReceived > file.Length)
+            throw new InvalidDataException("The Agent returned an invalid resumable upload position.");
+        file.Position = status.BytesReceived;
+        progress?.Report((status.BytesReceived, file.Length));
+        using var content = new ProgressStreamContent(file, status.BytesReceived, file.Length, progress, cancellationToken);
+        var url = $"api/v1/files/upload?{common}&offset={status.BytesReceived}";
         using var request = CreateRequest(device, token, HttpMethod.Post, url);
         request.Content = content;
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         await EnsureSuccessAsync(response, cancellationToken);
+    }
+
+    private async Task<UploadStatusDto?> TryGetUploadStatusAsync(
+        DeviceRecord device,
+        string token,
+        string relative,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        using var request = CreateRequest(device, token, HttpMethod.Get, relative);
+        using var response = await _http.SendAsync(request, timeout.Token);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        await EnsureSuccessAsync(response, timeout.Token);
+        return await response.Content.ReadFromJsonAsync<UploadStatusDto>(JsonDefaults.Options, timeout.Token)
+               ?? throw new InvalidDataException("The Agent returned an empty resumable upload status.");
     }
 
     public async Task CreateDirectoryAsync(DeviceRecord device, string token, string root, string path, CancellationToken cancellationToken = default) =>
@@ -264,11 +313,11 @@ public sealed class AgentClient
                 : $"Agent returned {(int)response.StatusCode}: {detail}");
     }
 
-    private static async Task CopyWithProgressAsync(Stream source, Stream destination, long total,
+    private static async Task CopyWithProgressAsync(Stream source, Stream destination, long initial, long total,
         IProgress<(long Current, long Total)>? progress, CancellationToken cancellationToken)
     {
         var buffer = new byte[1024 * 1024];
-        long current = 0;
+        var current = initial;
         int read;
         while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
         {
@@ -283,23 +332,32 @@ public sealed class AgentClient
         private readonly Stream _source;
         private readonly IProgress<(long Current, long Total)>? _progress;
         private readonly CancellationToken _cancellationToken;
+        private readonly long _initial;
+        private readonly long _total;
 
-        public ProgressStreamContent(Stream source, IProgress<(long Current, long Total)>? progress, CancellationToken cancellationToken)
+        public ProgressStreamContent(
+            Stream source,
+            long initial,
+            long total,
+            IProgress<(long Current, long Total)>? progress,
+            CancellationToken cancellationToken)
         {
             _source = source;
+            _initial = initial;
+            _total = total;
             _progress = progress;
             _cancellationToken = cancellationToken;
-            Headers.ContentLength = source.Length;
+            Headers.ContentLength = source.Length - source.Position;
         }
 
         protected override async Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context)
         {
-            await CopyWithProgressAsync(_source, stream, _source.Length, _progress, _cancellationToken);
+            await CopyWithProgressAsync(_source, stream, _initial, _total, _progress, _cancellationToken);
         }
 
         protected override bool TryComputeLength(out long length)
         {
-            length = _source.Length;
+            length = _source.Length - _source.Position;
             return true;
         }
     }

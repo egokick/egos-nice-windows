@@ -205,6 +205,12 @@ public sealed class MediaLinkResponse
     public DateTimeOffset ExpiresAt { get; set; }
 }
 
+public sealed class UploadStatusDto
+{
+    public long BytesReceived { get; set; }
+    public long TotalBytes { get; set; }
+}
+
 public sealed class ExitNodeRequest
 {
     public bool Enabled { get; set; }

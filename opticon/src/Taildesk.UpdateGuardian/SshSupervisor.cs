@@ -67,6 +67,7 @@ internal sealed class SshSupervisor : IAsyncDisposable
     private readonly string _configPath;
     private readonly string _logPath;
     private readonly string _readyPath;
+    private readonly string _failurePath;
     private readonly string _supervisorLockPath;
     private readonly string _stateLockPath;
     private readonly string _hostKeyPath;
@@ -95,6 +96,7 @@ internal sealed class SshSupervisor : IAsyncDisposable
         _configPath = Path.Combine(_stateDirectory, "sshd_config");
         _logPath = Path.Combine(_stateDirectory, "sshd.log");
         _readyPath = Path.Combine(_stateDirectory, "supervisor.ready");
+        _failurePath = Path.Combine(_stateDirectory, "supervisor.failure");
         _supervisorLockPath = Path.Combine(_stateDirectory, "supervisor.lock");
         _stateLockPath = Path.Combine(_stateDirectory, "state.lock");
         _hostKeyPath = Path.Combine(_stateDirectory, "ssh_host_ed25519_key");
@@ -283,6 +285,7 @@ internal sealed class SshSupervisor : IAsyncDisposable
             catch (Exception exception)
             {
                 Console.Error.WriteLine($"{DateTimeOffset.UtcNow:O} SSH reconciliation failed: {exception.Message}");
+                await WriteFailureAsync(exception);
                 await FailClosedAsync();
                 await Task.Delay(FailureBackoff, cancellationToken);
             }
@@ -354,6 +357,7 @@ internal sealed class SshSupervisor : IAsyncDisposable
         _observedTerminationGeneration = state.SessionTerminationGeneration;
         _observedActiveSessionIds = activeSessionIds;
         await WriteReadyAsync(state, cancellationToken);
+        try { File.Delete(_failurePath); } catch { }
         var untilExpiry = active.Min(lease => lease.ExpiresAt) - DateTimeOffset.UtcNow;
         return untilExpiry <= TimeSpan.Zero
             ? TimeSpan.FromMilliseconds(100)
@@ -625,7 +629,8 @@ internal sealed class SshSupervisor : IAsyncDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!IsDaemonProcessRunning())
-                    throw new InvalidOperationException("The isolated SSH daemon exited before opening its listener.");
+                    throw new InvalidOperationException(
+                        WithDaemonLog("The isolated SSH daemon exited before opening its listener."));
                 if (HasExactListener(state.TargetAddress, _daemonProcessId))
                 {
                     _daemonUserContext = userContext;
@@ -634,7 +639,8 @@ internal sealed class SshSupervisor : IAsyncDisposable
                 }
                 await Task.Delay(200, cancellationToken);
             }
-            throw new TimeoutException($"SSH did not listen exactly on {state.TargetAddress}:{RemoteAdministrationProtocol.SshPort}.");
+            throw new TimeoutException(WithDaemonLog(
+                $"SSH did not listen exactly on {state.TargetAddress}:{RemoteAdministrationProtocol.SshPort}."));
         }
         catch (Exception startError)
         {
@@ -663,6 +669,33 @@ internal sealed class SshSupervisor : IAsyncDisposable
         if (_daemonProcess is null || _daemonProcess.IsInvalid || _daemonProcess.IsClosed) return false;
         var result = WaitForSingleObject(_daemonProcess, 0);
         return result == WaitTimeout;
+    }
+
+    private string WithDaemonLog(string message)
+    {
+        try
+        {
+            if (!File.Exists(_logPath)) return message;
+            RejectReparsePoint(_logPath, "SSH daemon log");
+            using var input = new FileStream(
+                _logPath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
+            var retained = (int)Math.Min(input.Length, 4096);
+            if (retained == 0) return message;
+            input.Position = input.Length - retained;
+            var buffer = new byte[retained];
+            var read = input.Read(buffer, 0, buffer.Length);
+            var detail = Utf8NoBom.GetString(buffer, 0, read)
+                .Replace('\0', ' ')
+                .Trim();
+            return string.IsNullOrWhiteSpace(detail)
+                ? message
+                : $"{message} sshd log: {detail}";
+        }
+        catch
+        {
+            return message;
+        }
     }
 
     private async Task StopDaemonAsync()
@@ -898,6 +931,35 @@ internal sealed class SshSupervisor : IAsyncDisposable
         var json = JsonSerializer.Serialize(ready, StrictJson) + Environment.NewLine;
         await WriteAtomicTextIfChangedAsync(_readyPath, json, cancellationToken);
         await RestrictSystemOnlyAsync(_readyPath, directory: false, cancellationToken);
+    }
+
+    private async Task WriteFailureAsync(Exception exception)
+    {
+        try
+        {
+            var messages = exception is AggregateException aggregate
+                ? aggregate.Flatten().InnerExceptions.Select(item => item.Message)
+                : EnumerateExceptionMessages(exception);
+            var detail = string.Join(" | ", messages
+                .Where(message => !string.IsNullOrWhiteSpace(message))
+                .Distinct(StringComparer.Ordinal));
+            if (detail.Length > 4096) detail = detail[..4096];
+            await WriteAtomicTextAsync(
+                _failurePath,
+                $"{DateTimeOffset.UtcNow:O} {detail}{Environment.NewLine}",
+                CancellationToken.None);
+            await RestrictSystemOnlyAsync(_failurePath, directory: false, CancellationToken.None);
+        }
+        catch
+        {
+            // Failure reporting must never weaken fail-closed SSH cleanup.
+        }
+    }
+
+    private static IEnumerable<string> EnumerateExceptionMessages(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+            yield return current.Message;
     }
 
     private Task DeleteReadyAsync()

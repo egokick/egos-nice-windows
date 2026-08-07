@@ -39,6 +39,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<DeviceRecord> Devices { get; } = [];
     public ObservableCollection<InviteRecord> Invites { get; } = [];
     public ObservableCollection<TransferRow> Transfers { get; }
+
+    public void CancelTransfer(TransferRow transfer) => _transfers.Cancel(transfer);
+
+    public void ResumeTransfer(TransferRow transfer) => _transfers.Resume(transfer);
     public ObservableCollection<string> LogLines { get; } = [];
     public ObservableCollection<string> UpdateProgressLines { get; } = [];
     public ObservableCollection<SystemCheckResult> SystemChecks { get; } = [];
@@ -399,6 +403,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         RequirePrimary();
         RequireLiveAgent(device, "SSH");
+        Status = $"Preparing protected administrative SSH on {device.Name}...";
+        Log($"Preparing the target's isolated OpenSSH listener for {device.Name}; first use or repair can take up to a minute.");
         var token = GetAgentToken(device);
         var requestedLifetime = TimeSpan.FromHours(1);
         var handle = await SshSessionLauncher.LaunchAsync(

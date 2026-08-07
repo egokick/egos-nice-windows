@@ -36,6 +36,7 @@ var tests = new (string Name, Action Body)[]
     ("runtime tailnet policy keeps administrative SSH hub-only", TestTailnetSshPolicy),
     ("update journal writes round-trip through atomic persistence", TestUpdateJournalPersistence),
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
+    ("cancelled uploads retain an authenticated byte offset and resume", TestResumableUpload),
     ("path guard permits a child and blocks traversal", TestPathGuard),
     ("WPF style templates match their control target types", TestWpfStyleTemplateTargets),
     ("WPF controls keep explicit accessible foreground/background pairs", TestWpfContrastContract),
@@ -527,6 +528,71 @@ static void TestUploadPolicy()
     Assert(config.MaxConcurrentUploads is >= 1 and <= 2, "concurrent upload bound is unsafe");
     Assert(config.MinimumFreeSpaceBytes >= 5L * 1024 * 1024 * 1024, "free-space reserve is too small");
     Assert(config.MaxUploadDurationMinutes <= 24 * 60, "upload lifetime is unbounded");
+    var transfers = ReadSource("src", "Taildesk.Admin", "TransferManager.cs");
+    var browser = ReadSource("src", "Taildesk.Admin", "FileManagerWindow.xaml.cs");
+    var agentClient = ReadSource("src", "Taildesk.Admin", "AgentClient.cs");
+    var agentProgram = ReadSource("src", "Taildesk.Agent", "Program.cs");
+    var transferView = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml");
+    Assert(transfers.Contains("public void Resume(TransferRow row)", StringComparison.Ordinal)
+           && transfers.Contains("row.Cancellation?.Cancel()", StringComparison.Ordinal)
+           && transfers.Contains("row.Id", StringComparison.Ordinal),
+        "the application transfer manager must own cancellation and resumable transfer identity");
+    Assert(browser.Contains("StartDownload", StringComparison.Ordinal)
+           && browser.Contains("StartUpload", StringComparison.Ordinal)
+           && !browser.Contains("_transfers.DownloadAsync", StringComparison.Ordinal)
+           && !browser.Contains("_transfers.UploadAsync", StringComparison.Ordinal),
+        "the file browser must start application-owned transfers instead of awaiting window-owned transfers");
+    Assert(agentClient.Contains("RangeHeaderValue(offset, null)", StringComparison.Ordinal)
+           && agentClient.Contains("files/upload-status", StringComparison.Ordinal)
+           && agentClient.Contains("HttpStatusCode.NotFound", StringComparison.Ordinal)
+           && agentProgram.Contains("GetUploadStatus", StringComparison.Ordinal)
+           && agentProgram.Contains("UploadLegacyAsync", StringComparison.Ordinal),
+        "downloads and uploads must negotiate retained byte offsets when resumed");
+    Assert(transferView.Contains("Header=\"Resume\"", StringComparison.Ordinal)
+           && transferView.Contains("PreviewMouseRightButtonDown", StringComparison.Ordinal),
+        "the Transfers page must expose row-targeted right-click resume");
+}
+
+static void TestResumableUpload()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "opticon-resume-test-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    try
+    {
+        var expected = "resumable-transfer-payload"u8.ToArray();
+        var partial = Path.Combine(directory, ".taildesk-upload-test.partial");
+        using (var prefix = new MemoryStream(expected[..9]))
+        {
+            try
+            {
+                ResumableTransferFile.AppendToLengthAsync(
+                        partial, prefix, 0, expected.Length, 1024 * 1024, CancellationToken.None)
+                    .GetAwaiter().GetResult();
+                throw new InvalidOperationException("The deliberately incomplete upload unexpectedly completed.");
+            }
+            catch (IOException exception)
+            {
+                Assert(exception.Message.Contains("ended before", StringComparison.Ordinal),
+                    "the incomplete upload failed for an unexpected reason");
+            }
+        }
+
+        var offset = ResumableTransferFile.GetValidatedLength(partial, expected.Length);
+        Assert(offset == 9,
+            "the Agent did not retain the exact resumable offset");
+        using (var remainder = new MemoryStream(expected[9..]))
+        {
+            ResumableTransferFile.AppendToLengthAsync(
+                    partial, remainder, offset, expected.Length, 1024 * 1024, CancellationToken.None)
+                .GetAwaiter().GetResult();
+        }
+        Assert(File.ReadAllBytes(partial).SequenceEqual(expected),
+            "the resumed upload did not reproduce the original bytes");
+    }
+    finally
+    {
+        try { Directory.Delete(directory, recursive: true); } catch { }
+    }
 }
 static void TestPathGuard()
 {
@@ -815,7 +881,7 @@ static void TestOpenSshRecoveryDesign()
            && agentClient.Contains("AllowAutoRedirect = false", StringComparison.Ordinal),
         "authenticated Agent requests must bypass proxies and refuse redirects");
     var downloadFlush = agentClient.IndexOf("await output.FlushAsync", StringComparison.Ordinal);
-    var downloadMove = agentClient.IndexOf("File.Move(temporary, localPath", StringComparison.Ordinal);
+    var downloadMove = agentClient.LastIndexOf("File.Move(temporary, localPath", StringComparison.Ordinal);
     var downloadStreamScopeEnd = agentClient.LastIndexOf('}', downloadMove);
     Assert(downloadFlush >= 0 && downloadStreamScopeEnd > downloadFlush && downloadMove > downloadStreamScopeEnd,
         "downloads must flush and dispose the exclusive partial-file stream before atomically promoting it");
@@ -865,6 +931,15 @@ static void TestOpenSshRecoveryDesign()
            && manager.Contains("NetLocalGroupDelMembers", StringComparison.Ordinal)
            && manager.Contains("ErrorMemberNotInAlias", StringComparison.Ordinal),
         "SYSTEM helpers must use exact paths and the idle SSH account must leave Administrators");
+    Assert(manager.Contains("ReadSupervisorFailureAsync", StringComparison.Ordinal)
+           && manager.Contains("File.Delete(_failurePath)", StringComparison.Ordinal)
+           && manager.Contains("could not start:", StringComparison.Ordinal),
+        "Agent SSH provisioning must clear stale diagnostics and surface a new supervisor failure immediately");
+    var agentApiProgram = ReadSource("src", "Taildesk.Agent", "Program.cs");
+    Assert(agentApiProgram.Contains("catch (System.ComponentModel.Win32Exception", StringComparison.Ordinal)
+           && agentApiProgram.Contains("catch (AggregateException", StringComparison.Ordinal)
+           && agentApiProgram.Contains("Unexpected Agent failure", StringComparison.Ordinal),
+        "the Agent API must serialize bounded detail for every SSH/Windows failure class");
 
     var setup = ReadSource("src", "Taildesk.Setup", "InstallerServices.cs");
     Assert(setup.Contains("OpenSSH.Server~~~~0.0.1.0", StringComparison.Ordinal),
@@ -1084,6 +1159,11 @@ static void TestOpenSshRecoveryDesign()
         "Guardian must create sshd with the full dedicated token and safely load/unload its profile");
 
     var supervisor = ReadSource("src", "Taildesk.UpdateGuardian", "SshSupervisor.cs");
+    Assert(supervisor.Contains("WriteFailureAsync(exception)", StringComparison.Ordinal)
+           && supervisor.Contains("supervisor.failure", StringComparison.Ordinal)
+           && supervisor.Contains("File.Delete(_failurePath)", StringComparison.Ordinal)
+           && supervisor.Contains("WithDaemonLog", StringComparison.Ordinal),
+        "the independent SSH supervisor must publish protected failures and clear them after readiness");
     Assert(supervisor.Contains("JobObjectLimitKillOnJobClose", StringComparison.Ordinal)
            && supervisor.Contains("CreateSuspended", StringComparison.Ordinal),
         "stable guardian must own sshd and shells in a kill-on-close job");

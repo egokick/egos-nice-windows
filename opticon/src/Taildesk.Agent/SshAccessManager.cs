@@ -51,6 +51,7 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
     private readonly string _hostKeyPath;
     private readonly string _logPath;
     private readonly string _readyPath;
+    private readonly string _failurePath;
     private readonly string _stateLockPath;
     private readonly string _schtasksPath;
     private readonly string _netshPath;
@@ -86,6 +87,7 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
         _hostKeyPath = Path.Combine(_stateDirectory, "ssh_host_ed25519_key");
         _logPath = Path.Combine(_stateDirectory, "sshd.log");
         _readyPath = Path.Combine(_stateDirectory, "supervisor.ready");
+        _failurePath = Path.Combine(_stateDirectory, "supervisor.failure");
         _stateLockPath = Path.Combine(_stateDirectory, "state.lock");
 
         var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
@@ -205,6 +207,11 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
                 generation = state.Generation;
             }
 
+            try { if (File.Exists(_failurePath)) File.Delete(_failurePath); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException("Opticon could not clear the prior SSH supervisor diagnostic.", exception);
+            }
             await StartSupervisorTaskAsync(cancellationToken);
             await WaitForSupervisorReadyAsync(generation, cancellationToken);
             _lastError = null;
@@ -922,9 +929,31 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
             }
             catch (IOException) { }
             catch (JsonException) { }
+            var failure = await ReadSupervisorFailureAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(failure))
+                throw new InvalidOperationException("The independent Opticon SSH supervisor could not start: " + failure);
             await Task.Delay(200, cancellationToken);
         }
-        throw new TimeoutException("The independent Opticon SSH supervisor did not attest its exact listener in time.");
+        var detail = await ReadSupervisorFailureAsync(cancellationToken);
+        throw new TimeoutException(string.IsNullOrWhiteSpace(detail)
+            ? "The independent Opticon SSH supervisor did not attest its exact listener in time."
+            : "The independent Opticon SSH supervisor could not start: " + detail);
+    }
+
+    private async Task<string?> ReadSupervisorFailureAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (File.Exists(_failurePath))
+            {
+                var detail = (await File.ReadAllTextAsync(_failurePath, cancellationToken)).Trim();
+                if (detail.Length > 4096) detail = detail[..4096];
+                return detail;
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return null;
     }
     private async Task WriteAtomicTextAsync(string path, string value, CancellationToken cancellationToken)
     {
