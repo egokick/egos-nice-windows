@@ -694,28 +694,6 @@ internal static class AdminAppLauncher
 
         return Task.Run(() =>
         {
-            // StayActive can have a tray process and one or more short-lived
-            // Chrome native-host processes using the same executable. Launch
-            // the existing output first: the tray mutex makes this idempotent,
-            // and a native-host-only state still receives a real tray process.
-            // Most importantly, no restore, stop, or in-place build can race a
-            // Chrome native-host reconnect while that executable exists.
-            if (IsStayActiveApp(app))
-            {
-                if (!TryLaunchCurrentNativeExecutable(
-                        app,
-                        out var launched,
-                        out var stayActiveLaunchError))
-                {
-                    return new LaunchResult(false, stayActiveLaunchError);
-                }
-
-                if (launched)
-                {
-                    return new LaunchResult(true, string.Empty);
-                }
-            }
-
             if (!TryPrepareDependencies(app, out var errorMessage))
             {
                 return new LaunchResult(false, errorMessage);
@@ -727,20 +705,9 @@ internal static class AdminAppLauncher
                 return new LaunchResult(false, errorMessage);
             }
 
-            if (!TryLaunchCurrentNativeExecutableIfCurrent(
-                    app,
-                    out var currentOutputLaunched,
-                    out errorMessage))
-            {
-                return new LaunchResult(false, errorMessage);
-            }
-
-            if (currentOutputLaunched)
-            {
-                OpenLocalWebPageWhenReady(app);
-                return new LaunchResult(true, string.Empty);
-            }
-
+            // Always use the app's launcher.  Native executable shortcuts may
+            // skip the launcher's incremental build check and leave source
+            // changes unapplied.
             if (!TryStart(app, launchArguments, out errorMessage))
             {
                 return new LaunchResult(false, errorMessage);
@@ -749,11 +716,6 @@ internal static class AdminAppLauncher
             OpenLocalWebPageWhenReady(app);
             return new LaunchResult(true, string.Empty);
         });
-    }
-
-    private static bool IsStayActiveApp(AdminAppDefinition app)
-    {
-        return string.Equals(app.Id, "stayactive", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryStopExistingProcesses(
@@ -1008,142 +970,6 @@ internal static class AdminAppLauncher
         }
     }
 
-    private static bool TryLaunchCurrentNativeExecutable(
-        AdminAppDefinition app,
-        out bool launched,
-        out string errorMessage)
-    {
-        launched = false;
-        errorMessage = string.Empty;
-
-        if (app.PreferBatchStartup || string.IsNullOrWhiteSpace(app.NativeStartupExecutablePath))
-        {
-            return true;
-        }
-
-        try
-        {
-            var repositoryRoot = NiceWindowsRepositoryLocator.GetRepositoryRoot();
-            var appFolder = NiceWindowsRepositoryLocator.GetAppFolder(app);
-            var executablePath = Path.Combine(repositoryRoot, app.NativeStartupExecutablePath);
-            if (!File.Exists(executablePath))
-            {
-                return true;
-            }
-
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = executablePath,
-                WorkingDirectory = appFolder,
-                UseShellExecute = true
-            });
-            if (process is null)
-            {
-                errorMessage = $"Windows did not start {app.DisplayName} ('{executablePath}').";
-                return false;
-            }
-
-            launched = true;
-            return true;
-        }
-        catch (Exception exception) when (exception is InvalidOperationException
-                                             or System.ComponentModel.Win32Exception
-                                             or IOException
-                                             or UnauthorizedAccessException)
-        {
-            errorMessage = $"Could not quick-launch {app.DisplayName}: {exception.Message}";
-            return false;
-        }
-    }
-
-    private static bool TryLaunchCurrentNativeExecutableIfCurrent(
-        AdminAppDefinition app,
-        out bool launched,
-        out string errorMessage)
-    {
-        launched = false;
-        errorMessage = string.Empty;
-
-        if (app.PreferBatchStartup || string.IsNullOrWhiteSpace(app.NativeStartupExecutablePath))
-        {
-            return true;
-        }
-
-        try
-        {
-            var repositoryRoot = NiceWindowsRepositoryLocator.GetRepositoryRoot();
-            var appFolder = NiceWindowsRepositoryLocator.GetAppFolder(app);
-            var executablePath = Path.Combine(repositoryRoot, app.NativeStartupExecutablePath);
-            if (!File.Exists(executablePath) || !IsBuildOutputCurrent(appFolder, executablePath))
-            {
-                return true;
-            }
-
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = executablePath,
-                WorkingDirectory = appFolder,
-                UseShellExecute = true
-            });
-            if (process is null)
-            {
-                errorMessage = $"Windows did not start {app.DisplayName} ('{executablePath}').";
-                return false;
-            }
-
-            launched = true;
-            return true;
-        }
-        catch (Exception exception) when (exception is InvalidOperationException
-                                             or System.ComponentModel.Win32Exception
-                                             or IOException
-                                             or UnauthorizedAccessException)
-        {
-            errorMessage = $"Could not quick-launch {app.DisplayName}: {exception.Message}";
-            return false;
-        }
-    }
-
-    private static bool IsBuildOutputCurrent(string appFolder, string executablePath)
-    {
-        var executableWriteTime = File.GetLastWriteTimeUtc(executablePath);
-        foreach (var inputPath in EnumerateBuildInputs(appFolder))
-        {
-            if (File.GetLastWriteTimeUtc(inputPath) > executableWriteTime)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static IEnumerable<string> EnumerateBuildInputs(string appFolder)
-    {
-        var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ".cs", ".csproj", ".fs", ".fsproj", ".props", ".targets", ".resx",
-            ".xaml", ".config", ".json", ".xml"
-        };
-
-        foreach (var path in Directory.EnumerateFiles(appFolder, "*", SearchOption.AllDirectories))
-        {
-            var relativePath = Path.GetRelativePath(appFolder, path);
-            if (relativePath.StartsWith("bin" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                || relativePath.StartsWith("obj" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                || relativePath.StartsWith(".git" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                || relativePath.StartsWith(".vs" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (extensions.Contains(Path.GetExtension(path))
-                || string.Equals(Path.GetFileName(path), "start.bat", StringComparison.OrdinalIgnoreCase))
-            {
-                yield return path;
-            }
-        }
-    }
 
     private static bool TryStart(AdminAppDefinition app, out string errorMessage)
     {

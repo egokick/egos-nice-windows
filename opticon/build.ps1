@@ -33,6 +33,31 @@ function Enter-OpticonPackageBuildLock {
     }
 }
 
+function Remove-OpticonBuildDirectory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [TimeSpan]$Timeout = [TimeSpan]::FromSeconds(30)
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+
+    $deadline = [DateTime]::UtcNow.Add($Timeout)
+    do {
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Could not clear the previous Opticon build directory '$Path' within $([int]$Timeout.TotalSeconds) seconds. Close any Opticon or file-scanning process using that directory and retry. $($_.Exception.Message)"
+            }
+            Start-Sleep -Milliseconds 500
+        } catch [UnauthorizedAccessException] {
+            if ([DateTime]::UtcNow -ge $deadline) { throw }
+            Start-Sleep -Milliseconds 500
+        }
+    } while ($true)
+}
+
 $packageBuildLock = Enter-OpticonPackageBuildLock (Join-Path $artifacts '.opticon-package-build.lock')
 try {
 
@@ -45,8 +70,8 @@ if ($LASTEXITCODE -ne 0) { throw 'The Opticon solution build failed.' }
 dotnet run --project (Join-Path $repo 'tests/Taildesk.SelfTest/Taildesk.SelfTest.csproj') -c Release -p:EnableWindowsTargeting=true
 if ($LASTEXITCODE -ne 0) { throw 'The Opticon self-tests failed.' }
 
-if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+Remove-OpticonBuildDirectory -Path $publish
+Remove-OpticonBuildDirectory -Path $stage
 New-Item $publish -ItemType Directory | Out-Null
 New-Item (Join-Path $stage 'App/Payload') -ItemType Directory -Force | Out-Null
 New-Item $dist -ItemType Directory -Force | Out-Null

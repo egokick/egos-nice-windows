@@ -25,6 +25,17 @@ public partial class MainWindow : Window
         try
         {
             var arguments = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            if (arguments.Length == 0 && HostedBootstrapper.TryParse(Environment.ProcessPath, out var bootstrap))
+            {
+                StatusText.Text = "Starting the signed Opticon installer?";
+                await HostedBootstrapper.LaunchSetupAsync(bootstrap, message =>
+                {
+                    StatusText.Text = message;
+                    AppendLog(message);
+                });
+                Close();
+                return;
+            }
             _maintenanceMode = arguments
                 .Any(argument => argument.Equals("--maintenance", StringComparison.OrdinalIgnoreCase));
             if (_maintenanceMode)

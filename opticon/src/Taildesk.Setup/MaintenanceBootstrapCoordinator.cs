@@ -691,9 +691,7 @@ internal sealed class MaintenanceBootstrapCoordinator
                 "/inheritance:r",
                 "/grant:r",
                 "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F",
-                "/setowner",
-                "*S-1-5-18"
+                "*S-1-5-32-544:(OI)(CI)F"
             ],
             TimeSpan.FromSeconds(30), cancellationToken);
         if (!directoryAcl.Succeeded)
@@ -707,9 +705,7 @@ internal sealed class MaintenanceBootstrapCoordinator
                 "/inheritance:r",
                 "/grant:r",
                 "*S-1-5-18:F",
-                "*S-1-5-32-544:F",
-                "/setowner",
-                "*S-1-5-18"
+                "*S-1-5-32-544:F"
             ],
             TimeSpan.FromSeconds(30), cancellationToken);
         if (!fileAcl.Succeeded)
@@ -726,9 +722,7 @@ internal sealed class MaintenanceBootstrapCoordinator
                 "/inheritance:r",
                 "/grant:r",
                 "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F",
-                "/setowner",
-                "*S-1-5-18"
+                "*S-1-5-32-544:(OI)(CI)F"
             ],
             TimeSpan.FromSeconds(30), cancellationToken);
         if (!result.Succeeded)

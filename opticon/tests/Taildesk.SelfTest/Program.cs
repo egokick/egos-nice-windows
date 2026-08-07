@@ -25,6 +25,8 @@ var tests = new (string Name, Action Body)[]
     ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
     ("process runner supports commands with inherited standard handles", TestProcessRunnerWithoutCapture),
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
+    ("RustDesk virtual-display privacy is opt-in", TestRustDeskVirtualDisplayDefault),
+    ("RustDesk remote sessions pass the saved password to the native connection command", TestRustDeskRemoteSessionLaunch),
     ("RustDesk installer configures every Windows service profile before validation", TestRustDeskInstallerProfiles),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
     ("remote administration contracts reject unpinned or unsafe updates", TestRemoteAdministrationProtocol),
@@ -224,6 +226,44 @@ static void TestRustDeskHardening()
     Assert(privacyEnabled == RustDeskConfiguration.ConfigurePeerPrivacyMode2(privacyEnabled, true), "peer privacy configuration should be idempotent");
     var privacyDisabled = RustDeskConfiguration.ConfigurePeerPrivacyMode2(privacyEnabled, false);
     Assert(privacyDisabled.Contains("privacy_mode = false", StringComparison.Ordinal), "the per-device toggle must disable privacy for the selected peer");
+}
+
+static string ReadSource(params string[] parts)
+{
+    foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+    {
+        var directory = new DirectoryInfo(start);
+        while (directory is not null)
+        {
+            var candidate = Path.Combine([directory.FullName, .. parts]);
+            if (File.Exists(candidate)) return File.ReadAllText(candidate);
+            directory = directory.Parent;
+        }
+    }
+
+    throw new InvalidOperationException($"Source file was not found: {Path.Combine(parts)}");
+}
+
+static void TestRustDeskRemoteSessionLaunch()
+{
+    var launcher = ReadSource("src", "Taildesk.Admin", "RustDeskSessionLauncher.cs");
+    var connectArgument = launcher.IndexOf("start.ArgumentList.Add(\"--connect\")", StringComparison.Ordinal);
+    var passwordArgument = launcher.IndexOf("start.ArgumentList.Add(\"--password\")", StringComparison.Ordinal);
+    var passwordValue = launcher.IndexOf("start.ArgumentList.Add(password)", StringComparison.Ordinal);
+    Assert(connectArgument >= 0 && passwordArgument > connectArgument && passwordValue > passwordArgument,
+        "RustDesk remote launch must provide the saved password through its native connection command");
+    Assert(launcher.Contains("WorkingDirectory = executableDirectory", StringComparison.Ordinal),
+        "RustDesk must not inherit and lock Opticon's installed command-center directory");
+}
+
+static void TestRustDeskVirtualDisplayDefault()
+{
+    Assert(!new DeviceRecord().PrivacyMode2Enabled,
+        "new devices must not require a RustDesk virtual display for ordinary remote sessions");
+
+    var viewModel = ReadSource("src", "Taildesk.Admin", "MainViewModel.cs");
+    Assert(viewModel.Contains("Config.PrivacyMode2ByDevice.TryGetValue(device.Id, out var enabled) && enabled", StringComparison.Ordinal),
+        "a device must enable virtual-display privacy explicitly");
 }
 
 static void TestRustDeskInstallerProfiles()
@@ -679,6 +719,21 @@ static void TestOpenSshRecoveryDesign()
         "SSH launcher must resolve the Windows System32 OpenSSH client");
     Assert(!launcher.Contains("FindOnPath", StringComparison.Ordinal),
         "SSH launcher must not execute a PATH-resolved client");
+    Assert(launcher.Contains("WorkingDirectory = Path.GetDirectoryName(privateKeyPath)", StringComparison.Ordinal),
+        "interactive SSH must not inherit and lock Opticon's installed command-center directory");
+    var updateCoordinator = ReadSource("src", "Taildesk.Admin", "RemoteDeviceUpdateCoordinator.cs");
+    Assert(updateCoordinator.Contains("GetUpdateStatusAsync(device, agentToken", StringComparison.Ordinal)
+           && updateCoordinator.Contains("Update failed safely:", StringComparison.Ordinal),
+        "guarded updates must surface the remote journal while preparation is running and after a safe failure");
+    var mainWindow = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml.cs");
+    Assert(mainWindow.Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal)
+           && mainWindow.Contains("$ph.UseProxy=$false", StringComparison.Ordinal)
+           && mainWindow.Contains("canRecoverDownload", StringComparison.Ordinal),
+        "legacy download failures must offer a direct, pinned, externally observed maintenance recovery path");
+    var agentUpdateDownload = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");
+    Assert(agentUpdateDownload.Contains("UseProxy = false", StringComparison.Ordinal)
+           && agentUpdateDownload.Contains("Last error:", StringComparison.Ordinal),
+        "Agent artifact downloads must bypass ambient proxies and preserve bounded network diagnostics");
     var administratorProofIndex = launcher.IndexOf("await VerifyRemoteAdministratorAsync", StringComparison.Ordinal);
     var requestedCommandIndex = launcher.IndexOf("var remoteCommand = options.PowerShellEncodedCommand", StringComparison.Ordinal);
     Assert(administratorProofIndex >= 0 && requestedCommandIndex > administratorProofIndex
@@ -831,8 +886,11 @@ static void TestOpenSshRecoveryDesign()
            && authenticode.Contains("trustResult is not Success and not CertificateUntrustedRoot", StringComparison.Ordinal)
            && authenticode.Contains("FixedTimeEquals(embedded.RawData, expectedSigner.RawData)", StringComparison.Ordinal),
         "runtime Authenticode checks must accept only valid or exact pinned self-signed signatures and reject all other indeterminate results");
-    var flowStart = adminWindow.IndexOf("if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal);
-    var flowEnd = adminWindow.IndexOf("var explanation =", flowStart, StringComparison.Ordinal);
+    Assert(adminWindow.Contains("if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal)
+           && adminWindow.Contains("await RunMaintenanceBootstrapAsync(", StringComparison.Ordinal),
+        "legacy update selection must delegate to the guarded maintenance flow");
+    var flowStart = adminWindow.IndexOf("private async Task RunMaintenanceBootstrapAsync", StringComparison.Ordinal);
+    var flowEnd = adminWindow.IndexOf("private DeviceRecord RequireDevice", flowStart, StringComparison.Ordinal);
     Assert(flowStart >= 0 && flowEnd > flowStart, "maintenance command-center flow was not found");
     var maintenanceFlow = adminWindow[flowStart..flowEnd];
     var clipboardIndex = maintenanceFlow.IndexOf("Clipboard.SetText(command)", StringComparison.Ordinal);

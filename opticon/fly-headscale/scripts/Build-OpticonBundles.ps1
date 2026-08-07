@@ -2,12 +2,85 @@
 param(
     [ValidateSet("win-x64")]
     [string]$Runtime = "win-x64",
-    [string]$Version = "1.1.2",
+    [string]$Version = "1.1.12",
     [string]$MinimumGuardianVersion = "1.1.1",
     [string]$CertificateThumbprint = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-OpticonManifestSigningKey {
+    param([Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+
+    try {
+        $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+        if ($null -ne $rsa) { return $rsa }
+        throw "The pinned Opticon signing certificate has no RSA private key."
+    } catch {
+        if ($_.Exception.Message -notmatch '(?i)ephemeral') { throw }
+    }
+
+    if ($null -eq ('OpticonBundleSigning.CngKeyReader' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+
+namespace OpticonBundleSigning
+{
+    public static class CngKeyReader
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CryptKeyProviderInfo
+        {
+            public IntPtr ContainerName;
+            public IntPtr ProviderName;
+            public uint ProviderType;
+            public uint Flags;
+            public uint ParameterCount;
+            public IntPtr Parameters;
+            public uint KeySpec;
+        }
+
+        [DllImport("crypt32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CertGetCertificateContextProperty(
+            IntPtr certificateContext, uint propertyId, IntPtr data, ref uint dataSize);
+
+        public static RSA Open(X509Certificate2 certificate)
+        {
+            const uint KeyProviderInfoProperty = 2;
+            uint byteCount = 0;
+            if (!CertGetCertificateContextProperty(certificate.Handle, KeyProviderInfoProperty, IntPtr.Zero, ref byteCount) || byteCount == 0)
+                throw new CryptographicException("The Opticon signing key provider information is unavailable.");
+
+            IntPtr buffer = Marshal.AllocHGlobal(checked((int)byteCount));
+            try
+            {
+                if (!CertGetCertificateContextProperty(certificate.Handle, KeyProviderInfoProperty, buffer, ref byteCount))
+                    throw new CryptographicException("Windows could not read the Opticon signing key provider information.");
+
+                var keyInfo = (CryptKeyProviderInfo)Marshal.PtrToStructure(buffer, typeof(CryptKeyProviderInfo));
+                var keyName = Marshal.PtrToStringUni(keyInfo.ContainerName);
+                var providerName = Marshal.PtrToStringUni(keyInfo.ProviderName);
+                if (String.IsNullOrWhiteSpace(keyName) || String.IsNullOrWhiteSpace(providerName) || keyInfo.ProviderType != 0)
+                    throw new CryptographicException("The Opticon signing key is not a supported CNG key.");
+
+                return new RSACng(CngKey.Open(keyName, new CngProvider(providerName)));
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
+}
+'@
+    }
+
+    return [OpticonBundleSigning.CngKeyReader]::Open($Certificate)
+}
 
 function Get-SemanticVersionParts {
     param([Parameter(Mandatory)][string]$Value)
@@ -198,6 +271,10 @@ foreach ($component in $executables.Keys) {
     }
 }
 
+$bootstrapFile = "opticon-bootstrap-$Version.exe"
+$bootstrapPath = Join-Path $artifactDirectory $bootstrapFile
+Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $bootstrapPath -Force
+
 function Write-SignedReleaseManifest {
     param(
         [Parameter(Mandatory)][string]$Stage,
@@ -263,7 +340,7 @@ function Write-SignedReleaseManifest {
     $utf8 = New-Object Text.UTF8Encoding($false)
     $manifestBytes = $utf8.GetBytes(($releaseManifest | ConvertTo-Json -Depth 8))
     [IO.File]::WriteAllBytes((Join-Path $Stage "release-manifest.json"), $manifestBytes)
-    $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+    $rsa = Get-OpticonManifestSigningKey -Certificate $certificate
     if ($null -eq $rsa) { throw "The pinned Opticon signing certificate has no RSA private key." }
     try {
         $signatureBytes = $rsa.SignData(
@@ -334,7 +411,7 @@ $groups = @($candidates | Group-Object -Property { "$($_.role)|$($_.architecture
 foreach ($group in $groups) {
     $remaining = @($group.Group)
     $keptForGroup = 0
-    while ($remaining.Count -gt 0 -and $keptForGroup -lt 2) {
+    while ($remaining.Count -gt 0 -and $keptForGroup -lt 1) {
         $bestIndex = 0
         for ($index = 1; $index -lt $remaining.Count; $index++) {
             $comparison = Compare-SemanticVersion ([string]$remaining[$index].version) ([string]$remaining[$bestIndex].version)

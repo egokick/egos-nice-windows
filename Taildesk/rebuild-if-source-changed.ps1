@@ -71,12 +71,20 @@ if ($controllerInstallationReady) {
 } else {
     Write-Host 'Opticon installation integrity files are missing; rebuilding and repairing the command center...' -ForegroundColor Yellow
 }
-& (Join-Path $SourceRoot 'build.ps1')
+try {
+    & (Join-Path $SourceRoot 'build.ps1')
+} catch {
+    throw "Opticon build failed before installation. $($_.Exception.Message)"
+}
 if ($LASTEXITCODE -ne 0) { throw "Opticon build failed with exit code $LASTEXITCODE." }
 
 $stagedApp = Join-Path $SourceRoot 'artifacts\Opticon-CommandCenter-win-x64\App'
 if (-not (Test-Path -LiteralPath (Join-Path $stagedApp 'Opticon.exe'))) {
     throw "The Opticon build did not produce its staged app at '$stagedApp'."
+}
+$stagedCli = Join-Path $stagedApp 'Payload\Admin\Cli\opticon.exe'
+if (-not (Test-Path -LiteralPath $stagedCli -PathType Leaf)) {
+    throw "The Opticon build did not produce its staged signed CLI at '$stagedCli'."
 }
 
 $transactionalInstaller = Join-Path $SourceRoot 'artifacts\Opticon-CommandCenter-win-x64\Install-Opticon.ps1'
@@ -100,11 +108,17 @@ try {
 }
 "@
 $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+$repairWorkingDirectory = Join-Path $env:SystemRoot 'Temp'
 $updater = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
-)
+) -WorkingDirectory $repairWorkingDirectory
 if ($updater.ExitCode -ne 0) {
-    throw "Opticon installation update failed with exit code $($updater.ExitCode)."
+    $detail = if (Test-Path -LiteralPath $repairLog -PathType Leaf) {
+        (@(Get-Content -LiteralPath $repairLog -Tail 35) -join [Environment]::NewLine).Trim()
+    } else {
+        'The elevated repair did not create its diagnostic log.'
+    }
+    throw "Opticon installation update failed with exit code $($updater.ExitCode).`n`n$detail"
 }
 
 Write-Host 'Opticon was rebuilt and updated successfully.' -ForegroundColor Green

@@ -285,7 +285,13 @@ public static class SshSessionLauncher
         {
             UseShellExecute = false,
             CreateNoWindow = false,
-            WindowStyle = ProcessWindowStyle.Normal
+            WindowStyle = ProcessWindowStyle.Normal,
+            // The session directory already lives outside the installed app
+            // and remains valid for the lifetime of ssh.exe. Explicitly using
+            // it prevents an interactive SSH session from keeping Opticon's
+            // install directory locked during an update.
+            WorkingDirectory = Path.GetDirectoryName(privateKeyPath)
+                ?? throw new ArgumentException("The SSH private-key path has no parent directory.", nameof(privateKeyPath))
         };
 
         // -F NUL prevents a local ssh_config from weakening host checking,

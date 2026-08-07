@@ -62,7 +62,7 @@ public sealed class DeviceRecord
     public List<Guid> AuthorizedControllerIds { get; set; } = [];
 
     [JsonIgnore]
-    public bool PrivacyMode2Enabled { get; set; } = true;
+    public bool PrivacyMode2Enabled { get; set; }
 }
 
 public sealed class InviteRecord

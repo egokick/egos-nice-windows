@@ -27,7 +27,7 @@ public sealed class RemoteDeviceUpdateCoordinator
 
         var operationId = Guid.NewGuid();
         progress?.Report($"Staging Opticon Agent {release.Version} on {device.Name}; the installed Agent and remote-control services remain active.");
-        var prepared = await _agents.PrepareUpdateAsync(device, agentToken, new OpticonUpdateRequest
+        var prepareTask = _agents.PrepareUpdateAsync(device, agentToken, new OpticonUpdateRequest
         {
             OperationId = operationId,
             TargetVersion = release.Version,
@@ -37,6 +37,70 @@ public sealed class RemoteDeviceUpdateCoordinator
             PackageSize = release.Size,
             PackageSha256 = release.Sha256
         }, cancellationToken);
+        var lastPreparationProgress = string.Empty;
+        while (!prepareTask.IsCompleted)
+        {
+            var completed = await Task.WhenAny(
+                prepareTask,
+                Task.Delay(TimeSpan.FromSeconds(2), cancellationToken));
+            if (completed == prepareTask) break;
+            try
+            {
+                using var pollTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                pollTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+                var status = await _agents.GetUpdateStatusAsync(device, agentToken, pollTimeout.Token);
+                if (status.OperationId != operationId) continue;
+                var message = $"Remote Agent: {status.Phase} — {status.Message}";
+                if (!message.Equals(lastPreparationProgress, StringComparison.Ordinal))
+                {
+                    progress?.Report(message);
+                    lastPreparationProgress = message;
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                const string message = "The update request is still running; its live journal poll timed out.";
+                if (!message.Equals(lastPreparationProgress, StringComparison.Ordinal))
+                {
+                    progress?.Report(message);
+                    lastPreparationProgress = message;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                var message = "The update request is still running; its live journal is temporarily unavailable. " + exception.Message;
+                if (!message.Equals(lastPreparationProgress, StringComparison.Ordinal))
+                {
+                    progress?.Report(message);
+                    lastPreparationProgress = message;
+                }
+            }
+        }
+
+        UpdateStatusDto prepared;
+        try
+        {
+            prepared = await prepareTask;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            try
+            {
+                var failed = await _agents.GetUpdateStatusAsync(device, agentToken, cancellationToken);
+                if (failed.OperationId == operationId && failed.Phase == UpdatePhase.Failed)
+                {
+                    progress?.Report($"Update failed safely: {failed.Message}");
+                    return failed;
+                }
+            }
+            catch (Exception statusException) when (statusException is not OperationCanceledException)
+            {
+                throw new InvalidOperationException(
+                    "The update request failed and Opticon could not retrieve the remote failure journal. " +
+                    $"Request: {exception.Message} Journal: {statusException.Message}", exception);
+            }
+            throw;
+        }
         if (prepared.Phase != UpdatePhase.Ready)
             throw new InvalidOperationException($"The target did not reach the verified Ready state ({prepared.Phase}: {prepared.Message}).");
 

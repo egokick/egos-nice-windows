@@ -94,40 +94,10 @@ public partial class MainWindow : Window
 
             if (release.RequiresMaintenanceBootstrap)
             {
-                var operationId = Guid.NewGuid();
-                var command = BuildMaintenanceBootstrapCommand(release, device, operationId);
-                var instructions =
-                    $"{device.Name} runs an Agent that predates the guarded update API. Opticon will not send arbitrary commands to it.\n\n" +
-                    "Opticon selected this immutable role-specific bundle:\n" +
-                    $"{release.DownloadUri.AbsoluteUri}\nSHA-256: {release.Sha256}\n" +
-                    $"Operation: {operationId:N}\n\n" +
-                    "Choose Yes to copy a size-, SHA-256-, publisher-, Tailnet-device-, Tailscale-address-, and operation-pinned PowerShell command, snapshot recovery, open Remote into, and let this command center watch for the exact candidate for up to 30 minutes. The command verifies the extracted Setup signature before requesting elevation. Then, in the remote Windows session:\n" +
-                    "1. Open PowerShell.\n" +
-                    "2. Paste the copied command and press Enter.\n" +
-                    "3. Approve the one UAC prompt for Taildesk.Setup.exe.\n" +
-                    "4. Keep RustDesk, Setup, and this Opticon window open through the terminal result.\n\n" +
-                    "Setup must pass three protected local samples but cannot commit. This command center alone requires three authenticated external samples for the exact operation, release, architecture, IP, Tailnet identity, RustDesk, and any snapshotted SSH listener. If confirmation is lost or late, no commit is sent and the Guardian rolls back.\n\n" +
-                    "The one-time bootstrap keeps enrollment, Tailscale, RustDesk, routes, credentials, and Admin unchanged. Later Agent releases use the guarded update path.";
-                if (MessageBox.Show(
-                        instructions,
-                        "One-time signed Agent bootstrap",
-                        MessageBoxButton.YesNo,
-                        MessageBoxImage.Warning) != MessageBoxResult.Yes)
-                    return;
-
-                System.Windows.Clipboard.SetText(command);
-                var sshWasListening = await _viewModel.SnapshotMaintenanceSshAsync(device);
-                await _viewModel.LaunchRemoteControlAsync(device);
-                var maintenanceResult = await _viewModel.ObserveMaintenanceBootstrapAsync(
-                    device, release, operationId, sshWasListening);
-                var maintenanceMessage = maintenanceResult.Phase == UpdatePhase.Committed
-                    ? $"Opticon Agent {maintenanceResult.TargetVersion} is externally verified and committed on {device.Name}."
-                    : $"The maintenance candidate was not committed. {device.Name} reported {maintenanceResult.Phase}.\n\n{maintenanceResult.Message}";
-                MessageBox.Show(
-                    maintenanceMessage,
-                    "One-time signed Agent bootstrap",
-                    MessageBoxButton.OK,
-                    maintenanceResult.Phase == UpdatePhase.Committed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                await RunMaintenanceBootstrapAsync(
+                    device,
+                    release,
+                    $"{device.Name} runs an Agent that predates the guarded update API.");
                 return;
             }
 
@@ -139,12 +109,41 @@ public partial class MainWindow : Window
             if (MessageBox.Show(explanation, "Guarded Opticon Agent update", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return;
 
-            var result = await _viewModel.UpdateDeviceAsync(device, release);
+            var progressWindow = new UpdateProgressWindow(device.Name, device.AgentVersion, release.Version)
+            {
+                Owner = this,
+                DataContext = _viewModel
+            };
+            progressWindow.Show();
+            UpdateStatusDto result;
+            try
+            {
+                result = await _viewModel.UpdateDeviceAsync(device, release);
+            }
+            finally
+            {
+                progressWindow.FinishAndClose();
+                Activate();
+            }
             var message = result.Phase == UpdatePhase.Committed
                 ? $"Opticon Agent {result.TargetVersion} is healthy and committed on {device.Name}. The prior Agent remains available locally for boot-time recovery."
                 : $"The candidate was not committed. {device.Name} reported {result.Phase} and remains on Opticon Agent {result.CurrentVersion}.\n\n{result.Message}";
-            MessageBox.Show(message, "Opticon Agent update",
-                MessageBoxButton.OK, result.Phase == UpdatePhase.Committed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            var canRecoverDownload = result.Phase == UpdatePhase.Failed
+                                     && result.Message.Contains("download", StringComparison.OrdinalIgnoreCase);
+            var response = MessageBox.Show(
+                message + (canRecoverDownload
+                    ? "\n\nChoose Yes to use the signed one-time recovery path. Opticon will copy a direct-download command, open the remote desktop, and visibly watch the exact candidate through commit or rollback."
+                    : string.Empty),
+                "Opticon Agent update",
+                canRecoverDownload ? MessageBoxButton.YesNo : MessageBoxButton.OK,
+                result.Phase == UpdatePhase.Committed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            if (canRecoverDownload && response == MessageBoxResult.Yes)
+            {
+                await RunMaintenanceBootstrapAsync(
+                    device,
+                    release with { RequiresMaintenanceBootstrap = true },
+                    $"{device.Name}'s installed Agent could not download the signed release through its legacy network path.");
+            }
         }
         catch (Exception exception) { ShowError(exception); }
     }
@@ -454,7 +453,10 @@ public partial class MainWindow : Window
                + "$d=Join-Path $env:TEMP 'Opticon-Maintenance-" + suffix + "';"
                + "$z=$d+'.zip';"
                + "New-Item -ItemType Directory -Path $d -ErrorAction Stop|Out-Null;"
-               + "Invoke-WebRequest -UseBasicParsing -Uri '" + url + "' -OutFile $z;"
+               + "Add-Type -AssemblyName System.Net.Http;"
+               + "$ph=[Net.Http.HttpClientHandler]::new();$ph.UseProxy=$false;$ph.AllowAutoRedirect=$false;$ph.CheckCertificateRevocationList=$true;"
+               + "$hc=[Net.Http.HttpClient]::new($ph);try{$hc.Timeout=[TimeSpan]::FromMinutes(20);$rs=$hc.GetStreamAsync('" + url + "').GetAwaiter().GetResult();"
+               + "try{$fs=[IO.File]::Open($z,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{$rs.CopyTo($fs)}finally{$fs.Dispose()}}finally{$rs.Dispose()}}finally{$hc.Dispose();$ph.Dispose()};"
                + "if((Get-Item -LiteralPath $z).Length -ne " + size + "){throw 'Downloaded Opticon bundle size mismatch.'};"
                + "$h=(Get-FileHash -LiteralPath $z -Algorithm SHA256).Hash.ToLowerInvariant();"
                + "if($h -ne '" + release.Sha256 + "'){throw 'Downloaded Opticon bundle SHA-256 mismatch.'};"
@@ -485,6 +487,62 @@ public partial class MainWindow : Window
                + "','--expected-tailscale-ip=" + device.TailscaleIp
                + "','--operation-id=" + operationId.ToString("N") + "');"
                + "Start-Process -FilePath $s -ArgumentList $a -Verb RunAs -Wait";
+    }
+
+    private async Task RunMaintenanceBootstrapAsync(
+        DeviceRecord device,
+        OpticonUpdateRelease release,
+        string reason)
+    {
+        var operationId = Guid.NewGuid();
+        var command = BuildMaintenanceBootstrapCommand(release, device, operationId);
+        var instructions =
+            reason + " Opticon will not send arbitrary commands to it.\n\n" +
+            "Opticon selected this immutable role-specific bundle:\n" +
+            $"{release.DownloadUri.AbsoluteUri}\nSHA-256: {release.Sha256}\n" +
+            $"Operation: {operationId:N}\n\n" +
+            "Choose Yes to copy a size-, SHA-256-, publisher-, Tailnet-device-, Tailscale-address-, and operation-pinned PowerShell command, snapshot recovery, open Remote into, and let this command center watch for the exact candidate for up to 30 minutes. The command bypasses ambient Windows proxies and verifies the extracted Setup signature before requesting elevation. Then, in the remote Windows session:\n" +
+            "1. Open PowerShell.\n" +
+            "2. Paste the copied command and press Enter.\n" +
+            "3. Approve the one UAC prompt for Taildesk.Setup.exe.\n" +
+            "4. Keep RustDesk, Setup, and this Opticon window open through the terminal result.\n\n" +
+            "Setup must pass three protected local samples but cannot commit. This command center alone requires three authenticated external samples for the exact operation, release, architecture, IP, Tailnet identity, RustDesk, and any snapshotted SSH listener. If confirmation is lost or late, no commit is sent and the Guardian rolls back.\n\n" +
+            "The one-time bootstrap keeps enrollment, Tailscale, RustDesk, routes, credentials, and Admin unchanged. Later Agent releases use the guarded update path.";
+        if (MessageBox.Show(
+                instructions,
+                "One-time signed Agent bootstrap",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
+
+        System.Windows.Clipboard.SetText(command);
+        var sshWasListening = await _viewModel.SnapshotMaintenanceSshAsync(device);
+        await _viewModel.LaunchRemoteControlAsync(device);
+        var progressWindow = new UpdateProgressWindow(device.Name, device.AgentVersion, release.Version)
+        {
+            Owner = this,
+            DataContext = _viewModel
+        };
+        progressWindow.Show();
+        UpdateStatusDto maintenanceResult;
+        try
+        {
+            maintenanceResult = await _viewModel.ObserveMaintenanceBootstrapAsync(
+                device, release, operationId, sshWasListening);
+        }
+        finally
+        {
+            progressWindow.FinishAndClose();
+            Activate();
+        }
+        var maintenanceMessage = maintenanceResult.Phase == UpdatePhase.Committed
+            ? $"Opticon Agent {maintenanceResult.TargetVersion} is externally verified and committed on {device.Name}."
+            : $"The maintenance candidate was not committed. {device.Name} reported {maintenanceResult.Phase}.\n\n{maintenanceResult.Message}";
+        MessageBox.Show(
+            maintenanceMessage,
+            "One-time signed Agent bootstrap",
+            MessageBoxButton.OK,
+            maintenanceResult.Phase == UpdatePhase.Committed ? MessageBoxImage.Information : MessageBoxImage.Warning);
     }
 
     private DeviceRecord RequireDevice() => _viewModel.SelectedDevice ?? throw new InvalidOperationException("Select a device first.");

@@ -4,12 +4,22 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Taildesk.Shared;
 
 namespace Taildesk.Admin;
 
 public sealed class AgentClient
 {
+    // Agents through 1.1.9 use ASP.NET's default JSON enum binding, which
+    // accepts numeric enum values. Keep request serialization compatible with
+    // those installed agents while response parsing remains more permissive.
+    private static readonly JsonSerializerOptions AgentRequestJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
+
     private readonly HttpClient _http = new(new SocketsHttpHandler
     {
         UseProxy = false,
@@ -179,7 +189,7 @@ public sealed class AgentClient
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(45));
         using var request = CreateRequest(device, token, method, relative);
-        request.Content = JsonContent.Create(body, options: JsonDefaults.Options);
+        request.Content = JsonContent.Create(body, options: AgentRequestJsonOptions);
         using var response = await _http.SendAsync(request, timeout.Token);
         await EnsureSuccessAsync(response, timeout.Token);
     }
@@ -196,7 +206,7 @@ public sealed class AgentClient
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(requestTimeout);
         using var request = CreateRequest(device, token, method, relative);
-        request.Content = JsonContent.Create(body, options: JsonDefaults.Options);
+        request.Content = JsonContent.Create(body, options: AgentRequestJsonOptions);
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
         await EnsureSuccessAsync(response, timeout.Token);
         return await response.Content.ReadFromJsonAsync<T>(JsonDefaults.Options, timeout.Token)
@@ -224,7 +234,25 @@ public sealed class AgentClient
         if (response.IsSuccessStatusCode) return;
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
         if (body.Length > 500) body = body[..500];
-        throw new InvalidOperationException($"Agent returned {(int)response.StatusCode}: {body}");
+        var detail = body;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("error", out var error)
+                && error.ValueKind == JsonValueKind.String)
+            {
+                detail = error.GetString() ?? body;
+            }
+        }
+        catch (JsonException)
+        {
+            // Preserve a non-JSON agent response for diagnostics.
+        }
+        throw new InvalidOperationException(
+            string.IsNullOrWhiteSpace(detail)
+                ? $"Agent returned {(int)response.StatusCode} without an error detail."
+                : $"Agent returned {(int)response.StatusCode}: {detail}");
     }
 
     private static async Task CopyWithProgressAsync(Stream source, Stream destination, long total,

@@ -34,8 +34,8 @@
 - Direct-IP access is enabled on managed devices at port 21118; LAN discovery, public rendezvous/relay, automatic updates, UDP/IPv6 punching, and remote configuration changes are disabled.
 - RustDesk's whitelist is restricted to `100.64.0.0/10`; Tailscale grants provide the actual controller/managed authorization.
 - Windows Firewall allows the direct port only at the target's Tailscale local IP and only from the Tailscale address range. Outbound RustDesk traffic to every non-Tailscale IPv4 destination and all IPv6 destinations is blocked.
-- Managed targets permit RustDesk's Windows privacy mode. Each command center stores a per-device preference and configures that peer to use Mode 2's virtual display before connecting; disabling the preference restores ordinary physical-display mirroring for that peer.
-- Opticon launches RustDesk against the selected Tailscale IP and fills its password control through Windows UI Automation. The password is not placed in process arguments or on the clipboard during the normal workflow; manual clipboard copy remains a labeled recovery action.
+- Managed targets permit RustDesk's Windows privacy mode. Each command center exposes it as an opt-in per-device setting; ordinary connections mirror the physical display by default so they do not depend on a virtual-display driver.
+- Opticon launches RustDesk against the selected Tailscale IP and supplies the saved per-device password through RustDesk's supported connection command. The password is not copied to the clipboard during the normal workflow; manual clipboard copy remains a labeled recovery action.
 
 ## Administrative SSH controls
 

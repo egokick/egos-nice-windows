@@ -40,6 +40,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<InviteRecord> Invites { get; } = [];
     public ObservableCollection<TransferRow> Transfers { get; }
     public ObservableCollection<string> LogLines { get; } = [];
+    public ObservableCollection<string> UpdateProgressLines { get; } = [];
     public ObservableCollection<SystemCheckResult> SystemChecks { get; } = [];
     public AdminConfig Config => _state.Config;
     public bool IsPrimary => Config.Mode == AdminMode.Primary;
@@ -464,11 +465,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (!await _updateGate.WaitAsync(0, cancellationToken))
             throw new InvalidOperationException("Another guarded device update is already running from this command center.");
         Busy = true;
+        UpdateProgressLines.Clear();
         try
         {
             var progress = new Progress<string>(message =>
             {
                 Status = message;
+                UpdateProgressLines.Add($"{DateTime.Now:HH:mm:ss}  {message}");
                 Log(message);
             });
             var result = await _deviceUpdates.ObserveMaintenanceBootstrapAsync(
@@ -502,11 +505,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (!await _updateGate.WaitAsync(0, cancellationToken))
             throw new InvalidOperationException("Another guarded device update is already running from this command center.");
         Busy = true;
+        UpdateProgressLines.Clear();
         try
         {
             var progress = new Progress<string>(message =>
             {
                 Status = message;
+                UpdateProgressLines.Add($"{DateTime.Now:HH:mm:ss}  {message}");
                 Log(message);
             });
             var result = await _deviceUpdates.UpdateAsync(
@@ -797,7 +802,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Devices.Clear();
         foreach (var device in devices.OrderByDescending(device => device.State == DeviceConnectionState.Online).ThenBy(device => device.Name))
         {
-            device.PrivacyMode2Enabled = !Config.PrivacyMode2ByDevice.TryGetValue(device.Id, out var enabled) || enabled;
+            // Virtual-display privacy is opt-in: it requires a compatible RustDesk
+            // virtual display and otherwise produces a "No virtual displays" session.
+            device.PrivacyMode2Enabled = Config.PrivacyMode2ByDevice.TryGetValue(device.Id, out var enabled) && enabled;
             Devices.Add(device);
         }
         SelectedDevice = Devices.FirstOrDefault(device => device.Id == selectedId) ?? Devices.FirstOrDefault();

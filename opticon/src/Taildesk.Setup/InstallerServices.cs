@@ -187,10 +187,9 @@ public sealed class InstallCoordinator
         var sshKeygen = Path.Combine(opensshDirectory, "ssh-keygen.exe");
         if (File.Exists(ssh) && File.Exists(sshKeygen)) return;
 
-        var installed = await ProcessRunner.RunAsync(
-            "dism.exe",
-            ["/Online", "/Add-Capability", "/CapabilityName:OpenSSH.Client~~~~0.0.1.0", "/NoRestart"],
-            TimeSpan.FromMinutes(15),
+        var installed = await InstallOpenSshCapabilityAsync(
+            "OpenSSH.Client~~~~0.0.1.0",
+            "OpenSSH Client",
             cancellationToken);
         EnsureCapabilityCommandSucceeded(installed, "Windows could not install the OpenSSH Client capability");
         if (!File.Exists(ssh) || !File.Exists(sshKeygen))
@@ -214,7 +213,7 @@ public sealed class InstallCoordinator
         Directory.CreateDirectory(stateDirectory);
         var acl = await ProcessRunner.RunAsync(
             "icacls.exe",
-            [stateDirectory, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/setowner", "*S-1-5-18"],
+            [stateDirectory, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"],
             TimeSpan.FromSeconds(20),
             cancellationToken);
         EnsureCapabilityCommandSucceeded(acl, "Setup could not secure the OpenSSH installation journal");
@@ -229,10 +228,9 @@ public sealed class InstallCoordinator
         await WriteSetupJournalAsync(journalPath, "installing", cancellationToken);
         if (!File.Exists(sshd) || !File.Exists(sshKeygen))
         {
-            var installed = await ProcessRunner.RunAsync(
-                "dism.exe",
-                ["/Online", "/Add-Capability", "/CapabilityName:OpenSSH.Server~~~~0.0.1.0", "/NoRestart"],
-                TimeSpan.FromMinutes(15),
+            var installed = await InstallOpenSshCapabilityAsync(
+                "OpenSSH.Server~~~~0.0.1.0",
+                "OpenSSH Server",
                 cancellationToken);
             EnsureCapabilityCommandSucceeded(installed, "Windows could not install the OpenSSH Server capability");
         }
@@ -259,6 +257,52 @@ public sealed class InstallCoordinator
             CancellationToken.None);
         EnsureCapabilityCommandSucceeded(isolated, "Setup could not contain the OpenSSH service and firewall rule it installed");
         await WriteSetupJournalAsync(journalPath, "isolated", CancellationToken.None);
+    }
+
+    private static async Task<ProcessResult> InstallOpenSshCapabilityAsync(
+        string capabilityName,
+        string displayName,
+        CancellationToken cancellationToken)
+    {
+        const string command = "/Online /Add-Capability /NoRestart";
+        var timeout = TimeSpan.FromMinutes(30);
+        var dismLog = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Logs", "DISM", "dism.log");
+        await SetupDiagnostics.WriteAsync(
+            $"Starting Windows capability installation: {displayName}",
+            $"Command: dism.exe {command} /CapabilityName:{capabilityName}{Environment.NewLine}" +
+            $"Timeout: {timeout.TotalMinutes:0} minutes{Environment.NewLine}" +
+            $"DISM log: {dismLog}",
+            cancellationToken);
+
+        try
+        {
+            var result = await ProcessRunner.RunAsync(
+                "dism.exe",
+                ["/Online", "/Add-Capability", $"/CapabilityName:{capabilityName}", "/NoRestart"],
+                timeout,
+                cancellationToken);
+            await SetupDiagnostics.WriteAsync(
+                $"Windows capability installation completed: {displayName}",
+                $"Exit code: {result.ExitCode}{Environment.NewLine}" +
+                $"Standard output:{Environment.NewLine}{result.StandardOutput}{Environment.NewLine}" +
+                $"Standard error:{Environment.NewLine}{result.StandardError}",
+                CancellationToken.None);
+            return result;
+        }
+        catch (ProcessTimeoutException exception)
+        {
+            await SetupDiagnostics.WriteAsync(
+                $"Windows capability installation timed out: {displayName}",
+                $"Timeout: {exception.Timeout.TotalMinutes:0} minutes{Environment.NewLine}" +
+                $"Standard output:{Environment.NewLine}{exception.StandardOutput}{Environment.NewLine}" +
+                $"Standard error:{Environment.NewLine}{exception.StandardError}",
+                CancellationToken.None);
+            throw new TimeoutException(
+                $"Windows timed out while installing {displayName} after {exception.Timeout.TotalMinutes:0} minutes. " +
+                $"Review {SetupDiagnostics.LogPath} and {dismLog}, then ensure Windows Update servicing is available and retry setup.",
+                exception);
+        }
     }
 
     private static void EnsureCapabilityCommandSucceeded(ProcessResult result, string message)

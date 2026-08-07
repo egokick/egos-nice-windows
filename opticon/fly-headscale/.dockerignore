@@ -5,3 +5,7 @@ artifacts/*.zip
 artifacts/*.zip.*
 artifacts/hosted-build/
 artifacts/hosted-bundle-stage/
+# Keep legacy bootstrap executables out of ordinary gateway deployments too.
+artifacts/opticon-bootstrap-1.1.9.exe
+artifacts/opticon-bootstrap-1.1.10.exe
+artifacts/opticon-bootstrap-1.1.11.exe

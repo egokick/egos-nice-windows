@@ -7,6 +7,27 @@ public sealed record ProcessResult(int ExitCode, string StandardOutput, string S
     public bool Succeeded => ExitCode == 0;
 }
 
+public sealed class ProcessTimeoutException : TimeoutException
+{
+    public ProcessTimeoutException(
+        string executable,
+        TimeSpan timeout,
+        string standardOutput,
+        string standardError)
+        : base($"{Path.GetFileName(executable)} did not finish in time.")
+    {
+        Executable = executable;
+        Timeout = timeout;
+        StandardOutput = standardOutput;
+        StandardError = standardError;
+    }
+
+    public string Executable { get; }
+    public TimeSpan Timeout { get; }
+    public string StandardOutput { get; }
+    public string StandardError { get; }
+}
+
 public static class ProcessRunner
 {
     public static async Task<ProcessResult> RunAsync(
@@ -56,7 +77,12 @@ public static class ProcessRunner
             try { process.Kill(true); } catch { }
             if (timeoutSource?.IsCancellationRequested == true)
             {
-                throw new TimeoutException($"{Path.GetFileName(executable)} did not finish in time.");
+                try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
+                throw new ProcessTimeoutException(
+                    executable,
+                    timeout!.Value,
+                    await outputTask,
+                    await errorTask);
             }
             throw;
         }

@@ -15,7 +15,12 @@ public sealed class UpdateManager
     private const int MaximumDownloadAttempts = 4;
     private readonly AgentState _state;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly HttpClient _http = new(new HttpClientHandler { CheckCertificateRevocationList = true })
+    private readonly HttpClient _http = new(new HttpClientHandler
+    {
+        CheckCertificateRevocationList = true,
+        UseProxy = false,
+        AllowAutoRedirect = false
+    })
     {
         Timeout = Timeout.InfiniteTimeSpan
     };
@@ -285,7 +290,7 @@ public sealed class UpdateManager
             throw new InvalidOperationException($"This release requires update guardian {minimumVersion} or newer; installed is {installedText}.");
     }
 
-    private static async Task DownloadWithResumeAsync(Uri uri, string destination, long expectedSize, CancellationToken cancellationToken)
+    private async Task DownloadWithResumeAsync(Uri uri, string destination, long expectedSize, CancellationToken cancellationToken)
     {
         var partial = destination + ".partial";
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -306,7 +311,7 @@ public sealed class UpdateManager
                 if (offset > expectedSize) { File.Delete(partial); offset = 0; }
                 using var request = new HttpRequestMessage(HttpMethod.Get, uri);
                 if (offset > 0) request.Headers.Range = new RangeHeaderValue(offset, null);
-                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (offset > 0 && response.StatusCode == HttpStatusCode.OK)
                 {
                     File.Delete(partial);
@@ -341,7 +346,12 @@ public sealed class UpdateManager
                 if (attempt < MaximumDownloadAttempts) await Task.Delay(TimeSpan.FromSeconds(attempt * 2), cancellationToken);
             }
         }
-        throw new IOException($"The Opticon release could not be downloaded after {MaximumDownloadAttempts} attempts.", last);
+        var detail = last?.GetBaseException().Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (detail?.Length > 512) detail = detail[..512] + "...";
+        throw new IOException(
+            $"The Opticon release could not be downloaded after {MaximumDownloadAttempts} attempts." +
+            (string.IsNullOrWhiteSpace(detail) ? string.Empty : " Last error: " + detail),
+            last);
     }
 
     private static async Task EnsurePrivateUpdateDirectoryAsync(CancellationToken cancellationToken)

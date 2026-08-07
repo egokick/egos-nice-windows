@@ -121,12 +121,14 @@
                                         <TextBlock Grid.Row="7" Text="Credential" Style="{StaticResource LabelText}" />
                                         <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding PendingCredentialRotation}" />
                                     </Grid>
+                                    <TextBlock Text="{Binding UpdateStatus.Message}" Margin="0,8,0,0" TextWrapping="Wrap"
+                                               Foreground="{StaticResource MutedBrush}" FontSize="11" />
                                     <Separator Margin="0,14" Background="{StaticResource BorderBrush}" />
                                     <TextBlock Text="REMOTE PRIVACY" Style="{StaticResource LabelText}" />
                                     <CheckBox x:Name="PrivacyMode2Toggle" Margin="0,8,0,0"
-                                              Content="Blank physical display (Mode 2)" IsChecked="{Binding PrivacyMode2Enabled, Mode=OneWay}"
+                                              Content="Use virtual display (privacy mode)" IsChecked="{Binding PrivacyMode2Enabled, Mode=OneWay}"
                                               Click="PrivacyMode2_Click" />
-                                    <TextBlock Text="Applies to the next RustDesk connection to this device. Turn it off to mirror the physical display normally."
+                                    <TextBlock Text="Off by default for reliable connections. Turn it on only when this PC supports RustDesk virtual displays and you need to hide its physical screen."
                                                Margin="0,7,0,0" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" />
                                     <Separator Margin="0,14" Background="{StaticResource BorderBrush}" />
                                     <TextBlock Text="ACCESS ROLE" Style="{StaticResource LabelText}" />

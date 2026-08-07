@@ -1180,8 +1180,7 @@ internal sealed class SshSupervisor : IAsyncDisposable
                 path,
                 "/inheritance:r",
                 "/grant:r", systemGrant,
-                "/grant:r", accountGrant,
-                "/setowner", "*S-1-5-18"
+                "/grant:r", accountGrant
             ],
             TimeSpan.FromSeconds(20),
             cancellationToken);
@@ -1217,8 +1216,7 @@ internal sealed class SshSupervisor : IAsyncDisposable
                 path,
                 "/inheritance:r",
                 "/grant:r", "*S-1-5-18:F",
-                "/grant:r", "*S-1-5-32-544:F",
-                "/setowner", "*S-1-5-18"
+                "/grant:r", "*S-1-5-32-544:F"
             ],
             TimeSpan.FromSeconds(20),
             cancellationToken);
@@ -1235,7 +1233,7 @@ internal sealed class SshSupervisor : IAsyncDisposable
         var grant = directory ? "*S-1-5-18:(OI)(CI)F" : "*S-1-5-18:F";
         var result = await WindowsCommand.RunAsync(
             _icaclsPath,
-            [path, "/inheritance:r", "/grant:r", grant, "/setowner", "*S-1-5-18"],
+            [path, "/inheritance:r", "/grant:r", grant],
             TimeSpan.FromSeconds(20),
             cancellationToken);
         if (!result.Succeeded)

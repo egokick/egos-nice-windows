@@ -105,6 +105,25 @@ function Assert-SafeInstallSibling {
     }
 }
 
+function Move-OpticonDirectoryWithRetry {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Description
+    )
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        try {
+            Move-Item -LiteralPath $Source -Destination $Destination
+            return
+        } catch [IO.IOException] {
+            if ($attempt -eq 20) {
+                throw "$Description remained locked for 10 seconds. Close Opticon and any RustDesk, SSH, or command-prompt session opened from Opticon, then retry. $($_.Exception.Message)"
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
 function Assert-NoDirectoryReparsePoints {
     param([Parameter(Mandatory)][string]$Directory)
     $root = Get-Item -LiteralPath $Directory -Force
@@ -371,7 +390,7 @@ function Install-OpticonPayloadTransaction {
 
         Assert-InstalledOpticonClosed -Directories @($destination, $backup)
         if (Test-Path -LiteralPath $destination -PathType Container) {
-            Move-Item -LiteralPath $destination -Destination $backup
+            Move-OpticonDirectoryWithRetry -Source $destination -Destination $backup -Description 'The installed Opticon command center'
             $previousMoved = $true
             Assert-InstalledOpticonClosed -Directories @($destination, $backup)
         }

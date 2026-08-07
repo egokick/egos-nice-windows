@@ -46,7 +46,9 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	landingResult := httptest.NewRecorder(); g.ServeHTTP(landingResult, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID, nil))
 	if landingResult.Code != http.StatusOK { t.Fatalf("landing returned %d", landingResult.Code) }
 	landing := landingResult.Body.String()
-	if !strings.Contains(landing, "Mom &amp; Dad PC") || !strings.Contains(landing, bundle.SHA256) { t.Fatal("landing page omitted escaped device or bundle pin") }
+	if !strings.Contains(landing, "Mom &amp; Dad PC") || !strings.Contains(landing, "opticon-bootstrap-1.0.0.exe") || strings.Contains(landing, ".cmd") || strings.Contains(landing, "ExecutionPolicy Bypass") {
+		t.Fatal("landing page did not offer the signed bootstrap safely")
+	}
 	if strings.Contains(landing, "private-fragment-test") { t.Fatal("landing page leaked a fragment key") }
 
 	bundleResult := httptest.NewRecorder(); g.ServeHTTP(bundleResult, httptest.NewRequest(http.MethodGet, artifactPrefix+bundle.File, nil))

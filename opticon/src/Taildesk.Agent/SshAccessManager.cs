@@ -952,8 +952,7 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
                 path,
                 "/inheritance:r",
                 "/grant:r", "*S-1-5-18:F",
-                "/grant:r", "*S-1-5-32-544:F",
-                "/setowner", "*S-1-5-18"
+                "/grant:r", "*S-1-5-32-544:F"
             ],
             TimeSpan.FromSeconds(20),
             cancellationToken);
@@ -979,8 +978,7 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
                 "/inheritance:r",
                 "/grant:r", "*S-1-5-18:(OI)(CI)F",
                 // Traverse/read only; no inheritance reaches lease state or keys.
-                "/grant:r", $"*{accountSid}:RX",
-                "/setowner", "*S-1-5-18"
+                "/grant:r", $"*{accountSid}:RX"
             ],
             TimeSpan.FromSeconds(20),
             cancellationToken);
@@ -996,10 +994,16 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
         RequireExactSystemExecutable(_icaclsPath, "Windows ACL tool");
         var result = await ProcessRunner.RunAsync(
             _icaclsPath,
-            [path, "/inheritance:r", "/grant:r", inheritance, "/setowner", "*S-1-5-18"],
+            [path, "/inheritance:r", "/grant:r", inheritance],
             TimeSpan.FromSeconds(20),
             cancellationToken);
         EnsureSuccess(result, $"Opticon could not restrict {Path.GetFileName(path)} to SYSTEM");
+        var owner = await ProcessRunner.RunAsync(
+            _icaclsPath,
+            [path, "/setowner", "*S-1-5-18"],
+            TimeSpan.FromSeconds(20),
+            cancellationToken);
+        EnsureSuccess(owner, $"Opticon could not set SYSTEM ownership on {Path.GetFileName(path)}");
     }
 
     private void EnsureManagedAccount(bool enabled)
