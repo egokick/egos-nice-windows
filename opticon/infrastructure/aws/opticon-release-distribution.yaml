@@ -57,6 +57,9 @@ Resources:
           CachedMethods: [GET, HEAD]
           Compress: false
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          # AWS managed SimpleCORS. Invitation pages fetch the signed bootstrap
+          # directly from CloudFront, then assign the invite-bearing local name.
+          ResponseHeadersPolicyId: 60669652-455b-4ae9-85a4-c4c02393f86c
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
           MinimumProtocolVersion: TLSv1.2_2021

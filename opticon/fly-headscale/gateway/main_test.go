@@ -46,8 +46,11 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	landingResult := httptest.NewRecorder(); g.ServeHTTP(landingResult, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID, nil))
 	if landingResult.Code != http.StatusOK { t.Fatalf("landing returned %d", landingResult.Code) }
 	landing := landingResult.Body.String()
-	if !strings.Contains(landing, "Mom &amp; Dad PC") || !strings.Contains(landing, "opticon-bootstrap-1.0.0.exe") || strings.Contains(landing, ".cmd") || strings.Contains(landing, "ExecutionPolicy Bypass") {
+	if !strings.Contains(landing, "Mom &amp; Dad PC") || !strings.Contains(landing, "opticon-bootstrap-1.0.0.exe") || !strings.Contains(landing, "await fetch(") || !strings.Contains(landing, "URL.createObjectURL(blob)") || strings.Contains(landing, ".cmd") || strings.Contains(landing, "ExecutionPolicy Bypass") {
 		t.Fatal("landing page did not offer the signed bootstrap safely")
+	}
+	if !strings.Contains(landingResult.Header().Get("Content-Security-Policy"), "connect-src 'self'") {
+		t.Fatal("landing page did not permit its same-origin bootstrap fetch")
 	}
 	if strings.Contains(landing, "private-fragment-test") { t.Fatal("landing page leaked a fragment key") }
 
@@ -368,7 +371,16 @@ func TestInvitationPrefersImmutableCloudFrontBootstrap(t *testing.T) {
 	g := &gateway{artifactDir: root}
 	result := httptest.NewRecorder()
 	g.invitationLanding(result, httptest.NewRequest(http.MethodGet, "https://example.test/", nil), strings.Repeat("P", 24), hostedInvite{DeviceName: "PC", ExpiresAt: time.Now().Add(time.Hour)}, bundle)
-	if !strings.Contains(result.Body.String(), bootstrap.DownloadURL) { t.Fatal("invitation did not use the immutable CloudFront bootstrap") }
+	landing := result.Body.String()
+	if !strings.Contains(landing, bootstrap.DownloadURL) || !strings.Contains(landing, "blob.size!==20") {
+		t.Fatal("invitation did not fetch and size-check the immutable CloudFront bootstrap")
+	}
+	if !strings.Contains(result.Header().Get("Content-Security-Policy"), "connect-src https://d222.cloudfront.net") {
+		t.Fatal("invitation CSP did not permit the pinned CloudFront bootstrap origin")
+	}
+	if strings.Contains(landing, "a.href=\"https://d222.cloudfront.net") {
+		t.Fatal("invitation still relies on a cross-origin anchor download filename")
+	}
 }
 
 func TestUnsafeBundleFilenameCannotReachInstallerCommand(t *testing.T) {

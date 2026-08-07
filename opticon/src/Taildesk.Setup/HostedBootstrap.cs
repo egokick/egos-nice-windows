@@ -17,6 +17,9 @@ internal static class HostedBootstrapper
     private static readonly Regex NamePattern = new(
         "^Install-Opticon-(?<id>[A-Za-z0-9_-]{24,128})--(?<key>[A-Za-z0-9_-]{32,128})$",
         RegexOptions.CultureInvariant);
+    private static readonly Regex PublishedNamePattern = new(
+        "^opticon-bootstrap-[0-9]+\\.[0-9]+\\.[0-9]+$",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     internal static bool TryParse(string? executablePath, out HostedBootstrap bootstrap)
     {
@@ -27,6 +30,10 @@ internal static class HostedBootstrapper
         bootstrap = new HostedBootstrap(match.Groups["id"].Value, match.Groups["key"].Value);
         return true;
     }
+
+    internal static bool IsPublishedBootstrap(string? executablePath) =>
+        string.Equals(Path.GetExtension(executablePath), ".exe", StringComparison.OrdinalIgnoreCase)
+        && PublishedNamePattern.IsMatch(Path.GetFileNameWithoutExtension(executablePath) ?? string.Empty);
 
     internal static async Task LaunchSetupAsync(HostedBootstrap bootstrap, Action<string> report)
     {

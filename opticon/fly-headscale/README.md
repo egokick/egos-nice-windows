@@ -12,8 +12,9 @@ plaintext RustDesk, agent, controller, or Headscale enrollment credentials.
 - Internet routing: disabled unless the administrator explicitly enables an enrolled Opticon exit node
 
 `/opticon/i/<random-id>#<key>` is the recipient link. Only the random ID is
-sent to Fly; browser JavaScript uses the fragment key locally to create a tiny
-starter. The starter downloads and verifies a reusable bundle, while Setup
+sent to Fly; browser JavaScript fetches the signed bootstrap through CloudFront
+CORS and uses a blob URL to assign its invite-bearing local filename. The
+bootstrap downloads and verifies a reusable bundle, while Setup
 decrypts and verifies the signed invitation. Hosted ciphertext expires after
 14 days by default and is removed on manual expiration or successful enrollment.
 The command center can extend an active invitation without changing its URL;

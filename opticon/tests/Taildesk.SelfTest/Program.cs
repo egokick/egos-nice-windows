@@ -391,6 +391,7 @@ static void TestReleaseDistributionDesign()
            && template.Contains("BlockPublicPolicy: true", StringComparison.Ordinal)
            && template.Contains("DenyInsecureTransport", StringComparison.Ordinal)
            && template.Contains("OriginAccessControl", StringComparison.Ordinal)
+           && template.Contains("ResponseHeadersPolicyId: 60669652-455b-4ae9-85a4-c4c02393f86c", StringComparison.Ordinal)
            && template.Contains("TLSv1.2_2021", StringComparison.Ordinal),
         "CloudFront infrastructure no longer enforces the private TLS-only S3 boundary");
     Assert(publisher.Contains("--checksum-algorithm", StringComparison.Ordinal)
@@ -417,9 +418,16 @@ static void TestReleaseDistributionDesign()
         "Agent release downloader does not retain the required direct HTTPS behavior");
     Assert(hostedBootstrap.Contains("start.Environment[InvitePathEnvironmentVariable]", StringComparison.Ordinal)
            && hostedBootstrap.Contains("start.Environment[InviteKeyEnvironmentVariable]", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("IsPublishedBootstrap", StringComparison.Ordinal)
            && setupWindow.Contains("GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)", StringComparison.Ordinal)
-           && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal),
-        "hosted bootstrap no longer has a consumed child-environment fallback when Windows drops Setup arguments");
+           && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal)
+           && setupWindow.Contains("private-key-redacted", StringComparison.Ordinal)
+           && setupWindow.Contains("DetailsExpander.IsExpanded = true", StringComparison.Ordinal),
+        "hosted bootstrap handoff or redacted persistent Setup diagnostics regressed");
+    Assert(gateway.Contains("await fetch(", StringComparison.Ordinal)
+           && gateway.Contains("URL.createObjectURL(blob)", StringComparison.Ordinal)
+           && gateway.Contains("connect-src ", StringComparison.Ordinal),
+        "invitation download no longer creates an invite-bearing local bootstrap from the CloudFront response");
 }
 static void TestTailnetSshPolicy()
 {

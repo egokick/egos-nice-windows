@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Windows;
 using Taildesk.Shared;
@@ -13,10 +15,21 @@ public partial class MainWindow : Window
     private bool _installationRunning;
     private bool _maintenanceMode;
     private MaintenanceExpectedTarget? _maintenanceTarget;
+    private string _logPath = string.Empty;
+    private static readonly Regex InviteFileSecretPattern = new(
+        "(Install-Opticon-[A-Za-z0-9_-]{24,128}--)[A-Za-z0-9_-]{32,128}",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex InviteArgumentSecretPattern = new(
+        "(--invite-key=)[^\\s]+",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex FragmentSecretPattern = new(
+        "(#[A-Za-z0-9_-]{0,23})[A-Za-z0-9_-]{32,128}",
+        RegexOptions.CultureInvariant);
 
     public MainWindow()
     {
         InitializeComponent();
+        InitializeLog();
         Loaded += OnLoaded;
     }
 
@@ -25,6 +38,9 @@ public partial class MainWindow : Window
         try
         {
             var arguments = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            AppendLog($"Opticon Setup {typeof(MainWindow).Assembly.GetName().Version} started.");
+            AppendLog("Executable: " + (Environment.ProcessPath ?? "unavailable"));
+            AppendLog("Launch inputs: " + DescribeLaunchInputs(arguments));
             if (arguments.Length == 0 && HostedBootstrapper.TryParse(Environment.ProcessPath, out var bootstrap))
             {
                 StatusText.Text = "Starting the signed Opticon installer?";
@@ -86,7 +102,7 @@ public partial class MainWindow : Window
             StatusText.Text = _maintenanceMode
                 ? "Maintenance could not validate this selected device."
                 : "The invitation cannot be used.";
-            AppendLog("ERROR: " + exception.Message);
+            AppendException(exception);
         }
     }
 
@@ -164,7 +180,7 @@ public partial class MainWindow : Window
                 catch (Exception retryException)
                 {
                     StatusText.Text = "Installation stopped. See the error below.";
-                    AppendLog("ERROR: " + retryException.Message);
+                    AppendException(retryException);
                 }
             }
             InstallButton.Content = "Try again";
@@ -173,7 +189,7 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             StatusText.Text = "Installation stopped. See the error below.";
-            AppendLog("ERROR: " + exception.Message);
+            AppendException(exception);
             InstallButton.Content = "Try again";
             InstallButton.IsEnabled = true;
         }
@@ -203,12 +219,97 @@ public partial class MainWindow : Window
             return File.Exists(hostedPath) ? Path.GetFullPath(hostedPath) : throw new FileNotFoundException("The encrypted hosted invitation was not downloaded.");
         }
         var argument = arguments.FirstOrDefault(value => value.StartsWith("--invite=", StringComparison.OrdinalIgnoreCase));
+        if (argument is null && HostedBootstrapper.IsPublishedBootstrap(Environment.ProcessPath))
+            throw new FileNotFoundException(
+                "This installer lost its invitation identity while downloading. Return to the Opticon invitation page and download it again.");
         var path = argument is null ? Path.Combine(AppContext.BaseDirectory, "invite.tdinvite") : argument[9..].Trim('"');
         return File.Exists(path) ? Path.GetFullPath(path) : throw new FileNotFoundException("invite.tdinvite was not found next to Opticon Setup.");
     }
 
     private void AppendLog(string message)
     {
-        LogText.Text += $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}";
+        var entry = $"[{DateTime.Now:HH:mm:ss}] {SanitizeForLog(message)}{Environment.NewLine}";
+        LogText.AppendText(entry);
+        LogText.ScrollToEnd();
+        if (string.IsNullOrWhiteSpace(_logPath)) return;
+        try { File.AppendAllText(_logPath, entry); }
+        catch { OpenLogButton.IsEnabled = false; }
+    }
+
+    private void AppendException(Exception exception)
+    {
+        AppendLog("ERROR: " + exception.Message);
+        AppendLog(exception.ToString());
+        DetailsExpander.IsExpanded = true;
+    }
+
+    private void InitializeLog()
+    {
+        try
+        {
+            var directory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Opticon", "Logs", "Setup");
+            Directory.CreateDirectory(directory);
+            _logPath = Path.Combine(directory, $"setup-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Environment.ProcessId}.log");
+            File.WriteAllText(_logPath, string.Empty);
+            LogPathText.Text = _logPath;
+            LogPathText.ToolTip = _logPath;
+        }
+        catch
+        {
+            _logPath = string.Empty;
+            LogPathText.Text = "A persistent log file could not be created.";
+            OpenLogButton.IsEnabled = false;
+        }
+    }
+
+    private static string DescribeLaunchInputs(IEnumerable<string> arguments)
+    {
+        var descriptions = arguments.Select(argument =>
+        {
+            var separator = argument.IndexOf('=');
+            return separator > 0 ? argument[..separator] + "=[provided]" : argument;
+        }).ToList();
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)))
+            descriptions.Add(HostedBootstrapper.InvitePathEnvironmentVariable + "=[provided]");
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable)))
+            descriptions.Add(HostedBootstrapper.InviteKeyEnvironmentVariable + "=[provided]");
+        return descriptions.Count == 0 ? "none" : string.Join(", ", descriptions);
+    }
+
+    private string SanitizeForLog(string value)
+    {
+        if (!string.IsNullOrWhiteSpace(_hostedFragmentKey))
+            value = value.Replace(_hostedFragmentKey, "[private-key-redacted]", StringComparison.Ordinal);
+        value = InviteFileSecretPattern.Replace(value, "$1[private-key-redacted]");
+        value = InviteArgumentSecretPattern.Replace(value, "$1[private-key-redacted]");
+        return FragmentSecretPattern.Replace(value, "$1[private-key-redacted]");
+    }
+
+    private void CopyLog_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Clipboard.SetText(LogText.Text);
+            StatusText.Text = "Detailed setup log copied.";
+        }
+        catch (Exception exception)
+        {
+            AppendLog("The setup log could not be copied: " + exception.Message);
+        }
+    }
+
+    private void OpenLog_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(_logPath)) throw new FileNotFoundException("No persistent setup log is available.");
+            Process.Start(new ProcessStartInfo(_logPath) { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            AppendLog("The setup log file could not be opened: " + exception.Message);
+        }
     }
 }

@@ -24,11 +24,13 @@ The primary command center is intentionally an interactive tray application, not
 
 1. Opticon asks Headscale for a tagged, single-use pre-authentication key.
 2. It signs the personalized enrollment material, encrypts it with a random key, and copies a single-use URL with a default 14-day expiry to the clipboard. The decryption key is in the URL fragment, which browsers do not send to Fly.
-3. The recipient opens the URL. The page downloads a tiny `Install-Opticon-<device>.cmd`; they open it and approve UAC. The starter downloads the reusable role-specific Opticon bundle from an immutable CloudFront HTTPS URL, verifies its pinned size, SHA-256, and Authenticode signer, then starts Setup. Setup verifies the signed invitation and installs the pinned dependencies.
+3. The recipient opens the URL. The page fetches the signed bootstrap directly from CloudFront and creates a local `Install-Opticon-<id>--<key>.exe` download so the client-only fragment survives browser filename handling. They open it and approve UAC. The bootstrap downloads the reusable role-specific Opticon bundle from its immutable CloudFront HTTPS URL, verifies its pinned size, SHA-256, and Authenticode signer, then starts Setup. Setup verifies the signed invitation and installs the pinned dependencies.
 4. The new agent calls the laptop coordinator through its stable Tailscale address. The coordinator consumes the invitation, records the device, and supplies the final device-specific credentials.
 5. Normal remote-control, file, and media traffic goes directly between peers when NAT traversal succeeds. If it cannot, the encrypted WireGuard traffic is relayed through the private DERP endpoint on Fly.
 
 Invitation URLs contain a high-entropy identifier and a separate fragment decryption key. Fly stores the encrypted envelope, device label, role, and expiry; it never receives the fragment key or plaintext enrollment credentials. The default lifetime is 14 days. From the Invitations grid, right-click a row to copy its URL, extend its expiry, or expire it immediately. Extension preserves the URL but rotates the Headscale one-use key and re-signs/re-encrypts the payload. Successful enrollment immediately consumes the invitation, expires the local record, and removes the hosted ciphertext. Browsers deliberately do not auto-run downloads, so the unavoidable recipient flow is: open link, open the downloaded starter, approve UAC.
+
+Setup keeps a redacted per-run diagnostic log under `%LOCALAPPDATA%\Opticon\Logs\Setup`. Errors expand the **Detailed setup log** section automatically; the same section can be opened at any time to copy the log or open its file. Invitation fragment keys are redacted from filenames, arguments, exceptions, and persisted diagnostics.
 
 ## Private remote-session boundary
 
