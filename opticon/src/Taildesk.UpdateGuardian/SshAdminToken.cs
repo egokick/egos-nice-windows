@@ -167,17 +167,33 @@ internal static class SshAdminToken
 
     private static SafeAccessTokenHandle ReadLinkedToken(SafeAccessTokenHandle token)
     {
-        var buffer = ReadTokenInformation(token, TokenLinkedTokenClass, "linked token");
-        try
+        // TOKEN_LINKED_TOKEN is a fixed one-handle structure. Some supported
+        // Windows builds return ERROR_BAD_LENGTH (while reporting the correct
+        // size) for the usual zero-length sizing probe, so query it directly.
+        var expectedLength = checked((uint)Marshal.SizeOf<TokenLinkedToken>());
+        if (!GetLinkedTokenInformation(
+                token,
+                TokenLinkedTokenClass,
+                out var information,
+                expectedLength,
+                out var returnedLength))
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Windows could not read the SSH linked administrator token.");
+
+        var linked = new SafeAccessTokenHandle(information.LinkedToken);
+        if (returnedLength != expectedLength || linked.IsInvalid)
         {
-            var handle = Marshal.ReadIntPtr(buffer);
-            if (handle == IntPtr.Zero) throw new InvalidOperationException("Windows returned an empty linked administrator token.");
-            return new SafeAccessTokenHandle(handle);
+            linked.Dispose();
+            throw new InvalidDataException("Windows returned an invalid linked administrator token structure.");
         }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+        return linked;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenLinkedToken
+    {
+        public IntPtr LinkedToken;
     }
 
     private static int ReadIntegrityRid(SafeAccessTokenHandle token)
@@ -257,6 +273,15 @@ internal static class SshAdminToken
         SafeAccessTokenHandle token,
         int informationClass,
         IntPtr information,
+        uint informationLength,
+        out uint returnLength);
+
+    [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetLinkedTokenInformation(
+        SafeAccessTokenHandle token,
+        int informationClass,
+        out TokenLinkedToken information,
         uint informationLength,
         out uint returnLength);
 
