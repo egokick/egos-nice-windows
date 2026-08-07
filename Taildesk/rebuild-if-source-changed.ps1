@@ -17,34 +17,6 @@ function Get-InstalledOpticonPath {
     return $null
 }
 
-function Get-LatestSourceWriteTime {
-    $inputs = @(
-        (Join-Path $SourceRoot 'src'),
-        (Join-Path $SourceRoot 'assets'),
-        (Join-Path $SourceRoot 'Taildesk.sln'),
-        (Join-Path $SourceRoot 'Directory.Build.props'),
-        (Join-Path $SourceRoot 'build.ps1')
-    )
-
-    $newest = [DateTime]::MinValue
-    foreach ($input in $inputs) {
-        if (-not (Test-Path -LiteralPath $input)) { continue }
-
-        $items = if ((Get-Item -LiteralPath $input).PSIsContainer) {
-            Get-ChildItem -LiteralPath $input -File -Recurse -Force |
-                Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' }
-        } else {
-            Get-Item -LiteralPath $input
-        }
-
-        foreach ($item in $items) {
-            if ($item.LastWriteTimeUtc -gt $newest) { $newest = $item.LastWriteTimeUtc }
-        }
-    }
-
-    return $newest
-}
-
 function Test-ControllerInstallationReady {
     $controllerRoot = Join-Path $env:ProgramFiles 'Taildesk'
     $requiredFiles = @(
@@ -57,12 +29,30 @@ function Test-ControllerInstallationReady {
 }
 
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
+$fingerprintHelper = Join-Path $PSScriptRoot 'Get-OpticonSourceFingerprint.ps1'
+if (-not (Test-Path -LiteralPath $fingerprintHelper -PathType Leaf)) {
+    throw "Opticon's source fingerprint helper is missing: $fingerprintHelper"
+}
+. $fingerprintHelper
 $installedOpticon = Get-InstalledOpticonPath
-$latestSourceWriteTime = Get-LatestSourceWriteTime
+$sourceFingerprint = Get-OpticonSourceFingerprint -SourceRoot $SourceRoot
 $controllerInstallationReady = Test-ControllerInstallationReady
+$cacheDirectory = Join-Path $env:LOCALAPPDATA 'Opticon\BuildCache'
+$cachePath = Join-Path $cacheDirectory 'controller-source-v1.json'
+$installedHash = if ($null -ne $installedOpticon) {
+    (Get-FileHash -LiteralPath $installedOpticon -Algorithm SHA256).Hash.ToLowerInvariant()
+} else { '' }
+$cached = if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+    try { Get-Content -Raw -LiteralPath $cachePath | ConvertFrom-Json } catch { $null }
+} else { $null }
 if ($null -ne $installedOpticon -and
-    $latestSourceWriteTime -le (Get-Item -LiteralPath $installedOpticon).LastWriteTimeUtc -and
+    $null -ne $cached -and
+    [int]$cached.schemaVersion -eq 1 -and
+    [string]$cached.sourceFingerprint -eq $sourceFingerprint -and
+    [string]$cached.installedSha256 -eq $installedHash -and
+    [string]$cached.installedPath -eq [IO.Path]::GetFullPath($installedOpticon) -and
     $controllerInstallationReady) {
+    Write-Host 'Opticon source and installed command center are unchanged; using the installed build.' -ForegroundColor DarkGray
     exit 0
 }
 
@@ -120,5 +110,26 @@ if ($updater.ExitCode -ne 0) {
     }
     throw "Opticon installation update failed with exit code $($updater.ExitCode).`n`n$detail"
 }
+
+$installedOpticon = Get-InstalledOpticonPath
+if ($null -eq $installedOpticon -or -not (Test-ControllerInstallationReady)) {
+    throw 'Opticon installation completed without a ready command-center payload.'
+}
+$installedHash = (Get-FileHash -LiteralPath $installedOpticon -Algorithm SHA256).Hash.ToLowerInvariant()
+$cache = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    sourceFingerprint = $sourceFingerprint
+    installedPath = [IO.Path]::GetFullPath($installedOpticon)
+    installedSha256 = $installedHash
+    installedVersion = (Get-Item -LiteralPath $installedOpticon).VersionInfo.ProductVersion
+    installedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+}
+[IO.Directory]::CreateDirectory($cacheDirectory) | Out-Null
+$temporaryCache = "$cachePath.new"
+[IO.File]::WriteAllText(
+    $temporaryCache,
+    ($cache | ConvertTo-Json),
+    [Text.UTF8Encoding]::new($false))
+Move-Item -LiteralPath $temporaryCache -Destination $cachePath -Force
 
 Write-Host 'Opticon was rebuilt and updated successfully.' -ForegroundColor Green

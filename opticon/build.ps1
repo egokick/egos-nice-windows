@@ -70,9 +70,12 @@ if ($LASTEXITCODE -ne 0) { throw 'The Opticon solution build failed.' }
 dotnet run --project (Join-Path $repo 'tests/Taildesk.SelfTest/Taildesk.SelfTest.csproj') -c Release -p:EnableWindowsTargeting=true
 if ($LASTEXITCODE -ne 0) { throw 'The Opticon self-tests failed.' }
 
-Remove-OpticonBuildDirectory -Path $publish
 Remove-OpticonBuildDirectory -Path $stage
-New-Item $publish -ItemType Directory | Out-Null
+if (-not (Test-Path -LiteralPath $publish -PathType Container)) {
+    New-Item $publish -ItemType Directory | Out-Null
+} else {
+    Write-Host "Preserving $publish so MSBuild can reuse unchanged component publish outputs." -ForegroundColor DarkGray
+}
 New-Item (Join-Path $stage 'App/Payload') -ItemType Directory -Force | Out-Null
 New-Item $dist -ItemType Directory -Force | Out-Null
 
