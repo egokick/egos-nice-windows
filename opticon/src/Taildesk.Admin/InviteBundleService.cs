@@ -119,8 +119,12 @@ public sealed class InviteBundleService
 
             record.HostedInviteIdHash = publication.IdHash;
             record.HostedUrlProtected = SecretProtector.Protect(publication.Url);
-            _state.Config.Invites.Add(record);
-            await _state.SaveAsync(cancellationToken);
+            await DurableCollectionMutation.AddAsync(
+                _state.Config.Invites,
+                record,
+                _state.InviteGate,
+                _state.SaveAsync,
+                cancellationToken);
             return new InviteBundleResult(record, publication.Url);
         }
         catch

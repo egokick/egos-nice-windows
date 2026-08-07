@@ -19,9 +19,18 @@ internal static class StableGuardianMaintenance
 
         RequireSingleExecutable(sourceDirectory, "signed release Guardian");
         await InvitationSigning.VerifyAuthenticodeAsync(sourceExecutable, cancellationToken);
-        await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
-
         var sourceVersion = ReadVersion(sourceExecutable);
+
+        EnsureNoActiveUpdate();
+        using var coordination = await UpdateJournalCoordination.AcquireAsync(
+            TimeSpan.FromMinutes(2),
+            cancellationToken);
+        EnsureNoActiveUpdate();
+
+        // Everything derived from, or deleted beneath, the installed Guardian
+        // is re-read while the cross-process lease is held. A second Setup can
+        // no longer remove the active transaction's rollback artifacts.
+        await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
         var installedVersion = ReadVersion(installedExecutable);
         var installedFiles = RequireRecognizedInstalledFiles(installedDirectory);
         var contentMatches = await FilesMatchAsync(sourceExecutable, installedExecutable, cancellationToken);
@@ -30,12 +39,6 @@ internal static class StableGuardianMaintenance
             await DeleteMaintenanceArtifactsAsync(installedFiles, cancellationToken);
             return;
         }
-
-        EnsureNoActiveUpdate();
-        using var coordination = await UpdateJournalCoordination.AcquireAsync(
-            TimeSpan.FromMinutes(2),
-            cancellationToken);
-        EnsureNoActiveUpdate();
 
         // A prior successful ReplaceFile can leave its now-unused rollback
         // artifact behind if antivirus briefly holds it. These exact names are

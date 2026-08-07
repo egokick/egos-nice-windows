@@ -78,8 +78,21 @@ public sealed class CoordinatorServer : IAsyncDisposable
         try
         {
             var invite = _state.Config.Invites.FirstOrDefault(item => item.Id == request.InviteId);
-            if (invite is null || invite.RedeemedAt.HasValue || invite.IsExpired
+            if (invite is null
                 || !SecurityHelpers.FixedTimeEquals(invite.InviteSecretHash, SecurityHelpers.HashToken(request.InviteSecret)))
+            {
+                return Results.Json(new EnrollmentResponse { Message = "The invitation is invalid, expired, or already used." }, statusCode: 403);
+            }
+            if (invite.RedeemedAt.HasValue)
+            {
+                var enrolled = invite.EnrolledDeviceId.HasValue
+                    ? _state.Config.Devices.FirstOrDefault(item => item.Id == invite.EnrolledDeviceId.Value)
+                    : null;
+                return EnrollmentReplayPolicy.IsExactAcceptedReplay(invite, enrolled, request)
+                    ? Results.Ok(new EnrollmentResponse { Accepted = true, Message = "Enrollment was already completed." })
+                    : Results.Json(new EnrollmentResponse { Message = "The invitation was already used by a different enrollment identity." }, statusCode: 403);
+            }
+            if (invite.IsExpired)
             {
                 return Results.Json(new EnrollmentResponse { Message = "The invitation is invalid, expired, or already used." }, statusCode: 403);
             }
@@ -108,7 +121,6 @@ public sealed class CoordinatorServer : IAsyncDisposable
                 return Results.Json(new EnrollmentResponse { Message = "That Headscale node ID or Tailscale address is already enrolled. Revoke it before creating a replacement invitation." }, statusCode: 409);
             }
 
-            await _headscale.RevokeKeyAsync(invite.TailscaleKeyId, cancellationToken);
             var device = new DeviceRecord { Id = Guid.NewGuid() };
             device.TailnetDeviceId = request.TailnetDeviceId;
             device.Name = string.IsNullOrWhiteSpace(invite.DeviceName) ? request.HostName : invite.DeviceName;
@@ -124,21 +136,45 @@ public sealed class CoordinatorServer : IAsyncDisposable
             device.AdvertisesExitNode = invite.AdvertiseExitNode;
             device.State = DeviceConnectionState.Online;
             device.LastSeen = DateTimeOffset.UtcNow;
-            if (!_state.Config.Devices.Contains(device)) _state.Config.Devices.Add(device);
+            _state.Config.Devices.Add(device);
+            var oldExpiry = invite.ExpiresAt;
             invite.RedeemedAt = DateTimeOffset.UtcNow;
             invite.ExpiresAt = invite.RedeemedAt.Value;
             invite.EnrolledDeviceId = device.Id;
+            try
+            {
+                await _state.SaveAsync(cancellationToken);
+            }
+            catch
+            {
+                _state.Config.Devices.Remove(device);
+                invite.RedeemedAt = null;
+                invite.ExpiresAt = oldExpiry;
+                invite.EnrolledDeviceId = null;
+                throw;
+            }
+
+            // Enrollment is durable before irreversible remote cleanup. A lost
+            // response is therefore safe to retry through the exact replay path.
+            try { await _headscale.RevokeKeyAsync(invite.TailscaleKeyId, CancellationToken.None); } catch { }
             if (!string.IsNullOrWhiteSpace(invite.HostedInviteIdHash))
             {
+                var hostedId = invite.HostedInviteIdHash;
+                var hostedUrl = invite.HostedUrlProtected;
                 try
                 {
-                    await new HostedInviteClient(_state).DeleteAsync(invite.HostedInviteIdHash, cancellationToken);
+                    await new HostedInviteClient(_state).DeleteAsync(hostedId, CancellationToken.None);
                     invite.HostedInviteIdHash = string.Empty;
                     invite.HostedUrlProtected = string.Empty;
+                    try { await _state.SaveAsync(CancellationToken.None); }
+                    catch
+                    {
+                        invite.HostedInviteIdHash = hostedId;
+                        invite.HostedUrlProtected = hostedUrl;
+                    }
                 }
-                catch { /* Enrollment remains valid; the Fly object expires independently. */ }
+                catch { /* Enrollment remains valid; the hosted object expires independently. */ }
             }
-            await _state.SaveAsync(cancellationToken);
             return Results.Ok(new EnrollmentResponse { Accepted = true, Message = "Enrollment complete." });
         }
         finally

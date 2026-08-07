@@ -12,6 +12,12 @@ public sealed class AgentConfig
     public string DeviceName { get; set; } = Environment.MachineName;
     public DeviceRole Role { get; set; } = DeviceRole.ManagedOnly;
     public string AgentTokenHash { get; set; } = string.Empty;
+    public Guid? PendingCredentialRotationId { get; set; }
+    public string PendingCredentialRotationPasswordHash { get; set; } = string.Empty;
+    public string PreviousAgentTokenHash { get; set; } = string.Empty;
+    public DateTimeOffset? PreviousAgentTokenExpiresAt { get; set; }
+    public Guid? LastCompletedCredentialRotationId { get; set; }
+    public string LastCompletedCredentialRotationPasswordHash { get; set; } = string.Empty;
     public string MediaSigningKeyProtected { get; set; } = string.Empty;
     public string UpdateHealthTokenProtected { get; set; } = string.Empty;
     public string CoordinatorUrl { get; set; } = string.Empty;

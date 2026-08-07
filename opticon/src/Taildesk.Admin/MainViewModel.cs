@@ -336,7 +336,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await _agents.SetExitNodeAsync(device, token, true, cancellationToken);
             await _headscale.SetDeviceRoleAsync(device.TailnetDeviceId, device.Role, exitNode: true, cancellationToken);
             await Task.Delay(1500, cancellationToken);
-            await _headscale.ApproveAdvertisedRoutesAsync(device.TailnetDeviceId, cancellationToken);
+            await _headscale.ApproveExitNodeRoutesAsync(device.TailnetDeviceId, cancellationToken);
         }
         else
         {
@@ -704,7 +704,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             throw new InvalidOperationException("The coordinator URL must use its Tailscale IPv4 address.");
         }
-        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        using var client = DirectHttp.CreateClient(TimeSpan.FromSeconds(20));
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(coordinator, "/api/v1/registry"));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", SecretProtector.Unprotect(Config.ControllerTokenProtected));
         using var response = await client.SendAsync(request, cancellationToken);
@@ -732,7 +732,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         try
         {
-            var status = await _agents.GetStatusAsync(device, GetAgentToken(device), cancellationToken);
+            DeviceStatusDto status;
+            try
+            {
+                status = await _agents.GetStatusAsync(device, GetAgentToken(device), cancellationToken);
+            }
+            catch (Exception activeCredentialError) when (
+                activeCredentialError is not OperationCanceledException
+                && device.PendingCredentialRotationId.HasValue
+                && !string.IsNullOrWhiteSpace(device.PendingAgentTokenProtected))
+            {
+                try
+                {
+                    status = await _agents.GetStatusAsync(
+                        device,
+                        SecretProtector.Unprotect(device.PendingAgentTokenProtected),
+                        cancellationToken);
+                }
+                catch (Exception pendingCredentialError) when (pendingCredentialError is not OperationCanceledException)
+                {
+                    throw new InvalidOperationException(
+                        $"Neither the active nor pending credential could authenticate. Active: {activeCredentialError.Message} Pending: {pendingCredentialError.Message}",
+                        pendingCredentialError);
+                }
+            }
             device.State = DeviceConnectionState.Online;
             device.LastSeen = DateTimeOffset.UtcNow;
             device.HostName = status.HostName;
@@ -757,13 +780,48 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private async Task RotateOneAsync(DeviceRecord device, CancellationToken cancellationToken)
     {
         var oldToken = GetAgentToken(device);
-        var newToken = SecurityHelpers.CreateToken();
-        var newPassword = SecurityHelpers.CreateHumanPassword();
-        await _agents.RotateCredentialsAsync(device, oldToken, newToken, newPassword, cancellationToken);
+        if (!device.PendingCredentialRotationId.HasValue)
+        {
+            device.PendingCredentialRotationId = Guid.NewGuid();
+            device.PendingAgentTokenProtected = SecretProtector.Protect(SecurityHelpers.CreateToken());
+            device.PendingRustDeskPasswordProtected = SecretProtector.Protect(SecurityHelpers.CreateHumanPassword());
+            device.PendingCredentialRotation = true;
+            await _state.SaveAsync(CancellationToken.None);
+        }
+
+        var operationId = device.PendingCredentialRotationId.Value;
+        var newToken = SecretProtector.Unprotect(device.PendingAgentTokenProtected);
+        var newPassword = SecretProtector.Unprotect(device.PendingRustDeskPasswordProtected);
+        try
+        {
+            await _agents.RotateCredentialsAsync(
+                device, oldToken, operationId, newToken, newPassword, cancellationToken);
+        }
+        catch (Exception oldCredentialError) when (oldToken != newToken && oldCredentialError is not OperationCanceledException)
+        {
+            try
+            {
+                await _agents.RotateCredentialsAsync(
+                    device, newToken, operationId, newToken, newPassword, cancellationToken);
+            }
+            catch (Exception newCredentialError) when (newCredentialError is not OperationCanceledException)
+            {
+                throw new InvalidOperationException(
+                    $"Credential rotation could not be confirmed with either the prior or pending credential. Prior: {oldCredentialError.Message} Pending: {newCredentialError.Message}",
+                    newCredentialError);
+            }
+        }
+
         device.AgentTokenProtected = SecretProtector.Protect(newToken);
         device.RustDeskPasswordProtected = SecretProtector.Protect(newPassword);
+        await _state.SaveAsync(CancellationToken.None);
+
+        await _agents.CommitCredentialRotationAsync(device, newToken, operationId, cancellationToken);
         device.PendingCredentialRotation = false;
-        await _state.SaveAsync(cancellationToken);
+        device.PendingCredentialRotationId = null;
+        device.PendingAgentTokenProtected = string.Empty;
+        device.PendingRustDeskPasswordProtected = string.Empty;
+        await _state.SaveAsync(CancellationToken.None);
     }
 
     private async Task CleanupInactiveHostedInvitationsAsync(CancellationToken cancellationToken)

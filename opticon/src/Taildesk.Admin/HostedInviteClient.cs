@@ -12,7 +12,7 @@ public sealed class HostedInviteClient
 {
     private const string InviteAdminPath = "/opticon/v1/invitations/";
     private readonly AdminState _state;
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(30));
 
     public HostedInviteClient(AdminState state)
     {

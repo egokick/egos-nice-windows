@@ -85,13 +85,30 @@ public sealed class AgentRuntime
         await _state.SaveAsync(cancellationToken);
     }
 
-    public async Task RotateCredentialsAsync(string newAgentToken, string newRustDeskPassword, CancellationToken cancellationToken)
+    public async Task RotateCredentialsAsync(
+        Guid operationId,
+        string newAgentToken,
+        string newRustDeskPassword,
+        CancellationToken cancellationToken)
     {
+        if (operationId == Guid.Empty)
+            throw new InvalidOperationException("Credential rotation requires a non-empty operation ID.");
         if (string.IsNullOrWhiteSpace(newAgentToken) || newAgentToken.Length < 32
             || string.IsNullOrWhiteSpace(newRustDeskPassword) || newRustDeskPassword.Length < 12)
         {
             throw new InvalidOperationException("Replacement credentials do not meet the minimum length.");
         }
+
+        if (_state.Config.PendingCredentialRotationId == operationId
+            || _state.Config.LastCompletedCredentialRotationId == operationId)
+        {
+            if (CredentialRotationState.IsExactAppliedRotation(
+                    _state.Config, operationId, newAgentToken, newRustDeskPassword))
+                return;
+            throw new InvalidOperationException("That credential rotation operation was already used with different credentials.");
+        }
+        if (_state.Config.PendingCredentialRotationId.HasValue)
+            throw new InvalidOperationException("A different credential rotation is awaiting confirmation.");
 
         var rustDesk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RustDesk", "rustdesk.exe");
         if (!File.Exists(rustDesk))
@@ -105,7 +122,14 @@ public sealed class AgentRuntime
             throw new InvalidOperationException("RustDesk rejected the replacement permanent password.");
         }
 
-        _state.Config.AgentTokenHash = SecurityHelpers.HashToken(newAgentToken);
+        CredentialRotationState.Begin(
+            _state.Config, operationId, newAgentToken, newRustDeskPassword, DateTimeOffset.UtcNow);
+        await _state.SaveAsync(cancellationToken);
+    }
+
+    public async Task CommitCredentialRotationAsync(Guid operationId, CancellationToken cancellationToken)
+    {
+        CredentialRotationState.Commit(_state.Config, operationId);
         await _state.SaveAsync(cancellationToken);
     }
 

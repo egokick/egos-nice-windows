@@ -59,6 +59,9 @@ public sealed class DeviceRecord
     public DateTimeOffset EnrolledAt { get; set; } = DateTimeOffset.UtcNow;
     public string Notes { get; set; } = string.Empty;
     public bool PendingCredentialRotation { get; set; }
+    public Guid? PendingCredentialRotationId { get; set; }
+    public string PendingAgentTokenProtected { get; set; } = string.Empty;
+    public string PendingRustDeskPasswordProtected { get; set; } = string.Empty;
     public bool PendingRoleSync { get; set; }
     public List<Guid> AuthorizedControllerIds { get; set; } = [];
 
@@ -212,8 +215,14 @@ public sealed class ExitNodeRequest
 
 public sealed class CredentialRotationRequest
 {
+    public Guid OperationId { get; set; }
     public string NewAgentToken { get; set; } = string.Empty;
     public string NewRustDeskPassword { get; set; } = string.Empty;
+}
+
+public sealed class CredentialRotationCommitRequest
+{
+    public Guid OperationId { get; set; }
 }
 
 public sealed class RoleChangeRequest

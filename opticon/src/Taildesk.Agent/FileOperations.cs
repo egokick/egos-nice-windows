@@ -20,36 +20,27 @@ public sealed class FileOperations
 
     public FileListingDto List(string root, string? relativePath)
     {
-        var fullPath = _paths.Resolve(root, relativePath);
-        if (!Directory.Exists(fullPath))
+        using var directoryLease = _paths.Acquire(root, relativePath);
+        if (!directoryLease.IsDirectory)
         {
             throw new IOException("The requested path is not a directory.");
         }
 
         var entries = new List<FileEntryDto>();
-        foreach (var item in new DirectoryInfo(fullPath).EnumerateFileSystemInfos())
+        foreach (var item in directoryLease.Enumerate())
         {
-            try
+            if (item.IsHiddenOrSystem || item.IsReparsePoint)
             {
-                if ((item.Attributes & (FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint)) != 0)
-                {
-                    continue;
-                }
-
-                var isDirectory = (item.Attributes & FileAttributes.Directory) != 0;
-                entries.Add(new FileEntryDto
-                {
-                    Name = item.Name,
-                    RelativePath = Normalize(Path.GetRelativePath(GetRootPath(root), item.FullName)),
-                    IsDirectory = isDirectory,
-                    Size = isDirectory ? 0 : ((FileInfo)item).Length,
-                    LastWriteTime = item.LastWriteTimeUtc
-                });
+                continue;
             }
-            catch (UnauthorizedAccessException)
+            entries.Add(new FileEntryDto
             {
-                // Skip filesystem entries the service account cannot read.
-            }
+                Name = item.Name,
+                RelativePath = Normalize(Path.Combine(relativePath ?? string.Empty, item.Name)),
+                IsDirectory = item.IsDirectory,
+                Size = item.IsDirectory ? 0 : item.Size,
+                LastWriteTime = item.LastWriteTime
+            });
         }
 
         return new FileListingDto
@@ -60,15 +51,15 @@ public sealed class FileOperations
         };
     }
 
-    public FileStream OpenRead(string root, string relativePath)
+    public Stream OpenRead(string root, string relativePath)
     {
-        var path = _paths.Resolve(root, relativePath);
-        if (!File.Exists(path))
+        var lease = _paths.Acquire(root, relativePath, readFile: true);
+        try { return lease.OpenReadStream(); }
+        catch
         {
-            throw new FileNotFoundException("The requested file was not found.");
+            lease.Dispose();
+            throw;
         }
-
-        return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
 
     public async Task<string> UploadAsync(
@@ -80,22 +71,17 @@ public sealed class FileOperations
         bool overwrite,
         CancellationToken cancellationToken)
     {
-        var directory = _paths.Resolve(root, destinationDirectory);
-        if (!Directory.Exists(directory))
+        using var directoryLease = _paths.Acquire(root, destinationDirectory);
+        if (!directoryLease.IsDirectory)
         {
             throw new DirectoryNotFoundException("The destination directory does not exist.");
         }
+        var directory = directoryLease.FullPath;
 
         var safeName = Path.GetFileName(fileName);
         if (string.IsNullOrWhiteSpace(safeName) || !safeName.Equals(fileName, StringComparison.Ordinal))
         {
             throw new IOException("The file name is invalid.");
-        }
-
-        var destination = _paths.Resolve(root, Path.Combine(destinationDirectory, safeName), mustExist: false);
-        if (!overwrite && File.Exists(destination))
-        {
-            throw new IOException("A file with that name already exists.");
         }
 
         if (expectedLength <= 0 || expectedLength > _config.MaxUploadBytes)
@@ -107,11 +93,12 @@ public sealed class FileOperations
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(Math.Clamp(_config.MaxUploadDurationMinutes, 1, 7 * 24 * 60)));
         await _uploadSlots.WaitAsync(timeout.Token);
-        var temporary = Path.Combine(directory, $".taildesk-upload-{Guid.NewGuid():N}.partial");
+        var temporaryName = $".taildesk-upload-{Guid.NewGuid():N}.partial";
+        PathLease? temporaryLease = null;
         try
         {
-            await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024,
-                             FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.WriteThrough))
+            temporaryLease = directoryLease.CreateFile(temporaryName);
+            await using (var output = temporaryLease.OpenWriteStream())
             {
                 var buffer = new byte[1024 * 1024];
                 long written = 0;
@@ -127,40 +114,54 @@ public sealed class FileOperations
                 await output.FlushAsync(timeout.Token);
             }
 
-            File.Move(temporary, destination, overwrite);
-            return Normalize(Path.GetRelativePath(GetRootPath(root), destination));
+            if (directoryLease.TryOpenChild(safeName, delete: overwrite, out var destinationLease))
+            {
+                using (destinationLease)
+                {
+                    if (!overwrite) throw new IOException("A file with that name already exists.");
+                    if (destinationLease!.IsDirectory) throw new IOException("The upload destination is a directory.");
+                    destinationLease.Delete();
+                }
+            }
+            temporaryLease.RenameTo(directoryLease, safeName);
+            temporaryLease.Dispose();
+            temporaryLease = null;
+            return Normalize(Path.Combine(destinationDirectory, safeName));
         }
         finally
         {
+            if (temporaryLease is not null)
+            {
+                try { temporaryLease.Delete(); } catch { }
+                temporaryLease.Dispose();
+            }
             _uploadSlots.Release();
-            try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
         }
     }
 
     public void CreateDirectory(string root, string relativePath)
     {
-        var path = _paths.Resolve(root, relativePath, mustExist: false);
-        Directory.CreateDirectory(path);
+        var parentPath = Path.GetDirectoryName(relativePath) ?? string.Empty;
+        var directoryName = Path.GetFileName(relativePath);
+        using var parentLease = _paths.Acquire(root, parentPath);
+        if (!parentLease.IsDirectory) throw new DirectoryNotFoundException("The parent directory does not exist.");
+        parentLease.CreateDirectory(directoryName);
+        using var createdLease = parentLease.OpenChild(directoryName);
+        if (!createdLease.IsDirectory) throw new IOException("The requested directory path is occupied by a file.");
     }
 
     public void Delete(string root, string relativePath, bool recursive)
     {
-        var path = _paths.Resolve(root, relativePath);
+        using var lease = _paths.Acquire(root, relativePath, delete: true);
+        var path = lease.FullPath;
         var rootPath = GetRootPath(root);
         if (path.Equals(rootPath, StringComparison.OrdinalIgnoreCase))
         {
             throw new UnauthorizedAccessException("A shared root cannot be deleted.");
         }
 
-        if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-        else
-        {
-            if (recursive) EnsureTreeHasNoReparsePoints(path);
-            Directory.Delete(path, recursive);
-        }
+        if (lease.IsDirectory && recursive) DeleteTree(lease);
+        else lease.Delete();
     }
 
     public string ResolveFile(string root, string relativePath) => _paths.Resolve(root, relativePath);
@@ -169,22 +170,16 @@ public sealed class FileOperations
 
     private static string Normalize(string path) => path.Replace('\\', '/').TrimStart('/');
 
-    private static void EnsureTreeHasNoReparsePoints(string directory)
+    private static void DeleteTree(PathLease directoryLease)
     {
-        var pending = new Stack<string>();
-        pending.Push(directory);
-        while (pending.Count > 0)
+        foreach (var entry in directoryLease.Enumerate())
         {
-            var current = pending.Pop();
-            foreach (var entry in Directory.EnumerateFileSystemEntries(current))
-            {
-                var attributes = File.GetAttributes(entry);
-                if ((attributes & FileAttributes.ReparsePoint) != 0)
-                {
-                    throw new UnauthorizedAccessException("Recursive deletion stops at links and junctions.");
-                }
-                if ((attributes & FileAttributes.Directory) != 0) pending.Push(entry);
-            }
+            if (entry.IsReparsePoint)
+                throw new UnauthorizedAccessException("Recursive deletion stops at links and junctions.");
+            using var childLease = directoryLease.OpenChild(entry.Name, delete: true);
+            if (childLease.IsDirectory) DeleteTree(childLease);
+            else childLease.Delete();
         }
+        directoryLease.Delete();
     }
 }
