@@ -115,6 +115,30 @@ func TestValidBundleArtifactRequiresStableSupportedVersion(t *testing.T) {
 	}
 }
 
+func TestCloudFrontBundleURLIsStrictAndDoesNotNeedFlyVolume(t *testing.T) {
+	artifact := bundleArtifact{
+		Product: "OpticonBundle", Version: "1.2.3", Role: "ManagedOnly", Architecture: "x64",
+		File: "opticon-bundle-1.2.3-managed-win-x64.zip", Size: 1024, SHA256: strings.Repeat("a", 64),
+		DownloadURL: "https://d111111abcdef8.cloudfront.net/opticon/releases/1.2.3/opticon-bundle-1.2.3-managed-win-x64.zip",
+	}
+	if !validCloudFrontDownloadURL(artifact) { t.Fatal("valid immutable CloudFront URL was rejected") }
+	g := &gateway{bundleDir: t.TempDir()}
+	if !g.bundleIsAvailable(artifact) { t.Fatal("CloudFront artifact incorrectly required a Fly-volume copy") }
+	if url := bundleDownloadURL("https://control.example.test", artifact); url != artifact.DownloadURL {
+		t.Fatalf("installer retained Fly URL instead of CloudFront URL: %s", url)
+	}
+	for _, unsafe := range []string{
+		"http://d111111abcdef8.cloudfront.net/opticon/releases/1.2.3/opticon-bundle-1.2.3-managed-win-x64.zip",
+		"https://user:secret@d111111abcdef8.cloudfront.net/opticon/releases/1.2.3/opticon-bundle-1.2.3-managed-win-x64.zip",
+		"https://d111111abcdef8.cloudfront.net/opticon/releases/1.2.3/other.zip",
+		"https://evil.example.test/opticon/releases/1.2.3/opticon-bundle-1.2.3-managed-win-x64.zip",
+		"https://d111111abcdef8.cloudfront.net/opticon/releases/1.2.3/opticon-bundle-1.2.3-managed-win-x64.zip#fragment",
+	} {
+		candidate := artifact; candidate.DownloadURL = unsafe
+		if validCloudFrontDownloadURL(candidate) { t.Fatalf("unsafe URL accepted: %s", unsafe) }
+	}
+}
+
 func TestBundleForRoleRejectsAmbiguousEquivalentRelease(t *testing.T) {
 	root := t.TempDir()
 	bundleDir := filepath.Join(root, "bundles")

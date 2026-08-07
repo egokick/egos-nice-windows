@@ -54,7 +54,7 @@ public sealed class OpticonReleaseClient
             || selected.Sha256.Length != 64 || selected.Sha256.Any(character => !Uri.IsHexDigit(character))
             || Path.GetFileName(selected.File) != selected.File || !selected.File.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The selected Opticon release record has invalid immutable artifact metadata.");
-        var download = new Uri(controlOrigin, "/opticon/artifacts/v1/" + Uri.EscapeDataString(selected.File));
+        var download = ResolveDownloadUri(controlOrigin, selected);
         return new OpticonUpdateRelease(
             selected.Version,
             device.Role,
@@ -72,5 +72,26 @@ public sealed class OpticonReleaseClient
         {
             throw new InvalidDataException($"The release manifest contains an invalid Opticon version for {artifact.File}.", exception);
         }
+    }
+
+    private static Uri ResolveDownloadUri(Uri controlOrigin, ArtifactRecordDto artifact)
+    {
+        // Empty remains the deliberately supported Fly-relative migration path.
+        if (string.IsNullOrWhiteSpace(artifact.DownloadUrl))
+            return new Uri(controlOrigin, "/opticon/artifacts/v1/" + Uri.EscapeDataString(artifact.File));
+
+        if (!Uri.TryCreate(artifact.DownloadUrl, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Fragment)
+            || !uri.Host.EndsWith(".cloudfront.net", StringComparison.OrdinalIgnoreCase)
+            || !uri.Host.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-'))
+            throw new InvalidDataException("The Opticon release manifest contains an unsafe CloudFront download URL.");
+
+        var expectedPath = "/opticon/releases/" + artifact.Version + "/" + Uri.EscapeDataString(artifact.File);
+        if (!uri.AbsolutePath.Equals(expectedPath, StringComparison.Ordinal)
+            || !string.IsNullOrEmpty(uri.Query))
+            throw new InvalidDataException("The Opticon release manifest CloudFront URL does not match its immutable artifact record.");
+        return uri;
     }
 }

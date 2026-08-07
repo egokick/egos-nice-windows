@@ -24,7 +24,7 @@ The primary command center is intentionally an interactive tray application, not
 
 1. Opticon asks Headscale for a tagged, single-use pre-authentication key.
 2. It signs the personalized enrollment material, encrypts it with a random key, and copies a single-use URL with a default 14-day expiry to the clipboard. The decryption key is in the URL fragment, which browsers do not send to Fly.
-3. The recipient opens the URL. The page downloads a tiny `Install-Opticon-<device>.cmd`; they open it and approve UAC. The starter downloads the reusable role-specific Opticon bundle from Fly, verifies its pinned size, SHA-256, and Authenticode signer, then starts Setup. Setup verifies the signed invitation and installs the pinned dependencies.
+3. The recipient opens the URL. The page downloads a tiny `Install-Opticon-<device>.cmd`; they open it and approve UAC. The starter downloads the reusable role-specific Opticon bundle from an immutable CloudFront HTTPS URL, verifies its pinned size, SHA-256, and Authenticode signer, then starts Setup. Setup verifies the signed invitation and installs the pinned dependencies.
 4. The new agent calls the laptop coordinator through its stable Tailscale address. The coordinator consumes the invitation, records the device, and supplies the final device-specific credentials.
 5. Normal remote-control, file, and media traffic goes directly between peers when NAT traversal succeeds. If it cannot, the encrypted WireGuard traffic is relayed through the private DERP endpoint on Fly.
 
@@ -90,7 +90,7 @@ Fly is responsible for:
 - relaying already encrypted WireGuard packets when a direct route is unavailable;
 - helping peers discover public endpoints through STUN;
 - serving the four exact version/hash-pinned Tailscale and RustDesk installer artifacts used as the primary download source;
-- storing reusable, signed role-specific Opticon bundles on the persistent volume and serving them by immutable filename;
+- serving the small public release manifest (the signed reusable role bundles themselves are private S3 objects delivered through CloudFront);
 - temporarily storing opaque encrypted invitation envelopes and serving their time-bounded, single-use landing pages.
 
 Fly is **not** responsible for:
@@ -114,33 +114,22 @@ Prerequisites:
 - The expected IPs in `fly-headscale\config.yaml` still match `flyctl ips list`.
 - The pinned Opticon signing certificate is available in the current user certificate store when rebuilding bundles.
 
-From PowerShell:
+Provision the AWS transport once from an authenticated operator AWS CLI (the
+script refuses every account except `053663732727`):
 
 ```powershell
-$tokenLine = Get-Content 'C:\source\babelfish\.env' |
-    Where-Object { $_ -match '^FLY_API_TOKEN=' } |
-    Select-Object -First 1
-if (-not $tokenLine) { throw 'FLY_API_TOKEN was not found.' }
-
-$env:FLY_API_TOKEN = ($tokenLine -split '=', 2)[1].Trim().Trim('"').Trim("'")
-try {
-    Set-Location 'C:\source\egos-nice-windows\opticon\fly-headscale'
-
-    .\scripts\Build-OpticonBundles.ps1
-    flyctl volumes snapshots create vol_re17jzg9qjylg034 --app taildesk-egokick-control
-    flyctl deploy --remote-only --app taildesk-egokick-control --yes
-    .\scripts\Publish-OpticonBundles.ps1
-    flyctl status --app taildesk-egokick-control
-    flyctl ips list --app taildesk-egokick-control
-    flyctl volumes list --app taildesk-egokick-control
-    Invoke-WebRequest 'https://taildesk-egokick-control.fly.dev/health' -UseBasicParsing
-} finally {
-    Remove-Item Env:\FLY_API_TOKEN -ErrorAction SilentlyContinue
-}
+Set-Location 'C:\source\egos-nice-windows\opticon'
+.\infrastructure\aws\Provision-OpticonReleaseDistribution.ps1
 ```
 
+For every release, run `fly-headscale\scripts\Publish-OpticonBundles.ps1`.
+It reads the Fly token only from the approved operator environment, never
+writes it into the worktree, and deploys Fly only after both S3 objects are
+available and hash-verified through CloudFront. The script prints the selected
+version, object sizes, SHA-256 values, and distribution hostname.
 
-The Docker build intentionally excludes the large Opticon ZIPs. `Build-OpticonBundles.ps1` signs them and updates the manifest; the small gateway deployment publishes that manifest; `Publish-OpticonBundles.ps1` then sends each ZIP in HMAC-authenticated 4 MiB chunks to the persistent Fly volume. The gateway accepts only filenames, sizes, and SHA-256 values already declared in the manifest and exposes a bundle only after full-file hash verification.
+
+The Docker build intentionally excludes large Opticon ZIPs and bundle staging outputs. `Publish-OpticonBundles.ps1` discovers the next immutable S3 version, builds and signs both bundles, uploads with parallel multipart transfer and S3 SHA-256 checksums, verifies CloudFront HEAD, Range, and a full streamed SHA-256, then atomically deploys the Fly manifest containing only those CloudFront URLs. The gateway accepts only HTTPS CloudFront URLs that exactly match the manifest version and safe filename. Legacy Fly-volume bundles are retained but no new bundle is sent through its HMAC chunk endpoint.
 
 Useful diagnostics:
 
