@@ -38,7 +38,7 @@ public sealed class InstallCoordinator
     public InstallCoordinator(InvitePayload invite, string bundleDirectory, IProgress<InstallProgress> progress, bool allowTailscaleReauthentication = false)
     {
         _invite = invite;
-        _bundleDirectory = bundleDirectory;
+        _bundleDirectory = Path.GetFullPath(bundleDirectory);
         _progress = progress;
         _allowTailscaleReauthentication = allowTailscaleReauthentication;
         _userProfile = InteractiveUserProfile.Resolve();
@@ -70,14 +70,18 @@ public sealed class InstallCoordinator
             var agentExecutable = Path.Combine(agentPayload, "Taildesk.Agent.exe");
             if (!File.Exists(agentExecutable))
             {
-                throw new FileNotFoundException("The invitation bundle is incomplete (Payload\\Agent is missing).");
+                throw new FileNotFoundException(
+                    $"The invitation bundle is incomplete (Payload\\Agent is missing from {_bundleDirectory}).",
+                    agentExecutable);
             }
             await InvitationSigning.VerifyAuthenticodeAsync(agentExecutable, cancellationToken);
             var guardianPayload = Path.Combine(_bundleDirectory, "Payload", "UpdateGuardian");
             var guardianExecutable = Path.Combine(guardianPayload, "Taildesk.UpdateGuardian.exe");
             if (!File.Exists(guardianExecutable))
             {
-                throw new FileNotFoundException("The invitation bundle is incomplete (Payload\\UpdateGuardian is missing).");
+                throw new FileNotFoundException(
+                    $"The invitation bundle is incomplete (Payload\\UpdateGuardian is missing from {_bundleDirectory}).",
+                    guardianExecutable);
             }
             await InvitationSigning.VerifyAuthenticodeAsync(guardianExecutable, cancellationToken);
             if (_invite.Role == DeviceRole.ControllerAndManaged)

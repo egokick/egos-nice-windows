@@ -421,9 +421,11 @@ static void TestReleaseDistributionDesign()
            && hostedBootstrap.Contains("IsPublishedBootstrap", StringComparison.Ordinal)
            && setupWindow.Contains("GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)", StringComparison.Ordinal)
            && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal)
+           && setupWindow.Contains("new InstallCoordinator(_invite!, AppContext.BaseDirectory", StringComparison.Ordinal)
+           && !setupWindow.Contains("new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)", StringComparison.Ordinal)
            && setupWindow.Contains("private-key-redacted", StringComparison.Ordinal)
            && setupWindow.Contains("DetailsExpander.IsExpanded = true", StringComparison.Ordinal),
-        "hosted bootstrap handoff or redacted persistent Setup diagnostics regressed");
+        "hosted bootstrap handoff, executable-relative payload lookup, or redacted persistent Setup diagnostics regressed");
     Assert(gateway.Contains("await fetch(", StringComparison.Ordinal)
            && gateway.Contains("URL.createObjectURL(blob)", StringComparison.Ordinal)
            && gateway.Contains("buildBootstrapStarterCommand", StringComparison.Ordinal)

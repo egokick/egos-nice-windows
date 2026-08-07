@@ -141,7 +141,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                var installer = new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)!, progress);
+                var installer = new InstallCoordinator(_invite!, AppContext.BaseDirectory, progress);
                 await installer.InstallAsync(_cancellation.Token);
                 StatusText.Text = "Connected. This machine is ready.";
             }
@@ -165,7 +165,7 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var installer = new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)!, progress, allowTailscaleReauthentication: true);
+                    var installer = new InstallCoordinator(_invite!, AppContext.BaseDirectory, progress, allowTailscaleReauthentication: true);
                     await installer.InstallAsync(_cancellation.Token);
                     AppendLog("Setup finished successfully.");
                     InstallProgress.Value = 100;
