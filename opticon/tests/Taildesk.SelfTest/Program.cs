@@ -35,6 +35,7 @@ var tests = new (string Name, Action Body)[]
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
     ("path guard permits a child and blocks traversal", TestPathGuard),
     ("WPF style templates match their control target types", TestWpfStyleTemplateTargets),
+    ("WPF controls keep explicit accessible foreground/background pairs", TestWpfContrastContract),
     ("DPAPI current-user and machine scopes round-trip", TestDpapi)
 };
 
@@ -499,6 +500,169 @@ static void TestWpfStyleTemplateTargets()
             Assert(templateTarget == styleTarget, $"{styleTarget} style contains a {templateTarget} control template");
         }
     }
+}
+
+static void TestWpfContrastContract()
+{
+    var adminPath = FindSourceFile("src", "Taildesk.Admin", "App.xaml");
+    var setupPath = FindSourceFile("src", "Taildesk.Setup", "App.xaml");
+    var admin = XDocument.Load(adminPath);
+    var setup = XDocument.Load(setupPath);
+    XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+    static string TargetType(XElement style) =>
+        NormalizeTargetType(style.Attribute("TargetType")?.Value ?? string.Empty);
+    static bool HasDirectSetter(XElement style, string property) =>
+        style.Elements().Any(element => element.Name.LocalName == "Setter"
+                                        && element.Attribute("Property")?.Value == property);
+    static XElement RequireImplicitStyle(XDocument document, XNamespace xaml, string targetType)
+    {
+        var style = document.Descendants().FirstOrDefault(element =>
+            element.Name.LocalName == "Style"
+            && TargetType(element) == targetType
+            && element.Attribute(xaml + "Key") is null);
+        return style ?? throw new InvalidOperationException($"{targetType} has no implicit application style");
+    }
+    static void RequireColorPair(XElement style, string label)
+    {
+        Assert(HasDirectSetter(style, "Background") && HasDirectSetter(style, "Foreground"),
+            $"{label} must set both Background and Foreground");
+    }
+    static void RequireTriggerColorPair(XElement style, string property, string value, string label)
+    {
+        var trigger = style.Descendants().FirstOrDefault(element =>
+            element.Name.LocalName == "Trigger"
+            && element.Attribute("Property")?.Value == property
+            && element.Attribute("Value")?.Value == value);
+        Assert(trigger is not null
+               && HasDirectSetter(trigger, "Background")
+               && HasDirectSetter(trigger, "Foreground"),
+            $"{label} must replace both Background and Foreground");
+    }
+
+    var adminText = File.ReadAllText(adminPath);
+    var setupText = File.ReadAllText(setupPath);
+    Assert(!adminText.Contains("SystemColors", StringComparison.Ordinal)
+           && !setupText.Contains("SystemColors", StringComparison.Ordinal),
+        "fixed dark WPF canvases must not consume independently changing Windows theme colors");
+
+    foreach (var targetType in new[]
+             {
+                 "Button", "TextBox", "PasswordBox", "ComboBox", "CheckBox", "ListBox",
+                 "ListBoxItem", "ContextMenu", "MenuItem", "DataGrid", "DataGridColumnHeader",
+             })
+    {
+        var style = RequireImplicitStyle(admin, x, targetType);
+        RequireColorPair(style, targetType);
+    }
+    foreach (var targetType in new[] { "DataGridCell", "DataGridRow" })
+    {
+        Assert(HasDirectSetter(RequireImplicitStyle(admin, x, targetType), "Foreground"),
+            $"{targetType} must set Foreground; its background is supplied by DataGrid row/alternation states");
+    }
+
+    foreach (var templatedType in new[] { "Button", "ComboBox", "CheckBox" })
+    {
+        var style = RequireImplicitStyle(admin, x, templatedType);
+        Assert(style.Descendants().Any(element =>
+                element.Name.LocalName == "ControlTemplate" && TargetType(element) == templatedType),
+            $"{templatedType} must own its template instead of inheriting Windows theme text colors");
+    }
+
+    var primaryButton = admin.Descendants().FirstOrDefault(element =>
+        element.Name.LocalName == "Style" && element.Attribute(x + "Key")?.Value == "PrimaryButton")
+        ?? throw new InvalidOperationException("PrimaryButton style was not found");
+    RequireTriggerColorPair(primaryButton, "IsMouseOver", "True", "PrimaryButton hover");
+    RequireTriggerColorPair(primaryButton, "IsPressed", "True", "PrimaryButton pressed");
+    RequireTriggerColorPair(primaryButton, "IsEnabled", "False", "PrimaryButton disabled");
+
+    var pairedStates = new[]
+    {
+        (Type: "ListBoxItem", Property: "IsMouseOver", Value: "True"),
+        (Type: "ListBoxItem", Property: "IsSelected", Value: "True"),
+        (Type: "MenuItem", Property: "IsHighlighted", Value: "True"),
+        (Type: "DataGridColumnHeader", Property: "IsMouseOver", Value: "True"),
+        (Type: "DataGridColumnHeader", Property: "IsPressed", Value: "True"),
+        (Type: "DataGridCell", Property: "IsSelected", Value: "True"),
+        (Type: "DataGridRow", Property: "IsSelected", Value: "True")
+    };
+    foreach (var state in pairedStates)
+        RequireTriggerColorPair(RequireImplicitStyle(admin, x, state.Type), state.Property, state.Value,
+            $"{state.Type} {state.Property}");
+
+    var setupButton = RequireImplicitStyle(setup, x, "Button");
+    RequireColorPair(setupButton, "Setup Button");
+    Assert(setupButton.Descendants().Any(element =>
+            element.Name.LocalName == "ContentPresenter"
+            && element.Attributes().Any(attribute => attribute.Name.LocalName is "Foreground" or "TextElement.Foreground")),
+        "Setup button content must bind the explicit foreground into its template");
+    RequireTriggerColorPair(setupButton, "IsMouseOver", "True", "Setup button hover");
+    RequireTriggerColorPair(setupButton, "IsPressed", "True", "Setup button pressed");
+
+    var brushes = admin.Descendants()
+        .Where(element => element.Name.LocalName == "SolidColorBrush" && element.Attribute(x + "Key") is not null)
+        .ToDictionary(element => element.Attribute(x + "Key")!.Value,
+            element => element.Attribute("Color")?.Value ?? string.Empty, StringComparer.Ordinal);
+    foreach (var pair in new[]
+             {
+                 (Foreground: "TextBrush", Background: "WindowBrush"),
+                 (Foreground: "TextBrush", Background: "RailBrush"),
+                 (Foreground: "TextBrush", Background: "PanelBrush"),
+                 (Foreground: "TextBrush", Background: "PanelAltBrush"),
+                 (Foreground: "TextBrush", Background: "ControlBrush"),
+                 (Foreground: "TextBrush", Background: "ControlHoverBrush"),
+                 (Foreground: "TextBrush", Background: "ControlPressedBrush"),
+                 (Foreground: "TextBrush", Background: "InputBrush"),
+                 (Foreground: "TextBrush", Background: "SelectionBrush"),
+                 (Foreground: "MutedBrush", Background: "WindowBrush"),
+                 (Foreground: "MutedBrush", Background: "PanelBrush"),
+                 (Foreground: "OnAccentBrush", Background: "AccentBrush"),
+                 (Foreground: "OnAccentBrush", Background: "AccentHoverBrush"),
+                 (Foreground: "OnAccentBrush", Background: "AccentPressedBrush"),
+                 (Foreground: "OnLightSurfaceBrush", Background: "LightSurfaceBrush"),
+                 (Foreground: "OnLightSurfaceBrush", Background: "LightSurfaceHoverBrush")
+             })
+    {
+        var ratio = ContrastRatio(brushes[pair.Foreground], brushes[pair.Background]);
+        Assert(ratio >= 4.5,
+            $"{pair.Foreground} on {pair.Background} has only {ratio:F2}:1 contrast");
+    }
+}
+
+static string FindSourceFile(params string[] parts)
+{
+    foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+    {
+        var directory = new DirectoryInfo(start);
+        while (directory is not null)
+        {
+            var candidate = Path.Combine([directory.FullName, .. parts]);
+            if (File.Exists(candidate)) return candidate;
+            directory = directory.Parent;
+        }
+    }
+    throw new InvalidOperationException($"Source file was not found: {Path.Combine(parts)}");
+}
+
+static double ContrastRatio(string foreground, string background)
+{
+    static double Luminance(string color)
+    {
+        var hex = color.TrimStart('#');
+        if (hex.Length == 8) hex = hex[2..];
+        Assert(hex.Length == 6, $"unsupported color value: {color}");
+        static double Channel(string value)
+        {
+            var component = Convert.ToInt32(value, 16) / 255d;
+            return component <= 0.04045 ? component / 12.92 : Math.Pow((component + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * Channel(hex[..2]) + 0.7152 * Channel(hex[2..4]) + 0.0722 * Channel(hex[4..6]);
+    }
+
+    var foregroundLuminance = Luminance(foreground);
+    var backgroundLuminance = Luminance(background);
+    return (Math.Max(foregroundLuminance, backgroundLuminance) + 0.05)
+           / (Math.Min(foregroundLuminance, backgroundLuminance) + 0.05);
 }
 
 static void TestOpenSshRecoveryDesign()

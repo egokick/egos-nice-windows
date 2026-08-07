@@ -9,6 +9,9 @@
         <SolidColorBrush x:Key="AccentBrush" Color="#52D39A" />
         <SolidColorBrush x:Key="TextBrush" Color="#EDF1F5" />
         <SolidColorBrush x:Key="MutedBrush" Color="#9AA5AF" />
+        <SolidColorBrush x:Key="AccentHoverBrush" Color="#6BE0AD" />
+        <SolidColorBrush x:Key="AccentPressedBrush" Color="#3FBA84" />
+        <SolidColorBrush x:Key="OnAccentBrush" Color="#08130E" />
         <Style TargetType="Window">
             <Setter Property="Background" Value="{StaticResource WindowBrush}" />
             <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
@@ -16,11 +19,48 @@
         </Style>
         <Style TargetType="Button">
             <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-            <Setter Property="Foreground" Value="#08130E" />
+            <Setter Property="Foreground" Value="{StaticResource OnAccentBrush}" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="18,9" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBorder" Background="{TemplateBinding Background}" CornerRadius="2">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              Content="{TemplateBinding Content}"
+                                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                                              ContentStringFormat="{TemplateBinding ContentStringFormat}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"
+                                              RecognizesAccessKey="True" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+                    <Setter Property="Foreground" Value="{StaticResource OnAccentBrush}" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />
+                    <Setter Property="Foreground" Value="{StaticResource OnAccentBrush}" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+                    <Setter Property="Opacity" Value="0.58" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="ProgressBar">
+            <Setter Property="Background" Value="#0D0F12" />
+            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
         </Style>
     </Application.Resources>
 </Application>
