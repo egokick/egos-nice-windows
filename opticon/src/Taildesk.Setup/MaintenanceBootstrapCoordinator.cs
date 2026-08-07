@@ -318,8 +318,18 @@ internal sealed class MaintenanceBootstrapCoordinator
             throw new InvalidDataException("The signed release does not match this enrolled device role, architecture, or update protocol.");
         var current = UpdatePackageVerifier.ParseVersion(currentVersion);
         var target = UpdatePackageVerifier.ParseVersion(manifest.Version);
-        if (target <= current)
-            throw new InvalidOperationException($"Maintenance requires a newer Agent; installed is {currentVersion}, bundle is {manifest.Version}.");
+        if (target < current)
+            throw new InvalidOperationException($"Maintenance cannot downgrade the Agent; installed is {currentVersion}, bundle is {manifest.Version}.");
+        if (target == current)
+        {
+            var installedGuardian = Path.Combine(
+                AppPaths.UpdateGuardianInstallDirectory,
+                "Taildesk.UpdateGuardian.exe");
+            if (!File.Exists(installedGuardian)
+                || UpdatePackageVerifier.ParseVersion(ReadVersion(installedGuardian, "installed Guardian")) >= target)
+                throw new InvalidOperationException(
+                    $"Maintenance requires a newer Agent or Guardian; both installed components already match {currentVersion}.");
+        }
         _ = UpdatePackageVerifier.ParseVersion(manifest.MinimumGuardianVersion);
     }
 
@@ -390,6 +400,8 @@ internal sealed class MaintenanceBootstrapCoordinator
         {
             if (!File.Exists(installedExecutable))
                 throw new InvalidDataException("An incomplete existing Guardian installation blocks maintenance; it was not overwritten.");
+            await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
+            await StableGuardianMaintenance.UpgradeIfOlderAsync(sourceDirectory, destination, cancellationToken);
             await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
             ValidateGuardianVersion(installedExecutable, manifest.MinimumGuardianVersion);
             return;

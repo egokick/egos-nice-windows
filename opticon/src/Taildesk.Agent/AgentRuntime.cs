@@ -44,6 +44,7 @@ public sealed class AgentRuntime
             OperatingSystem = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
             Architecture = UpdateManager.CurrentArchitecture,
             AgentVersion = UpdateManager.CurrentVersion,
+            GuardianVersion = GetInstalledGuardianVersion(),
             UpdateProtocolVersion = RemoteAdministrationProtocol.UpdateVersion,
             TailscaleIp = tailscale.Ip,
             TailnetDeviceId = tailscale.DeviceId,
@@ -58,6 +59,23 @@ public sealed class AgentRuntime
             ServerTime = DateTimeOffset.UtcNow,
             UpdateStatus = _updates.GetStatus()
         };
+    }
+
+    private static string GetInstalledGuardianVersion()
+    {
+        var executable = Path.Combine(
+            AppPaths.UpdateGuardianInstallDirectory,
+            "Taildesk.UpdateGuardian.exe");
+        if (!File.Exists(executable)) return string.Empty;
+        try
+        {
+            return UpdatePackageVerifier.NormalizeVersion(
+                FileVersionInfo.GetVersionInfo(executable).ProductVersion ?? string.Empty);
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     public async Task SetExitNodeAdvertisementAsync(bool enabled, CancellationToken cancellationToken)

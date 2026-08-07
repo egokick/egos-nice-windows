@@ -51,8 +51,17 @@ public sealed class AgentClient
         var temporary = localPath + ".taildesk-partial";
         try
         {
-            await using var output = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, true);
-            await CopyWithProgressAsync(input, output, total, progress, cancellationToken);
+            await using (var output = new FileStream(
+                             temporary,
+                             FileMode.Create,
+                             FileAccess.Write,
+                             FileShare.None,
+                             1024 * 1024,
+                             true))
+            {
+                await CopyWithProgressAsync(input, output, total, progress, cancellationToken);
+                await output.FlushAsync(cancellationToken);
+            }
             File.Move(temporary, localPath, true);
         }
         finally

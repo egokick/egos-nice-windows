@@ -490,8 +490,8 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
                     reconstructed.StandardOutput.Trim() + Environment.NewLine,
                     cancellationToken);
             }
-            await RestrictPathAsync(_hostKeyPath, directory: false, cancellationToken);
-            await RestrictPathAsync(_hostKeyPath + ".pub", directory: false, cancellationToken);
+            await RestrictDaemonReadablePathAsync(_hostKeyPath, cancellationToken);
+            await RestrictDaemonReadablePathAsync(_hostKeyPath + ".pub", cancellationToken);
 
             var expectedConfig = BuildSshdConfig();
             var configChanged = !File.Exists(_sshdConfigPath)
@@ -503,7 +503,7 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
                 await WriteAtomicTextAsync(_sshdConfigPath, expectedConfig, cancellationToken);
             else if (configChanged)
                 configChanged = false; // Defer config replacement until active recovery sessions end.
-            await RestrictPathAsync(_sshdConfigPath, directory: false, cancellationToken);
+            await RestrictDaemonReadablePathAsync(_sshdConfigPath, cancellationToken);
 
             if (!File.Exists(_authorizedKeysPath))
                 await WriteAtomicTextAsync(_authorizedKeysPath, string.Empty, cancellationToken);
@@ -957,6 +957,41 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
             TimeSpan.FromSeconds(20),
             cancellationToken);
         EnsureSuccess(result, $"Opticon could not protect {Path.GetFileName(path)} for SYSTEM and Administrators");
+    }
+
+    // The isolated daemon runs with an elevated token whose Administrators SID
+    // is enabled. Windows OpenSSH rejects a host private key when the daemon's
+    // named user has a direct ACE, even if that ACE is read-only, so runtime
+    // inputs use only the well-known SYSTEM and Administrators principals.
+    private async Task RestrictDaemonReadablePathAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        RequireExactSystemExecutable(_icaclsPath, "Windows ACL tool");
+        var existing = ReadLocalUser();
+        if (existing is not null && string.Equals(existing.Value.Comment, ManagedAccountComment, StringComparison.Ordinal))
+        {
+            var accountSid = ((SecurityIdentifier)new NTAccount(Environment.MachineName, AccountName)
+                .Translate(typeof(SecurityIdentifier))).Value;
+            var removed = await ProcessRunner.RunAsync(
+                _icaclsPath,
+                [path, "/remove:g", $"*{accountSid}"],
+                TimeSpan.FromSeconds(20),
+                cancellationToken);
+            EnsureSuccess(removed, $"Opticon could not remove the named daemon ACE from {Path.GetFileName(path)}");
+        }
+
+        var restricted = await ProcessRunner.RunAsync(
+            _icaclsPath,
+            [
+                path,
+                "/inheritance:r",
+                "/grant:r", "*S-1-5-18:F",
+                "/grant:r", "*S-1-5-32-544:F"
+            ],
+            TimeSpan.FromSeconds(20),
+            cancellationToken);
+        EnsureSuccess(restricted, $"Opticon could not protect {Path.GetFileName(path)} for SYSTEM and Administrators");
     }
 
     private async Task RestrictStateDirectoryAsync(CancellationToken cancellationToken)

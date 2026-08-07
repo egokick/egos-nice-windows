@@ -490,11 +490,11 @@ internal sealed class SshSupervisor : IAsyncDisposable
             throw new FileNotFoundException("The Agent has not provisioned the isolated SSH host key.", _hostKeyPath);
         RejectReparsePoint(_hostKeyPath, "SSH host private key");
         RejectReparsePoint(_hostKeyPath + ".pub", "SSH host public key");
-        await RestrictSystemOnlyAsync(_hostKeyPath, directory: false, cancellationToken);
-        await RestrictSystemOnlyAsync(_hostKeyPath + ".pub", directory: false, cancellationToken);
+        await RestrictDaemonReadableAsync(_hostKeyPath, cancellationToken);
+        await RestrictDaemonReadableAsync(_hostKeyPath + ".pub", cancellationToken);
 
         await WriteAtomicTextIfChangedAsync(_configPath, config, cancellationToken);
-        await RestrictSystemOnlyAsync(_configPath, directory: false, cancellationToken);
+        await RestrictDaemonReadableAsync(_configPath, cancellationToken);
         await RestrictAuthorizedKeysAsync(_authorizedKeysPath, cancellationToken);
         await RestrictSystemOnlyAsync(_statePath, directory: false, cancellationToken);
 
@@ -1070,9 +1070,6 @@ internal sealed class SshSupervisor : IAsyncDisposable
             $"*{accountSid}:RX",
             directory: true,
             cancellationToken);
-        foreach (var path in new[] { _configPath, _hostKeyPath, _hostKeyPath + ".pub" })
-            await ApplyRuntimeAclAsync(path, $"*{accountSid}:R", directory: false, cancellationToken);
-
         await EnsureDaemonLogAccessAsync(accountSid, cancellationToken);
     }
 
@@ -1223,6 +1220,40 @@ internal sealed class SshSupervisor : IAsyncDisposable
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 $"Windows could not protect {Path.GetFileName(path)} for SYSTEM and Administrators: {result.ErrorDetail}");
+    }
+
+    // The daemon's full token has the built-in Administrators SID enabled.
+    // Granting its named account a direct host-key ACE makes Windows OpenSSH
+    // reject the private key as unprotected, so remove legacy named grants and
+    // authorize only the two well-known administrative principals.
+    private async Task RestrictDaemonReadableAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        RequireExactSystemExecutable(_icaclsPath, "Windows ACL tool");
+        var accountSid = GetManagedAccountSid();
+        var removed = await WindowsCommand.RunAsync(
+            _icaclsPath,
+            [path, "/remove:g", $"*{accountSid}"],
+            TimeSpan.FromSeconds(20),
+            cancellationToken);
+        if (!removed.Succeeded)
+            throw new InvalidOperationException(
+                $"Windows could not remove the named daemon ACE from {Path.GetFileName(path)}: {removed.ErrorDetail}");
+
+        var restricted = await WindowsCommand.RunAsync(
+            _icaclsPath,
+            [
+                path,
+                "/inheritance:r",
+                "/grant:r", "*S-1-5-18:F",
+                "/grant:r", "*S-1-5-32-544:F"
+            ],
+            TimeSpan.FromSeconds(20),
+            cancellationToken);
+        if (!restricted.Succeeded)
+            throw new InvalidOperationException(
+                $"Windows could not protect {Path.GetFileName(path)} for SYSTEM and Administrators: {restricted.ErrorDetail}");
     }
     private async Task RestrictSystemOnlyAsync(
         string path,

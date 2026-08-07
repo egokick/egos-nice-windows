@@ -739,6 +739,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             device.OperatingSystem = status.OperatingSystem;
             device.Architecture = status.Architecture;
             device.AgentVersion = status.AgentVersion;
+            device.GuardianVersion = status.GuardianVersion;
             device.UpdateProtocolVersion = status.UpdateProtocolVersion;
             device.AdvertisesExitNode = status.AdvertisesExitNode;
             device.RustDeskReady = status.RustDeskReady;

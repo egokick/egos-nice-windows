@@ -15,6 +15,8 @@ public sealed record OpticonUpdateRelease(
 
 public sealed class OpticonReleaseClient
 {
+    private static readonly Version GuardianSshAclMaintenanceVersion = new(1, 1, 23);
+
     private readonly HttpClient _http = new(new HttpClientHandler { CheckCertificateRevocationList = true })
     {
         Timeout = TimeSpan.FromSeconds(45)
@@ -39,17 +41,23 @@ public sealed class OpticonReleaseClient
 
         var architecture = string.IsNullOrWhiteSpace(device.Architecture) ? "x64" : device.Architecture.ToLowerInvariant();
         var current = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
+        var installedGuardian = ParseInstalledGuardianVersion(device.GuardianVersion);
+        var requiresGuardianMaintenance = installedGuardian < GuardianSshAclMaintenanceVersion;
         var candidates = manifest.Artifacts
             .Where(artifact => artifact.Product.Equals("OpticonBundle", StringComparison.Ordinal)
                                && artifact.Role == device.Role
                                && artifact.Architecture.Equals(architecture, StringComparison.OrdinalIgnoreCase))
             .Select(artifact => (Artifact: artifact, Version: ParseArtifactVersion(artifact)))
-            .Where(candidate => candidate.Version > current)
+            .Where(candidate => candidate.Version > current
+                                || (candidate.Version == current
+                                    && candidate.Version >= GuardianSshAclMaintenanceVersion
+                                    && requiresGuardianMaintenance))
             .OrderByDescending(candidate => candidate.Version)
             .ToArray();
         if (candidates.Length == 0) return null;
 
-        var selected = candidates[0].Artifact;
+        var selectedCandidate = candidates[0];
+        var selected = selectedCandidate.Artifact;
         if (selected.Size is < 1024 or > 1024L * 1024 * 1024
             || selected.Sha256.Length != 64 || selected.Sha256.Any(character => !Uri.IsHexDigit(character))
             || Path.GetFileName(selected.File) != selected.File || !selected.File.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
@@ -62,7 +70,14 @@ public sealed class OpticonReleaseClient
             download,
             selected.Size,
             selected.Sha256.ToLowerInvariant(),
-            device.UpdateProtocolVersion < RemoteAdministrationProtocol.UpdateVersion);
+            device.UpdateProtocolVersion < RemoteAdministrationProtocol.UpdateVersion
+            || (selectedCandidate.Version >= GuardianSshAclMaintenanceVersion && requiresGuardianMaintenance));
+    }
+
+    private static Version ParseInstalledGuardianVersion(string value)
+    {
+        try { return UpdatePackageVerifier.ParseVersion(value); }
+        catch (InvalidDataException) { return new Version(0, 0, 0); }
     }
 
     private static Version ParseArtifactVersion(ArtifactRecordDto artifact)

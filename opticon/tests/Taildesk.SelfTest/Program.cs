@@ -417,6 +417,10 @@ static void TestReleaseDistributionDesign()
            && gateway.Contains("writeFileAtomically", StringComparison.Ordinal)
            && client.Contains(".cloudfront.net", StringComparison.Ordinal),
         "manifest clients do not tightly validate CloudFront download URLs");
+    Assert(client.Contains("GuardianSshAclMaintenanceVersion = new(1, 1, 23)", StringComparison.Ordinal)
+           && client.Contains("candidate.Version == current", StringComparison.Ordinal)
+           && client.Contains("requiresGuardianMaintenance", StringComparison.Ordinal),
+        "the 1.1.23 release boundary must offer attended Guardian repair even after the Agent already reached that version");
     Assert(agent.Contains("UseProxy = false", StringComparison.Ordinal)
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
@@ -800,6 +804,11 @@ static void TestOpenSshRecoveryDesign()
     Assert(agentClient.Contains("UseProxy = false", StringComparison.Ordinal)
            && agentClient.Contains("AllowAutoRedirect = false", StringComparison.Ordinal),
         "authenticated Agent requests must bypass proxies and refuse redirects");
+    var downloadFlush = agentClient.IndexOf("await output.FlushAsync", StringComparison.Ordinal);
+    var downloadMove = agentClient.IndexOf("File.Move(temporary, localPath", StringComparison.Ordinal);
+    var downloadStreamScopeEnd = agentClient.LastIndexOf('}', downloadMove);
+    Assert(downloadFlush >= 0 && downloadStreamScopeEnd > downloadFlush && downloadMove > downloadStreamScopeEnd,
+        "downloads must flush and dispose the exclusive partial-file stream before atomically promoting it");
 
     var cli = ReadSource("src", "Taildesk.Cli", "Program.cs");
     Assert(cli.Contains("Volatile.Read(ref interactiveSshAttached)", StringComparison.Ordinal)
@@ -834,6 +843,9 @@ static void TestOpenSshRecoveryDesign()
     Assert(manager.Contains("*S-1-5-18:F", StringComparison.Ordinal)
            && manager.Contains("*S-1-5-32-544:F", StringComparison.Ordinal),
         "administrator authorized_keys ACL must allow only SYSTEM and built-in Administrators");
+    Assert(manager.Contains("RestrictDaemonReadablePathAsync", StringComparison.Ordinal)
+           && manager.Contains("/remove:g", StringComparison.Ordinal),
+        "Agent SSH preflight must remove legacy named daemon ACEs from host-key inputs");
     Assert(manager.Contains("RequireSystemOpenSshExecutable", StringComparison.Ordinal)
            && !manager.Contains("FindOnPath", StringComparison.Ordinal),
         "SYSTEM SSH binaries must use exact System32 paths");
@@ -877,12 +889,21 @@ static void TestOpenSshRecoveryDesign()
         "fresh Setup must prove Guardian compatibility before changing recovery or network state");
     Assert(setup.Contains("SupportsGuardianWatchdog(installedVersion)", StringComparison.Ordinal)
            && !setup.Contains("if (installedVersion < sourceVersion)", StringComparison.Ordinal),
-        "fresh Setup must retain an older signed Guardian that supports the watchdog contract");
+        "fresh Setup must verify the installed Guardian against the watchdog contract after attended maintenance");
+    var stableGuardianMaintenance = ReadSource("src", "Taildesk.Setup", "StableGuardianMaintenance.cs");
+    Assert(stableGuardianMaintenance.Contains("UpdateJournalCoordination.AcquireAsync", StringComparison.Ordinal)
+           && stableGuardianMaintenance.Contains("InvitationSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
+           && stableGuardianMaintenance.Contains("File.Replace(staged, installed, backup", StringComparison.Ordinal)
+           && stableGuardianMaintenance.Contains("File.Replace(backup, installedExecutable, failed", StringComparison.Ordinal),
+        "attended Setup must atomically upgrade and roll back an older signed stable Guardian outside active updates");
     var setupWatchdogSettings = setup[setup.IndexOf("var watchdogSettings", StringComparison.Ordinal)..setup.IndexOf("var guardianTaskSettings", StringComparison.Ordinal)];
     Assert(!setupWatchdogSettings.Contains("StartWhenAvailable", StringComparison.Ordinal),
         "the recurring watchdog must not queue missed StartWhenAvailable runs");
 
     var maintenance = ReadSource("src", "Taildesk.Setup", "MaintenanceBootstrapCoordinator.cs");
+    Assert(maintenance.Contains("target == current", StringComparison.Ordinal)
+           && maintenance.Contains("Maintenance requires a newer Agent or Guardian", StringComparison.Ordinal),
+        "attended maintenance must permit a same-release Agent transaction only to repair an older Guardian");
     Assert(maintenance.Contains("Environment.ProcessPath", StringComparison.Ordinal)
            && maintenance.Contains("VerifyAuthenticodeAsync(setupExecutable", StringComparison.Ordinal)
            && maintenance.Contains("setupVersion.Equals", StringComparison.Ordinal),
@@ -1065,6 +1086,13 @@ static void TestOpenSshRecoveryDesign()
            && supervisor.Contains("MaximumArchivedLogBytes", StringComparison.Ordinal)
            && supervisor.Contains("LogLevel INFO", StringComparison.Ordinal),
         "Guardian teardown and SSH logging must remain bounded and fail-closed");
+    var runtimeAclStart = supervisor.IndexOf("private async Task GrantDaemonRuntimeAccessAsync", StringComparison.Ordinal);
+    var runtimeAclEnd = supervisor.IndexOf("private async Task RotateDaemonLogAsync", runtimeAclStart, StringComparison.Ordinal);
+    Assert(runtimeAclStart >= 0 && runtimeAclEnd > runtimeAclStart
+           && !supervisor[runtimeAclStart..runtimeAclEnd].Contains("_hostKeyPath", StringComparison.Ordinal)
+           && supervisor.Contains("RestrictDaemonReadableAsync", StringComparison.Ordinal)
+           && supervisor.Contains("/remove:g", StringComparison.Ordinal),
+        "Guardian must let the elevated daemon read host keys through Administrators without a rejected named-user ACE");
 
     var app = ReadSource("src", "Taildesk.Admin", "App.xaml.cs");
     var viewModel = ReadSource("src", "Taildesk.Admin", "MainViewModel.cs");

@@ -42,6 +42,7 @@ public sealed class DeviceRecord
     public string OperatingSystem { get; set; } = string.Empty;
     public string Architecture { get; set; } = string.Empty;
     public string AgentVersion { get; set; } = string.Empty;
+    public string GuardianVersion { get; set; } = string.Empty;
     public int UpdateProtocolVersion { get; set; }
     public string AgentTokenProtected { get; set; } = string.Empty;
     public string RustDeskPasswordProtected { get; set; } = string.Empty;
@@ -147,6 +148,7 @@ public sealed class DeviceStatusDto
     public string OperatingSystem { get; set; } = string.Empty;
     public string Architecture { get; set; } = string.Empty;
     public string AgentVersion { get; set; } = string.Empty;
+    public string GuardianVersion { get; set; } = string.Empty;
     public int UpdateProtocolVersion { get; set; }
     public string TailscaleIp { get; set; } = string.Empty;
     public string TailnetDeviceId { get; set; } = string.Empty;
