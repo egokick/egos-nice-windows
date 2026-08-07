@@ -149,6 +149,7 @@ internal sealed class SshSupervisor : IAsyncDisposable
         catch (Exception exception)
         {
             Console.Error.WriteLine("Opticon SSH supervisor failed: " + exception);
+            await supervisor.WriteFailureAsync(exception);
             await supervisor.FailClosedAsync();
             return 1;
         }

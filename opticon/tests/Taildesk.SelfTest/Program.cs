@@ -418,10 +418,10 @@ static void TestReleaseDistributionDesign()
            && gateway.Contains("writeFileAtomically", StringComparison.Ordinal)
            && client.Contains(".cloudfront.net", StringComparison.Ordinal),
         "manifest clients do not tightly validate CloudFront download URLs");
-    Assert(client.Contains("GuardianSshAclMaintenanceVersion = new(1, 1, 23)", StringComparison.Ordinal)
+    Assert(client.Contains("GuardianSshMaintenanceVersion = new(1, 1, 28)", StringComparison.Ordinal)
            && client.Contains("candidate.Version == current", StringComparison.Ordinal)
            && client.Contains("requiresGuardianMaintenance", StringComparison.Ordinal),
-        "the 1.1.23 release boundary must offer attended Guardian repair even after the Agent already reached that version");
+        "the 1.1.28 release boundary must offer attended Guardian repair even after the Agent already reached that version");
     Assert(agent.Contains("UseProxy = false", StringComparison.Ordinal)
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
@@ -1034,6 +1034,8 @@ static void TestOpenSshRecoveryDesign()
     Assert(bundleBuilder.Contains("$setupPath", StringComparison.Ordinal)
            && bundleBuilder.Contains("Get-Item -LiteralPath $setupPath", StringComparison.Ordinal),
         "the signed inner release manifest must include the root Setup executable");
+    Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.28\"", StringComparison.Ordinal),
+        "the hosted release must require the Guardian that implements the SSH diagnostic contract");
     Assert(adminWindow.Contains("BuildMaintenanceBootstrapCommand(release, device, operationId)", StringComparison.Ordinal)
            && adminWindow.Contains("release-manifest.json", StringComparison.Ordinal)
            && adminWindow.Contains("RSASignaturePadding]::Pss", StringComparison.Ordinal)
@@ -1164,6 +1166,10 @@ static void TestOpenSshRecoveryDesign()
            && supervisor.Contains("File.Delete(_failurePath)", StringComparison.Ordinal)
            && supervisor.Contains("WithDaemonLog", StringComparison.Ordinal),
         "the independent SSH supervisor must publish protected failures and clear them after readiness");
+    Assert(supervisor.Contains("await supervisor.WriteFailureAsync(exception)", StringComparison.Ordinal)
+           && supervisor.IndexOf("await supervisor.WriteFailureAsync(exception)", StringComparison.Ordinal)
+              < supervisor.IndexOf("await supervisor.FailClosedAsync()", StringComparison.Ordinal),
+        "early SSH supervisor initialization failures must be published before fail-closed cleanup");
     Assert(supervisor.Contains("JobObjectLimitKillOnJobClose", StringComparison.Ordinal)
            && supervisor.Contains("CreateSuspended", StringComparison.Ordinal),
         "stable guardian must own sshd and shells in a kill-on-close job");

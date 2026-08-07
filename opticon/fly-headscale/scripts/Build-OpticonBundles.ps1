@@ -3,7 +3,7 @@ param(
     [ValidateSet("win-x64")]
     [string]$Runtime = "win-x64",
     [string]$Version = "1.1.12",
-    [string]$MinimumGuardianVersion = "1.1.2",
+    [string]$MinimumGuardianVersion = "1.1.28",
     [string]$CertificateThumbprint = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
 )
 

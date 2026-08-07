@@ -15,7 +15,10 @@ public sealed record OpticonUpdateRelease(
 
 public sealed class OpticonReleaseClient
 {
-    private static readonly Version GuardianSshAclMaintenanceVersion = new(1, 1, 23);
+    // Agent and the separately installed stable Guardian share the SSH
+    // supervisor diagnostic contract. Crossing this boundary must use attended
+    // maintenance so both binaries advance together.
+    private static readonly Version GuardianSshMaintenanceVersion = new(1, 1, 28);
 
     private readonly HttpClient _http = new(new HttpClientHandler { CheckCertificateRevocationList = true })
     {
@@ -42,7 +45,7 @@ public sealed class OpticonReleaseClient
         var architecture = string.IsNullOrWhiteSpace(device.Architecture) ? "x64" : device.Architecture.ToLowerInvariant();
         var current = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
         var installedGuardian = ParseInstalledGuardianVersion(device.GuardianVersion);
-        var requiresGuardianMaintenance = installedGuardian < GuardianSshAclMaintenanceVersion;
+        var requiresGuardianMaintenance = installedGuardian < GuardianSshMaintenanceVersion;
         var candidates = manifest.Artifacts
             .Where(artifact => artifact.Product.Equals("OpticonBundle", StringComparison.Ordinal)
                                && artifact.Role == device.Role
@@ -50,7 +53,7 @@ public sealed class OpticonReleaseClient
             .Select(artifact => (Artifact: artifact, Version: ParseArtifactVersion(artifact)))
             .Where(candidate => candidate.Version > current
                                 || (candidate.Version == current
-                                    && candidate.Version >= GuardianSshAclMaintenanceVersion
+                                    && candidate.Version >= GuardianSshMaintenanceVersion
                                     && requiresGuardianMaintenance))
             .OrderByDescending(candidate => candidate.Version)
             .ToArray();
@@ -71,7 +74,7 @@ public sealed class OpticonReleaseClient
             selected.Size,
             selected.Sha256.ToLowerInvariant(),
             device.UpdateProtocolVersion < RemoteAdministrationProtocol.UpdateVersion
-            || (selectedCandidate.Version >= GuardianSshAclMaintenanceVersion && requiresGuardianMaintenance));
+            || (selectedCandidate.Version >= GuardianSshMaintenanceVersion && requiresGuardianMaintenance));
     }
 
     private static Version ParseInstalledGuardianVersion(string value)
