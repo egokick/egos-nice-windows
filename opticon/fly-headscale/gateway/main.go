@@ -615,10 +615,13 @@ func (g *gateway) pruneUndeclaredBundles() error {
 func (g *gateway) invitationLanding(w http.ResponseWriter, r *http.Request, publicID string, invite hostedInvite, bundle bundleArtifact) {
 	bootstrap := artifactPrefix + "opticon-bootstrap-" + url.PathEscape(bundle.Version) + ".exe"
 	bootstrapSize := int64(0)
+	starter := ""
 	if published, err := g.bootstrapForVersion(bundle.Version); err == nil {
 		bootstrap = published.DownloadURL
 		bootstrapSize = published.Size
+		starter = buildBootstrapStarterCommand(published, publicID)
 	}
+	starterJSON, _ := json.Marshal(starter)
 	connectSource := "'self'"
 	if parsed, err := url.Parse(bootstrap); err == nil && parsed.IsAbs() {
 		connectSource = parsed.Scheme + "://" + parsed.Host
@@ -626,7 +629,7 @@ func (g *gateway) invitationLanding(w http.ResponseWriter, r *http.Request, publ
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src " + connectSource + "; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'")
 	if r.Method == http.MethodHead { return }
-	signedPage := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}button{background:#52d39a;color:#08130e;border:0;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.muted{color:#9da7b1}code{color:#52d39a}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p id="status">Preparing your signed Opticon installer. The download will start automatically.</p><button id="download">Download signed installer</button><p class="muted">The link expires at <code>%s</code>. It can enroll only one machine. No router changes are required.</p><script>const key=location.hash.slice(1);const status=document.getElementById('status');const button=document.getElementById('download');let active=false;async function download(){if(active)return;if(!/^[A-Za-z0-9_-]{32,128}$/.test(key)){status.textContent='This invitation link is incomplete. Ask for a new link.';button.disabled=true;return;}active=true;button.disabled=true;status.textContent='Downloading the signed Opticon installer…';try{const response=await fetch(%q,{credentials:'omit'});if(!response.ok)throw new Error('download returned '+response.status);const blob=await response.blob();if(%d>0&&blob.size!==%d)throw new Error('download size did not match the signed release');const objectURL=URL.createObjectURL(blob);const a=document.createElement('a');a.href=objectURL;a.download='Install-Opticon-%s--'+key+'.exe';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(objectURL),30000);status.textContent='Downloaded. Open the signed Opticon installer to continue.';button.disabled=false;}catch(error){status.textContent='The installer could not be prepared. Check your connection, then click Download signed installer to retry.';button.disabled=false;}finally{active=false;}}button.addEventListener('click',download);setTimeout(download,350);</script></body></html>`, html.EscapeString(invite.DeviceName), invite.ExpiresAt.Local().Format(time.RFC1123), bootstrap, bootstrapSize, bootstrapSize, publicID)
+	signedPage := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}button{background:#52d39a;color:#08130e;border:0;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.muted{color:#9da7b1}code{color:#52d39a}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p id="status">Preparing your signed Opticon installer. The download will start automatically.</p><button id="download">Download signed installer</button><p id="diagnostic" class="muted"></p><p class="muted">The link expires at <code>%s</code>. It can enroll only one machine. No router changes are required.</p><script>const key=location.hash.slice(1);const status=document.getElementById('status');const diagnostic=document.getElementById('diagnostic');const button=document.getElementById('download');const starterTemplate=%s;let active=false;let compatibility=false;function save(blob,name){const objectURL=URL.createObjectURL(blob);const a=document.createElement('a');a.href=objectURL;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(objectURL),30000);}function downloadStarter(reason){if(!starterTemplate){status.textContent='This browser cannot prepare the installer. Open the link in Microsoft Edge or Chrome.';diagnostic.textContent=reason;button.disabled=false;return;}const script=starterTemplate.replace('__OPTICON_FRAGMENT_KEY__',key);save(new Blob([script],{type:'application/octet-stream'}),'Install-Opticon-%s.cmd');status.textContent='Your browser blocked the direct installer, so a verified compatibility starter was downloaded. Open Install-Opticon-%s.cmd to continue.';diagnostic.textContent=reason;button.textContent='Download compatibility starter';button.disabled=false;}async function download(){if(active)return;if(!/^[A-Za-z0-9_-]{32,128}$/.test(key)){status.textContent='This invitation link is incomplete. Ask for a new link.';button.disabled=true;return;}if(compatibility){downloadStarter(diagnostic.textContent);return;}active=true;button.disabled=true;status.textContent='Downloading the signed Opticon installer…';try{if(typeof fetch!=='function')throw new Error('This browser disables direct downloads from invitation pages.');const response=await fetch(%q,{credentials:'omit'});if(!response.ok)throw new Error('CloudFront returned HTTP '+response.status+'.');const blob=await response.blob();if(%d>0&&blob.size!==%d)throw new Error('The browser received '+blob.size+' bytes; the signed release requires %d bytes.');save(blob,'Install-Opticon-%s--'+key+'.exe');status.textContent='Downloaded. Open the signed Opticon installer to continue.';button.disabled=false;}catch(error){compatibility=true;downloadStarter('Direct download detail: '+String(error&&error.message||error).slice(0,180));}finally{active=false;}}button.addEventListener('click',download);setTimeout(download,350);</script></body></html>`, html.EscapeString(invite.DeviceName), invite.ExpiresAt.Local().Format(time.RFC1123), string(starterJSON), publicID, publicID, bootstrap, bootstrapSize, bootstrapSize, bootstrapSize, publicID)
 	_, _ = io.WriteString(w, signedPage)
 }
 
@@ -637,6 +640,27 @@ func (g *gateway) bootstrapForVersion(version string) (bundleArtifact, error) {
 		if artifact.Product == "OpticonBootstrap" && artifact.Version == version && validBootstrapArtifact(artifact) { return artifact, nil }
 	}
 	return bundleArtifact{}, errors.New("release bootstrap is not published")
+}
+
+func buildBootstrapStarterCommand(bootstrap bundleArtifact, publicID string) string {
+	template := `@echo off
+setlocal
+set "OPTICON_STARTER_DIR=%TEMP%\Opticon-Starter-__PUBLIC_ID_SHORT__"
+if exist "%OPTICON_STARTER_DIR%" rmdir /s /q "%OPTICON_STARTER_DIR%"
+mkdir "%OPTICON_STARTER_DIR%" || exit /b 1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';function Get-OpticonFile([string]$url,[string]$path){$curl=Get-Command curl.exe -ErrorAction SilentlyContinue;if($curl){& $curl.Source --fail --location --silent --show-error --retry 3 --retry-delay 1 --connect-timeout 20 --output $path $url;if($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $path)){return};Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue};Invoke-WebRequest $url -OutFile $path -UseBasicParsing};$bootstrap=Join-Path $env:OPTICON_STARTER_DIR 'Install-Opticon-__PUBLIC_ID__--__OPTICON_FRAGMENT_KEY__.exe';Get-OpticonFile '__BOOTSTRAP_URL__' $bootstrap;$info=Get-Item -LiteralPath $bootstrap;if($info.Length -ne __BOOTSTRAP_SIZE__){throw 'Opticon bootstrap size verification failed'};$hash=(Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant();if($hash -ne '__BOOTSTRAP_HASH__'){throw 'Opticon bootstrap hash verification failed'};$sig=Get-AuthenticodeSignature -LiteralPath $bootstrap;if(-not $sig.SignerCertificate -or $sig.SignerCertificate.Thumbprint -ne 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or $sig.Status -in @('HashMismatch','NotSigned')){throw 'Opticon bootstrap signature verification failed'};$p=Start-Process -FilePath $bootstrap -Verb RunAs -Wait -PassThru;if($p.ExitCode -ne 0){throw ('Opticon bootstrap returned '+$p.ExitCode)}"
+if errorlevel 1 (echo. & echo Opticon could not start. Check the message above, then ask for a new invitation link if needed. & pause & exit /b 1)
+rmdir /s /q "%OPTICON_STARTER_DIR%" 2>nul
+del "%~f0"
+`
+	replacer := strings.NewReplacer(
+		"__PUBLIC_ID_SHORT__", publicID[:12],
+		"__PUBLIC_ID__", publicID,
+		"__BOOTSTRAP_URL__", powerShellSingleQuoted(bootstrap.DownloadURL),
+		"__BOOTSTRAP_SIZE__", strconv.FormatInt(bootstrap.Size, 10),
+		"__BOOTSTRAP_HASH__", strings.ToLower(bootstrap.SHA256),
+	)
+	return replacer.Replace(template)
 }
 
 func buildInstallerCommand(origin, publicID string, bundle bundleArtifact) string {

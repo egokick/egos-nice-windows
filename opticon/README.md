@@ -32,6 +32,8 @@ Invitation URLs contain a high-entropy identifier and a separate fragment decryp
 
 Setup keeps a redacted per-run diagnostic log under `%LOCALAPPDATA%\Opticon\Logs\Setup`. Errors expand the **Detailed setup log** section automatically; the same section can be opened at any time to copy the log or open its file. Invitation fragment keys are redacted from filenames, arguments, exceptions, and persisted diagnostics.
 
+Browsers that permit the direct CloudFront fetch receive the signed `.exe`. If a restricted browser disables that API, the invitation page instead creates a tiny local compatibility `.cmd`; it downloads the same immutable bootstrap and verifies its exact size, SHA-256, and Authenticode signer before requesting elevation. The compatibility file contains the client-only fragment key, but neither the key nor the generated file is uploaded to Fly or CloudFront.
+
 ## Private remote-session boundary
 
 RustDesk is retained as a replaceable open-source desktop engine rather than copied into the Opticon process. The RustDesk client is AGPL-3.0, and maintaining a private fork would add a large native/Rust/Flutter capture, codec, input, elevation, and accessibility surface. The process boundary keeps upgrades and license responsibilities explicit while Opticon owns the entire operator workflow.

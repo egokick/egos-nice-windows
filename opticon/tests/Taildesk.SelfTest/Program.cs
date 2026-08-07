@@ -426,8 +426,10 @@ static void TestReleaseDistributionDesign()
         "hosted bootstrap handoff or redacted persistent Setup diagnostics regressed");
     Assert(gateway.Contains("await fetch(", StringComparison.Ordinal)
            && gateway.Contains("URL.createObjectURL(blob)", StringComparison.Ordinal)
+           && gateway.Contains("buildBootstrapStarterCommand", StringComparison.Ordinal)
+           && gateway.Contains("Get-AuthenticodeSignature", StringComparison.Ordinal)
            && gateway.Contains("connect-src ", StringComparison.Ordinal),
-        "invitation download no longer creates an invite-bearing local bootstrap from the CloudFront response");
+        "invitation download no longer creates a direct or hash/signature-verified compatibility bootstrap handoff");
 }
 static void TestTailnetSshPolicy()
 {

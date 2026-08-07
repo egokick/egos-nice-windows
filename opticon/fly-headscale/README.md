@@ -19,6 +19,10 @@ decrypts and verifies the signed invitation. Hosted ciphertext expires after
 14 days by default and is removed on manual expiration or successful enrollment.
 The command center can extend an active invitation without changing its URL;
 it rotates the one-use Headscale key and replaces the signed encrypted envelope.
+If a restricted browser disables cross-origin fetch APIs, the same page creates
+a tiny compatibility starter locally. That starter downloads the immutable
+bootstrap and checks its pinned byte count, SHA-256, and Authenticode signer
+before elevation; the URL-fragment key still never reaches Fly or CloudFront.
 
 Large Opticon ZIPs and signed bootstraps live in a private S3 bucket and are
 served through CloudFront. Fly retains the small public manifest on its

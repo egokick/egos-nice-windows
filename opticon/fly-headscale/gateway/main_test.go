@@ -46,7 +46,7 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	landingResult := httptest.NewRecorder(); g.ServeHTTP(landingResult, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID, nil))
 	if landingResult.Code != http.StatusOK { t.Fatalf("landing returned %d", landingResult.Code) }
 	landing := landingResult.Body.String()
-	if !strings.Contains(landing, "Mom &amp; Dad PC") || !strings.Contains(landing, "opticon-bootstrap-1.0.0.exe") || !strings.Contains(landing, "await fetch(") || !strings.Contains(landing, "URL.createObjectURL(blob)") || strings.Contains(landing, ".cmd") || strings.Contains(landing, "ExecutionPolicy Bypass") {
+	if !strings.Contains(landing, "Mom &amp; Dad PC") || !strings.Contains(landing, "opticon-bootstrap-1.0.0.exe") || !strings.Contains(landing, "await fetch(") || !strings.Contains(landing, "URL.createObjectURL(blob)") || strings.Contains(landing, "ExecutionPolicy Bypass") {
 		t.Fatal("landing page did not offer the signed bootstrap safely")
 	}
 	if !strings.Contains(landingResult.Header().Get("Content-Security-Policy"), "connect-src 'self'") {
@@ -374,6 +374,9 @@ func TestInvitationPrefersImmutableCloudFrontBootstrap(t *testing.T) {
 	landing := result.Body.String()
 	if !strings.Contains(landing, bootstrap.DownloadURL) || !strings.Contains(landing, "blob.size!==20") {
 		t.Fatal("invitation did not fetch and size-check the immutable CloudFront bootstrap")
+	}
+	for _, expected := range []string{"downloadStarter", "Install-Opticon-" + strings.Repeat("P", 24) + ".cmd", bootstrap.SHA256, "Get-FileHash", "Get-AuthenticodeSignature"} {
+		if !strings.Contains(landing, expected) { t.Fatalf("invitation compatibility starter omitted %q", expected) }
 	}
 	if !strings.Contains(result.Header().Get("Content-Security-Policy"), "connect-src https://d222.cloudfront.net") {
 		t.Fatal("invitation CSP did not permit the pinned CloudFront bootstrap origin")
