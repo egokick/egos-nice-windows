@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "rapidSession": "gggg",
+  "testRound": 9,
+  "targetDevice": {
+    "deviceId": "cd67b29d-0609-4970-a86c-1a0e2a698a40",
+    "hostname": "gggg",
+    "tailnetDeviceId": "7",
+    "tailscaleIpv4": "100.64.0.3",
+    "architecture": "x64"
+  },
+  "timestamps": {
+    "roundStartedUtc": "2026-08-08T11:37:09.8678108Z",
+    "agent135FirstObservedUtc": "2026-08-08T11:51:33.1608044Z",
+    "guardian135FirstObservedUtc": "2026-08-08T11:52:08.0259200Z",
+    "sshListenerFirstObservedUtc": "2026-08-08T11:59:12.2578855Z",
+    "sshListenerCleanupObservedUtc": "2026-08-08T11:59:19.1065367Z",
+    "terminalStateVerifiedUtc": "2026-08-08T12:01:41.5963837Z"
+  },
+  "source": {
+    "repository": "https://github.com/egokick/egos-nice-windows.git",
+    "implementationBranch": "codex/rapid-gggg",
+    "commit": "933daa8710508fcb4755954d9ff81941b68b2eb6",
+    "tree": "b4ebebd5f204b6306362f6dc4f644166440cccb3",
+    "reachableFromApprovedBranch": true,
+    "detachedWorktree": "C:\\source\\egos-nice-windows-rapid-gggg-build"
+  },
+  "build": {
+    "status": "passed",
+    "command": "dotnet build opticon/Taildesk.sln -c Release",
+    "errors": 0,
+    "warnings": 1,
+    "localLog": "C:\\source\\egos-nice-windows-rapid-gggg-build\\opticon\\round9-build.log"
+  },
+  "tests": [
+    {
+      "name": "Taildesk.SelfTest",
+      "status": "passed",
+      "passed": 32,
+      "failed": 0,
+      "localLog": "C:\\source\\egos-nice-windows-rapid-gggg-build\\opticon\\round9-selftest.log"
+    }
+  ],
+  "install": {
+    "status": "passed",
+    "agentTransaction": "committed",
+    "guardianTransaction": "promoted-and-watchdog-probed",
+    "rollbackOccurred": false
+  },
+  "installedArtifacts": {
+    "agent": {
+      "version": "1.1.35",
+      "sha256": "113E5A8DCE905CE526260F9591D4960B3A31A22191989075F7AADDB63069B00B",
+      "pinnedAuthenticodeVerification": "passed",
+      "processRunning": true
+    },
+    "guardian": {
+      "version": "1.1.35",
+      "sha256": "44B53123A7C8120A853E1A73A3BB24876C99B6FB0F658EB3AB3352BF3AD6DA38",
+      "pinnedAuthenticodeVerification": "passed"
+    }
+  },
+  "externalOpenSsh": {
+    "result": "failed",
+    "listener45832Observed": true,
+    "listenerCleanedUp": true,
+    "agentListenerStayedHealthy": true,
+    "failureTypes": [
+      "endpoint_vpn_policy_blocked_child_ssh_to_tailscale_peer",
+      "attestation_token_inspection_access_denied"
+    ],
+    "boundedControllerDiagnosis": "The hardened child SSH process could not reach the Tailscale peer under endpoint VPN policy. Independent WindowsIdentity inspection then failed with ACCESS_DENIED because the in-session token lacked DUPLICATE access before the high-integrity, non-SYSTEM, Administrators SID, and SCM checks."
+  },
+  "runtimeState": {
+    "tailscale": {
+      "backendState": "Running",
+      "online": true,
+      "healthWarnings": []
+    },
+    "rustdeskProcessRunning": true,
+    "listenersAfterCleanup": [
+      {
+        "address": "100.64.0.3",
+        "port": 45831,
+        "owner": "Taildesk.Agent"
+      },
+      {
+        "address": "::",
+        "port": 21118,
+        "owner": "RustDesk"
+      }
+    ],
+    "sshListener45832PresentAfterCleanup": false,
+    "enrollmentChanged": false,
+    "tailscaleChanged": false,
+    "rustdeskChanged": false
+  },
+  "readyForSshProbe": false,
+  "result": "failed",
+  "requiredNextAction": "Provide a correctly formatted next-round commit with Test-Round, target, exact checks, rollback expectation, and report branch before target execution. The implementation should relay SSH through an Opticon-owned loopback endpoint and open the attestation token with QUERY and DUPLICATE rights."
+}
