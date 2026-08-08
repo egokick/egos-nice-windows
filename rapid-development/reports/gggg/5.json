@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "rapidSession": "gggg",
+  "testRound": 5,
+  "targetDevice": {
+    "deviceId": "cd67b29d-0609-4970-a86c-1a0e2a698a40",
+    "hostname": "gggg",
+    "tailnetDeviceId": "7",
+    "tailscaleIpv4": "100.64.0.3",
+    "architecture": "x64"
+  },
+  "timestamps": {
+    "roundStartedUtc": "2026-08-08T10:42:39.1727257Z",
+    "terminalStateVerifiedUtc": "2026-08-08T10:49:05.6593895Z"
+  },
+  "source": {
+    "repository": "https://github.com/egokick/egos-nice-windows.git",
+    "implementationBranch": "codex/rapid-gggg",
+    "commit": "e8b40e8e0688c8d482df8c39e3d5a32bb9769b79",
+    "tree": "b02527d71dae8272b8c499e8484d632c15ff17ff",
+    "reachableFromApprovedBranch": true,
+    "sourceChangedSinceRound4": false
+  },
+  "build": {
+    "status": "passed",
+    "execution": "reused",
+    "reason": "No source change. The exact tree passed the round-3 Release build and all 32 self-tests."
+  },
+  "productionBundle": {
+    "path": "C:\\source\\egos-nice-windows-rapid-gggg-artifacts\\round3\\opticon-bundle-1.1.32-managed-win-x64.zip",
+    "size": 156472464,
+    "sizeMatch": true,
+    "sha256": "1ECF55263D51269CFAE37BA33AE00EAD31A188EB074583F0E8FD825477C8D4D9",
+    "hashMatch": true,
+    "manifestSignature": "passed",
+    "manifestVersion": "1.1.32",
+    "manifestRole": "ManagedOnly",
+    "manifestArchitecture": "x64",
+    "allDeclaredSizesAndHashesMatch": true,
+    "setupPinnedAuthenticode": "passed",
+    "signerThumbprint": "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
+  },
+  "install": {
+    "status": "failed",
+    "stage": "uac-consent",
+    "operationId": "125cd0da-f70b-4549-a604-66186a08767b",
+    "setupProcessStarted": false,
+    "maintenanceLogCreated": false,
+    "maintenanceTransactionStarted": false,
+    "changedInstalledComponents": false,
+    "rollbackOccurred": false,
+    "failureType": "uac_cancelled",
+    "nativeErrorCode": 1223,
+    "message": "The signed Setup UAC prompt was kept open for attended approval, then Windows reported that the operation was canceled by the user. Setup never launched."
+  },
+  "installedArtifacts": {
+    "agent": {
+      "version": "1.1.29",
+      "sha256": "A39C94894DB039937ACD943432FA99E1AC2189B264FFC3A342FC97472CF69EF4",
+      "processRunning": true,
+      "changed": false
+    },
+    "guardian": {
+      "version": "1.1.31",
+      "sha256": "D843B7DFAFB179FAA8E15A2CA94592621DF77895A3AA27CF6F6F34F70F40CF6C",
+      "changed": false
+    }
+  },
+  "runtimeState": {
+    "tailscale": {
+      "backendState": "Running",
+      "online": true
+    },
+    "rustdeskProcessRunning": true,
+    "listeners": [
+      {
+        "address": "100.64.0.3",
+        "port": 45831,
+        "owner": "Taildesk.Agent"
+      },
+      {
+        "address": "::",
+        "port": 21118,
+        "owner": "RustDesk"
+      }
+    ],
+    "sshListener45832PresentBeforeLease": false,
+    "enrollmentChanged": false,
+    "tailscaleChanged": false,
+    "rustdeskChanged": false
+  },
+  "setupLogs": {
+    "status": "none-created",
+    "reason": "Setup did not start because affirmative UAC consent was not delivered."
+  },
+  "readyForSshProbe": false,
+  "result": "failed",
+  "requiredNextAction": "Retry the exact signed maintenance launch only when an attended administrator can provide affirmative UAC consent. Do not install the unsigned local build."
+}
