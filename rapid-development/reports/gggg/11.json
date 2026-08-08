@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "rapidSession": "gggg",
+  "testRound": 11,
+  "targetDevice": {
+    "deviceId": "cd67b29d-0609-4970-a86c-1a0e2a698a40",
+    "hostname": "gggg",
+    "tailnetDeviceId": "7",
+    "tailscaleIpv4": "100.64.0.3",
+    "architecture": "x64"
+  },
+  "timestamps": {
+    "roundStartedUtc": "2026-08-08T12:17:34.8150440Z",
+    "installedStateVerifiedUtc": "2026-08-08T12:19:13.9785640Z",
+    "observationWindowEndedUtc": "2026-08-08T12:28:00.6951695Z"
+  },
+  "source": {
+    "repository": "https://github.com/egokick/egos-nice-windows.git",
+    "implementationBranch": "codex/rapid-gggg",
+    "commit": "ea1ddfc8736ff6b64ab05ec6be76f3048834d3f0",
+    "implementationCommit": "191270448cb528214ec9487b0fe05f4f6dafa580",
+    "tree": "21f752362359e59098c61fb3b6186645c8660655",
+    "reachableFromApprovedBranch": true,
+    "detachedWorktree": "C:\\source\\egos-nice-windows-rapid-gggg-build"
+  },
+  "build": {
+    "status": "passed",
+    "command": "dotnet build opticon/Taildesk.sln -c Release",
+    "errors": 0,
+    "warnings": 1,
+    "localLog": "C:\\source\\egos-nice-windows-rapid-gggg-build\\opticon\\round11-build.log"
+  },
+  "tests": [
+    {
+      "name": "Taildesk.SelfTest",
+      "status": "passed",
+      "passed": 32,
+      "failed": 0,
+      "localLog": "C:\\source\\egos-nice-windows-rapid-gggg-build\\opticon\\round11-selftest.log"
+    }
+  ],
+  "install": {
+    "status": "passed",
+    "execution": "already-production-installed-by-controller",
+    "changedByTargetAgent": false,
+    "rollbackOccurred": false
+  },
+  "installedArtifacts": {
+    "agent": {
+      "version": "1.1.36",
+      "sha256": "01E9A176EE94165993A32E2104BFBAAECE1689FBBD2E4F40903323A27FDD2762",
+      "signerThumbprint": "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53",
+      "pinnedAuthenticodeVerification": "passed",
+      "processRunning": true
+    },
+    "guardian": {
+      "version": "1.1.36",
+      "sha256": "098E5E32D634016FD60D1E404C110707579E8FBCA4EA2435A53A4D6D253FAAB8",
+      "signerThumbprint": "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53",
+      "pinnedAuthenticodeVerification": "passed"
+    }
+  },
+  "runtimeState": {
+    "tailscale": {
+      "backendState": "Running",
+      "online": true,
+      "hostname": "gggg",
+      "ipv4": "100.64.0.3",
+      "healthWarnings": []
+    },
+    "rustdeskProcessRunning": true,
+    "agent45831BoundOnlyToTargetTailscaleIpv4": true,
+    "sshListener45832PresentBeforeLease": false,
+    "enrollmentChanged": false,
+    "tailscaleChanged": false,
+    "rustdeskChanged": false
+  },
+  "externalOpenSsh": {
+    "result": "not-observed-during-target-window",
+    "observationDurationSeconds": 514,
+    "listener45832Observed": false,
+    "signedAdministratorAttestation": "pending-controller-probe",
+    "challengeCommand": "pending-controller-probe",
+    "revocation": "pending-controller-probe"
+  },
+  "idleCleanupState": {
+    "sshListener45832Present": false,
+    "sshProcessesPresent": false,
+    "dedicatedAccountExists": true,
+    "dedicatedAccountEnabled": false,
+    "authorizedKeysStatus": "not-found-or-inaccessible",
+    "firewallRuleStatus": "access-denied-or-inaccessible"
+  },
+  "protectedDiagnostics": {
+    "scheduledTaskState": "access-denied-to-non-elevated-target-shell",
+    "nativeErrorCode": 5
+  },
+  "readyForSshProbe": true,
+  "result": "ready",
+  "requiredNextAction": "Run the normal external OpenSSH lifecycle against signed Agent and Guardian 1.1.36, then push a follow-up round describing pass evidence or the next exact defect."
+}
