@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "rapidSession": "gggg",
+  "testRound": 7,
+  "targetDevice": {
+    "deviceId": "cd67b29d-0609-4970-a86c-1a0e2a698a40",
+    "hostname": "gggg",
+    "tailnetDeviceId": "7",
+    "tailscaleIpv4": "100.64.0.3",
+    "architecture": "x64"
+  },
+  "timestamps": {
+    "roundStartedUtc": "2026-08-08T10:59:41.0328336Z",
+    "agent133FirstObservedUtc": "2026-08-08T11:16:21.8707939Z",
+    "terminalStateVerifiedUtc": "2026-08-08T11:18:34.8256475Z"
+  },
+  "source": {
+    "repository": "https://github.com/egokick/egos-nice-windows.git",
+    "implementationBranch": "codex/rapid-gggg",
+    "commit": "173740b61afe08754e44acf892155feb79911327",
+    "tree": "85b0fb124471a282b1a1c5f0e32aab2ce5358eab",
+    "reachableFromApprovedBranch": true,
+    "detachedWorktree": "C:\\source\\egos-nice-windows-rapid-gggg-build"
+  },
+  "build": {
+    "status": "passed",
+    "command": "dotnet build opticon/Taildesk.sln -c Release",
+    "errors": 0,
+    "warnings": 1,
+    "localLog": "C:\\source\\egos-nice-windows-rapid-gggg-build\\opticon\\round7-build.log"
+  },
+  "tests": [
+    {
+      "name": "Taildesk.SelfTest",
+      "status": "passed",
+      "passed": 32,
+      "failed": 0,
+      "localLog": "C:\\source\\egos-nice-windows-rapid-gggg-build\\opticon\\round7-selftest.log"
+    }
+  ],
+  "install": {
+    "status": "failed",
+    "stage": "guardian-reconciliation-before-promotion",
+    "agentTransaction": "committed",
+    "guardianTransaction": "preserved-by-omission",
+    "rollbackOccurred": false,
+    "failureType": "guardian_staged_file_reopen_failed",
+    "boundedEvidence": "Agent 1.1.33 committed and remained healthy, but Guardian remained 1.1.31. The next implementation commit identifies the source defect as an extraction output handle remaining open before Authenticode verification reopened the staged Guardian."
+  },
+  "installedArtifacts": {
+    "agent": {
+      "version": "1.1.33",
+      "sha256": "1A181300652E9BF285D85CAE7A4E49E7F463052423212D0317E4E8127DDCAF3C",
+      "pinnedAuthenticodeVerification": "passed",
+      "processRunning": true
+    },
+    "guardian": {
+      "version": "1.1.31",
+      "sha256": "D843B7DFAFB179FAA8E15A2CA94592621DF77895A3AA27CF6F6F34F70F40CF6C",
+      "pinnedAuthenticodeVerification": "passed",
+      "preservedAsRollbackSafeVersion": true
+    }
+  },
+  "runtimeState": {
+    "tailscale": {
+      "backendState": "Running",
+      "online": true,
+      "healthWarnings": []
+    },
+    "rustdeskProcessRunning": true,
+    "listeners": [
+      {
+        "address": "100.64.0.3",
+        "port": 45831,
+        "owner": "Taildesk.Agent"
+      },
+      {
+        "address": "::",
+        "port": 21118,
+        "owner": "RustDesk"
+      }
+    ],
+    "sshListener45832PresentBeforeLease": false,
+    "enrollmentChanged": false,
+    "tailscaleChanged": false,
+    "rustdeskChanged": false
+  },
+  "diagnostics": {
+    "updateJournal": "access-denied-to-non-elevated-target-shell",
+    "guardianStartupFailure": "not-found-or-inaccessible",
+    "supervisorFailure": "access-denied-to-non-elevated-target-shell",
+    "sshdLog": "access-denied-to-non-elevated-target-shell",
+    "nativeErrorCode": 5
+  },
+  "externalOpenSshResult": "not-run-because-guardian-reconciliation-did-not-complete",
+  "readyForSshProbe": false,
+  "result": "failed",
+  "requiredNextAction": "Build and test round 8, then allow the controller to update Agent and reconcile the signed Guardian after closing the staged extraction output before verification."
+}
