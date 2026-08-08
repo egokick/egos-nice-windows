@@ -89,6 +89,30 @@ Tests should use an unmistakable version identity containing the normal numeric 
 - Pushes a readiness or failure report commit to the report branch.
 - Never edits the implementation branch.
 
+## Example agent prompts
+
+Replace every angle-bracketed value before using these prompts. Both agents must read this document before acting; the prompts are intentionally concise and do not replace the controls or acceptance criteria above and below them.
+
+### Prompt for the fix agent
+
+```text
+Run the Opticon rapid-development testing loop described in opticon/readme-rapid-development.md for session <session-id> and target <device-id>. You own implementation branch codex/rapid-<session-id>; use an isolated worktree and do not alter unrelated work. The target reports on rapid-report/<session-id>/<device-id>.
+
+For each round, validate that the target report matches the requested full commit SHA, session, device, and round, then exercise OpenSSH through the normal Command Center path and collect bounded, redacted evidence. If it fails, diagnose the actual source defect, add a regression test, make the smallest safe fix, run proportional local verification, and push the next implementation commit. Put the exact target action, checks, expected result, log locations, and rollback expectation in the commit body using this document's fix-commit format. Wait for the matching target report and repeat until every completion criterion passes.
+
+Never weaken production signing, identity, authorization, rollback, or recovery protections. The testing authorization remains active until the administrator manually revokes it; do not revoke it merely because a round passes or fails. Report the final passing commit and evidence to the administrator, who decides when to revoke testing access.
+```
+
+### Prompt for the target-device agent
+
+```text
+Act as the target-device agent for Opticon rapid-development session <session-id> on device <device-id>, following opticon/readme-rapid-development.md. You own only report branch rapid-report/<session-id>/<device-id>; never edit or push to implementation branch codex/rapid-<session-id>. Keep source/build and report work in separate isolated worktrees.
+
+For each requested round, obtain a fresh authorized operation lease, verify that the persistent testing authorization is active and bound to this device, fetch the approved repository without changing its origin, and build the exact requested full commit SHA. Rebuild changed components and transitive dependencies, run the required and full self-tests, sign only with the session test certificate, and install transactionally while preserving Agent/Guardian rollback plus Tailscale and RustDesk recovery. Never bypass production trust or identity checks.
+
+Write the redacted machine-readable report at rapid-development/reports/<session-id>/<round>.json and push a report commit using this document's target-report format. Include exact source SHA, versions and hashes, test/service/task results, bounded error details, rollback state, and Ready-For-SSH-Probe: yes only when external testing is safe. Never include invitation secrets, tokens, passwords, private keys, or secret-bearing command lines. Then wait for the next implementation commit or manual revocation; do not revoke or expire the invitation yourself.
+```
+
 ## Git coordination protocol
 
 Use two branches so two agents never write to the same branch:
