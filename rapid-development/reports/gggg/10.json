@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "rapidSession": "gggg",
+  "testRound": 10,
+  "roundAssignment": "inferred-sequentially-for-preflight-failure-reporting-only",
+  "targetDevice": {
+    "deviceId": "cd67b29d-0609-4970-a86c-1a0e2a698a40",
+    "hostname": "gggg",
+    "tailnetDeviceId": "7",
+    "tailscaleIpv4": "100.64.0.3"
+  },
+  "timestamps": {
+    "implementationHeadFirstObservedUtc": "2026-08-08T12:01:01.5338684Z",
+    "preflightFailureReportedUtc": "2026-08-08T12:11:42.6625193Z"
+  },
+  "source": {
+    "repository": "https://github.com/egokick/egos-nice-windows.git",
+    "implementationBranch": "codex/rapid-gggg",
+    "commit": "191270448cb528214ec9487b0fe05f4f6dafa580",
+    "reachableFromApprovedBranch": true,
+    "checkedOutOrBuilt": false
+  },
+  "coordinationPreflight": {
+    "status": "failed",
+    "failureType": "malformed_fix_commit_metadata",
+    "missingRequiredFields": [
+      "Rapid-Session",
+      "Test-Round",
+      "Target-Device",
+      "Target-Action",
+      "Required-Checks",
+      "Expected-Result",
+      "Relevant-Logs",
+      "Rollback-Expectation",
+      "Report-Branch"
+    ],
+    "message": "The implementation commit mentions target gggg and version 1.1.36 in free text, but it does not define an authorized numbered test round using the runbook format. The target did not infer deployment scope or execute it."
+  },
+  "build": {
+    "status": "failed",
+    "execution": "not-run",
+    "reason": "Coordination preflight failed before source checkout or build."
+  },
+  "install": {
+    "status": "failed",
+    "execution": "not-run",
+    "changedInstalledComponents": false,
+    "rollbackOccurred": false
+  },
+  "installedArtifacts": {
+    "agent": {
+      "version": "1.1.35",
+      "sha256": "113E5A8DCE905CE526260F9591D4960B3A31A22191989075F7AADDB63069B00B",
+      "processRunning": true
+    },
+    "guardian": {
+      "version": "1.1.35",
+      "sha256": "44B53123A7C8120A853E1A73A3BB24876C99B6FB0F658EB3AB3352BF3AD6DA38"
+    }
+  },
+  "runtimeState": {
+    "agent45831BoundToTargetTailscaleIpv4": true,
+    "sshListener45832Present": false,
+    "installedStateChanged": false
+  },
+  "readyForSshProbe": false,
+  "result": "failed",
+  "requiredNextAction": "Push a successor commit with a monotonically increasing Test-Round and every required fix-commit field, including exact target action/checks, rollback expectation, and rapid-report/gggg."
+}
