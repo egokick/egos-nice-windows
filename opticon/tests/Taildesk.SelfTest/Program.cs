@@ -1018,6 +1018,11 @@ static void TestOpenSshRecoveryDesign()
         "SSH launcher must not execute a PATH-resolved client");
     Assert(launcher.Contains("WorkingDirectory = Path.GetDirectoryName(privateKeyPath)", StringComparison.Ordinal),
         "interactive SSH must not inherit and lock Opticon's installed command-center directory");
+    Assert(launcher.Contains("new LoopbackSshRelay(grant.Host, DedicatedPort)", StringComparison.Ordinal)
+           && launcher.Contains("new TcpListener(IPAddress.Loopback, 0)", StringComparison.Ordinal)
+           && launcher.Contains("target.ConnectAsync(_targetHost, _targetPort", StringComparison.Ordinal)
+           && launcher.Contains("connectionHost ?? grant.Host", StringComparison.Ordinal),
+        "SSH must traverse a per-lease loopback relay so endpoint VPN policy cannot block the hardened child client from the Tailscale peer");
     var updateCoordinator = ReadSource("src", "Taildesk.Admin", "RemoteDeviceUpdateCoordinator.cs");
     Assert(updateCoordinator.Contains("GetUpdateStatusAsync(device, agentToken", StringComparison.Ordinal)
            && updateCoordinator.Contains("Update failed safely:", StringComparison.Ordinal),
@@ -1373,6 +1378,8 @@ static void TestOpenSshRecoveryDesign()
            && adminToken.Contains("const uint expectedLength = sizeof(int)", StringComparison.Ordinal)
            && !adminToken.Contains("var buffer = ReadTokenInformation(token, informationClass, description)", StringComparison.Ordinal),
         "fixed-size token fields must not depend on zero-buffer sizing probes that preserve stale Windows last-error values");
+    Assert(adminToken.Contains("TokenAccessLevels.Query | TokenAccessLevels.Duplicate", StringComparison.Ordinal),
+        "the in-session SSH proof must retain TOKEN_DUPLICATE while constructing its independent WindowsIdentity");
     var daemonUser = ReadSource("src", "Taildesk.UpdateGuardian", "SshDaemonUserContext.cs");
     Assert(daemonUser.Contains("LogonFullAdministrator", StringComparison.Ordinal)
            && daemonUser.Contains("CreateProcessAsUserW", StringComparison.Ordinal)

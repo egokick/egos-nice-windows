@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
@@ -32,6 +33,83 @@ public delegate Task<SshAccessResponse> SshSessionProvisioner(
 
 public delegate Task SshSessionRevoker(string sessionId, CancellationToken cancellationToken);
 
+internal sealed class LoopbackSshRelay : IAsyncDisposable
+{
+    private readonly TcpListener _listener;
+    private readonly string _targetHost;
+    private readonly int _targetPort;
+    private readonly CancellationTokenSource _shutdown = new();
+    private readonly object _sync = new();
+    private readonly HashSet<Task> _connections = [];
+    private readonly Task _acceptLoop;
+
+    public LoopbackSshRelay(string targetHost, int targetPort)
+    {
+        _targetHost = targetHost;
+        _targetPort = targetPort;
+        _listener = new TcpListener(IPAddress.Loopback, 0);
+        _listener.Start(4);
+        Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        _acceptLoop = AcceptLoopAsync();
+    }
+
+    public string Host => IPAddress.Loopback.ToString();
+    public int Port { get; }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_shutdown.IsCancellationRequested) return;
+        await _shutdown.CancelAsync();
+        _listener.Stop();
+        try { await _acceptLoop; }
+        catch (OperationCanceledException) { }
+        catch (SocketException) when (_shutdown.IsCancellationRequested) { }
+
+        Task[] connections;
+        lock (_sync) connections = [.. _connections];
+        try { await Task.WhenAll(connections); }
+        catch (OperationCanceledException) { }
+        catch (SocketException) when (_shutdown.IsCancellationRequested) { }
+        finally { _shutdown.Dispose(); }
+    }
+
+    private async Task AcceptLoopAsync()
+    {
+        while (!_shutdown.IsCancellationRequested)
+        {
+            var client = await _listener.AcceptTcpClientAsync(_shutdown.Token);
+            var connection = RelayAsync(client, _shutdown.Token);
+            lock (_sync) _connections.Add(connection);
+            _ = connection.ContinueWith(
+                completed =>
+                {
+                    lock (_sync) _connections.Remove(completed);
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+    }
+
+    private async Task RelayAsync(TcpClient client, CancellationToken cancellationToken)
+    {
+        using (client)
+        using (var target = new TcpClient())
+        {
+            await target.ConnectAsync(_targetHost, _targetPort, cancellationToken);
+            await using var clientStream = client.GetStream();
+            await using var targetStream = target.GetStream();
+            using var connectionEnded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var upstream = clientStream.CopyToAsync(targetStream, connectionEnded.Token);
+            var downstream = targetStream.CopyToAsync(clientStream, connectionEnded.Token);
+            await Task.WhenAny(upstream, downstream);
+            await connectionEnded.CancelAsync();
+            try { await Task.WhenAll(upstream, downstream); }
+            catch (OperationCanceledException) when (connectionEnded.IsCancellationRequested) { }
+        }
+    }
+}
+
 /// <summary>
 /// Owns a running interactive ssh.exe process and its ephemeral local key files.
 /// Cleanup and remote revocation happen automatically when ssh.exe exits.
@@ -42,6 +120,7 @@ public sealed class SshSessionHandle : IAsyncDisposable
     private readonly string _sessionDirectory;
     private readonly string _privateKeyPath;
     private readonly SshSessionRevoker? _revoker;
+    private readonly LoopbackSshRelay _relay;
     private int _cleanupStarted;
     private int _disposed;
 
@@ -50,13 +129,15 @@ public sealed class SshSessionHandle : IAsyncDisposable
         SshAccessResponse grant,
         string sessionDirectory,
         string privateKeyPath,
-        SshSessionRevoker? revoker)
+        SshSessionRevoker? revoker,
+        LoopbackSshRelay relay)
     {
         _process = process;
         Grant = grant;
         _sessionDirectory = sessionDirectory;
         _privateKeyPath = privateKeyPath;
         _revoker = revoker;
+        _relay = relay;
         Completion = MonitorAsync();
     }
 
@@ -130,6 +211,8 @@ public sealed class SshSessionHandle : IAsyncDisposable
             }
         }
 
+        await _relay.DisposeAsync();
+
         try
         {
             SshSessionLauncher.DeleteEphemeralFiles(_sessionDirectory, _privateKeyPath);
@@ -192,6 +275,7 @@ public static class SshSessionLauncher
         var privateKeyPath = Path.Combine(sessionDirectory, "id_ed25519");
         var knownHostsPath = Path.Combine(sessionDirectory, "known_hosts");
         SshAccessResponse? grant = null;
+        LoopbackSshRelay? relay = null;
 
         try
         {
@@ -206,8 +290,15 @@ public static class SshSessionLauncher
                     ?? throw new InvalidDataException("The target returned an empty SSH access grant.");
             ValidateGrant(grant, options.ExpectedHost, options.RequestedLifetime);
 
+            // Endpoint VPN products can allow Opticon's authenticated Agent API
+            // traffic while denying a child ssh.exe direct access to the same
+            // Tailscale peer. Keep the hardened Windows SSH client and all of its
+            // key/host validation, but carry its TCP stream through this process.
+            // The relay is loopback-only and exists for this one lease.
+            relay = new LoopbackSshRelay(grant.Host, DedicatedPort);
+
             var hostKey = NormalizePublicKey(grant.HostPublicKey, "SSH host key");
-            var knownHost = $"[{grant.Host}]:{DedicatedPort} {hostKey}{Environment.NewLine}";
+            var knownHost = $"[{relay.Host}]:{relay.Port} {hostKey}{Environment.NewLine}";
             await File.WriteAllTextAsync(
                 knownHostsPath,
                 knownHost,
@@ -219,6 +310,8 @@ public static class SshSessionLauncher
                 grant,
                 privateKeyPath,
                 knownHostsPath,
+                relay.Host,
+                relay.Port,
                 cancellationToken);
 
             var remoteCommand = options.PowerShellEncodedCommand is null
@@ -226,7 +319,7 @@ public static class SshSessionLauncher
                 : BuildExactPowerShellCommand(grant.SystemRoot, options.PowerShellEncodedCommand);
             var start = BuildStartInfo(
                 ssh, grant, privateKeyPath, knownHostsPath,
-                remoteCommand, options.AllocateTerminal);
+                remoteCommand, options.AllocateTerminal, relay.Host, relay.Port);
             var process = new Process { StartInfo = start };
             if (!process.Start()) throw new InvalidOperationException("The Windows OpenSSH client did not start.");
 
@@ -235,7 +328,8 @@ public static class SshSessionLauncher
                 grant,
                 sessionDirectory,
                 privateKeyPath,
-                revoker);
+                revoker,
+                relay);
         }
         catch (Exception launchError)
         {
@@ -251,6 +345,8 @@ public static class SshSessionLauncher
                     // The target-side lease still expires independently.
                 }
             }
+
+            if (relay is not null) await relay.DisposeAsync();
 
             try { DeleteEphemeralFiles(sessionDirectory, privateKeyPath); }
             catch (Exception cleanupError)
@@ -269,7 +365,9 @@ public static class SshSessionLauncher
         string privateKeyPath,
         string knownHostsPath,
         string? remoteCommand = null,
-        bool allocateTerminal = true)
+        bool allocateTerminal = true,
+        string? connectionHost = null,
+        int? connectionPort = null)
     {
         if (remoteCommand is not null &&
             (string.IsNullOrWhiteSpace(remoteCommand) ||
@@ -297,7 +395,7 @@ public static class SshSessionLauncher
         // -F NUL prevents a local ssh_config from weakening host checking,
         // changing the destination, adding forwards, or selecting another key.
         Add(start, "-F", "NUL");
-        Add(start, "-p", DedicatedPort.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Add(start, "-p", (connectionPort ?? DedicatedPort).ToString(System.Globalization.CultureInfo.InvariantCulture));
         Add(start, "-l", grant.UserName);
         Add(start, "-i", privateKeyPath);
         Add(start, "-o", "BatchMode=yes");
@@ -315,7 +413,7 @@ public static class SshSessionLauncher
         Add(start, "-o", "ServerAliveCountMax=3");
         Add(start, "-o", "ConnectTimeout=15");
         start.ArgumentList.Add(allocateTerminal ? "-t" : "-T");
-        start.ArgumentList.Add(grant.Host);
+        start.ArgumentList.Add(connectionHost ?? grant.Host);
         if (remoteCommand is not null) start.ArgumentList.Add(remoteCommand);
         return start;
     }
@@ -325,6 +423,8 @@ public static class SshSessionLauncher
         SshAccessResponse grant,
         string privateKeyPath,
         string knownHostsPath,
+        string connectionHost,
+        int connectionPort,
         CancellationToken cancellationToken)
     {
         var challenge = SecurityHelpers.CreateToken(32);
@@ -344,7 +444,9 @@ public static class SshSessionLauncher
             privateKeyPath,
             knownHostsPath,
             remoteCommand,
-            allocateTerminal: false);
+            allocateTerminal: false,
+            connectionHost,
+            connectionPort);
 
         var result = await ProcessRunner.RunAsync(
             sshExecutable,

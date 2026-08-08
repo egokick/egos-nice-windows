@@ -88,7 +88,11 @@ internal static class SshAdminToken
 
     public static SshAdminAttestation InspectCurrent(string challenge)
     {
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        // Inspect creates its own WindowsIdentity from this handle. That
+        // constructor duplicates the token, so a query-only handle causes an
+        // otherwise fully elevated OpenSSH child to fail with ACCESS_DENIED.
+        using var identity = WindowsIdentity.GetCurrent(
+            TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
         return Inspect(identity.AccessToken, challenge, requireAdministrativeCapability: true);
     }
 
