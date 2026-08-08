@@ -48,6 +48,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<SystemCheckResult> SystemChecks { get; } = [];
     public AdminConfig Config => _state.Config;
     public bool IsPrimary => Config.Mode == AdminMode.Primary;
+    public string OpticonVersion { get; } = UpdatePackageVerifier.NormalizeVersion(
+        typeof(MainViewModel).Assembly.GetName().Version?.ToString() ?? string.Empty);
     public DeviceRecord? SelectedDevice { get => _selectedDevice; set { _selectedDevice = value; Changed(); } }
     public string Status { get => _status; set { _status = value; Changed(); } }
     public bool Busy { get => _busy; set { _busy = value; Changed(); } }
