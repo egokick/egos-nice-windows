@@ -82,12 +82,32 @@ Tests should use an unmistakable version identity containing the normal numeric 
 ### Target agent
 
 - Runs only on the invited device.
-- Monitors the approved implementation branch.
+- Runs under a durable supervisor and continuously monitors the approved implementation branch until manual revocation.
 - Builds the exact requested commit in an isolated worktree.
 - Runs tests, signs the local test payload, and installs it transactionally.
 - Captures build, installation, Agent, Guardian, Task Scheduler, and OpenSSH diagnostics.
 - Pushes a readiness or failure report commit to the report branch.
 - Never edits the implementation branch.
+
+## Autonomous target liveness requirement
+
+There is no out-of-band channel for waking or re-prompting the target-device agent. After the attended one-time bootstrap, its source-to-build-to-report loop must therefore be fully autonomous. Merely asking an interactive agent to "wait" is insufficient.
+
+The bootstrap must install a protected, automatically started supervisor that owns the loop and survives user logout, agent-process exit, service restart, and machine reboot. The supervisor must:
+
+- start at boot without another UAC prompt or interactive login;
+- continuously fetch or poll the approved implementation branch using a bounded interval with jitter and exponential backoff during network, Git, or control-plane outages;
+- renew operation leases while the testing authorization remains active;
+- persist the session ID, last observed implementation SHA, current round, phase, retry state, and last pushed report SHA in protected machine-level state;
+- process each approved implementation commit at most once per round unless the fix commit explicitly requests a retry;
+- resume an interrupted fetch, build, test, install, rollback, or report phase safely after restart;
+- push a failure report when possible, then return to polling instead of exiting;
+- push a readiness report, then immediately return to polling for the next implementation commit instead of waiting for a new prompt;
+- treat an unchanged branch as normal and remain alive indefinitely;
+- expose authenticated heartbeat and current-state diagnostics to the Admin Center; and
+- stop normal polling only after server-confirmed manual revocation, then perform the cleanup and acknowledgement flow.
+
+Loss of connectivity or lease renewal pauses new privileged work but does not terminate the supervisor. It continues retrying with backoff until connectivity returns or it can confirm revocation. A local unrecoverable error must be durably recorded and reported, while the supervisor remains available for a later source fix. Crash-loop protection may slow retries, but it must not permanently disable the loop without an explicit administrator action.
 
 ## Example agent prompts
 
@@ -106,11 +126,13 @@ Never weaken production signing, identity, authorization, rollback, or recovery 
 ### Prompt for the target-device agent
 
 ```text
-Act as the target-device agent for Opticon rapid-development session <session-id> on device <device-id>, following opticon/readme-rapid-development.md. You own only report branch rapid-report/<session-id>/<device-id>; never edit or push to implementation branch codex/rapid-<session-id>. Keep source/build and report work in separate isolated worktrees.
+Act as the persistent target-device agent for Opticon rapid-development session <session-id> on device <device-id>, following opticon/readme-rapid-development.md. There is no other communication channel and nobody can prompt or reactivate you. Run continuously under the installed restart-safe supervisor until the server confirms that an administrator manually revoked this testing authorization. Do not exit after success, failure, an unchanged branch, a network outage, a Git error, a lease-renewal failure, process restart, logout, or reboot; checkpoint state, back off safely when needed, and resume polling autonomously.
+
+You own only report branch rapid-report/<session-id>/<device-id>; never edit or push to implementation branch codex/rapid-<session-id>. Keep source/build and report work in separate isolated worktrees. Poll the approved implementation branch for a new authorized full commit SHA, process each requested round idempotently, and persist enough protected state to resume any interrupted phase without repeating a committed transaction.
 
 For each requested round, obtain a fresh authorized operation lease, verify that the persistent testing authorization is active and bound to this device, fetch the approved repository without changing its origin, and build the exact requested full commit SHA. Rebuild changed components and transitive dependencies, run the required and full self-tests, sign only with the session test certificate, and install transactionally while preserving Agent/Guardian rollback plus Tailscale and RustDesk recovery. Never bypass production trust or identity checks.
 
-Write the redacted machine-readable report at rapid-development/reports/<session-id>/<round>.json and push a report commit using this document's target-report format. Include exact source SHA, versions and hashes, test/service/task results, bounded error details, rollback state, and Ready-For-SSH-Probe: yes only when external testing is safe. Never include invitation secrets, tokens, passwords, private keys, or secret-bearing command lines. Then wait for the next implementation commit or manual revocation; do not revoke or expire the invitation yourself.
+Write the redacted machine-readable report at rapid-development/reports/<session-id>/<round>.json and push a report commit using this document's target-report format. Include exact source SHA, versions and hashes, test/service/task results, bounded error details, rollback state, and Ready-For-SSH-Probe: yes only when external testing is safe. Never include invitation secrets, tokens, passwords, private keys, or secret-bearing command lines. After every readiness or failure report, immediately return to autonomous polling. Manual server-confirmed revocation is the only normal stop signal; do not revoke or expire the invitation yourself, and perform the documented cleanup before terminating.
 ```
 
 ## Git coordination protocol
@@ -188,7 +210,7 @@ The Admin Center displays testing sessions separately from ordinary invitations.
 
 ### 2. Redeem once and bootstrap
 
-The target opens the invitation link and completes an attended bootstrap. The bootstrap verifies the exact target identity, creates the protected testing service and local test certificate, registers the public certificate, clones the approved repository, and creates isolated build/report worktrees.
+The target opens the invitation link and completes an attended bootstrap. The bootstrap verifies the exact target identity, installs the protected auto-start testing supervisor and its durable state store, creates the local test certificate, registers the public certificate, clones the approved repository, and creates isolated build/report worktrees. Before the attended bootstrap finishes, it must restart the supervisor and prove that autonomous polling resumes without another prompt.
 
 After redemption, the original link cannot enroll another machine. The existing target authorization remains active until manual revocation.
 
@@ -256,6 +278,8 @@ Testing is complete only after all of the following succeed for the same source 
 - no listener on a non-Tailscale address;
 - successful rollback exercise or a previously verified rollback path unaffected by the change;
 - one reboot/startup validation proving Guardian and SSH task recovery behavior;
+- target-supervisor recovery after process termination and reboot, followed by another successful autonomous polling round;
+- continued healthy polling after both a readiness report and a failure report, with no external wake-up;
 - no regression in file transfer, RustDesk, Tailscale, enrollment, or updates; and
 - a final target report commit marked passed.
 
@@ -301,6 +325,7 @@ Before starting:
 - [ ] Create the implementation and target report branches.
 - [ ] Create the testing invitation and record the session ID.
 - [ ] Complete one-time attended redemption and certificate registration.
+- [ ] Confirm the target supervisor restarts automatically and reports a polling heartbeat without another prompt.
 
 For every round:
 
@@ -330,7 +355,7 @@ Build testing mode in this order so no trust bypass exists without its control p
 3. Admin Center creation/status/revocation UI;
 4. one-time target-bound invitation redemption;
 5. per-session test certificate registration and protected storage;
-6. isolated source checkout, fingerprinting, incremental build, and report generation;
+6. durable auto-start target supervisor, protected checkpoints, autonomous polling, isolated source checkout, fingerprinting, incremental build, and report generation;
 7. transactional test installation and production restoration;
 8. Git branch/commit coordination;
 9. automated external OpenSSH probe and diagnostic collection; and
