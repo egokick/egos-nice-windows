@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "rapidSession": "gggg",
+  "testRound": 12,
+  "targetDevice": {
+    "deviceId": "cd67b29d-0609-4970-a86c-1a0e2a698a40",
+    "hostname": "gggg",
+    "tailnetDeviceId": "7",
+    "tailscaleIpv4": "100.64.0.3",
+    "architecture": "x64"
+  },
+  "timestamps": {
+    "roundStartedUtc": "2026-08-08T12:30:46.0072021Z",
+    "observationStartedUtc": "2026-08-08T12:31:37.1430722Z",
+    "accountEnabledUtc": "2026-08-08T12:32:06.0970292Z",
+    "listenerObservedUtc": "2026-08-08T12:32:09.5625376Z",
+    "cleanupObservedUtc": "2026-08-08T12:32:19.8316818Z",
+    "terminalStateVerifiedUtc": "2026-08-08T12:35:11.3838213Z"
+  },
+  "source": {
+    "repository": "https://github.com/egokick/egos-nice-windows.git",
+    "implementationBranch": "codex/rapid-gggg",
+    "commit": "ced03a53ac77beeb4beeb8dc1b37ad715aa23f0e",
+    "sourceCommit": "ea1ddfc8736ff6b64ab05ec6be76f3048834d3f0",
+    "tree": "21f752362359e59098c61fb3b6186645c8660655",
+    "expectedTree": "21f752362359e59098c61fb3b6186645c8660655",
+    "treeMatches": true,
+    "sourceDiffCount": 0,
+    "reachableFromApprovedBranch": true
+  },
+  "build": {
+    "status": "passed",
+    "execution": "reused",
+    "reason": "Instruction-only commit has the exact round-11 source tree. Round 11 built it with zero errors and all 32 self-tests passed."
+  },
+  "install": {
+    "status": "passed",
+    "execution": "not-authorized-or-required",
+    "changedInstalledComponents": false,
+    "rollbackOccurred": false
+  },
+  "installedArtifacts": {
+    "agent": {
+      "version": "1.1.36",
+      "sha256": "01E9A176EE94165993A32E2104BFBAAECE1689FBBD2E4F40903323A27FDD2762",
+      "pinnedAuthenticodeVerification": "passed",
+      "processRunning": true
+    },
+    "guardian": {
+      "version": "1.1.36",
+      "sha256": "098E5E32D634016FD60D1E404C110707579E8FBCA4EA2435A53A4D6D253FAAB8",
+      "pinnedAuthenticodeVerification": "passed"
+    }
+  },
+  "externalOpenSsh": {
+    "result": "clean-lifecycle-observed-controller-cryptographic-result-pending",
+    "listenerAbsentBeforeLease": true,
+    "accountEnabledBeforeBind": true,
+    "listenerAddress": "100.64.0.3",
+    "listenerPort": 45832,
+    "listenerBoundOnlyToTargetTailscaleIpv4": true,
+    "sshRelatedProcessCountDuringLease": 3,
+    "listenerRemovedAfterLease": true,
+    "sshRelatedProcessCountAfterLease": 0,
+    "dedicatedAccountDisabledAfterLease": true,
+    "signedAdministratorAttestation": "controller-only-result-not-exposed-by-agent-status",
+    "challengeCommand": "controller-only-result-not-exposed-by-agent-status",
+    "revocationCleanup": "passed"
+  },
+  "runtimeState": {
+    "tailscale": {
+      "backendState": "Running",
+      "online": true,
+      "healthWarnings": []
+    },
+    "rustdeskProcessRunning": true,
+    "agent45831BoundOnlyToTargetTailscaleIpv4": true,
+    "sshListener45832PresentAfterCleanup": false,
+    "enrollmentChanged": false,
+    "tailscaleChanged": false,
+    "rustdeskChanged": false
+  },
+  "protectedDiagnostics": {
+    "supervisorFailure": "not-found-or-inaccessible",
+    "sshdLog": "access-denied-to-non-elevated-target-shell",
+    "authorizedKeys": "not-found-or-inaccessible",
+    "nativeErrorCodeForProtectedRead": 5
+  },
+  "readyForSshProbe": true,
+  "result": "lifecycle-observed-controller-evidence-pending",
+  "requiredNextAction": "Correlate the controller's signed high-integrity non-SYSTEM administrator attestation and challenge-command result with the observed round-12 listener/account/process lifecycle. Push a follow-up commit declaring pass or the next exact defect."
+}
