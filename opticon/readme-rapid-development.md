@@ -100,9 +100,9 @@ Replace every angle-bracketed value before using these prompts. Both agents must
 ### Prompt for the fix agent
 
 ```text
-Run the Opticon rapid-development testing loop described in opticon/readme-rapid-development.md for session <session-id> and target <device-id>. You own implementation branch codex/rapid-<session-id>; use an isolated worktree and do not alter unrelated work. The target reports on rapid-report/<session-id>/<device-id>.
+Run the Opticon rapid-development testing loop described in opticon/readme-rapid-development.md for target <device-id>. You own <implementation-branch>; use an isolated worktree and do not alter unrelated work. The target reports on <report-branch>.
 
-For each round, validate that the target report matches the requested full commit SHA, session, device, and round, then exercise OpenSSH through the normal Command Center path and collect bounded, redacted evidence. If it fails, diagnose the actual source defect, add a regression test, make the smallest safe fix, run proportional local verification, and push the next implementation commit. Put the exact target action, checks, expected result, log locations, and rollback expectation in the commit body using this document's fix-commit format. Wait for the matching target report and repeat until every completion criterion passes.
+For each round, validate that the target report matches the requested full commit SHA, device, and round, then exercise OpenSSH through the normal Command Center path and collect bounded, redacted evidence. If it fails, diagnose the actual source defect, add a regression test, make the smallest safe fix, run proportional local verification, and push the next implementation commit. Put the exact target action, checks, expected result, log locations, and rollback expectation in the commit body using this document's fix-commit format. Wait for the matching target report and repeat until every completion criterion passes.
 
 Never weaken production signing, identity, authorization, rollback, or recovery protections. The testing authorization remains active until the administrator manually revokes it; do not revoke it merely because a round passes or fails. Report the final passing commit and evidence to the administrator, who decides when to revoke testing access.
 ```
@@ -110,7 +110,7 @@ Never weaken production signing, identity, authorization, rollback, or recovery 
 ### Prompt for the target-device agent
 
 ```text
-Act as the target-device agent for Opticon rapid-development session <session-id> on device <device-id>. Read and follow opticon/readme-rapid-development.md. Watch implementation branch codex/rapid-<session-id>, perform each requested test round, and report results only on rapid-report/<session-id>/<device-id> as described in the runbook.
+Act as the target-device agent for Opticon rapid development on device <device-id>. Read and follow opticon/readme-rapid-development.md. Watch <implementation-branch>, perform each requested test round, and report results only on <report-branch> as described in the runbook.
 
 Keep this task open and continue checking for new implementation commits after every report. There is no other way to prompt or reactivate you. Do not finish because there is no new commit or because a test or poll failed; keep waiting and retrying until the administrator manually revokes the testing invitation.
 ```
