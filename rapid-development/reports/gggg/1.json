@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "rapidSession": "gggg",
+  "testRound": 1,
+  "targetDevice": {
+    "deviceId": "cd67b29d-0609-4970-a86c-1a0e2a698a40",
+    "hostname": "gggg",
+    "tailnetDeviceId": "7",
+    "tailscaleIpv4": "100.64.0.3",
+    "architecture": "x64"
+  },
+  "timestamps": {
+    "roundStartedUtc": "2026-08-08T09:49:04.1629390Z",
+    "buildStartedUtc": "2026-08-08T09:50:01.4250000Z",
+    "buildFinishedUtc": "2026-08-08T09:50:15.3710000Z",
+    "selfTestStartedUtc": "2026-08-08T09:50:21.8920000Z",
+    "selfTestFinishedUtc": "2026-08-08T09:50:23.7610000Z",
+    "reportedUtc": "2026-08-08T09:52:53.7019417Z"
+  },
+  "source": {
+    "repository": "https://github.com/egokick/egos-nice-windows.git",
+    "implementationBranch": "codex/rapid-gggg",
+    "commit": "747da77e43e60c98fc5b86755810f53cf5d707c8",
+    "tree": "28402cc7235e1647f937f5bd0c8223bc63739b12",
+    "reachableFromApprovedBranch": true,
+    "detachedWorktree": "C:\\source\\egos-nice-windows-rapid-gggg-build",
+    "cleanBeforeBuild": true,
+    "instructionCommitChangedFiles": 0
+  },
+  "toolchain": {
+    "os": "Microsoft Windows NT 10.0.26200.0",
+    "powershell": "5.1.26100.8875",
+    "git": "2.45.2.windows.1",
+    "dotnetSdk": "9.0.101",
+    "tailscale": "1.102.1-t8ebe8f7c3-gda6192991"
+  },
+  "build": {
+    "status": "passed",
+    "command": "dotnet build opticon/Taildesk.sln -c Release",
+    "errors": 0,
+    "warnings": 1,
+    "boundedExcerpt": "Build succeeded. 1 Warning(s), 0 Error(s). Warning CS1998 in Taildesk.Admin/MainViewModel.cs(654,23).",
+    "localLog": "C:\\source\\egos-nice-windows-rapid-gggg-build\\opticon\\round1-build.log"
+  },
+  "tests": [
+    {
+      "name": "Taildesk.SelfTest",
+      "status": "passed",
+      "command": "dotnet run --project opticon/tests/Taildesk.SelfTest/Taildesk.SelfTest.csproj -c Release --no-build",
+      "passed": 32,
+      "failed": 0,
+      "boundedExcerpt": "All 32 named self-tests passed, including OpenSSH recovery, guarded update contracts, update journal persistence, and administrative recovery checks.",
+      "localLog": "C:\\source\\egos-nice-windows-rapid-gggg-build\\opticon\\round1-selftest.log"
+    }
+  ],
+  "builtArtifacts": {
+    "agent": {
+      "version": "1.1.31+747da77e43e60c98fc5b86755810f53cf5d707c8",
+      "sha256": "FDE7138B6FAA195D10FA6B56EA649B6BBEDB006F6FD4FD90823657E84BA634D9",
+      "signatureStatus": "NotSigned"
+    },
+    "guardian": {
+      "version": "1.1.31+747da77e43e60c98fc5b86755810f53cf5d707c8",
+      "sha256": "83B083D28EDC9D2332B5F18B4E04282D167F2B79B3065198325C310DCBED9230",
+      "signatureStatus": "NotSigned"
+    }
+  },
+  "authorization": {
+    "state": "unverified",
+    "operationLease": "unavailable",
+    "sessionCertificate": "not found",
+    "shellElevated": false,
+    "failure": "No rapid-development authorization state, operation-lease client, protected testing bootstrap, or per-device per-session signing certificate exists in the requested source or on the target. The exact round commit is instruction-only."
+  },
+  "install": {
+    "status": "failed",
+    "stage": "pre-install-safety-gate",
+    "changedInstalledComponents": false,
+    "rollbackOccurred": false,
+    "rollbackReason": "No installation was entered; the existing Agent and Guardian were preserved by omission.",
+    "failureType": "rapid_testing_control_plane_unavailable",
+    "message": "The locally built Agent and Guardian are unsigned and cannot be installed without weakening production trust. The runbook forbids that bypass."
+  },
+  "installedArtifacts": {
+    "agent": {
+      "version": "1.1.29",
+      "sha256": "A39C94894DB039937ACD943432FA99E1AC2189B264FFC3A342FC97472CF69EF4",
+      "signerSubject": "CN=Opticon Invitation Signing",
+      "processRunning": true
+    },
+    "guardian": {
+      "version": "1.1.31",
+      "sha256": "D843B7DFAFB179FAA8E15A2CA94592621DF77895A3AA27CF6F6F34F70F40CF6C",
+      "signerSubject": "CN=Opticon Invitation Signing"
+    },
+    "rustdesk": {
+      "version": "1.4.9+67",
+      "sha256": "3CCD9D5E1F14D1013D12E79C8426A07CC057510FE6D6676309771F03DB2BFBDD",
+      "signatureStatus": "Valid",
+      "processRunning": true
+    }
+  },
+  "runtimeState": {
+    "tailscale": {
+      "backendState": "Running",
+      "online": true,
+      "hostname": "gggg",
+      "ipv4": "100.64.0.3"
+    },
+    "listeners": [
+      {
+        "address": "100.64.0.3",
+        "port": 45831,
+        "owner": "Taildesk.Agent"
+      },
+      {
+        "address": "::",
+        "port": 21118,
+        "owner": "RustDesk"
+      }
+    ],
+    "sshListener45832Present": false,
+    "scheduledTasks": {
+      "status": "access-denied",
+      "nativeErrorCode": 5,
+      "queried": [
+        "Taildesk Agent",
+        "Taildesk Update Guardian",
+        "Taildesk Update Guardian Watchdog",
+        "Taildesk Opticon SSH Supervisor"
+      ]
+    },
+    "protectedSshDiagnostics": {
+      "status": "access-denied",
+      "nativeErrorCode": 5,
+      "pathsQueried": [
+        "C:\\ProgramData\\Taildesk\\Agent\\SshAccess\\supervisor.failure",
+        "C:\\ProgramData\\Taildesk\\Agent\\SshAccess\\sshd.log",
+        "C:\\ProgramData\\Taildesk\\Ssh\\supervisor.failure",
+        "C:\\ProgramData\\Taildesk\\Ssh\\sshd.log"
+      ]
+    }
+  },
+  "readyForSshProbe": false,
+  "result": "failed",
+  "requiredNextAction": "Implement or provide the authorized rapid-development bootstrap, active operation-lease validation, local session certificate registration/signing, elevated transactional Agent and Guardian installation, and protected diagnostic capture. Do not weaken production Authenticode checks."
+}
