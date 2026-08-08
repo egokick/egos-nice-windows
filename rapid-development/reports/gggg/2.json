@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "rapidSession": "gggg",
+  "testRound": 2,
+  "targetDevice": {
+    "deviceId": "cd67b29d-0609-4970-a86c-1a0e2a698a40",
+    "hostname": "gggg",
+    "tailnetDeviceId": "7",
+    "tailscaleIpv4": "100.64.0.3",
+    "architecture": "x64"
+  },
+  "timestamps": {
+    "roundStartedUtc": "2026-08-08T10:08:27.6867967Z",
+    "readinessVerifiedUtc": "2026-08-08T10:09:58.2403516Z"
+  },
+  "source": {
+    "repository": "https://github.com/egokick/egos-nice-windows.git",
+    "implementationBranch": "codex/rapid-gggg",
+    "commit": "fbc4a50c9c1cc3ffd78a81fa205b84f46c3616c2",
+    "tree": "28402cc7235e1647f937f5bd0c8223bc63739b12",
+    "reachableFromApprovedBranch": true,
+    "detachedWorktree": "C:\\source\\egos-nice-windows-rapid-gggg-build",
+    "instructionCommitChangedFiles": 0,
+    "sourceChangedSinceRound1": false
+  },
+  "build": {
+    "status": "passed",
+    "execution": "reused",
+    "reason": "No source change. This exact tree was built successfully in round 1 with 0 errors, and all 32 self-tests passed."
+  },
+  "install": {
+    "status": "passed",
+    "execution": "not-requested",
+    "changedInstalledComponents": false,
+    "rollbackOccurred": false,
+    "message": "Round 2 explicitly preserves the installed production-signed Agent 1.1.29 and Guardian 1.1.31."
+  },
+  "installedArtifacts": {
+    "agent": {
+      "path": "C:\\Program Files\\Taildesk\\Agent\\Taildesk.Agent.exe",
+      "version": "1.1.29",
+      "sha256": "A39C94894DB039937ACD943432FA99E1AC2189B264FFC3A342FC97472CF69EF4",
+      "signerSubject": "CN=Opticon Invitation Signing",
+      "signerThumbprint": "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53",
+      "pinnedAuthenticodeVerification": "passed",
+      "pinnedVerifierExitCode": 0,
+      "windowsTrustStatus": "UnknownError",
+      "windowsTrustNativeCode": "0x800B0109",
+      "windowsTrustExplanation": "Expected for the deliberately self-signed publisher certificate; Opticon accepts only this code followed by an exact fixed-time match to its pinned certificate.",
+      "processRunning": true
+    },
+    "guardian": {
+      "path": "C:\\Program Files\\Taildesk\\UpdateGuardian\\Taildesk.UpdateGuardian.exe",
+      "version": "1.1.31",
+      "sha256": "D843B7DFAFB179FAA8E15A2CA94592621DF77895A3AA27CF6F6F34F70F40CF6C",
+      "signerSubject": "CN=Opticon Invitation Signing",
+      "signerThumbprint": "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53",
+      "pinnedAuthenticodeVerification": "passed",
+      "pinnedVerifierExitCode": 0,
+      "windowsTrustStatus": "UnknownError",
+      "windowsTrustNativeCode": "0x800B0109",
+      "windowsTrustExplanation": "Expected for the deliberately self-signed publisher certificate; Opticon accepts only this code followed by an exact fixed-time match to its pinned certificate."
+    },
+    "rustdesk": {
+      "version": "1.4.9+67",
+      "sha256": "3CCD9D5E1F14D1013D12E79C8426A07CC057510FE6D6676309771F03DB2BFBDD",
+      "signatureStatus": "Valid",
+      "processRunning": true
+    }
+  },
+  "runtimeState": {
+    "tailscale": {
+      "version": "1.102.1-t8ebe8f7c3-gda6192991",
+      "backendState": "Running",
+      "online": true,
+      "hostname": "gggg",
+      "tailnetDeviceId": "7",
+      "ipv4": "100.64.0.3",
+      "healthWarnings": []
+    },
+    "listeners": [
+      {
+        "address": "100.64.0.3",
+        "port": 45831,
+        "owner": "Taildesk.Agent"
+      },
+      {
+        "address": "::",
+        "port": 21118,
+        "owner": "RustDesk"
+      }
+    ],
+    "agent45831BoundOnlyToTargetTailscaleIpv4": true,
+    "sshListener45832PresentBeforeLease": false,
+    "enrollmentChanged": false,
+    "tailscaleChanged": false,
+    "rustdeskChanged": false
+  },
+  "protectedSshDiagnostics": {
+    "capturePhase": "after-controller-probe",
+    "currentStatus": "not-yet-applicable",
+    "paths": [
+      "C:\\ProgramData\\Taildesk\\Agent\\SshAccess\\supervisor.failure",
+      "C:\\ProgramData\\Taildesk\\Agent\\SshAccess\\sshd.log"
+    ]
+  },
+  "readyForSshProbe": true,
+  "result": "passed",
+  "nextExpectedAction": "The fix agent may request a normal authenticated OpenSSH lease against the installed signed Agent 1.1.29 and Guardian 1.1.31, then provide another implementation commit if post-probe target diagnostics are required."
+}
