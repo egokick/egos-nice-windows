@@ -68,6 +68,9 @@ internal static class Program
         }
         catch (Exception exception)
         {
+            UpdateGuardianStartupDiagnostics.TryWrite(
+                watchdogOnly ? "watchdog" : "full",
+                exception);
             Console.Error.WriteLine("Taildesk Update Guardian failed: " + exception);
             return 1;
         }

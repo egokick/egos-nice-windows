@@ -245,7 +245,9 @@ internal sealed class MaintenanceBootstrapCoordinator
                     durable.SshWasListening = false;
                     durable.CommitDeadline = null;
                     durable.AgentProcessId = 0;
-                    durable.Message = "Windows could not start the update Guardian; the installed Agent was not changed. Maintenance can be retried.";
+                    durable.Message =
+                        "Windows could not start the update Guardian; the installed Agent was not changed. " +
+                        BoundedDiagnostic(startFailure.Message);
                     await UpdateJournalPersistence.SaveAsync(durable, cancellationToken: CancellationToken.None);
                 }
             }
@@ -748,8 +750,11 @@ internal sealed class MaintenanceBootstrapCoordinator
         Guid operationId,
         CancellationToken cancellationToken)
     {
-        var deadline = DateTimeOffset.UtcNow.AddMinutes(1);
+        // A full Guardian may legitimately wait two minutes behind a finishing
+        // watchdog/full invocation. Setup must outlive that mutex contract.
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(2.5);
         string lastError = string.Empty;
+        UpdateGuardianStartupDiagnostics.Clear();
         while (DateTimeOffset.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -771,12 +776,35 @@ internal sealed class MaintenanceBootstrapCoordinator
                 if (durable.Phase != UpdatePhase.ActivationScheduled
                     || durable.GuardianClaimedAt is not null)
                     return;
+                var failure = UpdateGuardianStartupDiagnostics.Read();
+                if (failure is not null
+                    && failure.Mode.Equals("full", StringComparison.Ordinal)
+                    && (failure.OperationId == Guid.Empty || failure.OperationId == operationId))
+                    throw new InvalidOperationException(
+                        "The scheduled Guardian exited before claiming maintenance: " +
+                        BoundedDiagnostic(failure.Error));
                 await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
             }
         }
 
+        var taskState = await ProcessRunner.RunAsync(
+            "schtasks.exe",
+            ["/Query", "/TN", RemoteAdministrationProtocol.GuardianTaskName, "/V", "/FO", "LIST"],
+            TimeSpan.FromSeconds(15), cancellationToken);
+        var taskDetail = BoundedDiagnostic(
+            string.Join(" ", taskState.StandardOutput.Trim(), taskState.StandardError.Trim()).Trim());
+
         throw new InvalidOperationException(
-            "The fail-safe Guardian did not pick up the scheduled maintenance transaction. " + lastError);
+            "The fail-safe Guardian did not pick up the scheduled maintenance transaction after its bounded mutex wait. " +
+            BoundedDiagnostic(lastError) + " Task Scheduler: " + taskDetail);
+    }
+
+    private static string BoundedDiagnostic(string value)
+    {
+        value = string.Join(" ", value
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        if (value.Length == 0) return "No additional diagnostic was reported.";
+        return value.Length <= 2_000 ? value : value[..2_000];
     }
 
     private static async Task InstallGuardianTaskAsync(CancellationToken cancellationToken)

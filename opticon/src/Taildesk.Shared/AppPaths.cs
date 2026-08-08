@@ -24,6 +24,9 @@ public static class AppPaths
 
     public static string UpdateCommitRequestFile => Path.Combine(UpdateDataDirectory, "commit-request.json");
 
+    public static string UpdateGuardianStartupFailureFile =>
+        Path.Combine(UpdateDataDirectory, "guardian-startup-failure.json");
+
     public static string SshDataDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Taildesk", "Ssh");
 

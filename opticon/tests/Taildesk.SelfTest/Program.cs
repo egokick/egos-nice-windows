@@ -424,10 +424,10 @@ static void TestReleaseDistributionDesign()
            && gateway.Contains("writeFileAtomically", StringComparison.Ordinal)
            && client.Contains(".cloudfront.net", StringComparison.Ordinal),
         "manifest clients do not tightly validate CloudFront download URLs");
-    Assert(client.Contains("GuardianSshMaintenanceVersion = new(1, 1, 30)", StringComparison.Ordinal)
+    Assert(client.Contains("GuardianSshMaintenanceVersion = new(1, 1, 31)", StringComparison.Ordinal)
            && client.Contains("candidate.Version == current", StringComparison.Ordinal)
            && client.Contains("requiresGuardianMaintenance", StringComparison.Ordinal),
-        "the 1.1.30 release boundary must offer attended Guardian repair even after the Agent already reached that version");
+        "the 1.1.31 release boundary must offer attended Guardian repair even after the Agent already reached that version");
     Assert(agent.Contains("UseProxy = false", StringComparison.Ordinal)
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
@@ -1221,7 +1221,7 @@ static void TestOpenSshRecoveryDesign()
     Assert(bundleBuilder.Contains("$setupPath", StringComparison.Ordinal)
            && bundleBuilder.Contains("Get-Item -LiteralPath $setupPath", StringComparison.Ordinal),
         "the signed inner release manifest must include the root Setup executable");
-    Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.30\"", StringComparison.Ordinal),
+    Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.31\"", StringComparison.Ordinal),
         "the hosted release must require the Guardian that implements the fixed linked-token SSH contract");
     Assert(adminWindow.Contains("BuildMaintenanceBootstrapCommand(release, device, operationId)", StringComparison.Ordinal)
            && adminWindow.Contains("release-manifest.json", StringComparison.Ordinal)
@@ -1331,6 +1331,11 @@ static void TestOpenSshRecoveryDesign()
     var guardianHealth = ReadSource("src", "Taildesk.UpdateGuardian", "InternalHealthClient.cs");
     Assert(guardianHealth.Contains("UpdateHealthTokenStore.LoadFromAgentConfigFile()", StringComparison.Ordinal),
         "Guardian internal health must use the same config-first sidecar fallback");
+    var maintenanceBootstrap = ReadSource("src", "Taildesk.Setup", "MaintenanceBootstrapCoordinator.cs");
+    Assert(maintenanceBootstrap.Contains("AddMinutes(2.5)", StringComparison.Ordinal)
+           && maintenanceBootstrap.Contains("UpdateGuardianStartupDiagnostics.Read()", StringComparison.Ordinal)
+           && guardianProgram.Contains("UpdateGuardianStartupDiagnostics.TryWrite", StringComparison.Ordinal),
+        "Setup pickup must outlive the Guardian mutex wait and surface protected pre-claim startup failures");
 
     var adminToken = ReadSource("src", "Taildesk.UpdateGuardian", "SshAdminToken.cs");
     Assert(adminToken.Contains("TokenElevationTypeLimited", StringComparison.Ordinal)
