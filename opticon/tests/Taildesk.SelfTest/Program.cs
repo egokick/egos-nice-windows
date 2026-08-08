@@ -1315,7 +1315,10 @@ static void TestOpenSshRecoveryDesign()
     var guardianProgram = ReadSource("src", "Taildesk.UpdateGuardian", "Program.cs");
     Assert(guardianProgram.Contains("RemoteAdministrationProtocol.GuardianWatchdogArgument", StringComparison.Ordinal)
            && guardianProgram.Contains("watchdogOnly ? TimeSpan.Zero : TimeSpan.FromMinutes(2)", StringComparison.Ordinal)
-           && guardianProgram.Contains("new GuardianRunner().RunAsync(watchdogOnly", StringComparison.Ordinal),
+           && guardianProgram.Contains(".RunAsync(watchdogOnly, cancellation.Token)", StringComparison.Ordinal)
+           && guardianProgram.Contains(".GetAwaiter()", StringComparison.Ordinal)
+           && guardianProgram.Contains(".GetResult()", StringComparison.Ordinal)
+           && !guardianProgram.Contains("return await new GuardianRunner", StringComparison.Ordinal),
         "full ONSTART mode must wait through a quick watchdog so boot health cannot be suppressed");
 
     var updateManager = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");

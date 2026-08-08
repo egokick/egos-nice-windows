@@ -59,7 +59,15 @@ internal static class Program
                 cancellation.Cancel();
             };
 
-            return await new GuardianRunner().RunAsync(watchdogOnly, cancellation.Token);
+            // A Windows mutex is owned by the acquiring thread. Do not await
+            // here: an async continuation may resume on another pool thread,
+            // which would make ReleaseMutex fail even though this process owns
+            // the named mutex. The runner remains asynchronous internally while
+            // this entry thread waits and retains mutex ownership.
+            return new GuardianRunner()
+                .RunAsync(watchdogOnly, cancellation.Token)
+                .GetAwaiter()
+                .GetResult();
         }
         catch (OperationCanceledException)
         {
