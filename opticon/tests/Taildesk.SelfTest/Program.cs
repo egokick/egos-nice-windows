@@ -1327,6 +1327,11 @@ static void TestOpenSshRecoveryDesign()
            && updateManager.Contains("UpdatePhase.Committed or UpdatePhase.RolledBack or UpdatePhase.Failed", StringComparison.Ordinal)
            && !updateManager.Contains("allowAlreadyRunning", StringComparison.Ordinal),
         "commit wakeup must require terminal evidence from the exact durable operation");
+    var packageVerifier = ReadSource("src", "Taildesk.Shared", "UpdatePackageVerifier.cs");
+    Assert(packageVerifier.Contains("Both archive", StringComparison.Ordinal)
+           && packageVerifier.IndexOf("await target.FlushAsync", StringComparison.Ordinal)
+              < packageVerifier.IndexOf("VerifyAuthenticodeAsync(output", StringComparison.Ordinal),
+        "Guardian extraction must close its exclusive output handle before Authenticode reopens the staged executable");
     Assert(manager.Contains("SessionTerminationGeneration++", StringComparison.Ordinal)
            && manager.Contains("terminateAuthenticatedSessions: true", StringComparison.Ordinal),
         "revocation and expiry must durably request termination of already-authenticated SSH shells");

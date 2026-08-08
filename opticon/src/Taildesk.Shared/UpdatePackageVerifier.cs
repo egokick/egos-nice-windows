@@ -173,23 +173,28 @@ public static partial class UpdatePackageVerifier
             var entry = FindUniqueEntry(archive, normalized);
             if (entry.Length != file.Size) throw new InvalidDataException($"Release file size mismatch: {normalized}");
             var output = Path.Combine(destination, "Taildesk.UpdateGuardian.exe");
-            await using var source = entry.Open();
-            await using var target = new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, true);
-            using var sha = SHA256.Create();
-            var buffer = new byte[1024 * 1024];
-            long written = 0;
-            int read;
-            while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
             {
-                written += read;
-                if (written > file.Size) throw new InvalidDataException("The Guardian expanded beyond its declared size.");
-                await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                sha.TransformBlock(buffer, 0, read, null, 0);
+                await using var source = entry.Open();
+                await using var target = new FileStream(
+                    output, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, true);
+                using var sha = SHA256.Create();
+                var buffer = new byte[1024 * 1024];
+                long written = 0;
+                int read;
+                while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+                {
+                    written += read;
+                    if (written > file.Size) throw new InvalidDataException("The Guardian expanded beyond its declared size.");
+                    await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    sha.TransformBlock(buffer, 0, read, null, 0);
+                }
+                sha.TransformFinalBlock([], 0, 0);
+                if (written != file.Size || !Convert.ToHexString(sha.Hash!).Equals(file.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("The Guardian release file hash does not match its signed declaration.");
+                await target.FlushAsync(cancellationToken);
             }
-            sha.TransformFinalBlock([], 0, 0);
-            if (written != file.Size || !Convert.ToHexString(sha.Hash!).Equals(file.Sha256, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("The Guardian release file hash does not match its signed declaration.");
-            await target.FlushAsync(cancellationToken);
+            // Authenticode opens the staged image independently. Both archive
+            // and destination streams must be closed before this call.
             await InvitationSigning.VerifyAuthenticodeAsync(output, cancellationToken);
             var reported = NormalizeVersion(FileVersionInfo.GetVersionInfo(output).ProductVersion ?? string.Empty);
             if (!reported.Equals(NormalizeVersion(request.TargetVersion), StringComparison.Ordinal))
