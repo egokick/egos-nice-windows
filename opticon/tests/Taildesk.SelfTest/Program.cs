@@ -424,10 +424,11 @@ static void TestReleaseDistributionDesign()
            && gateway.Contains("writeFileAtomically", StringComparison.Ordinal)
            && client.Contains(".cloudfront.net", StringComparison.Ordinal),
         "manifest clients do not tightly validate CloudFront download URLs");
-    Assert(client.Contains("GuardianSshMaintenanceVersion = new(1, 1, 32)", StringComparison.Ordinal)
+    Assert(client.Contains("GuardianApiBootstrapVersion", StringComparison.Ordinal)
            && client.Contains("candidate.Version == current", StringComparison.Ordinal)
-           && client.Contains("requiresGuardianMaintenance", StringComparison.Ordinal),
-        "the 1.1.32 release boundary must offer attended Guardian repair even after the Agent already reached that version");
+           && client.Contains("installedGuardian < candidate.Version", StringComparison.Ordinal)
+           && client.Contains("RequiresGuardianReconciliation", StringComparison.Ordinal),
+        "release selection must offer authenticated Guardian reconciliation after a watchdog-capable Agent reaches the same version");
     Assert(agent.Contains("UseProxy = false", StringComparison.Ordinal)
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
@@ -1162,11 +1163,14 @@ static void TestOpenSshRecoveryDesign()
     Assert(setup.Contains("SupportsGuardianWatchdog(installedVersion)", StringComparison.Ordinal)
            && !setup.Contains("if (installedVersion < sourceVersion)", StringComparison.Ordinal),
         "fresh Setup must verify the installed Guardian against the watchdog contract after attended maintenance");
-    var stableGuardianMaintenance = ReadSource("src", "Taildesk.Setup", "StableGuardianMaintenance.cs");
+    var stableGuardianMaintenance = ReadSource("src", "Taildesk.Shared", "StableGuardianMaintenance.cs");
     Assert(stableGuardianMaintenance.Contains("UpdateJournalCoordination.AcquireAsync", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("InvitationSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("File.Replace(staged, installed, backup", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("File.Replace(backup, installedExecutable, failed", StringComparison.Ordinal)
+           && stableGuardianMaintenance.Contains("GuardianWatchdogArgument", StringComparison.Ordinal)
+           && stableGuardianMaintenance.IndexOf("GuardianWatchdogArgument", StringComparison.Ordinal)
+              < stableGuardianMaintenance.IndexOf("DeleteWithRetryAsync(backup", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("RequireRecognizedInstalledFiles", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("Guid.TryParseExact", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("FilesMatchAsync", StringComparison.Ordinal),
@@ -1221,8 +1225,17 @@ static void TestOpenSshRecoveryDesign()
     Assert(bundleBuilder.Contains("$setupPath", StringComparison.Ordinal)
            && bundleBuilder.Contains("Get-Item -LiteralPath $setupPath", StringComparison.Ordinal),
         "the signed inner release manifest must include the root Setup executable");
-    Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.32\"", StringComparison.Ordinal),
-        "the hosted release must require the Guardian that implements the fixed linked-token SSH contract");
+    Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.2\"", StringComparison.Ordinal),
+        "the hosted release must permit a watchdog-capable Guardian to install the Agent that performs signed Guardian reconciliation");
+    var guardianUpdateManager = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");
+    Assert(guardianUpdateManager.Contains("VerifyAndExtractGuardianAsync", StringComparison.Ordinal)
+           && guardianUpdateManager.Contains("StableGuardianMaintenance.ReconcileSignedReleaseAsync", StringComparison.Ordinal)
+           && guardianUpdateManager.Contains("GuardianWatchdogArgument", StringComparison.Ordinal)
+           && guardianUpdateManager.Contains("Close the active Opticon SSH lease", StringComparison.Ordinal)
+           && ReadSource("src", "Taildesk.Agent", "Program.cs").Contains("/api/v1/update/guardian", StringComparison.Ordinal)
+           && updateCoordinator.Contains("ReconcileGuardianAsync", StringComparison.Ordinal)
+           && updateCoordinator.Contains("post-maintenance Agent sample", StringComparison.Ordinal),
+        "watchdog-capable Agents must reconcile only the production-signed Guardian and externally attest the result without UAC");
     Assert(adminWindow.Contains("BuildMaintenanceBootstrapCommand(release, device, operationId)", StringComparison.Ordinal)
            && adminWindow.Contains("release-manifest.json", StringComparison.Ordinal)
            && adminWindow.Contains("RSASignaturePadding]::Pss", StringComparison.Ordinal)

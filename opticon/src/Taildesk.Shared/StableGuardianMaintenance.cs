@@ -1,9 +1,9 @@
 using System.Diagnostics;
 using Taildesk.Shared;
 
-namespace Taildesk.Setup;
+namespace Taildesk.Shared;
 
-internal static class StableGuardianMaintenance
+public static class StableGuardianMaintenance
 {
     private const string ExecutableName = "Taildesk.UpdateGuardian.exe";
 
@@ -80,6 +80,20 @@ internal static class StableGuardianMaintenance
                 throw new InvalidDataException("The promoted stable Guardian version does not match the signed release.");
             if (!await FilesMatchAsync(sourceExecutable, installedExecutable, cancellationToken))
                 throw new InvalidDataException("The promoted stable Guardian does not match the signed release.");
+
+            // Exercise the promoted fixed-path binary before discarding the
+            // signed rollback copy. Watchdog mode is side-effect free when no
+            // transaction is active, but still validates startup, path policy,
+            // Authenticode, and the runtime dependency closure.
+            var startup = await ProcessRunner.RunAsync(
+                installedExecutable,
+                [RemoteAdministrationProtocol.GuardianWatchdogArgument],
+                TimeSpan.FromSeconds(30),
+                cancellationToken);
+            if (!startup.Succeeded)
+                throw new InvalidOperationException(
+                    "The promoted stable Guardian failed its watchdog startup probe: " +
+                    string.Join(" ", startup.StandardOutput.Trim(), startup.StandardError.Trim()).Trim());
 
             await DeleteWithRetryAsync(backup, cancellationToken);
         }
@@ -214,7 +228,10 @@ internal static class StableGuardianMaintenance
             throw new InvalidDataException("The protected update journal cannot be read before Guardian maintenance.", exception);
         }
         if (journal is not null
-            && journal.Phase is not UpdatePhase.None and not UpdatePhase.Failed and not UpdatePhase.RolledBack)
+            && journal.Phase is not UpdatePhase.None
+                and not UpdatePhase.Committed
+                and not UpdatePhase.Failed
+                and not UpdatePhase.RolledBack)
             throw new InvalidOperationException(
                 $"Stable Guardian maintenance cannot interrupt update {journal.OperationId:N}, which is {journal.Phase}.");
     }

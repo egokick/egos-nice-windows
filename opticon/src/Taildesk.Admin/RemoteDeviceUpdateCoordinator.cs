@@ -25,6 +25,14 @@ public sealed class RemoteDeviceUpdateCoordinator
         if (!await AgentClient.ProbeTcpAsync(device.TailscaleIp, 21118, TimeSpan.FromSeconds(10), cancellationToken))
             throw new InvalidOperationException("RustDesk TCP 21118 is unavailable. Opticon will not update a distant device without a verified recovery channel.");
 
+        var currentAgentVersion = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
+        var releaseVersion = UpdatePackageVerifier.ParseVersion(release.Version);
+        if (currentAgentVersion == releaseVersion && release.RequiresGuardianReconciliation)
+        {
+            await ReconcileGuardianAsync(device, agentToken, release, progress, cancellationToken);
+            return await _agents.GetUpdateStatusAsync(device, agentToken, cancellationToken);
+        }
+
         var operationId = Guid.NewGuid();
         progress?.Report($"Staging Opticon Agent {release.Version} on {device.Name}; the installed Agent and remote-control services remain active.");
         var prepareTask = _agents.PrepareUpdateAsync(device, agentToken, new OpticonUpdateRequest
@@ -179,8 +187,46 @@ public sealed class RemoteDeviceUpdateCoordinator
             progress?.Report(
                 "Commit delivery is indeterminate; polling the Guardian's durable terminal state. " + exception.Message);
         }
-        return await WaitForTerminalStatusAsync(
+        var terminal = await WaitForTerminalStatusAsync(
             device, agentToken, operationId, DateTimeOffset.UtcNow.AddMinutes(2), progress, cancellationToken);
+        if (terminal.Phase == UpdatePhase.Committed)
+            await ReconcileGuardianAsync(device, agentToken, release, progress, cancellationToken);
+        return terminal;
+    }
+
+    private async Task ReconcileGuardianAsync(
+        DeviceRecord device,
+        string agentToken,
+        OpticonUpdateRelease release,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var operationId = Guid.NewGuid();
+        progress?.Report(
+            $"Reconciling the production-signed stable Guardian with Opticon {release.Version}; no UAC or arbitrary command execution is used.");
+        var result = await _agents.ReconcileGuardianAsync(device, agentToken, new OpticonUpdateRequest
+        {
+            OperationId = operationId,
+            TargetVersion = release.Version,
+            Role = release.Role,
+            Architecture = release.Architecture,
+            DownloadUrl = release.DownloadUri.AbsoluteUri,
+            PackageSize = release.Size,
+            PackageSha256 = release.Sha256
+        }, cancellationToken);
+        if (result.OperationId != operationId)
+            throw new InvalidDataException("The Agent returned a different Guardian maintenance operation ID.");
+        var expected = UpdatePackageVerifier.ParseVersion(release.Version);
+        if (UpdatePackageVerifier.ParseVersion(result.GuardianVersion) < expected)
+            throw new InvalidDataException(
+                $"The Agent reported Guardian {result.GuardianVersion} after reconciling release {release.Version}.");
+        var status = await _agents.GetStatusAsync(device, agentToken, cancellationToken);
+        if (UpdatePackageVerifier.ParseVersion(status.GuardianVersion) < expected
+            || !status.RustDeskReady
+            || !status.TailscaleIp.Equals(device.TailscaleIp, StringComparison.Ordinal))
+            throw new InvalidDataException(
+                "The post-maintenance Agent sample did not attest the expected Guardian, Tailscale identity, and RustDesk recovery channel.");
+        progress?.Report(result.Message);
     }
 
     public async Task<UpdateStatusDto> ObserveMaintenanceBootstrapAsync(

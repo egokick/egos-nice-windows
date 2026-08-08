@@ -111,6 +111,98 @@ public static partial class UpdatePackageVerifier
         }
     }
 
+    public static async Task<OpticonReleaseManifest> VerifyAndExtractGuardianAsync(
+        string packagePath,
+        string destination,
+        OpticonUpdateRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateRequest(request);
+        if (!File.Exists(packagePath)) throw new FileNotFoundException("The staged Opticon package is missing.", packagePath);
+        if (new FileInfo(packagePath).Length != request.PackageSize)
+            throw new InvalidDataException("The staged Opticon package size does not match the release manifest.");
+
+        await using (var stream = File.OpenRead(packagePath))
+        {
+            var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
+            if (!hash.Equals(request.PackageSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The staged Opticon package SHA-256 does not match the release manifest.");
+        }
+
+        using var archive = ZipFile.OpenRead(packagePath);
+        var manifestEntry = FindUniqueEntry(archive, ManifestEntryName);
+        var signatureEntry = FindUniqueEntry(archive, SignatureEntryName);
+        if (manifestEntry.Length is <= 0 or > 1024 * 1024 || signatureEntry.Length is <= 0 or > 64 * 1024)
+            throw new InvalidDataException("The Opticon release metadata has an invalid size.");
+
+        var manifestBytes = await ReadEntryAsync(manifestEntry, 1024 * 1024, cancellationToken);
+        var signatureText = System.Text.Encoding.UTF8.GetString(
+            await ReadEntryAsync(signatureEntry, 64 * 1024, cancellationToken)).Trim();
+        byte[] signature;
+        try { signature = Convert.FromBase64String(signatureText); }
+        catch (FormatException exception) { throw new InvalidDataException("The Opticon release signature is malformed.", exception); }
+        if (!InvitationSigning.Verify(manifestBytes, signature))
+            throw new InvalidDataException("The Opticon release manifest signature is invalid.");
+
+        var manifest = JsonSerializer.Deserialize<OpticonReleaseManifest>(manifestBytes, JsonDefaults.Options)
+                       ?? throw new InvalidDataException("The Opticon release manifest is empty.");
+        ValidateManifest(manifest, request);
+
+        const string prefix = "Payload/UpdateGuardian/";
+        var guardianFiles = manifest.Files
+            .Where(file => NormalizeEntry(file.Path).StartsWith(prefix, StringComparison.Ordinal))
+            .ToArray();
+        if (guardianFiles.Length != 1
+            || NormalizeEntry(guardianFiles[0].Path) != prefix + "Taildesk.UpdateGuardian.exe")
+            throw new InvalidDataException("The Opticon release must contain exactly one signed Guardian executable.");
+
+        var declared = guardianFiles.Select(file => NormalizeEntry(file.Path)).ToHashSet(StringComparer.Ordinal);
+        var packaged = archive.Entries
+            .Where(entry => !string.IsNullOrEmpty(entry.Name) && NormalizeEntry(entry.FullName).StartsWith(prefix, StringComparison.Ordinal))
+            .Select(entry => NormalizeEntry(entry.FullName)).ToArray();
+        if (packaged.Length != packaged.Distinct(StringComparer.Ordinal).Count() || !declared.SetEquals(packaged))
+            throw new InvalidDataException("The Guardian payload contains missing, duplicate, or undeclared files.");
+
+        if (Directory.Exists(destination)) Directory.Delete(destination, true);
+        Directory.CreateDirectory(destination);
+        try
+        {
+            var file = guardianFiles[0];
+            var normalized = NormalizeEntry(file.Path);
+            ValidateReleaseFile(file, normalized);
+            var entry = FindUniqueEntry(archive, normalized);
+            if (entry.Length != file.Size) throw new InvalidDataException($"Release file size mismatch: {normalized}");
+            var output = Path.Combine(destination, "Taildesk.UpdateGuardian.exe");
+            await using var source = entry.Open();
+            await using var target = new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, true);
+            using var sha = SHA256.Create();
+            var buffer = new byte[1024 * 1024];
+            long written = 0;
+            int read;
+            while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+            {
+                written += read;
+                if (written > file.Size) throw new InvalidDataException("The Guardian expanded beyond its declared size.");
+                await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                sha.TransformBlock(buffer, 0, read, null, 0);
+            }
+            sha.TransformFinalBlock([], 0, 0);
+            if (written != file.Size || !Convert.ToHexString(sha.Hash!).Equals(file.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The Guardian release file hash does not match its signed declaration.");
+            await target.FlushAsync(cancellationToken);
+            await InvitationSigning.VerifyAuthenticodeAsync(output, cancellationToken);
+            var reported = NormalizeVersion(FileVersionInfo.GetVersionInfo(output).ProductVersion ?? string.Empty);
+            if (!reported.Equals(NormalizeVersion(request.TargetVersion), StringComparison.Ordinal))
+                throw new InvalidDataException($"The signed Guardian binary reports version {reported}, not {request.TargetVersion}.");
+            return manifest;
+        }
+        catch
+        {
+            try { if (Directory.Exists(destination)) Directory.Delete(destination, true); } catch { }
+            throw;
+        }
+    }
+
     public static void ValidateRequest(OpticonUpdateRequest request)
     {
         if (request.ProtocolVersion != RemoteAdministrationProtocol.UpdateVersion || request.OperationId == Guid.Empty)

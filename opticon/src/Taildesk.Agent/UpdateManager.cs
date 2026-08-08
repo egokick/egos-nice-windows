@@ -179,6 +179,84 @@ public sealed class UpdateManager
         }
     }
 
+    public async Task<GuardianMaintenanceStatusDto> ReconcileGuardianAsync(
+        OpticonUpdateRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            UpdatePackageVerifier.ValidateRequest(request);
+            ValidateGuardianTarget(request);
+            if (!IsRustDeskReady())
+                throw new InvalidOperationException(
+                    "The RustDesk recovery channel is not healthy on TCP 21118. Opticon refuses to replace its stable Guardian without remote-control fallback.");
+            if (IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+                .Any(endpoint => endpoint.Port == RemoteAdministrationProtocol.SshPort))
+                throw new InvalidOperationException("Close the active Opticon SSH lease before updating the stable Guardian.");
+
+            var installedGuardian = GuardianExecutable();
+            await InvitationSigning.VerifyAuthenticodeAsync(installedGuardian, cancellationToken);
+            var previousVersion = ReadExecutableVersion(installedGuardian);
+            await EnsurePrivateUpdateDirectoryAsync(cancellationToken);
+            EnsureFreeSpace(request.PackageSize);
+
+            var operationDirectory = Path.Combine(
+                AppPaths.UpdateDataDirectory,
+                "guardian-" + request.OperationId.ToString("N"));
+            Directory.CreateDirectory(operationDirectory);
+            var packagePath = ReusableCommittedPackage(request) ?? Path.Combine(operationDirectory, "package.zip");
+            var downloadedForGuardian = !File.Exists(packagePath);
+            if (downloadedForGuardian)
+                await DownloadWithResumeAsync(new Uri(request.DownloadUrl), packagePath, request.PackageSize, cancellationToken);
+
+            var stagedGuardian = Path.Combine(operationDirectory, "staged-guardian");
+            var manifest = await UpdatePackageVerifier.VerifyAndExtractGuardianAsync(
+                packagePath, stagedGuardian, request, cancellationToken);
+            if (UpdatePackageVerifier.ParseVersion(manifest.Version)
+                < UpdatePackageVerifier.ParseVersion(manifest.MinimumGuardianVersion))
+                throw new InvalidDataException("The signed release Guardian is older than its own declared minimum Guardian version.");
+
+            await StableGuardianMaintenance.ReconcileSignedReleaseAsync(
+                stagedGuardian,
+                AppPaths.UpdateGuardianInstallDirectory,
+                cancellationToken);
+
+            await InvitationSigning.VerifyAuthenticodeAsync(installedGuardian, cancellationToken);
+            var installedVersion = ReadExecutableVersion(installedGuardian);
+            var expectedVersion = UpdatePackageVerifier.NormalizeVersion(request.TargetVersion);
+            if (UpdatePackageVerifier.ParseVersion(installedVersion)
+                < UpdatePackageVerifier.ParseVersion(expectedVersion))
+                throw new InvalidDataException(
+                    $"Stable Guardian maintenance retained {installedVersion}, which is older than signed release {expectedVersion}.");
+
+            var watchdog = await ProcessRunner.RunAsync(
+                installedGuardian,
+                [RemoteAdministrationProtocol.GuardianWatchdogArgument],
+                TimeSpan.FromSeconds(30),
+                cancellationToken);
+            if (!watchdog.Succeeded)
+                throw new InvalidOperationException(
+                    "The promoted signed Guardian did not pass its SYSTEM watchdog startup probe: " +
+                    string.Join(" ", watchdog.StandardOutput.Trim(), watchdog.StandardError.Trim()).Trim());
+
+            return new GuardianMaintenanceStatusDto
+            {
+                OperationId = request.OperationId,
+                PreviousVersion = previousVersion,
+                GuardianVersion = installedVersion,
+                Changed = !installedVersion.Equals(previousVersion, StringComparison.Ordinal),
+                Message = installedVersion.Equals(previousVersion, StringComparison.Ordinal)
+                    ? $"The installed signed Guardian {installedVersion} already satisfies this release."
+                    : $"The signed stable Guardian was atomically updated from {previousVersion} to {installedVersion} and passed its watchdog startup probe."
+            };
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task<UpdateStatusDto> ActivateAsync(Guid operationId, CancellationToken cancellationToken = default)
     {
         await _gate.WaitAsync(cancellationToken);
@@ -282,6 +360,47 @@ public sealed class UpdateManager
         if (!RemoteAdministrationProtocol.IsTailscaleIpv4(_state.Config.BindAddress))
             throw new InvalidOperationException("The Agent is not bound to a valid Tailscale IPv4 address.");
     }
+
+    private void ValidateGuardianTarget(OpticonUpdateRequest request)
+    {
+        if (request.Role != _state.Config.Role)
+            throw new InvalidOperationException("The Guardian release role does not match this device.");
+        if (!request.Architecture.Equals(CurrentArchitecture, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"The Guardian release is for {request.Architecture}, but this device is {CurrentArchitecture}.");
+        var currentAgent = UpdatePackageVerifier.ParseVersion(CurrentVersion);
+        var target = UpdatePackageVerifier.ParseVersion(request.TargetVersion);
+        if (target != currentAgent)
+            throw new InvalidOperationException(
+                $"Update the Agent to {request.TargetVersion} before reconciling the same signed Guardian; the running Agent is {CurrentVersion}.");
+        if (!RemoteAdministrationProtocol.IsTailscaleIpv4(_state.Config.BindAddress))
+            throw new InvalidOperationException("The Agent is not bound to a valid Tailscale IPv4 address.");
+    }
+
+    private static string? ReusableCommittedPackage(OpticonUpdateRequest request)
+    {
+        try
+        {
+            var journal = UpdateJournalPersistence.Load();
+            if (journal?.Phase != UpdatePhase.Committed
+                || journal.OperationId == Guid.Empty
+                || !journal.TargetVersion.Equals(
+                    UpdatePackageVerifier.NormalizeVersion(request.TargetVersion), StringComparison.Ordinal)
+                || journal.PackageSize != request.PackageSize
+                || !journal.PackageSha256.Equals(request.PackageSha256, StringComparison.OrdinalIgnoreCase)
+                || !File.Exists(journal.PackagePath))
+                return null;
+            return journal.PackagePath;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string ReadExecutableVersion(string path) =>
+        UpdatePackageVerifier.NormalizeVersion(
+            FileVersionInfo.GetVersionInfo(path).ProductVersion ?? string.Empty);
 
     private static void ValidateGuardianCompatibility(string guardian, string minimumVersion)
     {

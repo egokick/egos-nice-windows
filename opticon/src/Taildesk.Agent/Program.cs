@@ -378,6 +378,8 @@ app.MapPost("/api/v1/update/activate", async (UpdateOperationRequest request, Up
     Results.Ok(await updates.ActivateAsync(request.OperationId, cancellationToken)));
 app.MapPost("/api/v1/update/commit", async (UpdateOperationRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
     Results.Ok(await updates.RequestCommitAsync(request.OperationId, cancellationToken)));
+app.MapPost("/api/v1/update/guardian", async (OpticonUpdateRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
+    Results.Ok(await updates.ReconcileGuardianAsync(request, cancellationToken)));
 
 await app.RunAsync();
 

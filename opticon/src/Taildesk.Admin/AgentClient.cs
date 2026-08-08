@@ -228,6 +228,15 @@ public sealed class AgentClient
         CancellationToken cancellationToken = default) =>
         GetAsync<UpdateStatusDto>(device, token, "api/v1/update/status", cancellationToken);
 
+    public Task<GuardianMaintenanceStatusDto> ReconcileGuardianAsync(
+        DeviceRecord device,
+        string token,
+        OpticonUpdateRequest request,
+        CancellationToken cancellationToken = default) =>
+        SendJsonResultAsync<GuardianMaintenanceStatusDto>(
+            device, token, HttpMethod.Post, "api/v1/update/guardian", request,
+            TimeSpan.FromMinutes(30), cancellationToken);
+
     public static async Task<bool> ProbeTcpAsync(
         string tailscaleIp,
         int port,

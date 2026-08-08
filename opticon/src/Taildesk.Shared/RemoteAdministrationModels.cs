@@ -120,6 +120,15 @@ public sealed class UpdateStatusDto
     public bool RollbackAvailable { get; set; }
 }
 
+public sealed class GuardianMaintenanceStatusDto
+{
+    public Guid OperationId { get; set; }
+    public string PreviousVersion { get; set; } = string.Empty;
+    public string GuardianVersion { get; set; } = string.Empty;
+    public bool Changed { get; set; }
+    public string Message { get; set; } = string.Empty;
+}
+
 public sealed class UpdateJournal
 {
     public int SchemaVersion { get; set; } = 1;
