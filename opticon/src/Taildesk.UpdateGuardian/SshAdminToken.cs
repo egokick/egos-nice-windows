@@ -221,9 +221,24 @@ internal static class SshAdminToken
 
     private static int ReadInt32(SafeAccessTokenHandle token, int informationClass, string description)
     {
-        var buffer = ReadTokenInformation(token, informationClass, description);
-        try { return Marshal.ReadInt32(buffer); }
-        finally { Marshal.FreeHGlobal(buffer); }
+        // TOKEN_ELEVATION_TYPE, TOKEN_ELEVATION, and TOKEN_TYPE are all
+        // fixed DWORD-sized values. Supported Windows builds do not
+        // consistently set ERROR_INSUFFICIENT_BUFFER for a zero-length probe
+        // of these classes, and the stale last-error value can misleadingly
+        // report ERROR_NOT_ALL_ASSIGNED. Query the bounded value directly.
+        const uint expectedLength = sizeof(int);
+        if (!GetInt32TokenInformation(
+                token,
+                informationClass,
+                out var information,
+                expectedLength,
+                out var returnedLength))
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                $"Windows could not read the SSH {description}.");
+        if (returnedLength != expectedLength)
+            throw new InvalidDataException($"Windows returned an invalid SSH {description} structure.");
+        return information;
     }
 
     private static IntPtr ReadTokenInformation(
@@ -273,6 +288,15 @@ internal static class SshAdminToken
         SafeAccessTokenHandle token,
         int informationClass,
         IntPtr information,
+        uint informationLength,
+        out uint returnLength);
+
+    [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetInt32TokenInformation(
+        SafeAccessTokenHandle token,
+        int informationClass,
+        out int information,
         uint informationLength,
         out uint returnLength);
 

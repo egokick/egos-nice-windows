@@ -18,7 +18,7 @@ public sealed class OpticonReleaseClient
     // Agent and the separately installed stable Guardian share the SSH
     // supervisor diagnostic contract. Crossing this boundary must use attended
     // maintenance so both binaries advance together.
-    private static readonly Version GuardianSshMaintenanceVersion = new(1, 1, 31);
+    private static readonly Version GuardianSshMaintenanceVersion = new(1, 1, 32);
 
     private readonly HttpClient _http = new(new HttpClientHandler { CheckCertificateRevocationList = true })
     {

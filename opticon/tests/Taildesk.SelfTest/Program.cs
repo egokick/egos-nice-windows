@@ -424,10 +424,10 @@ static void TestReleaseDistributionDesign()
            && gateway.Contains("writeFileAtomically", StringComparison.Ordinal)
            && client.Contains(".cloudfront.net", StringComparison.Ordinal),
         "manifest clients do not tightly validate CloudFront download URLs");
-    Assert(client.Contains("GuardianSshMaintenanceVersion = new(1, 1, 31)", StringComparison.Ordinal)
+    Assert(client.Contains("GuardianSshMaintenanceVersion = new(1, 1, 32)", StringComparison.Ordinal)
            && client.Contains("candidate.Version == current", StringComparison.Ordinal)
            && client.Contains("requiresGuardianMaintenance", StringComparison.Ordinal),
-        "the 1.1.31 release boundary must offer attended Guardian repair even after the Agent already reached that version");
+        "the 1.1.32 release boundary must offer attended Guardian repair even after the Agent already reached that version");
     Assert(agent.Contains("UseProxy = false", StringComparison.Ordinal)
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
@@ -1221,7 +1221,7 @@ static void TestOpenSshRecoveryDesign()
     Assert(bundleBuilder.Contains("$setupPath", StringComparison.Ordinal)
            && bundleBuilder.Contains("Get-Item -LiteralPath $setupPath", StringComparison.Ordinal),
         "the signed inner release manifest must include the root Setup executable");
-    Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.31\"", StringComparison.Ordinal),
+    Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.32\"", StringComparison.Ordinal),
         "the hosted release must require the Guardian that implements the fixed linked-token SSH contract");
     Assert(adminWindow.Contains("BuildMaintenanceBootstrapCommand(release, device, operationId)", StringComparison.Ordinal)
            && adminWindow.Contains("release-manifest.json", StringComparison.Ordinal)
@@ -1348,6 +1348,10 @@ static void TestOpenSshRecoveryDesign()
            && adminToken.Contains("GetLinkedTokenInformation", StringComparison.Ordinal)
            && !adminToken.Contains("ReadTokenInformation(token, TokenLinkedTokenClass", StringComparison.Ordinal),
         "the fixed TOKEN_LINKED_TOKEN query must not depend on a zero-buffer sizing probe that returns ERROR_BAD_LENGTH on supported Windows builds");
+    Assert(adminToken.Contains("GetInt32TokenInformation", StringComparison.Ordinal)
+           && adminToken.Contains("const uint expectedLength = sizeof(int)", StringComparison.Ordinal)
+           && !adminToken.Contains("var buffer = ReadTokenInformation(token, informationClass, description)", StringComparison.Ordinal),
+        "fixed-size token fields must not depend on zero-buffer sizing probes that preserve stale Windows last-error values");
     var daemonUser = ReadSource("src", "Taildesk.UpdateGuardian", "SshDaemonUserContext.cs");
     Assert(daemonUser.Contains("LogonFullAdministrator", StringComparison.Ordinal)
            && daemonUser.Contains("CreateProcessAsUserW", StringComparison.Ordinal)
