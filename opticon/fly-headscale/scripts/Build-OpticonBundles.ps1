@@ -18,6 +18,7 @@ $invitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
 $SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint.ToUpperInvariant()
 $ProductCertificateThumbprint = $ProductCertificateThumbprint.ToUpperInvariant()
 $script:git = $null
+$script:trustedGitRoot = $null
 
 function Assert-NoReparseTraversal {
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Path)
@@ -68,7 +69,8 @@ function Invoke-FixedGit {
     # ownership exception to this one validated repository and process; never
     # mutate the user's global safe.directory configuration.
     $null = $start.ArgumentList.Add('-c')
-    $null = $start.ArgumentList.Add("safe.directory=$($repo.Replace('\', '/'))")
+    if ([string]::IsNullOrWhiteSpace($script:trustedGitRoot)) { throw 'The exact trusted Git root has not been established.' }
+    $null = $start.ArgumentList.Add("safe.directory=$($script:trustedGitRoot.Replace('\', '/'))")
     foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
     $start.Environment.Clear()
     $start.Environment['SystemRoot'] = $windows
@@ -407,11 +409,20 @@ if ((Compare-SemanticVersion $MinimumGuardianVersion $Version) -gt 0) {
 
 $flyRoot = Split-Path $PSScriptRoot -Parent
 $repo = Split-Path $flyRoot -Parent
+$script:trustedGitRoot = [IO.Path]::GetFullPath((Split-Path $repo -Parent))
+$gitMetadata = Join-Path $script:trustedGitRoot '.git'
+if (-not (Test-Path -LiteralPath $gitMetadata -PathType Container)) {
+    throw 'The expected production Git metadata directory is missing.'
+}
+Assert-NoReparseTraversal -Root $script:trustedGitRoot -Path $gitMetadata
 $gitRoot = (Invoke-FixedGit -Arguments @('-C', $repo, 'rev-parse', '--show-toplevel')).Trim()
 if ([string]::IsNullOrWhiteSpace($gitRoot) -or $gitRoot.Contains([Environment]::NewLine)) {
     throw 'A production hosted build must originate from one committed Git checkout.'
 }
 $gitRoot = [IO.Path]::GetFullPath($gitRoot)
+if (-not $gitRoot.Equals($script:trustedGitRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The production hosted build resolved an unexpected Git root.'
+}
 $relativeRepo = [IO.Path]::GetRelativePath($gitRoot, $repo).Replace('\', '/')
 $gitStatus = Invoke-FixedGit -Arguments @(
     '-C', $gitRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', $relativeRepo)
