@@ -46,6 +46,7 @@ const (
 
 var trustedSourceManifestKeyID string
 var trustedProductSignerThumbprint string
+var trustedSigningProfile string
 
 type gateway struct {
 	proxy         *httputil.ReverseProxy
@@ -389,6 +390,10 @@ var errAdminBusy = errors.New("too many concurrent administrative requests")
 func configureProductionTrust() error {
 	sourceKey := strings.ToUpper(strings.TrimSpace(os.Getenv("OPTICON_SOURCE_RELEASE_KEY_ID")))
 	productSigner := strings.ToUpper(strings.TrimSpace(os.Getenv("OPTICON_PRODUCT_SIGNER_THUMBPRINT")))
+	signingProfile := strings.TrimSpace(os.Getenv("OPTICON_SIGNING_PROFILE"))
+	if signingProfile != "Production" && signingProfile != "OwnerManaged" {
+		return errors.New("production signing profile must be Production or OwnerManaged")
+	}
 	if !publisherThumbprintPattern.MatchString(sourceKey) || !publisherThumbprintPattern.MatchString(productSigner) {
 		return errors.New("production source-release and product signer trust pins are missing or invalid")
 	}
@@ -397,11 +402,12 @@ func configureProductionTrust() error {
 	}
 	trustedSourceManifestKeyID = sourceKey
 	trustedProductSignerThumbprint = productSigner
+	trustedSigningProfile = signingProfile
 	return nil
 }
 
 func validProductionArtifactTrust(artifact bundleArtifact) bool {
-	if artifact.SigningProfile != "Production" || !publisherThumbprintPattern.MatchString(artifact.SourceManifestKeyID) ||
+	if artifact.SigningProfile != trustedSigningProfile || !publisherThumbprintPattern.MatchString(artifact.SourceManifestKeyID) ||
 		!publisherThumbprintPattern.MatchString(artifact.ProductSigner) || artifact.SourceManifestKeyID == invitationSigningKeyID ||
 		artifact.ProductSigner == invitationSigningKeyID || artifact.SourceManifestKeyID == artifact.ProductSigner {
 		return false
@@ -862,7 +868,7 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 			!invite.ExpiresAt.After(now) || invite.ExpiresAt.After(now.Add(366*24*time.Hour)) || len(invite.Ciphertext) < 64 || len(invite.Ciphertext) > maxInviteBody ||
 			!inviteHashPattern.MatchString(strings.ToLower(invite.SourceSHA256)) || !inviteHashPattern.MatchString(strings.ToLower(invite.SourceManifestSHA256)) ||
 			invite.SourceSize <= 0 || invite.SDKVersion != pinnedSDKVersion || invite.RuntimeVersion != pinnedRuntimeVersion || !supportedTargetRuntimes(invite.TargetRuntimes) ||
-			invite.SigningProfile != "Production" || invite.SourceManifestKeyID != trustedSourceManifestKeyID ||
+			invite.SigningProfile != trustedSigningProfile || invite.SourceManifestKeyID != trustedSourceManifestKeyID ||
 			invite.ProductSigner != trustedProductSignerThumbprint || invite.BootstrapSigner != invite.ProductSigner ||
 			invite.BootstrapVersion != invite.ReleaseVersion ||
 			invite.BootstrapFile != "opticon-bootstrap-"+invite.ReleaseVersion+".exe" || invite.BootstrapSize <= 0 || invite.BootstrapSize > maxBootstrapArtifactBytes ||

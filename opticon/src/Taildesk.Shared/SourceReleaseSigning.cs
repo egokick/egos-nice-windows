@@ -29,7 +29,7 @@ public static class SourceReleaseSigning
 
     private static X509Certificate2 LoadPinnedCertificate()
     {
-        if (!BuildSigningTrust.IsProduction && string.IsNullOrWhiteSpace(BuildSigningTrust.SourceReleaseCertificateBase64))
+        if (!BuildSigningTrust.IsPublishable && string.IsNullOrWhiteSpace(BuildSigningTrust.SourceReleaseCertificateBase64))
             return X509CertificateLoader.LoadCertificate(InvitationSigning.PinnedCertificate.RawData);
 
         var certificate = LoadPublicCertificate(BuildSigningTrust.SourceReleaseCertificateBase64, "source-release");

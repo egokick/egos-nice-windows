@@ -320,7 +320,8 @@ internal sealed class MaintenanceBootstrapCoordinator
         string currentVersion)
     {
         if (manifest.SchemaVersion != 1
-            || manifest.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || manifest.SigningProfile != BuildSigningTrust.ProfileName
+            || !BuildSigningTrust.IsPublishable
             || manifest.SourceReleaseKeyId != SourceReleaseSigning.KeyId
             || manifest.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
             || manifest.UpdateProtocolVersion != RemoteAdministrationProtocol.UpdateVersion

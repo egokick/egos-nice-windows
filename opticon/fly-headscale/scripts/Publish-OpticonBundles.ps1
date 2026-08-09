@@ -5,6 +5,8 @@ param(
     [string]$ArtifactDirectory = "",
     [string]$Version = "",
     [string]$ControlOrigin = "https://taildesk-egokick-control.fly.dev",
+    [ValidateSet("Production", "OwnerManaged")]
+    [string]$SigningProfile = "Production",
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
     [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
@@ -119,7 +121,7 @@ function Assert-ProductionArtifactTrust {
     $profile = Get-ArtifactString $Artifact 'signingProfile'
     $sourceKey = Get-ArtifactString $Artifact 'sourceManifestKeyId'
     $productSigner = Get-ArtifactString $Artifact 'productSignerThumbprint'
-    if ($profile -cne 'Production' -or
+    if ($profile -cne $SigningProfile -or
         -not $sourceKey.Equals($SourceReleaseCertificateThumbprint, [StringComparison]::Ordinal) -or
         -not $productSigner.Equals($ProductCertificateThumbprint, [StringComparison]::Ordinal) -or
         $sourceKey -eq $invitationSigningThumbprint -or
@@ -188,11 +190,16 @@ function New-PrivatePublisherDirectory {
 function Assert-ProductSignature {
     param([Parameter(Mandatory)][string]$Path)
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+    $allowedStatus = if ($SigningProfile -eq 'Production') {
+        @([Management.Automation.SignatureStatus]::Valid)
+    } else {
+        @([Management.Automation.SignatureStatus]::Valid, [Management.Automation.SignatureStatus]::UnknownError)
+    }
+    if ($signature.Status -notin $allowedStatus -or
         $null -eq $signature.SignerCertificate -or
         -not $signature.SignerCertificate.Thumbprint.Equals($ProductCertificateThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
         $null -eq $signature.TimeStamperCertificate) {
-        throw "Production Authenticode verification, publisher pinning, or RFC3161 timestamp validation failed for $Path."
+        throw "$SigningProfile Authenticode verification, publisher pinning, or RFC3161 timestamp validation failed for $Path."
     }
     $eku = $signature.SignerCertificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
     if ($null -eq $eku -or -not (([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$eku).EnhancedKeyUsages |
@@ -483,7 +490,7 @@ function Assert-OpticonSourceArchive {
                     [Security.Cryptography.RSASignaturePadding]::Pss)) { throw 'The source inner-manifest RSA-PSS signature is invalid.' }
         } finally { $rsa.Dispose(); $certificate.Dispose(); $productCertificate.Dispose() }
         if ([int]$inner.schemaVersion -ne 1 -or [string]$inner.version -ne [string]$Record.version -or
-            [string]$inner.signingProfile -cne 'Production' -or
+            [string]$inner.signingProfile -cne $SigningProfile -or
             [string]$inner.sourceReleaseKeyId -ne $SourceReleaseCertificateThumbprint -or
             [string]$inner.productSignerThumbprint -ne $ProductCertificateThumbprint -or
             [string]$inner.sdkVersion -ne [string]$Record.sdkVersion -or [string]$inner.runtimeVersion -ne [string]$Record.runtimeVersion -or
@@ -498,7 +505,7 @@ function Assert-OpticonSourceArchive {
                 (Read-ZipEntryBounded -Entry $entries['directory.build.props'] -MaximumBytes 1MB)) }
         catch { throw 'The archived Directory.Build.props is malformed.' }
         $props = $archivedProps.Project.PropertyGroup
-        if ([string]$props.OpticonSigningProfile -cne 'Production' -or
+        if ([string]$props.OpticonSigningProfile -cne $SigningProfile -or
             [string]$props.OpticonSourceReleaseKeyId -ne $SourceReleaseCertificateThumbprint -or
             [string]$props.OpticonSourceReleaseCertificateBase64 -ne [string]$inner.sourceReleaseCertificateBase64 -or
             [string]$props.OpticonProductSignerThumbprint -ne $ProductCertificateThumbprint -or
@@ -590,7 +597,7 @@ function Assert-OpticonBundleArchive {
         $inner = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
         if ([int]$inner.schemaVersion -ne 1 -or [string]$inner.version -ne [string]$Record.version -or
             [string]$inner.role -ne [string]$Record.role -or [string]$inner.architecture -ne [string]$Record.architecture -or
-            [string]$inner.signingProfile -cne 'Production' -or
+            [string]$inner.signingProfile -cne $SigningProfile -or
             [string]$inner.sourceReleaseKeyId -ne $SourceReleaseCertificateThumbprint -or
             [string]$inner.productSignerThumbprint -ne $ProductCertificateThumbprint) {
             throw 'The signed bundle release identity does not match its outer production record.'
@@ -665,6 +672,7 @@ if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { 
 if ($SkipBuild -and [string]::IsNullOrWhiteSpace($Version)) { throw "-SkipBuild requires an explicit -Version so an existing build is never misidentified." }
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "Build-OpticonBundles.ps1") -Version $version `
+        -SigningProfile $SigningProfile `
         -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
         -ProductCertificateThumbprint $ProductCertificateThumbprint `
         -Rfc3161TimestampUrl $Rfc3161TimestampUrl `
@@ -763,7 +771,7 @@ if (-not $SkipManifestPublish) {
         if ($actual.Count -ne 1 -or [string]$actual[0].product -cne [string]$expected.product -or
             [string]$actual[0].version -cne [string]$expected.version -or [long]$actual[0].size -ne [long]$expected.size -or
             [string]$actual[0].sha256 -cne [string]$expected.sha256 -or [string]$actual[0].downloadUrl -cne [string]$expected.downloadUrl -or
-            [string]$actual[0].signingProfile -cne 'Production' -or
+            [string]$actual[0].signingProfile -cne $SigningProfile -or
             [string]$actual[0].sourceManifestKeyId -cne $SourceReleaseCertificateThumbprint -or
             [string]$actual[0].productSignerThumbprint -cne $ProductCertificateThumbprint) {
             throw "Fly served release metadata that differed from the verified publication for $($expected.file)."

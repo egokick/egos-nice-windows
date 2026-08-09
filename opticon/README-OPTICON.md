@@ -185,6 +185,11 @@ Set-Location 'C:\source\egos-nice-windows\opticon'
 
 The production build requires a clean committed tree, recreates every publish directory, signs each executable with the product signer and RFC 3161 timestamp, and signs the exact package manifest with the offline source-release key. It writes `dist\Opticon-CommandCenter-win-x64.zip` and checks the hosted release manifest. Extract the ZIP, verify its Windows publisher, and open only `Install-Opticon.exe`; a loose PowerShell installer is never a release entry point.
 
+For an owner-controlled fleet without a public publisher identity, use the explicit
+`OwnerManaged` profile with separate self-signed product and source-release keys.
+Windows shows **Unknown Publisher** at the initial UAC boundary, while exact hashes,
+signer pins, the RSA-PSS source manifest, and the RFC 3161 timestamp remain mandatory.
+
 Hosted invitations pin the exact bootstrap and source archive by version, size, SHA-256, signing profile, release key, product signer, SDK/runtime, and architecture. The recipient verifies and builds that source locally with .NET SDK 10.0.302, receives a clear prompt when it is missing, and Setup automatically consumes the encrypted one-time invitation to join the private mesh.
 
 Developer packages require explicit separate development certificates and `-BuildProfile Developer -SkipTargetReleaseDeployment`; they are named `DEV-UNTRUSTED` and are intentionally non-publishable.

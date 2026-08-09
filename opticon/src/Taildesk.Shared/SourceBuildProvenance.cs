@@ -561,7 +561,8 @@ public static class SourceBuildProvenance
             || attestation.SourceSize != invite.SourceSize || attestation.SdkVersion != invite.SdkVersion
             || attestation.RuntimeVersion != invite.RuntimeVersion || attestation.SourceManifestKeyId != invite.SourceManifestKeyId
             || attestation.SigningProfile != invite.SigningProfile
-            || attestation.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || attestation.SigningProfile != BuildSigningTrust.ProfileName
+            || !BuildSigningTrust.IsPublishable
             || attestation.SourceManifestKeyId != SourceReleaseSigning.KeyId
             || attestation.ProductSignerThumbprint != invite.ProductSignerThumbprint
             || attestation.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
@@ -787,7 +788,8 @@ public static class SourceBuildProvenance
 
     private static void ValidateGeneration(InstalledSourceGeneration generation)
     {
-        if (generation.SigningProfile != OpticonSigningProfile.Production.ToString()
+        if (generation.SigningProfile != BuildSigningTrust.ProfileName
+            || !BuildSigningTrust.IsPublishable
             || generation.SourceManifestKeyId != SourceReleaseSigning.KeyId
             || generation.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
             || !Regex.IsMatch(generation.ReleaseVersion, "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$")

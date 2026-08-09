@@ -164,6 +164,13 @@ Set-Location 'C:\source\egos-nice-windows\opticon'
 
 The production build starts from a clean committed tree, creates fresh isolated outputs, signs every executable with the product certificate and RFC 3161 timestamp, then signs the exact package manifest with the offline source-release key. It writes `dist\Opticon-CommandCenter-win-x64.zip` and checks the same version's hosted target release. Extract the ZIP, verify the Windows publisher, and open only `Install-Opticon.exe`; no loose PowerShell entry point is distributed.
 
+For an owner-controlled fleet without a public publisher identity, use the explicit
+`OwnerManaged` profile with separate self-signed product and source-release keys.
+Windows shows **Unknown Publisher** at the initial UAC boundary, but the invitation
+page and bootstrap still enforce exact bootstrap/source hashes, signer pins, the
+RSA-PSS source manifest, and an RFC 3161 timestamp. This profile must not be
+represented as publicly trusted software.
+
 Hosted invitations no longer carry prebuilt Agent binaries. The invitation pins the exact bootstrap and source archive by version, filename, size, SHA-256, signing profile, source-release key, product signer, SDK, runtime, and target architecture. The recipient verifies and builds that source locally with .NET SDK 10.0.302, after an explicit install prompt if the exact SDK is absent, and Setup then enrolls the device into the private mesh using the encrypted one-time invitation.
 
 Developer packages require explicit, separate development certificates plus `-BuildProfile Developer -SkipTargetReleaseDeployment`; their filename contains `DEV-UNTRUSTED` and they cannot be published. A skipped production build does not make that version available through **Update Opticon**.

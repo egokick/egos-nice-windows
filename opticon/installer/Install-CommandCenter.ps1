@@ -9,6 +9,8 @@ param(
     [int]$BootstrapProcessId,
     [Parameter(Mandatory)][ValidateSet('0','1')]
     [string]$DevelopmentOnly,
+    [Parameter(Mandatory)][ValidateSet('0','1')]
+    [string]$OwnerManaged,
     [string]$InstallDirectory = "$env:ProgramFiles\Taildesk\Admin",
     [switch]$ControllerOnlyRepair
 )
@@ -19,6 +21,10 @@ $script:RouteTaskName = 'Taildesk Fly Route'
 $script:UiTaskName = 'Opticon Command Center'
 $script:ControllerIPv4 = '213.188.217.227'
 $script:IsDevelopmentBuild = $DevelopmentOnly -eq '1'
+$script:IsOwnerManagedBuild = $OwnerManaged -eq '1'
+if ($script:IsDevelopmentBuild -and $script:IsOwnerManagedBuild) {
+    throw 'An Opticon installer cannot be both development-only and owner-managed.'
+}
 $ExpectedCodeSigningThumbprint = $ExpectedCodeSigningThumbprint.ToUpperInvariant()
 $ExpectedSourceReleaseKeyId = $ExpectedSourceReleaseKeyId.ToUpperInvariant()
 if ($script:IsDevelopmentBuild) {
@@ -186,6 +192,13 @@ function Assert-PinnedOpticonExecutable {
                 [Management.Automation.SignatureStatus]::Valid,
                 [Management.Automation.SignatureStatus]::UnknownError)) {
             throw "The development Authenticode signature is invalid: $Path ($($signature.Status))"
+        }
+    } elseif ($script:IsOwnerManagedBuild) {
+        if ($signature.Status -notin @(
+                [Management.Automation.SignatureStatus]::Valid,
+                [Management.Automation.SignatureStatus]::UnknownError) -or
+            $null -eq $signature.TimeStamperCertificate) {
+            throw "The owner-managed executable lacks its exact timestamped signature: $Path ($($signature.Status))"
         }
     } elseif ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
               $null -eq $signature.TimeStamperCertificate) {

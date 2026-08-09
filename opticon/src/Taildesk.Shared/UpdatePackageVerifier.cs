@@ -247,7 +247,8 @@ public static partial class UpdatePackageVerifier
     private static void ValidateManifest(OpticonReleaseManifest manifest, OpticonUpdateRequest request)
     {
         if (manifest.SchemaVersion != 1 || manifest.UpdateProtocolVersion != RemoteAdministrationProtocol.UpdateVersion
-            || manifest.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || manifest.SigningProfile != BuildSigningTrust.ProfileName
+            || !BuildSigningTrust.IsPublishable
             || manifest.SourceReleaseKeyId != SourceReleaseSigning.KeyId
             || manifest.ProductSignerThumbprint != ProductSigning.CertificateThumbprint)
             throw new InvalidDataException("The signed release requires an unsupported update protocol.");

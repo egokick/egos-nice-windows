@@ -15,10 +15,8 @@ internal static class SigningTrustSelfChecks
             ProductSigning.PinnedCertificate,
             requirePublicChain: BuildSigningTrust.IsProduction);
 
-        if (BuildSigningTrust.IsProduction)
+        if (BuildSigningTrust.IsPublishable)
         {
-            if (!BuildSigningTrust.IsPublishable)
-                throw new InvalidOperationException("The production signing profile was marked unpublishable.");
             BuildSigningTrust.RequirePublishable();
             if (SourceReleaseSigning.CertificateThumbprint.Equals(
                     InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase)
@@ -26,7 +24,7 @@ internal static class SigningTrustSelfChecks
                     InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase)
                 || ProductSigning.CertificateThumbprint.Equals(
                     SourceReleaseSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Production signing trust domains are not distinct.");
+                throw new InvalidOperationException("Publishable signing trust domains are not distinct.");
         }
         else
         {

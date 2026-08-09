@@ -75,7 +75,8 @@ public sealed class OpticonSourceReleaseClient
             || source.SdkVersion != SupportedSdkVersion || source.RuntimeVersion != SupportedRuntimeVersion
             || source.SourceManifestSha256.Length != 64 || source.SourceManifestSha256.Any(character => !Uri.IsHexDigit(character))
             || source.SourceManifestKeyId != SourceReleaseSigning.KeyId
-            || source.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || source.SigningProfile != BuildSigningTrust.ProfileName
+            || !BuildSigningTrust.IsPublishable
             || source.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
             || source.SourceManifestKeyId == InvitationSigning.CertificateThumbprint
             || source.ProductSignerThumbprint == InvitationSigning.CertificateThumbprint
@@ -86,7 +87,7 @@ public sealed class OpticonSourceReleaseClient
             || bootstrap.Sha256.Length != 64 || bootstrap.Sha256.Any(character => !Uri.IsHexDigit(character))
             || !bootstrap.SignerThumbprint.Equals(
                 ProductSigning.CertificateThumbprint, StringComparison.Ordinal)
-            || bootstrap.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || bootstrap.SigningProfile != BuildSigningTrust.ProfileName
             || bootstrap.SourceManifestKeyId != SourceReleaseSigning.KeyId
             || bootstrap.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
             || bootstrap.File != $"opticon-bootstrap-{currentVersion}.exe")

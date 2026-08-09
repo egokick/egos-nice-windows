@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory)][string]$SourceSha256,
     [Parameter(Mandatory)][string]$SourceManifestSha256,
     [Parameter(Mandatory)][string]$SourceManifestKeyId,
-    [Parameter(Mandatory)][ValidateSet('Production')][string]$SigningProfile,
+    [Parameter(Mandatory)][ValidateSet('Production','OwnerManaged')][string]$SigningProfile,
     [Parameter(Mandatory)][string]$SourceReleaseCertificateBase64,
     [Parameter(Mandatory)][string]$ProductSignerThumbprint,
     [Parameter(Mandatory)][string]$ProductSigningCertificateBase64,

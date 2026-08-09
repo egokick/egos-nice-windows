@@ -125,7 +125,8 @@ internal static class SourceBootstrapInstaller
             || invite.SourceSize is < 1024 or > 256L * 1024 * 1024 || !HashPattern.IsMatch(invite.SourceSha256)
             || !HashPattern.IsMatch(invite.SourceManifestSha256)
             || invite.SourceManifestKeyId != SourceReleaseSigning.KeyId
-            || invite.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || invite.SigningProfile != BuildSigningTrust.ProfileName
+            || !BuildSigningTrust.IsPublishable
             || invite.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
             || invite.SdkVersion != "10.0.302" || invite.RuntimeVersion != "10.0.10"
             || !invite.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal)
@@ -241,7 +242,7 @@ internal static class SourceBootstrapInstaller
                        ?? throw new InvalidDataException("The source inner manifest is empty.");
         if (manifest.SchemaVersion != 1 || manifest.Version != invite.ReleaseVersion
             || manifest.SigningProfile != invite.SigningProfile
-            || manifest.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || manifest.SigningProfile != BuildSigningTrust.ProfileName
             || manifest.SourceReleaseKeyId != invite.SourceManifestKeyId
             || manifest.SourceReleaseKeyId != SourceReleaseSigning.KeyId
             || manifest.ProductSignerThumbprint != invite.ProductSignerThumbprint

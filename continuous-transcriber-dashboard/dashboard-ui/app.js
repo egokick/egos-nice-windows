@@ -22,7 +22,7 @@ const state = {
 const els = Object.fromEntries([
   "archiveSummary", "refreshButton", "playButton", "backButton", "forwardButton",
   "playbackStatus", "playbackTime", "skipSilence", "timeline", "timelineSelection",
-  "activityMarks", "startHandle", "cursorHandle", "endHandle", "cursorOutput",
+  "activityMarks", "timelineDragOffset", "startHandle", "cursorHandle", "endHandle", "cursorOutput",
   "startInput", "endInput", "searchInput", "matchCount", "transcriptScroller",
   "transcriptList", "loadingState", "audioPlayer", "deviceList", "selectAllDevices",
   "syncSelectedButton", "accessNotice", "toast", "scheduleDialog", "scheduleForm",
@@ -418,11 +418,15 @@ function renderTimeline(includeActivityMarks = true) {
   const startPercent = ((state.rangeStart - availableStart) / span) * 100;
   const endPercent = ((state.rangeEnd - availableStart) / span) * 100;
   const cursorPercent = ((state.cursor - availableStart) / span) * 100;
-  els.startHandle.style.left = `${startPercent}%`;
-  els.endHandle.style.left = `${endPercent}%`;
-  els.cursorHandle.style.left = `${cursorPercent}%`;
-  els.timelineSelection.style.left = `${startPercent}%`;
-  els.timelineSelection.style.width = `${Math.max(0, endPercent - startPercent)}%`;
+  const draggedPercent = state.dragging?.visualPercent;
+  const displayedStartPercent = state.dragging?.handleName === "start" ? draggedPercent : startPercent;
+  const displayedEndPercent = state.dragging?.handleName === "end" ? draggedPercent : endPercent;
+  const displayedCursorPercent = state.dragging?.handleName === "cursor" ? draggedPercent : cursorPercent;
+  els.startHandle.style.left = `${displayedStartPercent}%`;
+  els.endHandle.style.left = `${displayedEndPercent}%`;
+  els.cursorHandle.style.left = `${displayedCursorPercent}%`;
+  els.timelineSelection.style.left = `${displayedStartPercent}%`;
+  els.timelineSelection.style.width = `${Math.max(0, displayedEndPercent - displayedStartPercent)}%`;
   els.startInput.value = toLocalInputValue(state.rangeStart);
   els.endInput.value = toLocalInputValue(state.rangeEnd);
   els.cursorOutput.textContent = dateTimeFormatter.format(new Date(state.cursor));
@@ -453,7 +457,15 @@ function renderActivityMarks() {
 
 function beginTimelineDrag(event, handleName) {
   event.preventDefault();
-  state.dragging = handleName;
+  if (!state.summary) return;
+  if (handleName === "cursor" && !event.target.closest(".timeline-handle")) {
+    state.cursor = timelineValueAt(event.clientX);
+  }
+  state.dragging = {
+    handleName,
+    originTime: handleName === "start" ? state.rangeStart : handleName === "end" ? state.rangeEnd : state.cursor,
+    originClientX: event.clientX,
+  };
   els.timeline.setPointerCapture?.(event.pointerId);
   updateDraggedHandle(event.clientX);
 }
@@ -465,8 +477,9 @@ function moveTimelineDrag(event) {
 
 async function endTimelineDrag() {
   if (!state.dragging) return;
-  const dragged = state.dragging;
+  const { handleName: dragged } = state.dragging;
   state.dragging = null;
+  els.timelineDragOffset.hidden = true;
   if (dragged === "cursor") {
     state.followPlayback = true;
     scrollTranscriptToCursor();
@@ -478,22 +491,66 @@ async function endTimelineDrag() {
 }
 
 function updateDraggedHandle(clientX) {
+  const drag = state.dragging;
+  if (!drag) return;
   const rect = els.timeline.getBoundingClientRect();
-  const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
   const availableStart = Date.parse(state.summary.availableStart);
   const availableEnd = Date.parse(state.summary.availableEnd);
-  const value = availableStart + ratio * (availableEnd - availableStart);
-  if (state.dragging === "start") {
+  const value = nonLinearDragValue(drag, clientX, rect, availableStart, availableEnd);
+  drag.visualPercent = clamp((clientX - rect.left) / rect.width, 0, 1) * 100;
+  if (drag.handleName === "start") {
     state.rangeStart = Math.min(value, state.rangeEnd - 1000);
     if (state.cursor < state.rangeStart) state.cursor = state.rangeStart;
-  } else if (state.dragging === "end") {
+  } else if (drag.handleName === "end") {
     state.rangeEnd = Math.max(value, state.rangeStart + 1000);
     if (state.cursor > state.rangeEnd) state.cursor = state.rangeEnd;
   } else {
     state.cursor = clamp(value, state.rangeStart, state.rangeEnd);
     scrollTranscriptToCursor();
   }
+  renderTimelineDragOffset(clientX, rect, value - drag.originTime);
   renderTimeline(false);
+}
+
+function timelineValueAt(clientX) {
+  const rect = els.timeline.getBoundingClientRect();
+  const availableStart = Date.parse(state.summary.availableStart);
+  const availableEnd = Date.parse(state.summary.availableEnd);
+  return availableStart + clamp((clientX - rect.left) / rect.width, 0, 1) * (availableEnd - availableStart);
+}
+
+function nonLinearDragValue(drag, clientX, rect, availableStart, availableEnd) {
+  const deltaPixels = clientX - drag.originClientX;
+  const direction = Math.sign(deltaPixels);
+  if (!direction) return drag.originTime;
+
+  const bounds = dragBounds(drag.handleName, drag.originTime, availableStart, availableEnd);
+  const maxDelta = direction < 0 ? bounds.backward : bounds.forward;
+  const availablePixels = direction < 0
+    ? drag.originClientX - rect.left
+    : rect.right - drag.originClientX;
+  // Squaring the pointer distance gives precise adjustments close to the setpoint
+  // and accelerates smoothly toward the earliest/latest available timestamp.
+  const progress = clamp(Math.abs(deltaPixels) / Math.max(1, availablePixels), 0, 1);
+  return drag.originTime + direction * maxDelta * progress * progress;
+}
+
+function dragBounds(handleName, originTime, availableStart, availableEnd) {
+  if (handleName === "start") {
+    return { backward: originTime - availableStart, forward: state.rangeEnd - 1000 - originTime };
+  }
+  if (handleName === "end") {
+    return { backward: originTime - state.rangeStart - 1000, forward: availableEnd - originTime };
+  }
+  return { backward: originTime - state.rangeStart, forward: state.rangeEnd - originTime };
+}
+
+function renderTimelineDragOffset(clientX, rect, deltaMilliseconds) {
+  const offset = Math.round(deltaMilliseconds / 86400000);
+  const sign = offset > 0 ? "+" : "";
+  els.timelineDragOffset.textContent = `${sign}${offset} ${Math.abs(offset) === 1 ? "day" : "days"}`;
+  els.timelineDragOffset.style.left = `${clamp(clientX - rect.left, 0, rect.width)}px`;
+  els.timelineDragOffset.hidden = false;
 }
 
 function adjustHandleWithKeyboard(event, handleName) {

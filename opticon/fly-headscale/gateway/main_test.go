@@ -22,6 +22,7 @@ var testProductionProductSigner = strings.Repeat("C", 40)
 func init() {
 	trustedSourceManifestKeyID = testProductionSourceKeyID
 	trustedProductSignerThumbprint = testProductionProductSigner
+	trustedSigningProfile = "Production"
 }
 
 func productionArtifact(artifact bundleArtifact) bundleArtifact {
@@ -661,6 +662,13 @@ func TestProductionArtifactTrustRejectsDeveloperAndConfusedKeys(t *testing.T) {
 	confused.ProductSigner = confused.SourceManifestKeyID
 	if validProductionArtifactTrust(confused) {
 		t.Fatal("source-release/product trust-domain confusion was accepted")
+	}
+	trustedSigningProfile = "OwnerManaged"
+	defer func() { trustedSigningProfile = "Production" }()
+	ownerManaged := base
+	ownerManaged.SigningProfile = "OwnerManaged"
+	if !validProductionArtifactTrust(ownerManaged) || validProductionArtifactTrust(base) {
+		t.Fatal("owner-managed trust profile was not enforced exactly")
 	}
 }
 

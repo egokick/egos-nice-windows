@@ -62,6 +62,13 @@ ordinary releases do not build an image or roll a Fly machine. The endpoint is
 signed with the same DPAPI-protected HMAC credential already used by the local
 command center. The old HMAC chunk route remains only as a migration fallback.
 
+For an owner-controlled fleet that deliberately accepts the initial Windows
+**Unknown Publisher** prompt, pass `-SigningProfile OwnerManaged` with separate
+self-signed product and source-release certificates. Set the gateway secret
+`OPTICON_SIGNING_PROFILE=OwnerManaged`. Hash, signer, source-manifest, timestamp,
+and trust-domain checks remain mandatory; only the public Windows chain requirement
+is relaxed.
+
 The Fly API token is needed only for operator-initiated gateway deployments. It
 must never be copied into this directory, the container image, Opticon
 configuration, or an invitation.

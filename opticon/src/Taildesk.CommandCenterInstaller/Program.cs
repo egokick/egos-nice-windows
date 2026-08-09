@@ -147,7 +147,7 @@ internal static class Program
         if (!manifest.SigningProfile.Equals(BuildSigningTrust.ProfileName, StringComparison.Ordinal)
             || !manifest.SourceReleaseKeyId.Equals(SourceReleaseSigning.KeyId, StringComparison.Ordinal)
             || !manifest.ProductSignerThumbprint.Equals(ProductSigning.CertificateThumbprint, StringComparison.Ordinal)
-            || manifest.DevelopmentOnly == BuildSigningTrust.IsProduction)
+            || manifest.DevelopmentOnly == BuildSigningTrust.IsPublishable)
             throw new InvalidDataException("The command-center package trust metadata does not match this installer.");
 
         var paths = new HashSet<string>(StringComparer.Ordinal);
@@ -348,6 +348,8 @@ internal static class Program
         start.ArgumentList.Add(Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
         start.ArgumentList.Add("-DevelopmentOnly");
         start.ArgumentList.Add(developmentOnly ? "1" : "0");
+        start.ArgumentList.Add("-OwnerManaged");
+        start.ArgumentList.Add(BuildSigningTrust.IsOwnerManaged ? "1" : "0");
         if (controllerOnlyRepair) start.ArgumentList.Add("-ControllerOnlyRepair");
 
         start.Environment.Clear();

@@ -2,7 +2,7 @@
 param(
     [ValidateSet('win-x64', 'win-arm64')]
     [string]$Runtime = 'win-x64',
-    [ValidateSet('Production', 'Developer')]
+    [ValidateSet('Production', 'OwnerManaged', 'Developer')]
     [string]$BuildProfile = 'Production',
     [string]$CodeSigningCertificateThumbprint,
     [string]$SourceReleaseSigningCertificateThumbprint,
@@ -429,7 +429,7 @@ function Publish-OpticonProject {
 function Sign-OpticonExecutable {
     param([Parameter(Mandatory)][string]$Path)
     $arguments = @('sign', '/fd', 'SHA256')
-    if ($BuildProfile -eq 'Production') {
+    if ($BuildProfile -in @('Production', 'OwnerManaged')) {
         $arguments += @('/tr', $TimestampServer, '/td', 'SHA256')
     }
     $arguments += @('/sha1', $script:productThumbprint, '/s', 'My')
@@ -447,6 +447,10 @@ function Sign-OpticonExecutable {
     if ($BuildProfile -eq 'Production' -and
         ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate)) {
         throw "Windows did not validate the production Authenticode chain for $Path ($($signature.Status))."
+    }
+    if ($BuildProfile -eq 'OwnerManaged' -and
+        ($signature.Status -notin @('Valid', 'UnknownError') -or -not $signature.TimeStamperCertificate)) {
+        throw "Windows did not validate the exact timestamped owner-managed signature for $Path ($($signature.Status))."
     }
     if ($BuildProfile -eq 'Developer' -and
         ($signature.Status -in @('NotSigned', 'HashMismatch') -or $signature.TimeStamperCertificate)) {
@@ -515,10 +519,10 @@ try {
     if ($BuildProfile -eq 'Developer' -and -not $SkipTargetReleaseDeployment) {
         throw 'Developer artifacts are intentionally non-publishable; pass -SkipTargetReleaseDeployment explicitly.'
     }
-    if ($BuildProfile -eq 'Production') {
+    if ($BuildProfile -in @('Production', 'OwnerManaged')) {
         if ([string]::IsNullOrWhiteSpace($CodeSigningCertificateThumbprint) -or
             [string]::IsNullOrWhiteSpace($SourceReleaseSigningCertificateThumbprint)) {
-            throw 'Production builds require separate code-signing and source-release signing certificate thumbprints.'
+            throw 'Publishable builds require separate code-signing and source-release signing certificate thumbprints.'
         }
         Assert-ProductionGitState
     }
@@ -760,6 +764,8 @@ try {
     $null = [IO.Directory]::CreateDirectory($dist)
     $artifactName = if ($BuildProfile -eq 'Production') {
         "Opticon-CommandCenter-$Runtime.zip"
+    } elseif ($BuildProfile -eq 'OwnerManaged') {
+        "Opticon-CommandCenter-OWNER-MANAGED-$Runtime.zip"
     } else {
         "Opticon-CommandCenter-DEV-UNTRUSTED-$Runtime.zip"
     }

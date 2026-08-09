@@ -24,7 +24,7 @@ public static class ProductSigning
                 path,
                 PinnedCertificate,
                 requireWindowsTrustedChain: BuildSigningTrust.IsProduction,
-                requireRfc3161Timestamp: BuildSigningTrust.IsProduction,
+                requireRfc3161Timestamp: BuildSigningTrust.IsPublishable,
                 cancellationToken);
         }
         catch (InvalidDataException) when (SourceBuildProvenance.TryVerify(path))
@@ -50,7 +50,7 @@ public static class ProductSigning
     private static X509Certificate2 LoadPinnedCertificate()
     {
         X509Certificate2 certificate;
-        if (!BuildSigningTrust.IsProduction && string.IsNullOrWhiteSpace(BuildSigningTrust.ProductSigningCertificateBase64))
+        if (!BuildSigningTrust.IsPublishable && string.IsNullOrWhiteSpace(BuildSigningTrust.ProductSigningCertificateBase64))
         {
             certificate = X509CertificateLoader.LoadCertificate(InvitationSigning.PinnedCertificate.RawData);
         }

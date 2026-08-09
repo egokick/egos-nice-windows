@@ -159,8 +159,9 @@ button:disabled { cursor: default; opacity: .4; }
 .timeline-rail, .timeline-selection { position: absolute; top: 34px; right: 0; left: 0; height: 5px; border-radius: 99px; }
 .timeline-rail { background: #dfe7e3; }
 .timeline-selection { right: auto; background: var(--green); }
-.activity-marks { position: absolute; inset: 25px 0 auto; height: 23px; pointer-events: none; }
-.activity-mark { position: absolute; bottom: 5px; width: 2px; height: 9px; border-radius: 2px; background: #82a79d; opacity: .55; }
+.activity-marks { position: absolute; inset: 23px 0 auto; z-index: 1; height: 27px; pointer-events: none; }
+.activity-mark { position: absolute; bottom: 3px; width: 4px; height: 20px; border: 1px solid rgba(48, 145, 80, .32); border-radius: 3px; background: #8ee6a5; box-shadow: 0 1px 4px rgba(38, 135, 69, .28); opacity: .95; transform: translateX(-50%); }
+.timeline-drag-offset { position: absolute; z-index: 4; top: 0; min-width: max-content; padding: 4px 7px; border-radius: 6px; background: #173a2f; color: white; font-size: 11px; font-weight: 800; letter-spacing: .02em; line-height: 1; pointer-events: none; transform: translateX(-50%); box-shadow: 0 2px 8px rgba(23, 58, 47, .24); }
 
 .timeline-handle {
   position: absolute;

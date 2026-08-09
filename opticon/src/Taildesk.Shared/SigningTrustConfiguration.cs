@@ -5,6 +5,7 @@ namespace Taildesk.Shared;
 public enum OpticonSigningProfile
 {
     Developer,
+    OwnerManaged,
     Production
 }
 
@@ -22,7 +23,8 @@ public static class BuildSigningTrust
 
     public static OpticonSigningProfile Profile { get; } = ParseProfile(Get("OpticonSigningProfile"));
     public static bool IsProduction => Profile == OpticonSigningProfile.Production;
-    public static bool IsPublishable => IsProduction;
+    public static bool IsOwnerManaged => Profile == OpticonSigningProfile.OwnerManaged;
+    public static bool IsPublishable => IsProduction || IsOwnerManaged;
     public static string ProfileName => Profile.ToString();
 
     internal static string SourceReleaseKeyId => Get("OpticonSourceReleaseKeyId").Trim().ToUpperInvariant();
@@ -32,9 +34,9 @@ public static class BuildSigningTrust
 
     public static void RequirePublishable()
     {
-        if (!IsProduction)
+        if (!IsPublishable)
             throw new InvalidOperationException(
-                "Developer-signed Opticon artifacts are intentionally not publishable. Rebuild with OpticonSigningProfile=Production and separate release/code-signing certificates.");
+                "Developer-signed Opticon artifacts are intentionally not publishable. Rebuild with OpticonSigningProfile=Production or OwnerManaged and separate release/code-signing certificates.");
         _ = SourceReleaseSigning.PinnedCertificate;
         _ = ProductSigning.PinnedCertificate;
     }
@@ -44,6 +46,7 @@ public static class BuildSigningTrust
     private static OpticonSigningProfile ParseProfile(string value) => value switch
     {
         "Developer" => OpticonSigningProfile.Developer,
+        "OwnerManaged" => OpticonSigningProfile.OwnerManaged,
         "Production" => OpticonSigningProfile.Production,
         _ => throw new InvalidOperationException("The embedded Opticon signing profile is invalid.")
     };

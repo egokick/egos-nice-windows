@@ -2,6 +2,8 @@
 param(
     [ValidateSet("win-x64")]
     [string]$Runtime = "win-x64",
+    [ValidateSet("Production", "OwnerManaged")]
+    [string]$SigningProfile = "Production",
     [string]$Version = "1.1.38",
     [string]$MinimumGuardianVersion = "1.1.2",
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
@@ -98,7 +100,7 @@ function Get-ArtifactString {
 
 function Test-ProductionArtifactTrust {
     param([Parameter(Mandatory)]$Artifact)
-    return (Get-ArtifactString $Artifact 'signingProfile') -ceq 'Production' -and
+    return (Get-ArtifactString $Artifact 'signingProfile') -ceq $SigningProfile -and
         (Get-ArtifactString $Artifact 'sourceManifestKeyId') -eq $SourceReleaseCertificateThumbprint -and
         (Get-ArtifactString $Artifact 'productSignerThumbprint') -eq $ProductCertificateThumbprint
 }
@@ -121,8 +123,10 @@ function Get-LocalArtifactPath {
 }
 
 function Assert-ProductSigningCertificate {
-    param([Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
-    if ($Certificate.Subject -eq $Certificate.Issuer) {
+    param(
+        [Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+        [Parameter(Mandatory)][bool]$RequirePublicTrust)
+    if ($RequirePublicTrust -and $Certificate.Subject -eq $Certificate.Issuer) {
         throw 'The production Authenticode certificate must not be self-signed.'
     }
     $ekuExtension = $Certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
@@ -131,6 +135,7 @@ function Assert-ProductSigningCertificate {
     if (-not ($enhanced.EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' })) {
         throw 'The production Authenticode certificate lacks the Code Signing EKU.'
     }
+    if (-not $RequirePublicTrust) { return }
     $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
     try {
         $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::Online
@@ -146,11 +151,16 @@ function Assert-ProductSigningCertificate {
 function Assert-ProductSignature {
     param([Parameter(Mandatory)][string]$Path)
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+    $allowedStatus = if ($SigningProfile -eq 'Production') {
+        @([Management.Automation.SignatureStatus]::Valid)
+    } else {
+        @([Management.Automation.SignatureStatus]::Valid, [Management.Automation.SignatureStatus]::UnknownError)
+    }
+    if ($signature.Status -notin $allowedStatus -or
         $null -eq $signature.SignerCertificate -or
         -not $signature.SignerCertificate.Thumbprint.Equals($ProductCertificateThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
         $null -eq $signature.TimeStamperCertificate) {
-        throw "Production Authenticode verification, publisher pinning, or RFC3161 timestamp validation failed for $Path."
+        throw "$SigningProfile Authenticode verification, publisher pinning, or RFC3161 timestamp validation failed for $Path."
     }
     $eku = $signature.SignerCertificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
     if ($null -eq $eku -or -not (([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$eku).EnhancedKeyUsages |
@@ -510,7 +520,7 @@ function Invoke-ExactDotNet {
 }
 
 $installedSdks = @((Invoke-ExactDotNet -Arguments @('--list-sdks') -CaptureOutput) -split "`r?`n")
-if (-not ($installedSdks | Where-Object { $_ -match '^10\.0\.200\s' })) {
+if (-not ($installedSdks | Where-Object { $_ -match '^10\.0\.302\s' })) {
     throw 'Release builds require exact .NET SDK 10.0.302 (the SDK carrying runtime 10.0.10).'
 }
 $selectedSdk = (Invoke-ExactDotNet -Arguments @('--version') -CaptureOutput).Trim()
@@ -518,12 +528,12 @@ if ($selectedSdk -ne '10.0.302') { throw "global.json selected SDK '$selectedSdk
 $packageBuildLock = Enter-OpticonPackageBuildLock (Join-Path $repo "artifacts\.opticon-package-build.lock")
 try {
 $sourceReleaseCertificate = Get-ReleaseCertificate -Thumbprint $SourceReleaseCertificateThumbprint -Purpose 'Offline source-release signing'
-$productCertificate = Get-ReleaseCertificate -Thumbprint $ProductCertificateThumbprint -Purpose 'Production Authenticode signing'
+$productCertificate = Get-ReleaseCertificate -Thumbprint $ProductCertificateThumbprint -Purpose "$SigningProfile Authenticode signing"
 $sourceRsaProbe = Get-OpticonManifestSigningKey -Certificate $sourceReleaseCertificate
 try {
     if ($sourceRsaProbe.KeySize -lt 3072) { throw 'The production source-release RSA key must be at least 3072 bits.' }
 } finally { $sourceRsaProbe.Dispose() }
-Assert-ProductSigningCertificate -Certificate $productCertificate
+Assert-ProductSigningCertificate -Certificate $productCertificate -RequirePublicTrust ($SigningProfile -eq 'Production')
 $sourceReleaseCertificateBase64 = [Convert]::ToBase64String($sourceReleaseCertificate.RawData)
 $productSigningCertificateBase64 = [Convert]::ToBase64String($productCertificate.RawData)
 $manifestPath = Join-Path $artifactDirectory "manifest.json"
@@ -588,7 +598,7 @@ $publishArguments = @(
     "-p:EnableWindowsTargeting=true",
     "-p:Version=$Version", "-p:InformationalVersion=$Version",
     "-p:IncludeSourceRevisionInInformationalVersion=false", "-p:ContinuousIntegrationBuild=true",
-    "-p:OpticonSigningProfile=Production",
+    "-p:OpticonSigningProfile=$SigningProfile",
     "-p:OpticonSourceReleaseKeyId=$SourceReleaseCertificateThumbprint",
     "-p:OpticonSourceReleaseCertificateBase64=$sourceReleaseCertificateBase64",
     "-p:OpticonProductSignerThumbprint=$ProductCertificateThumbprint",
@@ -672,7 +682,7 @@ $bootstrapRecord = [pscustomobject]@{
     size = $bootstrapInfo.Length
     sha256 = (Get-FileHash -LiteralPath $bootstrapTemporary -Algorithm SHA256).Hash.ToLowerInvariant()
     signerThumbprint = $ProductCertificateThumbprint
-    signingProfile = 'Production'
+    signingProfile = $SigningProfile
     sourceManifestKeyId = $SourceReleaseCertificateThumbprint
     productSignerThumbprint = $ProductCertificateThumbprint
 }
@@ -737,7 +747,7 @@ function Write-SignedReleaseManifest {
     $releaseManifest = [pscustomobject][ordered]@{
         schemaVersion = 1
         version = $Version
-        signingProfile = 'Production'
+        signingProfile = $SigningProfile
         sourceReleaseKeyId = $SourceReleaseCertificateThumbprint
         productSignerThumbprint = $ProductCertificateThumbprint
         role = $Role
@@ -796,7 +806,7 @@ foreach ($definition in $definitions) {
         product = "OpticonBundle"; version = $Version; role = $definition.Role
         architecture = "x64"; file = $fileName; size = $file.Length
         sha256 = (Get-FileHash -LiteralPath $temporaryDestination -Algorithm SHA256).Hash.ToLowerInvariant()
-        signingProfile = 'Production'; sourceManifestKeyId = $SourceReleaseCertificateThumbprint
+        signingProfile = $SigningProfile; sourceManifestKeyId = $SourceReleaseCertificateThumbprint
         productSignerThumbprint = $ProductCertificateThumbprint
     }
     $sameRelease = @($existingBundles | Where-Object {
@@ -821,7 +831,7 @@ New-Item -Path $sourceStage -ItemType Directory -Force | Out-Null
 $sourceProps = [xml](Get-Content -Raw -LiteralPath (Join-Path $repo 'Directory.Build.props'))
 $sourcePropertyValues = [ordered]@{
     Version = $Version
-    OpticonSigningProfile = 'Production'
+    OpticonSigningProfile = $SigningProfile
     OpticonSourceReleaseKeyId = $SourceReleaseCertificateThumbprint
     OpticonSourceReleaseCertificateBase64 = $sourceReleaseCertificateBase64
     OpticonProductSignerThumbprint = $ProductCertificateThumbprint
@@ -911,7 +921,7 @@ foreach ($file in Get-ChildItem -LiteralPath $sourceStage -File -Recurse | Sort-
 $sourceManifest = [pscustomobject][ordered]@{
     schemaVersion = 1
     version = $Version
-    signingProfile = 'Production'
+    signingProfile = $SigningProfile
     sourceReleaseKeyId = $SourceReleaseCertificateThumbprint
     sourceReleaseCertificateBase64 = $sourceReleaseCertificateBase64
     productSignerThumbprint = $ProductCertificateThumbprint
@@ -963,7 +973,7 @@ $sourceRecord = [pscustomobject][ordered]@{
     targetRuntimes = @('win-x64', 'win-arm64')
     sourceManifestSha256 = $sourceManifestHash
     sourceManifestKeyId = $SourceReleaseCertificateThumbprint
-    signingProfile = 'Production'
+    signingProfile = $SigningProfile
     productSignerThumbprint = $ProductCertificateThumbprint
 }
 $existingSources = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonSource' -and $_.version -eq $Version })
