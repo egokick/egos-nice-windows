@@ -24,6 +24,7 @@ $solutionPath = Join-Path $repo 'Taildesk.sln'
 $packageLockPath = Join-Path $artifacts '.opticon-package-build.lock'
 $sourceRsa = $null
 $git = $null
+$trustedGitRoot = $null
 
 function Normalize-Thumbprint {
     param([Parameter(Mandatory)][string]$Value)
@@ -188,11 +189,20 @@ function Assert-CodeSigningCertificate {
 }
 
 function Assert-ProductionGitState {
+    $script:trustedGitRoot = [IO.Path]::GetFullPath((Split-Path $repo -Parent))
+    $gitMetadata = Join-Path $script:trustedGitRoot '.git'
+    if (-not (Test-Path -LiteralPath $gitMetadata -PathType Container)) {
+        throw 'The expected production Git metadata directory is missing.'
+    }
+    Assert-NoReparseTraversal -Root $script:trustedGitRoot -Path $gitMetadata
     $gitRoot = (Invoke-FixedGit -Arguments @('-C', $repo, 'rev-parse', '--show-toplevel')).Trim()
     if ([string]::IsNullOrWhiteSpace($gitRoot) -or $gitRoot.Contains([Environment]::NewLine)) {
         throw 'A production build must originate from a committed Git checkout.'
     }
     $gitRoot = [IO.Path]::GetFullPath($gitRoot.Trim())
+    if (-not $gitRoot.Equals($script:trustedGitRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The production build resolved an unexpected Git root.'
+    }
     $relativeRepo = [IO.Path]::GetRelativePath($gitRoot, $repo).Replace('\', '/')
     $status = Invoke-FixedGit -Arguments @(
         '-C', $gitRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', $relativeRepo)
@@ -232,6 +242,11 @@ function Invoke-FixedGit {
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    if ([string]::IsNullOrWhiteSpace($script:trustedGitRoot)) {
+        throw 'The exact trusted Git root has not been established.'
+    }
+    $null = $start.ArgumentList.Add('-c')
+    $null = $start.ArgumentList.Add("safe.directory=$($script:trustedGitRoot.Replace('\', '/'))")
     foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
     $start.Environment.Clear()
     $start.Environment['SystemRoot'] = $windows
