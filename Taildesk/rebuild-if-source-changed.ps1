@@ -6,6 +6,83 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$OwnerManagedProductSigner = '820179B968ADC9C289A56B52025292BDCBFF3A74'
+$OwnerManagedSourceSigner = 'EF6907F6706FB68CB4743F0781AFF631391FCDD2'
+$Rfc3161TimestampUrl = 'http://timestamp.digicert.com'
+
+function Get-PowerShell7Path {
+    $command = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $command -or [string]::IsNullOrWhiteSpace($command.Source)) {
+        throw 'PowerShell 7 or newer is required to rebuild Opticon. Install Microsoft.PowerShell, then try again.'
+    }
+    return [IO.Path]::GetFullPath($command.Source)
+}
+
+function Assert-OwnerManagedInstaller {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "The signed Opticon installer is missing: $Path"
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $actual = if ($null -eq $signature.SignerCertificate) {
+        ''
+    } else {
+        $signature.SignerCertificate.Thumbprint.ToUpperInvariant()
+    }
+    if ($actual -cne $OwnerManagedProductSigner -or
+        $signature.Status -in @('NotSigned', 'HashMismatch') -or
+        $null -eq $signature.TimeStamperCertificate) {
+        throw 'The rebuilt Opticon installer does not have the exact OwnerManaged product signature and RFC 3161 timestamp.'
+    }
+}
+
+function Expand-OwnerManagedPackage {
+    param(
+        [Parameter(Mandatory)][string]$Archive,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    if (Test-Path -LiteralPath $Destination) {
+        throw "The random package extraction directory already exists: $Destination"
+    }
+    [IO.Directory]::CreateDirectory($Destination) | Out-Null
+    Expand-Archive -LiteralPath $Archive -DestinationPath $Destination
+}
+
+function Remove-ExtractedOwnerManagedPackage {
+    param([Parameter(Mandatory)][string]$Directory)
+
+    $files = @(
+        'Install-Opticon.exe',
+        'command-center.manifest.json',
+        'command-center.manifest.sig',
+        'App\Opticon.exe',
+        'App\Cli\opticon.exe',
+        'App\Tools\Taildesk.RouteKeeper.exe',
+        'App\Payload\Setup\Taildesk.Setup.exe',
+        'App\Payload\Agent\Taildesk.Agent.exe',
+        'App\Payload\Admin\Opticon.exe',
+        'App\Payload\Admin\Cli\opticon.exe',
+        'App\Payload\Admin\Tools\Taildesk.RouteKeeper.exe',
+        'App\Payload\UpdateGuardian\Taildesk.UpdateGuardian.exe'
+    )
+    foreach ($relative in $files) {
+        $path = Join-Path $Directory $relative
+        if (Test-Path -LiteralPath $path -PathType Leaf) { [IO.File]::Delete($path) }
+    }
+    foreach ($relative in @(
+            'App\Payload\Admin\Tools', 'App\Payload\Admin\Cli', 'App\Payload\Admin',
+            'App\Payload\UpdateGuardian', 'App\Payload\Agent', 'App\Payload\Setup',
+            'App\Payload', 'App\Tools', 'App\Cli', 'App', '.')) {
+        $path = if ($relative -eq '.') { $Directory } else { Join-Path $Directory $relative }
+        if (Test-Path -LiteralPath $path -PathType Container) {
+            try { [IO.Directory]::Delete($path, $false) } catch { }
+        }
+    }
+}
+
 function Get-InstalledOpticonPath {
     foreach ($path in @(
         (Join-Path $env:ProgramFiles 'Taildesk\Admin\Opticon.exe'),
@@ -108,57 +185,43 @@ if ($controllerInstallationReady) {
 } else {
     Write-Host 'Opticon installation integrity files are missing; rebuilding and repairing the command center...' -ForegroundColor Yellow
 }
+$buildScript = Join-Path $SourceRoot 'build.ps1'
+$powershell7 = Get-PowerShell7Path
 try {
-    & (Join-Path $SourceRoot 'build.ps1')
+    & $powershell7 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File $buildScript `
+        -BuildProfile OwnerManaged `
+        -Runtime win-x64 `
+        -CodeSigningCertificateThumbprint $OwnerManagedProductSigner `
+        -SourceReleaseSigningCertificateThumbprint $OwnerManagedSourceSigner `
+        -TimestampServer $Rfc3161TimestampUrl `
+        -SkipTargetReleaseDeployment
 } catch {
     throw "Opticon build failed before installation. $($_.Exception.Message)"
 }
 if ($LASTEXITCODE -ne 0) { throw "Opticon build failed with exit code $LASTEXITCODE." }
 
-$stagedApp = Join-Path $SourceRoot 'artifacts\Opticon-CommandCenter-win-x64\App'
-if (-not (Test-Path -LiteralPath (Join-Path $stagedApp 'Opticon.exe'))) {
-    throw "The Opticon build did not produce its staged app at '$stagedApp'."
+$package = Join-Path $SourceRoot 'dist\Opticon-CommandCenter-OWNER-MANAGED-win-x64.zip'
+if (-not (Test-Path -LiteralPath $package -PathType Leaf)) {
+    throw "The Opticon build completed without its OwnerManaged package at '$package'."
 }
-$stagedCli = Join-Path $stagedApp 'Payload\Admin\Cli\opticon.exe'
-if (-not (Test-Path -LiteralPath $stagedCli -PathType Leaf)) {
-    throw "The Opticon build did not produce its staged signed CLI at '$stagedCli'."
-}
-
-$transactionalInstaller = Join-Path $SourceRoot 'artifacts\Opticon-CommandCenter-win-x64\Install-Opticon.ps1'
-if (-not (Test-Path -LiteralPath $transactionalInstaller -PathType Leaf)) {
-    throw "The Opticon build completed without its transactional installer at '$transactionalInstaller'."
-}
-$repairLogDirectory = Join-Path $env:LOCALAPPDATA 'Opticon\Logs'
-$repairLog = Join-Path $repairLogDirectory 'controller-repair.log'
-$escapedInstaller = $transactionalInstaller.Replace("'", "''")
-$escapedLogDirectory = $repairLogDirectory.Replace("'", "''")
-$escapedLog = $repairLog.Replace("'", "''")
-$command = @"
-`$ErrorActionPreference = 'Stop'
-New-Item -ItemType Directory -Path '$escapedLogDirectory' -Force | Out-Null
+$packageCacheRoot = Join-Path $env:LOCALAPPDATA 'Opticon\BuildCache\Packages'
+[IO.Directory]::CreateDirectory($packageCacheRoot) | Out-Null
+$packageDirectory = Join-Path $packageCacheRoot ([Guid]::NewGuid().ToString('N'))
 try {
-    & '$escapedInstaller' -ControllerOnlyRepair *>&1 | Tee-Object -FilePath '$escapedLog' -Append
-    exit 0
-} catch {
-    (`$_ | Format-List * -Force | Out-String) | Tee-Object -FilePath '$escapedLog' -Append | Out-Host
-    exit 1
-}
-"@
-$encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-$repairWorkingDirectory = Join-Path $env:SystemRoot 'Temp'
-if ($null -ne $installedOpticon) {
-    Request-InstalledOpticonShutdown -InstalledPath $installedOpticon
-}
-$updater = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
-) -WorkingDirectory $repairWorkingDirectory
-if ($updater.ExitCode -ne 0) {
-    $detail = if (Test-Path -LiteralPath $repairLog -PathType Leaf) {
-        (@(Get-Content -LiteralPath $repairLog -Tail 35) -join [Environment]::NewLine).Trim()
-    } else {
-        'The elevated repair did not create its diagnostic log.'
+    Expand-OwnerManagedPackage -Archive $package -Destination $packageDirectory
+    $transactionalInstaller = Join-Path $packageDirectory 'Install-Opticon.exe'
+    Assert-OwnerManagedInstaller -Path $transactionalInstaller
+
+    if ($null -ne $installedOpticon) {
+        Request-InstalledOpticonShutdown -InstalledPath $installedOpticon
     }
-    throw "Opticon installation update failed with exit code $($updater.ExitCode).`n`n$detail"
+    $updater = Start-Process -FilePath $transactionalInstaller -Verb RunAs -Wait -PassThru `
+        -ArgumentList '--controller-only-repair' -WorkingDirectory $packageDirectory
+    if ($updater.ExitCode -ne 0) {
+        throw "The signed Opticon command-center repair returned exit code $($updater.ExitCode)."
+    }
+} finally {
+    Remove-ExtractedOwnerManagedPackage -Directory $packageDirectory
 }
 
 $installedOpticon = Get-InstalledOpticonPath

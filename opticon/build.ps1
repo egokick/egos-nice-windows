@@ -14,6 +14,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7) {
+    throw 'The Opticon release build requires PowerShell 7 or newer. Run build.ps1 with pwsh.exe, not Windows PowerShell.'
+}
+
 $RequiredSdkVersion = '10.0.302'
 $InvitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
 $repo = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -574,6 +578,7 @@ try {
     $sdkRoot = Join-Path $workspace 'sdk-pin'
     $stage = Join-Path $workspace 'package'
     $publishRoot = Join-Path $workspace 'publish'
+    $solutionArtifacts = Join-Path $workspace 'solution-artifacts'
     $packageCache = Join-Path $workspace 'nuget-packages'
     $nugetHttpCache = Join-Path $workspace 'nuget-http-cache'
     $cliHome = Join-Path $workspace 'dotnet-home'
@@ -584,7 +589,7 @@ try {
     $nugetPluginsCache = Join-Path $workspace 'nuget-plugins-cache'
     $userExtensions = Join-Path $workspace 'empty-msbuild-user-extensions'
     foreach ($directory in @(
-            $sdkRoot, $stage, $publishRoot, $packageCache, $nugetHttpCache,
+            $sdkRoot, $stage, $publishRoot, $solutionArtifacts, $packageCache, $nugetHttpCache,
             $cliHome, $buildTemp, $userExtensions, $buildUserProfile,
             $buildAppData, $buildLocalAppData, $nugetPluginsCache)) {
         $null = [IO.Directory]::CreateDirectory($directory)
@@ -650,13 +655,15 @@ try {
             '--no-cache',
             '--force',
             '--force-evaluate',
-            '--disable-parallel'
+            '--disable-parallel',
+            '--artifacts-path', $solutionArtifacts
         ) + $msbuildTrustArguments)
         try {
             try {
                 Invoke-DotNet -Arguments (@(
                     'build', $solutionPath, '-c', 'Release', '-t:Rebuild', '--nologo',
                     '--no-restore',
+                    '--artifacts-path', $solutionArtifacts,
                     '-p:EnableWindowsTargeting=true',
                     '-p:IncludeSourceRevisionInInformationalVersion=false',
                     '-p:ContinuousIntegrationBuild=true'
@@ -664,11 +671,12 @@ try {
             } catch {
                 throw "The Opticon solution build failed. $($_.Exception.Message)"
             }
-            $selfTestDll = Join-Path $repo (
-                'tests\Taildesk.SelfTest\bin\Release\net10.0-windows10.0.19041.0\Taildesk.SelfTest.dll')
-            if (-not (Test-Path -LiteralPath $selfTestDll -PathType Leaf)) {
-                throw 'The Opticon self-test executable was not built.'
+            $selfTestDlls = @(Get-ChildItem -LiteralPath $solutionArtifacts -File -Recurse `
+                -Filter 'Taildesk.SelfTest.dll')
+            if ($selfTestDlls.Count -ne 1) {
+                throw 'The isolated Opticon solution build did not produce exactly one self-test executable.'
             }
+            $selfTestDll = $selfTestDlls[0].FullName
             try {
                 Invoke-DotNet -Arguments @($selfTestDll)
             } catch {

@@ -14,5 +14,5 @@ if not exist "%LAUNCH_SCRIPT%" (
     exit /b 2
 )
 
-start "Opticon startup" /d "%~dp0" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%LAUNCH_SCRIPT%" -SourceRoot "%TAILDESK_SOURCE%" -RebuildScript "%REBUILD_SCRIPT%" -OpticonExecutable "%OPTICON_EXE%" -ControlUrl "%CONTROL_URL%"
+start "Opticon startup" /d "%~dp0" powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "%LAUNCH_SCRIPT%" -SourceRoot "%TAILDESK_SOURCE%" -RebuildScript "%REBUILD_SCRIPT%" -OpticonExecutable "%OPTICON_EXE%" -ControlUrl "%CONTROL_URL%"
 exit /b 0

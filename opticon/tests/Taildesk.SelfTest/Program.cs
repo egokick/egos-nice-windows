@@ -1565,10 +1565,22 @@ static void TestOpenSshRecoveryDesign()
         "legacy download and Guardian-contract failures must fail closed into the signed source-invitation recovery path");
     var adminApp = ReadSource("src", "Taildesk.Admin", "App.xaml.cs");
     var incrementalRebuild = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "rebuild-if-source-changed.ps1"));
+    var sourceLauncher = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "start.bat"));
     Assert(adminApp.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal)
            && incrementalRebuild.Contains("Request-InstalledOpticonShutdown", StringComparison.Ordinal)
            && incrementalRebuild.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal),
         "source-triggered controller rebuilds must request a graceful Command Center shutdown before swapping the installed payload");
+    Assert(incrementalRebuild.Contains("Get-PowerShell7Path", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("-BuildProfile OwnerManaged", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("Opticon-CommandCenter-OWNER-MANAGED-win-x64.zip", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("Assert-OwnerManagedInstaller", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("Install-Opticon.exe", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("--controller-only-repair", StringComparison.Ordinal)
+           && !incrementalRebuild.Contains("Install-Opticon.ps1", StringComparison.Ordinal)
+           && !incrementalRebuild.Contains("ExecutionPolicy', 'Bypass", StringComparison.Ordinal)
+           && sourceLauncher.Contains("ExecutionPolicy RemoteSigned", StringComparison.Ordinal)
+           && !sourceLauncher.Contains("ExecutionPolicy Bypass", StringComparison.Ordinal),
+        "source-triggered controller rebuilds must use PowerShell 7 and the signed OwnerManaged package without a loose elevated script");
     var agentUpdateDownload = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");
     Assert(agentUpdateDownload.Contains("UseProxy = false", StringComparison.Ordinal)
            && agentUpdateDownload.Contains("Last error:", StringComparison.Ordinal),
@@ -1989,6 +2001,9 @@ static void TestOpenSshRecoveryDesign()
     var solution = ReadSource("Taildesk.sln");
     Assert(buildScript.Contains("The Opticon solution build failed", StringComparison.Ordinal)
            && buildScript.Contains("The Opticon self-tests failed", StringComparison.Ordinal)
+           && buildScript.Contains("$solutionArtifacts = Join-Path $workspace 'solution-artifacts'", StringComparison.Ordinal)
+           && buildScript.Contains("--artifacts-path', $solutionArtifacts", StringComparison.Ordinal)
+           && buildScript.Contains("Get-ChildItem -LiteralPath $solutionArtifacts", StringComparison.Ordinal)
            && buildScript.Contains("must contain only the signed opticon.exe", StringComparison.Ordinal)
            && buildScript.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal)
            && hostedBuild.Contains("The clean $component publish must contain only", StringComparison.Ordinal)

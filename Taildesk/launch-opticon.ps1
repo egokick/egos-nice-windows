@@ -19,7 +19,7 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $OpticonExecutable -PathType Leaf)) {
-        throw 'Opticon is not installed. Run Opticon''s Install-Opticon.ps1 first.'
+        throw 'Opticon is not installed. Build and run the signed OwnerManaged Install-Opticon.exe package first.'
     }
 
     try {
@@ -44,6 +44,5 @@ try {
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     } catch { }
-    Read-Host 'Press Enter to close this window'
     exit 1
 }
