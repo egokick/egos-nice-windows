@@ -536,7 +536,10 @@ function Invoke-ExactDotNet {
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0) {
-            throw "The exact .NET SDK command '$([string]::Join(' ', $Arguments))' failed ($($process.ExitCode)): $($stderr.Trim())"
+            $diagnosticParts = @($stderr.Trim(), $stdout.Trim()) | Where-Object { $_ }
+            $diagnostic = [string]::Join([Environment]::NewLine, $diagnosticParts)
+            if ($diagnostic.Length -gt 8192) { $diagnostic = $diagnostic.Substring(0, 8192) + ' [truncated]' }
+            throw "The exact .NET SDK command '$([string]::Join(' ', $Arguments))' failed ($($process.ExitCode)): $diagnostic"
         }
         if ($CaptureOutput) { return $stdout }
         if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host $stdout.TrimEnd() }
