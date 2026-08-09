@@ -671,12 +671,11 @@ try {
             } catch {
                 throw "The Opticon solution build failed. $($_.Exception.Message)"
             }
-            $selfTestDlls = @(Get-ChildItem -LiteralPath $solutionArtifacts -File -Recurse `
-                -Filter 'Taildesk.SelfTest.dll')
-            if ($selfTestDlls.Count -ne 1) {
-                throw 'The isolated Opticon solution build did not produce exactly one self-test executable.'
+            $selfTestDll = Join-Path $solutionArtifacts `
+                'bin\Taildesk.SelfTest\release\Taildesk.SelfTest.dll'
+            if (-not (Test-Path -LiteralPath $selfTestDll -PathType Leaf)) {
+                throw 'The isolated Opticon solution build did not produce its exact self-test executable.'
             }
-            $selfTestDll = $selfTestDlls[0].FullName
             try {
                 Invoke-DotNet -Arguments @($selfTestDll)
             } catch {
