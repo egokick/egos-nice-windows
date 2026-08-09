@@ -873,6 +873,8 @@ static void TestReleaseDistributionDesign()
            && builder.Contains("targetRuntimes = @('win-x64', 'win-arm64')", StringComparison.Ordinal)
            && builder.Contains("safe.directory=$($script:trustedGitRoot.Replace('\\', '/'))", StringComparison.Ordinal)
            && builder.Contains("The production hosted build resolved an unexpected Git root", StringComparison.Ordinal)
+           && builder.Contains("DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE", StringComparison.Ordinal)
+           && builder.Contains("-p:MSBuildEnableWorkloadResolver=false", StringComparison.Ordinal)
            && builder.Contains("$retainedBootstraps", StringComparison.Ordinal)
            && builder.Contains("$retainedSources", StringComparison.Ordinal)
            && builder.Contains("The clean $component publish must contain only", StringComparison.Ordinal),

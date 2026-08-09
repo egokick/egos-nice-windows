@@ -517,7 +517,8 @@ function Invoke-ExactDotNet {
         DOTNET_CLI_HOME = $cliHome; NUGET_PACKAGES = $packageCache; NUGET_HTTP_CACHE_PATH = $nugetHttpCache
         NUGET_XMLDOC_MODE = 'skip'; NUGET_CERT_REVOCATION_MODE = 'online'
         DOTNET_MULTILEVEL_LOOKUP = '0'; DOTNET_NOLOGO = '1'; DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
-        DOTNET_CLI_TELEMETRY_OPTOUT = '1'; MSBUILDDISABLENODEREUSE = '1'
+        DOTNET_CLI_TELEMETRY_OPTOUT = '1'; DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE = '1'
+        MSBUILDDISABLENODEREUSE = '1'
     }
     foreach ($entry in $safeEnvironment.GetEnumerator()) {
         if (-not [string]::IsNullOrWhiteSpace([string]$entry.Value)) { $start.Environment[[string]$entry.Key] = [string]$entry.Value }
@@ -636,7 +637,7 @@ $publishArguments = @(
     "-p:ImportByWildcardAfterMicrosoftCSharpTargets=false",
     "-p:ImportByWildcardBeforeMicrosoftCommonCrossTargetingTargets=false",
     "-p:ImportByWildcardAfterMicrosoftCommonCrossTargetingTargets=false",
-    "-p:UseSharedCompilation=false", "-nodeReuse:false"
+    "-p:UseSharedCompilation=false", "-p:MSBuildEnableWorkloadResolver=false", "-nodeReuse:false"
 )
 $executables = [ordered]@{
     Setup = "Taildesk.Setup.exe"
@@ -651,7 +652,8 @@ foreach ($component in $executables.Keys) {
     $output = Join-Path $buildRoot $component
     $componentArtifacts = Join-Path $intermediateRoot $component
     $trustArguments = @($publishArguments | Where-Object { $_ -like '-p:Opticon*' -or $_ -like '-p:DirectoryBuild*' -or
-            $_ -like '-p:MSBuildUserExtensionsPath*' -or $_ -like '-p:Import*' -or $_ -eq '-p:UseSharedCompilation=false' -or $_ -eq '-nodeReuse:false' })
+            $_ -like '-p:MSBuildUserExtensionsPath*' -or $_ -like '-p:Import*' -or
+            $_ -eq '-p:UseSharedCompilation=false' -or $_ -eq '-p:MSBuildEnableWorkloadResolver=false' -or $_ -eq '-nodeReuse:false' })
     Invoke-ExactDotNet -Arguments (@(
         'restore', $project, '-r', $Runtime, '--configfile', $nugetConfig, '--packages', $packageCache,
         '--no-cache', '--force', '--force-evaluate', '--disable-parallel',
@@ -873,7 +875,7 @@ Copy-Item -LiteralPath (Join-Path $repo 'source-package\NuGet.Config') -Destinat
 $sourceRestoreTrustArguments = @($publishArguments | Where-Object {
         $_ -like '-p:Opticon*' -or $_ -like '-p:DirectoryBuild*' -or
         $_ -like '-p:MSBuildUserExtensionsPath*' -or $_ -like '-p:Import*' -or
-        $_ -eq '-p:UseSharedCompilation=false' -or $_ -eq '-nodeReuse:false'
+        $_ -eq '-p:UseSharedCompilation=false' -or $_ -eq '-p:MSBuildEnableWorkloadResolver=false' -or $_ -eq '-nodeReuse:false'
     })
 $sourceRestoreProject = Join-Path $repo 'src\Taildesk.Setup\Taildesk.Setup.csproj'
 foreach ($sourceRuntime in @('win-x64', 'win-arm64')) {
