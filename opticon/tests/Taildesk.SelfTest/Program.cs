@@ -876,6 +876,8 @@ static void TestReleaseDistributionDesign()
            && builder.Contains("DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE", StringComparison.Ordinal)
            && builder.Contains("DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK", StringComparison.Ordinal)
            && builder.Contains("-p:MSBuildEnableWorkloadResolver=false", StringComparison.Ordinal)
+           && builder.Contains("USERPROFILE = $cliHome; HOME = $cliHome", StringComparison.Ordinal)
+           && builder.Contains("APPDATA = $isolatedRoamingProfile; LOCALAPPDATA = $isolatedLocalProfile", StringComparison.Ordinal)
            && builder.Contains("$retainedBootstraps", StringComparison.Ordinal)
            && builder.Contains("$retainedSources", StringComparison.Ordinal)
            && builder.Contains("The clean $component publish must contain only", StringComparison.Ordinal),

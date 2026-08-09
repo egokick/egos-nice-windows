@@ -468,10 +468,13 @@ $stageRoot = Join-Path $sdkAnchor 'hosted-bundle-stage'
 $packageCache = Join-Path $sdkAnchor 'packages'
 $nugetHttpCache = Join-Path $sdkAnchor 'nuget-http-cache'
 $cliHome = Join-Path $sdkAnchor 'dotnet-home'
+$isolatedRoamingProfile = Join-Path $cliHome 'AppData\Roaming'
+$isolatedLocalProfile = Join-Path $cliHome 'AppData\Local'
 $buildTemp = Join-Path $sdkAnchor 'temp'
 $userExtensions = Join-Path $sdkAnchor 'empty-msbuild-user-extensions'
 $intermediateRoot = Join-Path $sdkAnchor 'obj'
-foreach ($directory in @($packageCache, $nugetHttpCache, $cliHome, $buildTemp, $userExtensions, $intermediateRoot)) {
+foreach ($directory in @($packageCache, $nugetHttpCache, $cliHome, $isolatedRoamingProfile, $isolatedLocalProfile,
+        $buildTemp, $userExtensions, $intermediateRoot)) {
     [IO.Directory]::CreateDirectory($directory) | Out-Null
 }
 $emptyTargets = Join-Path $sdkAnchor 'Directory.Build.targets'
@@ -515,6 +518,8 @@ function Invoke-ExactDotNet {
         ComSpec = (Join-Path $system32 'cmd.exe'); PATH = [string]::Join([IO.Path]::PathSeparator, @($dotnetRoot, $system32)); PATHEXT = '.COM;.EXE'
         TEMP = $buildTemp; TMP = $buildTemp; DOTNET_ROOT = $dotnetRoot
         DOTNET_CLI_HOME = $cliHome; NUGET_PACKAGES = $packageCache; NUGET_HTTP_CACHE_PATH = $nugetHttpCache
+        USERPROFILE = $cliHome; HOME = $cliHome; APPDATA = $isolatedRoamingProfile; LOCALAPPDATA = $isolatedLocalProfile
+        HOMEDRIVE = [IO.Path]::GetPathRoot($cliHome).TrimEnd('\'); HOMEPATH = $cliHome.Substring([IO.Path]::GetPathRoot($cliHome).Length - 1)
         NUGET_XMLDOC_MODE = 'skip'; NUGET_CERT_REVOCATION_MODE = 'online'
         DOTNET_MULTILEVEL_LOOKUP = '0'; DOTNET_NOLOGO = '1'; DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
         DOTNET_CLI_TELEMETRY_OPTOUT = '1'; DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE = '1'
