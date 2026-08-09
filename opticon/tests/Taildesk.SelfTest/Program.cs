@@ -1554,6 +1554,8 @@ static void TestOpenSshRecoveryDesign()
         "Command Center shutdown must terminate SSH and report remote/local cleanup independently");
 
     var buildScript = ReadSource("build.ps1");
+    var targetReleaseCheck = ReadSource("scripts", "Ensure-OpticonTargetRelease.ps1");
+    var buildWorkflow = ReadSource(".github", "workflows", "build-windows.yml");
     var hostedBuild = ReadSource("fly-headscale", "scripts", "Build-OpticonBundles.ps1");
     var installer = ReadSource("installer", "Install-CommandCenter.ps1");
     Assert(buildScript.Contains("The Opticon solution build failed", StringComparison.Ordinal)
@@ -1563,6 +1565,15 @@ static void TestOpenSshRecoveryDesign()
            && hostedBuild.Contains("hosted CLI directory must contain only", StringComparison.Ordinal)
            && hostedBuild.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal),
         "release packaging must fail on native build/test errors and ship a single signed CLI app");
+    Assert(buildScript.Contains("SkipTargetReleaseDeployment", StringComparison.Ordinal)
+           && buildScript.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
+           && buildWorkflow.Contains("-SkipTargetReleaseDeployment", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("Test-CompleteRelease", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("Publish-OpticonBundles.ps1", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("status --porcelain", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("refs/remotes/origin/main", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("DeploymentRequired", StringComparison.Ordinal),
+        "operator builds must deploy missing target releases only from clean synchronized main while CI opts out explicitly");
     var sourceControllerUpdater = ReadSource("scripts", "Update-InstalledOpticon.ps1");
     Assert(sourceControllerUpdater.Contains("Install-Opticon.ps1", StringComparison.Ordinal)
            && sourceControllerUpdater.Contains("exclusive lock", StringComparison.Ordinal)

@@ -126,11 +126,13 @@ Set-Location 'C:\source\egos-nice-windows\opticon'
 .\infrastructure\aws\Provision-OpticonReleaseDistribution.ps1
 ```
 
-For every release, run `fly-headscale\scripts\Publish-OpticonBundles.ps1`.
-It reads the Fly token only from the approved operator environment, never
-writes it into the worktree, and deploys Fly only after both S3 objects are
-available and hash-verified through CloudFront. The script prints the selected
-version, object sizes, SHA-256 values, and distribution hostname.
+The normal `build.ps1` command checks the live target-release manifest after a
+successful package build. If the source version is not fully deployed, it runs
+`fly-headscale\scripts\Publish-OpticonBundles.ps1` automatically. Automatic
+publication is allowed only from a clean `main` exactly synchronized with
+`origin/main`; missing credentials or an incomplete deployment fail the build
+loudly. The publisher prints the selected version, object sizes, SHA-256 values,
+and distribution hostname.
 
 
 The Docker build intentionally excludes large Opticon ZIPs and bundle staging outputs. `Publish-OpticonBundles.ps1` discovers the next immutable S3 version, builds and signs both bundles, uploads with parallel multipart transfer and S3 SHA-256 checksums, verifies CloudFront HEAD, Range, and a full streamed SHA-256, then atomically deploys the Fly manifest containing only those CloudFront URLs. The gateway accepts only HTTPS CloudFront URLs that exactly match the manifest version and safe filename. Legacy Fly-volume bundles are retained but no new bundle is sent through its HMAC chunk endpoint.
@@ -156,8 +158,8 @@ Set-Location 'C:\source\egos-nice-windows\opticon'
 .\build.ps1 -Runtime win-x64
 ```
 
-The build runs the solution and self-tests, publishes self-contained Windows binaries, and writes `dist\Opticon-CommandCenter-win-x64.zip`. Extract it and run `Install-Opticon.ps1` as Administrator. The installer preserves the compatibility data paths, creates Opticon desktop/startup/Start Menu shortcuts with the Opticon icon, installs the narrowly scoped roaming-route maintenance task, and removes legacy Taildesk shortcuts.
+The build runs the solution and self-tests, publishes self-contained Windows binaries, writes `dist\Opticon-CommandCenter-win-x64.zip`, and ensures that the same version's signed target bundles are deployed through S3/CloudFront and the live manifest. Extract the command-center ZIP and run `Install-Opticon.ps1` as Administrator. The installer preserves the compatibility data paths, creates Opticon desktop/startup/Start Menu shortcuts with the Opticon icon, installs the narrowly scoped roaming-route maintenance task, and removes legacy Taildesk shortcuts.
 
-This command-center build does not publish a managed-device Agent update. After incrementing `Directory.Build.props`, publish the signed Agent/Guardian bundles with `fly-headscale\scripts\Publish-OpticonBundles.ps1`; only then will **Update Opticon** on a target discover the new version in the hosted manifest.
+Use `-SkipTargetReleaseDeployment` only for explicit development or CI builds that must not mutate production. A skipped build does not make that version available through **Update Opticon**.
 
 For deeper implementation details, continue with `docs\ARCHITECTURE.md` and `docs\SECURITY.md`, then read the code under `src\Taildesk.Admin`, `src\Taildesk.Agent`, `src\Taildesk.Setup`, and `src\Taildesk.Shared`.

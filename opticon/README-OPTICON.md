@@ -110,37 +110,20 @@ The deployable directory is `fly-headscale`. Its `fly.toml`, Dockerfile, Headsca
 Prerequisites:
 
 - `flyctl` is installed through WinGet on this laptop.
-- `C:\source\babelfish\.env` contains `FLY_API_TOKEN=...`.
 - The expected IPs in `fly-headscale\config.yaml` still match `flyctl ips list`.
 - The pinned Opticon signing certificate is available in the current user certificate store when rebuilding bundles.
 
-From PowerShell:
+For an ordinary Opticon release, build from the repository root:
 
 ```powershell
-$tokenLine = Get-Content 'C:\source\babelfish\.env' |
-    Where-Object { $_ -match '^FLY_API_TOKEN=' } |
-    Select-Object -First 1
-if (-not $tokenLine) { throw 'FLY_API_TOKEN was not found.' }
-
-$env:FLY_API_TOKEN = ($tokenLine -split '=', 2)[1].Trim().Trim('"').Trim("'")
-try {
-    Set-Location 'C:\source\egos-nice-windows\opticon\fly-headscale'
-
-    .\scripts\Build-OpticonBundles.ps1
-    flyctl volumes snapshots create vol_re17jzg9qjylg034 --app taildesk-egokick-control
-    flyctl deploy --remote-only --app taildesk-egokick-control --yes
-    .\scripts\Publish-OpticonBundles.ps1
-    flyctl status --app taildesk-egokick-control
-    flyctl ips list --app taildesk-egokick-control
-    flyctl volumes list --app taildesk-egokick-control
-    Invoke-WebRequest 'https://taildesk-egokick-control.fly.dev/health' -UseBasicParsing
-} finally {
-    Remove-Item Env:\FLY_API_TOKEN -ErrorAction SilentlyContinue
-}
+Set-Location 'C:\source\egos-nice-windows\opticon'
+.\build.ps1 -Runtime win-x64
 ```
 
-
-The Docker build intentionally excludes the large Opticon ZIPs. `Build-OpticonBundles.ps1` signs them and updates the manifest; the small gateway deployment publishes that manifest; `Publish-OpticonBundles.ps1` then sends each ZIP in HMAC-authenticated 4 MiB chunks to the persistent Fly volume. The gateway accepts only filenames, sizes, and SHA-256 values already declared in the manifest and exposes a bundle only after full-file hash verification.
+After packaging succeeds, the build checks the live manifest and publishes a
+missing target release through the private S3/CloudFront distribution. Ordinary
+releases do not deploy the Fly gateway or require a Fly token. Run `flyctl
+deploy` separately only when gateway code or configuration changes.
 
 Useful diagnostics:
 
@@ -163,6 +146,6 @@ Set-Location 'C:\source\egos-nice-windows\opticon'
 .\build.ps1 -Runtime win-x64
 ```
 
-The build runs the solution and self-tests, publishes self-contained Windows binaries, and writes `dist\Opticon-CommandCenter-win-x64.zip`. Extract it and run `Install-Opticon.ps1` as Administrator. The installer preserves the compatibility data paths, creates Opticon desktop/startup/Start Menu shortcuts with the Opticon icon, installs the narrowly scoped roaming-route maintenance task, and removes legacy Taildesk shortcuts.
+The build runs the solution and self-tests, publishes self-contained Windows binaries, writes `dist\Opticon-CommandCenter-win-x64.zip`, and checks the live target-release manifest. If this version is missing, a clean and pushed `main` build automatically publishes its signed target bundles through S3/CloudFront. Use `-SkipTargetReleaseDeployment` only for explicit development or CI builds. Extract the command-center ZIP and run `Install-Opticon.ps1` as Administrator. The installer preserves the compatibility data paths, creates Opticon desktop/startup/Start Menu shortcuts with the Opticon icon, installs the narrowly scoped roaming-route maintenance task, and removes legacy Taildesk shortcuts.
 
 For deeper implementation details, continue with `docs\ARCHITECTURE.md` and `docs\SECURITY.md`, then read the code under `src\Taildesk.Admin`, `src\Taildesk.Agent`, `src\Taildesk.Setup`, and `src\Taildesk.Shared`.

@@ -2,7 +2,8 @@
 param(
     [ValidateSet('win-x64', 'win-arm64')]
     [string]$Runtime = 'win-x64',
-    [switch]$FrameworkDependent
+    [switch]$FrameworkDependent,
+    [switch]$SkipTargetReleaseDeployment
 )
 
 $ErrorActionPreference = 'Stop'
@@ -151,4 +152,9 @@ Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Compression
 Write-Host "Built $zip" -ForegroundColor Green
 } finally {
     $packageBuildLock.Dispose()
+}
+
+if (-not $SkipTargetReleaseDeployment) {
+    & (Join-Path $repo 'scripts\Ensure-OpticonTargetRelease.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'The Opticon target release check or deployment failed.' }
 }
