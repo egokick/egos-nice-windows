@@ -518,6 +518,10 @@ function Invoke-ExactDotNet {
         NUGET_XMLDOC_MODE = 'skip'; NUGET_CERT_REVOCATION_MODE = 'online'
         DOTNET_MULTILEVEL_LOOKUP = '0'; DOTNET_NOLOGO = '1'; DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
         DOTNET_CLI_TELEMETRY_OPTOUT = '1'; DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE = '1'
+        # No Opticon project consumes SDK workloads and the resolver is also
+        # disabled below. Do not let unrelated machine-wide workload metadata
+        # make this otherwise hermetic restore depend on per-user CLI state.
+        DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK = '1'
         MSBUILDDISABLENODEREUSE = '1'
     }
     foreach ($entry in $safeEnvironment.GetEnumerator()) {
