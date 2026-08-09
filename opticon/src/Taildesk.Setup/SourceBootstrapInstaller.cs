@@ -127,11 +127,11 @@ internal static class SourceBootstrapInstaller
             || invite.SourceManifestKeyId != SourceReleaseSigning.KeyId
             || invite.SigningProfile != OpticonSigningProfile.Production.ToString()
             || invite.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
-            || invite.SdkVersion != "8.0.423" || invite.RuntimeVersion != "8.0.29"
+            || invite.SdkVersion != "10.0.302" || invite.RuntimeVersion != "10.0.10"
             || !invite.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal)
             || invite.BootstrapVersion != invite.ReleaseVersion
             || invite.BootstrapFile != $"opticon-bootstrap-{invite.ReleaseVersion}.exe"
-            || invite.BootstrapSize is < 1024 or > 64L * 1024 * 1024
+            || invite.BootstrapSize is < 1024 or > 128L * 1024 * 1024
             || !HashPattern.IsMatch(invite.BootstrapSha256)
             || !invite.BootstrapSignerThumbprint.Equals(
                 ProductSigning.CertificateThumbprint, StringComparison.Ordinal))
@@ -295,7 +295,7 @@ internal static class SourceBootstrapInstaller
                 if (result.Succeeded && runtimes.Succeeded && host.Succeeded
                     && result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries)
                         .Any(line => line.StartsWith(version + " ", StringComparison.Ordinal))
-                    && RequiredRuntimesPresent(runtimes.StandardOutput, "8.0.29")
+                    && RequiredRuntimesPresent(runtimes.StandardOutput, "10.0.10")
                     && SdkHostMatchesTarget(host.StandardOutput, targetRuntime)) return dotnet;
             }
             var architecture = targetRuntime == "win-arm64" ? "arm64" : "x64";

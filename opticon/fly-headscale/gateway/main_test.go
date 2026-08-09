@@ -691,12 +691,18 @@ func TestManifestMustRetainArtifactsForUnexpiredInvitations(t *testing.T) {
 	oldSource := productionArtifact(bundleArtifact{Product: "OpticonSource", Version: "1.2.0", Architecture: "source", File: "opticon-source-1.2.0.zip", Size: 30, SHA256: hash, DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.0.zip", SDKVersion: pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion, TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash})
 	invite := productionInvite(hostedInvite{ExpiresAt: time.Now().Add(time.Hour), ReleaseVersion: oldSource.Version, SourceFile: oldSource.File, SourceSize: oldSource.Size, SourceSHA256: oldSource.SHA256, SourceManifestSHA256: oldSource.SourceManifestSHA256, SDKVersion: oldSource.SDKVersion, RuntimeVersion: oldSource.RuntimeVersion, TargetRuntimes: oldSource.TargetRuntimes, BootstrapVersion: oldBootstrap.Version, BootstrapFile: oldBootstrap.File, BootstrapSize: oldBootstrap.Size, BootstrapSHA256: oldBootstrap.SHA256, BootstrapSigner: oldBootstrap.SignerThumbprint})
 	data, _ := json.Marshal(invite)
-	if err := os.WriteFile(filepath.Join(root, "active.json"), data, 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(root, "active.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
 	g := &gateway{inviteDir: root}
 	newOnly := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{{Product: "unrelated", File: "other", Size: 1}}}
-	if err := g.requireActiveInviteArtifacts(newOnly, time.Now()); err == nil { t.Fatal("manifest removal broke an unexpired invitation without being rejected") }
+	if err := g.requireActiveInviteArtifacts(newOnly, time.Now()); err == nil {
+		t.Fatal("manifest removal broke an unexpired invitation without being rejected")
+	}
 	retained := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{oldBootstrap, oldSource}}
-	if err := g.requireActiveInviteArtifacts(retained, time.Now()); err != nil { t.Fatalf("immutable old invitation artifacts were rejected: %v", err) }
+	if err := g.requireActiveInviteArtifacts(retained, time.Now()); err != nil {
+		t.Fatalf("immutable old invitation artifacts were rejected: %v", err)
+	}
 }
 
 func TestUnsafeBundleFilenameCannotReachInstallerCommand(t *testing.T) {
@@ -827,6 +833,48 @@ func TestHMACReplayRemainsRejectedAcrossGatewayRestart(t *testing.T) {
 	}
 }
 
+func TestPersistentNonceNeverDeletesRecentInFlightTarget(t *testing.T) {
+	now := time.Now()
+	nonce := "in-flight-nonce-012345678901"
+	nonceDir := t.TempDir()
+	hash := sha256.Sum256([]byte(nonce))
+	path := filepath.Join(nonceDir, hex.EncodeToString(hash[:])+".nonce")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	g := &gateway{nonceDir: nonceDir}
+	if g.consumePersistentNonce(nonce, now) {
+		t.Fatal("a recent O_EXCL nonce placeholder was deleted and replayed")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("recent in-flight nonce was removed: %v", err)
+	}
+}
+
+func TestPersistentNonceIsAtomicAcrossGatewayInstances(t *testing.T) {
+	now := time.Now()
+	nonceDir := t.TempDir()
+	start := make(chan struct{})
+	results := make(chan bool, 2)
+	for range 2 {
+		g := &gateway{nonceDir: nonceDir}
+		go func() {
+			<-start
+			results <- g.consumePersistentNonce("concurrent-nonce-0123456789", now)
+		}()
+	}
+	close(start)
+	accepted := 0
+	for range 2 {
+		if <-results {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("expected exactly one persistent nonce winner, got %d", accepted)
+	}
+}
+
 func TestAdministrativeBodyConcurrencyCapFailsClosed(t *testing.T) {
 	g := &gateway{adminSlots: make(chan struct{}, 1)}
 	g.adminSlots <- struct{}{}
@@ -834,6 +882,35 @@ func TestAdministrativeBodyConcurrencyCapFailsClosed(t *testing.T) {
 	g.ServeHTTP(result, httptest.NewRequest(http.MethodPut, releaseAdminPath, strings.NewReader(`{}`)))
 	if result.Code != http.StatusTooManyRequests {
 		t.Fatalf("saturated administrative body reader returned %d", result.Code)
+	}
+}
+
+func TestPublicControlConcurrencyCapsFailClosedByRouteClass(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		path   string
+		stream bool
+	}{
+		{name: "machine control", path: "/machine/register"},
+		{name: "DERP stream", path: "/derp", stream: true},
+		{name: "ts2021 stream", path: "/ts2021", stream: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			g := &gateway{proxySlots: make(chan struct{}, 1), streamSlots: make(chan struct{}, 1)}
+			slots := g.proxySlots
+			if test.stream {
+				slots = g.streamSlots
+			}
+			slots <- struct{}{}
+			result := httptest.NewRecorder()
+			g.ServeHTTP(result, httptest.NewRequest(http.MethodGet, test.path, nil))
+			if result.Code != http.StatusTooManyRequests {
+				t.Fatalf("saturated route returned %d", result.Code)
+			}
+			if result.Header().Get("Retry-After") != "5" {
+				t.Fatal("saturated public control route omitted Retry-After")
+			}
+		})
 	}
 }
 

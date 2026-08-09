@@ -10,4 +10,4 @@ file and do not use ExecutionPolicy Bypass.
 Install-Opticon.exe verifies the offline-signed package manifest and the exact
 hash, size, version, and product signature of every executable before elevation.
 Hosted device invitations then download and verify the exact source release and
-build it locally with .NET SDK 8.0.423.
+build it locally with .NET SDK 10.0.302.

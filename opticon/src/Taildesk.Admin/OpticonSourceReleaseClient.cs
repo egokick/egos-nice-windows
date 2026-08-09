@@ -25,15 +25,15 @@ public sealed record OpticonSourceRelease(
 
 public sealed class OpticonSourceReleaseClient
 {
-    public const string SupportedSdkVersion = "8.0.423";
-    public const string SupportedRuntimeVersion = "8.0.29";
+    public const string SupportedSdkVersion = "10.0.302";
+    public const string SupportedRuntimeVersion = "10.0.10";
     private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(45));
 
     public async Task<OpticonSourceRelease> GetCurrentAsync(
         AdminConfig config,
         CancellationToken cancellationToken = default)
     {
-		BuildSigningTrust.RequirePublishable();
+        BuildSigningTrust.RequirePublishable();
         if (!Uri.TryCreate(config.HeadscaleControlUrl, UriKind.Absolute, out var control)
             || control.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException("The Opticon HTTPS control origin is not configured.");
@@ -82,7 +82,7 @@ public sealed class OpticonSourceReleaseClient
             || source.SourceManifestKeyId == source.ProductSignerThumbprint
             || !source.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal))
             throw new InvalidDataException("The exact source release has invalid immutable build metadata.");
-        if (bootstrap.Size is < 1024 or > 64L * 1024 * 1024
+        if (bootstrap.Size is < 1024 or > 128L * 1024 * 1024
             || bootstrap.Sha256.Length != 64 || bootstrap.Sha256.Any(character => !Uri.IsHexDigit(character))
             || !bootstrap.SignerThumbprint.Equals(
                 ProductSigning.CertificateThumbprint, StringComparison.Ordinal)

@@ -37,6 +37,13 @@ public sealed class SourceBuildFileAttestation
     public string Sha256 { get; set; } = string.Empty;
 }
 
+public sealed record SourceInstallationBinding(
+    string TransactionId,
+    Guid InviteId,
+    string InviteCiphertextSha256,
+    string SourceSha256,
+    string SourceManifestSha256);
+
 internal sealed class InstalledSourceProvenance
 {
     public int SchemaVersion { get; set; } = 5;
@@ -73,6 +80,9 @@ public static class SourceBuildProvenance
     private static readonly Regex Sha256Pattern = new("^[a-f0-9]{64}$", RegexOptions.CultureInvariant);
     private static readonly Regex ControllerTransactionPattern = new(
         "^Admin\\.(?:installing|failed)-[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex GuardianTransactionFilePattern = new(
+        "^Taildesk\\.UpdateGuardian\\.exe\\.(?:upgrade|backup|failed)-[a-f0-9]{32}$",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     private static readonly object Gate = new();
     private static Dictionary<string, InstalledSourceFile>? _activeFiles;
     private static Dictionary<string, InstalledSourceFile>? _activeControllerFiles;
@@ -168,6 +178,21 @@ public static class SourceBuildProvenance
         {
             var current = ReadProtectedStore();
             current.Installed = PruneInstalledGenerations(current.Installed);
+            var machineInstall = MachineInstallTransactionPersistence.Load();
+            if (machineInstall is not null)
+            {
+                if (current.Pending is null)
+                    throw new InvalidDataException(
+                        "Machine-install recovery exists but its pending source provenance is missing.");
+                MachineInstallTransactionPersistence.RequireMatches(
+                    machineInstall,
+                    new SourceInstallationBinding(
+                        current.PendingTransactionId,
+                        current.PendingInviteId,
+                        current.PendingInviteCiphertextSha256,
+                        current.Pending.SourceSha256,
+                        current.Pending.SourceManifestSha256));
+            }
             string transactionId;
             if (current.Pending is not null)
             {
@@ -302,6 +327,28 @@ public static class SourceBuildProvenance
         WriteProtectedStore(store);
     }
 
+    public static SourceInstallationBinding RequireActiveInstallationBinding(Guid expectedInviteId)
+    {
+        if (expectedInviteId == Guid.Empty)
+            throw new InvalidDataException("The expected source-installation invitation ID is empty.");
+        lock (Gate)
+        {
+            if (_pendingPromotion is null
+                || _activeStoreLease is null
+                || string.IsNullOrEmpty(_pendingTransactionId)
+                || _pendingInviteId != expectedInviteId
+                || string.IsNullOrEmpty(_pendingInviteCiphertextSha256))
+                throw new InvalidDataException(
+                    "No matching authenticated source-build installation is active in this Setup process.");
+            return new SourceInstallationBinding(
+                _pendingTransactionId,
+                _pendingInviteId,
+                _pendingInviteCiphertextSha256,
+                _pendingPromotion.SourceSha256,
+                _pendingPromotion.SourceManifestSha256);
+        }
+    }
+
     public static void RollbackActiveInstallation()
     {
         var (candidate, transactionId, inviteId, inviteHash, storeLease) = GetActiveInstallation();
@@ -309,6 +356,9 @@ public static class SourceBuildProvenance
         if (storeLease is null) throw new InvalidOperationException("The source-build installation lease is missing.");
         var store = ReadProtectedStore();
         RequirePendingMatches(store, candidate, transactionId, inviteId, inviteHash);
+        if (MachineInstallTransactionPersistence.Load() is not null)
+            throw new InvalidOperationException(
+                "Machine enrollment has external side effects under protected recovery; pending source trust was preserved for roll-forward recovery.");
         if (AgentInstallTransactionPersistence.Load() is not null)
             throw new InvalidOperationException(
                 "The Agent filesystem transaction is still active; pending source trust was preserved for recovery.");
@@ -467,6 +517,20 @@ public static class SourceBuildProvenance
             .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         if (canonicalPath.StartsWith(adminRoot, StringComparison.OrdinalIgnoreCase))
             yield return Path.Combine(AppPaths.InstallDirectory, "Admin.previous", canonicalPath[adminRoot.Length..]);
+
+        var guardian = Path.GetFullPath(Path.Combine(
+            AppPaths.UpdateGuardianInstallDirectory, "Taildesk.UpdateGuardian.exe"));
+        if (canonicalPath.Equals(guardian, StringComparison.OrdinalIgnoreCase)
+            && Directory.Exists(AppPaths.UpdateGuardianInstallDirectory))
+        {
+            var transactionFiles = Directory.EnumerateFiles(
+                    AppPaths.UpdateGuardianInstallDirectory, "Taildesk.UpdateGuardian.exe.*", SearchOption.TopDirectoryOnly)
+                .Where(path => GuardianTransactionFilePattern.IsMatch(Path.GetFileName(path)))
+                .Take(17).ToArray();
+            if (transactionFiles.Length > 16)
+                throw new InvalidDataException("Too many stable Guardian transaction files require recovery.");
+            foreach (var transactionFile in transactionFiles) yield return transactionFile;
+        }
 
         var agentRoot = Path.GetFullPath(AppPaths.AgentInstallDirectory)
             .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
@@ -729,8 +793,8 @@ public static class SourceBuildProvenance
             || !Regex.IsMatch(generation.ReleaseVersion, "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$")
             || !Sha256Pattern.IsMatch(generation.SourceSha256)
             || !Sha256Pattern.IsMatch(generation.SourceManifestSha256)
-            || generation.SdkVersion != "8.0.423"
-            || generation.RuntimeVersion != "8.0.29"
+            || generation.SdkVersion != "10.0.302"
+            || generation.RuntimeVersion != "10.0.10"
             || generation.TargetRuntime is not ("win-x64" or "win-arm64")
             || generation.Files.Count is < 1 or > 512)
             throw new InvalidDataException("A machine source-build provenance generation is invalid.");

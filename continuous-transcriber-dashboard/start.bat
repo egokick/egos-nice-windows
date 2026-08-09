@@ -3,7 +3,7 @@ setlocal
 
 set "APP_DIR=%~dp0"
 set "PROJECT=%APP_DIR%ContinuousTranscriber.Dashboard.csproj"
-set "APP=%APP_DIR%bin\Debug\net8.0-windows10.0.19041.0\ContinuousTranscriber.Dashboard.exe"
+set "APP=%APP_DIR%bin\Debug\net10.0-windows10.0.19041.0\ContinuousTranscriber.Dashboard.exe"
 set "DOTNET_CLI_HOME=%APP_DIR%..\.dotnet"
 set "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1"
 set "DOTNET_ROLL_FORWARD=Major"

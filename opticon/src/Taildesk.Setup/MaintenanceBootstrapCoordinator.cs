@@ -320,10 +320,13 @@ internal sealed class MaintenanceBootstrapCoordinator
         string currentVersion)
     {
         if (manifest.SchemaVersion != 1
+            || manifest.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || manifest.SourceReleaseKeyId != SourceReleaseSigning.KeyId
+            || manifest.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
             || manifest.UpdateProtocolVersion != RemoteAdministrationProtocol.UpdateVersion
             || manifest.Role != config.Role
             || !manifest.Architecture.Equals(architecture, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("The signed release does not match this enrolled device role, architecture, or update protocol.");
+            throw new InvalidDataException("The signed release does not match the production trust policy or this enrolled device role, architecture, and update protocol.");
         var current = UpdatePackageVerifier.ParseVersion(currentVersion);
         var target = UpdatePackageVerifier.ParseVersion(manifest.Version);
         if (target < current)

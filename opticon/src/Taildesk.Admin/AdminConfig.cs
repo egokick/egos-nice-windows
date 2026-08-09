@@ -76,8 +76,7 @@ public sealed class AdminState
                 || string.IsNullOrWhiteSpace(bootstrap.ControllerTokenProtected)
                 || string.IsNullOrWhiteSpace(bootstrap.DeviceName)
                 || !Uri.TryCreate(bootstrap.CoordinatorUrl, UriKind.Absolute, out var coordinator)
-                || coordinator.Scheme != Uri.UriSchemeHttps
-                || !string.IsNullOrEmpty(coordinator.UserInfo))
+                || !IsExpectedPrivateCoordinatorOrigin(coordinator))
                 throw new InvalidDataException("The protected controller bootstrap metadata is invalid.");
             var bootstrapToken = SecretProtector.Unprotect(
                 bootstrap.ControllerTokenProtected,
@@ -106,4 +105,13 @@ public sealed class AdminState
     }
 
     public DeviceRecord? FindDevice(Guid id) => Config.Devices.FirstOrDefault(device => device.Id == id);
+
+    private static bool IsExpectedPrivateCoordinatorOrigin(Uri coordinator) =>
+        coordinator.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+        && coordinator.Port == 45830
+        && coordinator.AbsolutePath == "/"
+        && string.IsNullOrEmpty(coordinator.UserInfo)
+        && string.IsNullOrEmpty(coordinator.Query)
+        && string.IsNullOrEmpty(coordinator.Fragment)
+        && RemoteAdministrationProtocol.IsTailscaleIpv4(coordinator.Host);
 }

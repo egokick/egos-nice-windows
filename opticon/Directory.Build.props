@@ -1,8 +1,9 @@
 <Project>
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
-    <RuntimeFrameworkVersion Condition="'$(RuntimeIdentifier)' != ''">8.0.29</RuntimeFrameworkVersion>
-    <TargetLatestRuntimePatch>false</TargetLatestRuntimePatch>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <WindowsSdkPackageVersion>10.0.19041.57</WindowsSdkPackageVersion>
+    <OpticonRuntimeVersion>10.0.10</OpticonRuntimeVersion>
+    <TargetLatestRuntimePatch>true</TargetLatestRuntimePatch>
     <Version>1.1.38</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

@@ -14,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$RequiredSdkVersion = '8.0.423'
+$RequiredSdkVersion = '10.0.302'
 $InvitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
 $repo = [IO.Path]::GetFullPath($PSScriptRoot)
 $artifacts = Join-Path $repo 'artifacts'
@@ -98,7 +98,7 @@ function Get-RequiredDotNet {
     Assert-NoReparseTraversal -Root $programFiles -Path $dotnet
     $sdkDirectory = Join-Path (Split-Path $dotnet -Parent) "sdk\$RequiredSdkVersion"
     if (-not (Test-Path -LiteralPath $sdkDirectory -PathType Container)) {
-        throw ".NET SDK $RequiredSdkVersion is required exactly. Install it from https://dotnet.microsoft.com/download/dotnet/8.0"
+        throw ".NET SDK $RequiredSdkVersion is required exactly. Install it from https://dotnet.microsoft.com/download/dotnet/10.0"
     }
     Assert-NoReparseTraversal -Root $programFiles -Path $sdkDirectory
     return $dotnet
@@ -302,11 +302,16 @@ function Invoke-DotNet {
             TMP = $script:buildTemp
             DOTNET_ROOT = (Split-Path $script:dotnet -Parent)
             DOTNET_CLI_HOME = $script:cliHome
+            USERPROFILE = $script:buildUserProfile
+            HOME = $script:buildUserProfile
+            APPDATA = $script:buildAppData
+            LOCALAPPDATA = $script:buildLocalAppData
             DOTNET_MULTILEVEL_LOOKUP = '0'
             DOTNET_NOLOGO = '1'
             DOTNET_CLI_TELEMETRY_OPTOUT = '1'
             NUGET_PACKAGES = $script:packageCache
             NUGET_HTTP_CACHE_PATH = $script:nugetHttpCache
+            NUGET_PLUGINS_CACHE_PATH = $script:nugetPluginsCache
             NUGET_XMLDOC_MODE = 'skip'
             NUGET_CERT_REVOCATION_MODE = 'online'
             MSBUILDDISABLENODEREUSE = '1'
@@ -376,18 +381,17 @@ function Publish-OpticonProject {
         throw "The declared Opticon project is missing: $ProjectName"
     }
     $null = [IO.Directory]::CreateDirectory($OutputDirectory)
-    $objRoot = Join-Path $script:workspace "obj\$ProjectName"
-    $projectIntermediate = "-p:BaseIntermediateOutputPath=$objRoot\" + '$(MSBuildProjectName)\'
+    $componentArtifacts = Join-Path $script:workspace "component-artifacts\$ProjectName"
     Invoke-DotNet -Arguments (@(
         'restore', $projectFile,
         '-r', $Runtime,
         '--configfile', $script:nugetConfig,
         '--packages', $script:packageCache,
-        '--no-http-cache',
+        '--no-cache',
         '--force',
         '--force-evaluate',
         '--disable-parallel',
-        $projectIntermediate
+        '--artifacts-path', $componentArtifacts
     ) + $script:msbuildTrustArguments)
     Invoke-DotNet -Arguments (@(
         'publish', $projectFile,
@@ -398,7 +402,7 @@ function Publish-OpticonProject {
         '-t:Rebuild',
         '--nologo',
         '-o', $OutputDirectory,
-        $projectIntermediate,
+        '--artifacts-path', $componentArtifacts,
         '-p:PublishSingleFile=true',
         '-p:IncludeNativeLibrariesForSelfExtract=true',
         '-p:EnableCompressionInSingleFile=true',
@@ -408,6 +412,12 @@ function Publish-OpticonProject {
         '-p:IncludeSourceRevisionInInformationalVersion=false',
         '-p:ContinuousIntegrationBuild=true'
     ) + $script:msbuildTrustArguments)
+    if ($ProjectName -eq 'Taildesk.Cli') {
+        $referencedAdminRuntimeConfig = Join-Path $OutputDirectory 'Opticon.runtimeconfig.json'
+        if (Test-Path -LiteralPath $referencedAdminRuntimeConfig -PathType Leaf) {
+            [IO.File]::Delete($referencedAdminRuntimeConfig)
+        }
+    }
     $files = @(Get-ChildItem -LiteralPath $OutputDirectory -File -Recurse)
     if ($files.Count -ne 1 -or -not $files[0].Name.Equals(
             $ExpectedExecutable, [StringComparison]::Ordinal)) {
@@ -418,9 +428,11 @@ function Publish-OpticonProject {
 
 function Sign-OpticonExecutable {
     param([Parameter(Mandatory)][string]$Path)
-    $arguments = @(
-        'sign', '/fd', 'SHA256', '/tr', $TimestampServer, '/td', 'SHA256',
-        '/sha1', $script:productThumbprint, '/s', 'My')
+    $arguments = @('sign', '/fd', 'SHA256')
+    if ($BuildProfile -eq 'Production') {
+        $arguments += @('/tr', $TimestampServer, '/td', 'SHA256')
+    }
+    $arguments += @('/sha1', $script:productThumbprint, '/s', 'My')
     if ($script:productSigner.StoreLocation -eq
         [Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine) {
         $arguments += '/sm'
@@ -429,15 +441,15 @@ function Sign-OpticonExecutable {
     Invoke-SignTool -Arguments $arguments
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     if (-not $signature.SignerCertificate -or
-        (Normalize-Thumbprint $signature.SignerCertificate.Thumbprint) -ne $script:productThumbprint -or
-        -not $signature.TimeStamperCertificate) {
-        throw "The signed executable lacks the exact product signer or RFC3161 timestamp: $Path"
+        (Normalize-Thumbprint $signature.SignerCertificate.Thumbprint) -ne $script:productThumbprint) {
+        throw "The signed executable lacks the exact product signer: $Path"
     }
-    if ($BuildProfile -eq 'Production' -and $signature.Status -ne 'Valid') {
+    if ($BuildProfile -eq 'Production' -and
+        ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate)) {
         throw "Windows did not validate the production Authenticode chain for $Path ($($signature.Status))."
     }
     if ($BuildProfile -eq 'Developer' -and
-        $signature.Status -in @('NotSigned', 'HashMismatch')) {
+        ($signature.Status -in @('NotSigned', 'HashMismatch') -or $signature.TimeStamperCertificate)) {
         throw "Developer Authenticode signing failed for $Path ($($signature.Status))."
     }
 }
@@ -498,8 +510,7 @@ function New-ReproducibleZip {
 }
 
 $packageBuildLock = Enter-OpticonPackageBuildLock -Path $packageLockPath
-$workspace = Join-Path $artifacts (
-    "command-center-$Runtime-" + [Guid]::NewGuid().ToString('N'))
+$workspace = Join-Path $artifacts ('b-' + [Guid]::NewGuid().ToString('N'))
 try {
     if ($BuildProfile -eq 'Developer' -and -not $SkipTargetReleaseDeployment) {
         throw 'Developer artifacts are intentionally non-publishable; pass -SkipTargetReleaseDeployment explicitly.'
@@ -532,9 +543,9 @@ try {
     }
     $props = [xml][IO.File]::ReadAllText($propsPath)
     $version = $props.SelectSingleNode('/Project/PropertyGroup/Version').InnerText
-    $requiredRuntime = $props.SelectSingleNode('/Project/PropertyGroup/RuntimeFrameworkVersion').InnerText
+    $requiredRuntime = $props.SelectSingleNode('/Project/PropertyGroup/OpticonRuntimeVersion').InnerText
     if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
-        $requiredRuntime -notmatch '^8\.0\.[0-9]+$') {
+        $requiredRuntime -notmatch '^10\.0\.[0-9]+$') {
         throw 'Directory.Build.props does not contain exact release/runtime versions.'
     }
 
@@ -548,10 +559,15 @@ try {
     $nugetHttpCache = Join-Path $workspace 'nuget-http-cache'
     $cliHome = Join-Path $workspace 'dotnet-home'
     $buildTemp = Join-Path $workspace 'temp'
+    $buildUserProfile = Join-Path $workspace 'user-profile'
+    $buildAppData = Join-Path $buildUserProfile 'AppData\Roaming'
+    $buildLocalAppData = Join-Path $buildUserProfile 'AppData\Local'
+    $nugetPluginsCache = Join-Path $workspace 'nuget-plugins-cache'
     $userExtensions = Join-Path $workspace 'empty-msbuild-user-extensions'
     foreach ($directory in @(
             $sdkRoot, $stage, $publishRoot, $packageCache, $nugetHttpCache,
-            $cliHome, $buildTemp, $userExtensions)) {
+            $cliHome, $buildTemp, $userExtensions, $buildUserProfile,
+            $buildAppData, $buildLocalAppData, $nugetPluginsCache)) {
         $null = [IO.Directory]::CreateDirectory($directory)
     }
     $utf8NoBom = [Text.UTF8Encoding]::new($false)
@@ -592,7 +608,6 @@ try {
         "-p:OpticonSourceReleaseCertificateBase64=$sourcePublicBase64",
         "-p:OpticonProductSignerThumbprint=$productThumbprint",
         "-p:OpticonProductSigningCertificateBase64=$productPublicBase64",
-        "-p:RuntimeFrameworkVersion=$requiredRuntime",
         "-p:DirectoryBuildPropsPath=$propsPath",
         "-p:DirectoryBuildTargetsPath=$emptyTargets",
         "-p:MSBuildUserExtensionsPath=$userExtensions",
@@ -613,7 +628,7 @@ try {
             'restore', $solutionPath,
             '--configfile', $nugetConfig,
             '--packages', $packageCache,
-            '--no-http-cache',
+            '--no-cache',
             '--force',
             '--force-evaluate',
             '--disable-parallel'
@@ -631,7 +646,7 @@ try {
                 throw "The Opticon solution build failed. $($_.Exception.Message)"
             }
             $selfTestDll = Join-Path $repo (
-                'tests\Taildesk.SelfTest\bin\Release\net8.0-windows10.0.19041.0\Taildesk.SelfTest.dll')
+                'tests\Taildesk.SelfTest\bin\Release\net10.0-windows10.0.19041.0\Taildesk.SelfTest.dll')
             if (-not (Test-Path -LiteralPath $selfTestDll -PathType Leaf)) {
                 throw 'The Opticon self-test executable was not built.'
             }
@@ -688,7 +703,8 @@ try {
 
     # The offline release private key is opened only after every build, test,
     # publish, and Authenticode operation has completed.
-    $sourceRsa = $sourceSigner.Certificate.GetRSAPrivateKey()
+    $sourceRsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey(
+        $sourceSigner.Certificate)
     if (-not $sourceRsa) {
         throw 'The source-release signing certificate has no RSA private key.'
     }

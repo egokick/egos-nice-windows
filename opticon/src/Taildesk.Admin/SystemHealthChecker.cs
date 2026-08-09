@@ -2,9 +2,11 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 using Taildesk.Shared;
 
 namespace Taildesk.Admin;
@@ -26,11 +28,11 @@ public sealed class SystemHealthChecker
     private const string FlyHost = "taildesk-egokick-control.fly.dev";
     private const string FlyOrigin = "https://taildesk-egokick-control.fly.dev";
     private const string FlyDedicatedIpv4 = "213.188.217.227";
-    private const string RouteHelperSha256 = "4A6F35EE0F2BE6A3599E417FA6F11A04E7500CFE639C3CE9EF9788A9DC0A4C27";
+    private const string RouteTaskName = "Taildesk Fly Route";
     private readonly AdminState _state;
     private readonly HeadscaleApiClient _headscale;
     private readonly string _executablePath;
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(25) };
+    private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(25));
 
     public SystemHealthChecker(AdminState state, HeadscaleApiClient headscale, string? executablePath = null)
     {
@@ -98,14 +100,27 @@ public sealed class SystemHealthChecker
         }
         else
         {
-            var version = await ProcessRunner.RunAsync(tailscalePath, ["version"], TimeSpan.FromSeconds(20), cancellationToken);
-            var actualVersion = version.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? string.Empty;
-            Add("Tailscale", "Pinned client", version.Succeeded && actualVersion == DependencyArtifacts.Tailscale(RuntimeInformation.ProcessArchitecture).Version
-                    ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
-                version.Succeeded ? $"Installed version is {actualVersion}; required version is {DependencyArtifacts.Tailscale(RuntimeInformation.ProcessArchitecture).Version}." : "Tailscale version could not be read.");
+            try
+            {
+                var artifact = DependencyArtifacts.Tailscale(RuntimeInformation.ProcessArchitecture);
+                await VerifyVendorExecutableAsync(tailscalePath, artifact, cancellationToken);
+                var version = await RunFixedProcessAsync(tailscalePath, ["version"], TimeSpan.FromSeconds(20), cancellationToken);
+                var actualVersion = version.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? string.Empty;
+                var exactVersion = version.Succeeded && HasExactThreePartVersion(actualVersion, artifact.Version);
+                Add("Tailscale", "Pinned client", exactVersion ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
+                    version.Succeeded ? $"Installed version is {actualVersion}; required version is {artifact.Version}." : "Tailscale version could not be read.");
 
-            tailscaleStatus = await ReadJsonProcessAsync(tailscalePath, ["status", "--json"], cancellationToken);
-            tailscalePrefs = await ReadJsonProcessAsync(tailscalePath, ["debug", "prefs"], cancellationToken);
+                if (exactVersion)
+                {
+                    tailscaleStatus = await ReadJsonProcessAsync(tailscalePath, ["status", "--json"], cancellationToken);
+                    tailscalePrefs = await ReadJsonProcessAsync(tailscalePath, ["debug", "prefs"], cancellationToken);
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Add("Tailscale", "Pinned client", SystemCheckSeverity.Failure,
+                    "The installed Tailscale client failed its fixed-path publisher check: " + Safe(exception.Message));
+            }
         }
 
         CheckTailscaleState(config, tailscaleStatus, tailscalePrefs, Add);
@@ -128,7 +143,7 @@ public sealed class SystemHealthChecker
 
         try
         {
-            var snapshot = await ReadWindowsSnapshotAsync(config, _executablePath, cancellationToken);
+            var snapshot = await ReadWindowsSnapshotAsync(config, cancellationToken);
             CheckWindowsSnapshot(config, snapshot, Add);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -226,7 +241,8 @@ public sealed class SystemHealthChecker
     {
         try
         {
-            using var response = await _http.GetAsync(FlyOrigin + "/health", cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Get, FlyOrigin + "/health");
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             add("Control plane", "Fly health", response.IsSuccessStatusCode ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
                 response.IsSuccessStatusCode ? "The private Opticon control service is healthy." : $"Fly health returned HTTP {(int)response.StatusCode}.");
         }
@@ -235,7 +251,7 @@ public sealed class SystemHealthChecker
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Head, "https://www.microsoft.com/favicon.ico");
-            using var response = await _http.SendAsync(request, cancellationToken);
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             add("Internet", "General internet access", response.IsSuccessStatusCode ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
                 response.IsSuccessStatusCode ? "A non-Fly internet endpoint is reachable." : $"General internet check returned HTTP {(int)response.StatusCode}.");
         }
@@ -262,7 +278,7 @@ public sealed class SystemHealthChecker
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Head, artifact.PrimaryUrl);
-                using var response = await _http.SendAsync(request, cancellationToken);
+                using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 var size = response.Content.Headers.ContentLength;
                 var valid = response.IsSuccessStatusCode && size == artifact.Size;
                 add("Enrollment", $"Pinned {artifact.Product} download", valid ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
@@ -282,7 +298,8 @@ public sealed class SystemHealthChecker
         if (!configured) return;
         try
         {
-            using var response = await _http.GetAsync(expected + "/api/v1/registry", cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Get, expected + "/api/v1/registry");
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             var alive = response.StatusCode == HttpStatusCode.Unauthorized;
             add("Coordinator", "Local coordinator listener", alive ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
                 alive ? "The coordinator answered on the Tailscale address and correctly rejected an unauthenticated request." : $"The coordinator returned unexpected HTTP {(int)response.StatusCode}.");
@@ -290,16 +307,14 @@ public sealed class SystemHealthChecker
         catch (Exception exception) { add("Coordinator", "Local coordinator listener", SystemCheckSeverity.Failure, Safe(exception.Message)); }
     }
 
-    private static async Task<WindowsSnapshot?> ReadWindowsSnapshotAsync(AdminConfig config, string executablePath, CancellationToken cancellationToken)
+    private static async Task<WindowsSnapshot?> ReadWindowsSnapshotAsync(AdminConfig config, CancellationToken cancellationToken)
     {
         var ip64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(config.CoordinatorBindAddress));
         var rust64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(Environment.ExpandEnvironmentVariables(config.RustDeskPath)));
-        var exe64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(executablePath));
         var script = """
             $ErrorActionPreference='SilentlyContinue'
             $ip=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__IP64__'))
             $rust=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__RUST64__'))
-            $exe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__EXE64__'))
             $ts=Get-CimInstance Win32_Service -Filter "Name='Tailscale'"
             $rs=Get-CimInstance Win32_Service -Filter "Name='RustDesk'"
             $nordService=Get-CimInstance Win32_Service -Filter "Name='nordvpn-service'"
@@ -307,44 +322,78 @@ public sealed class SystemHealthChecker
             $nord=if($nordFile){(Get-Content -Raw -LiteralPath $nordFile.FullName|ConvertFrom-Json).SettingsDto}
             $nordDefault=[bool](Get-NetRoute -DestinationPrefix '0.0.0.0/0'|Where-Object{$_.InterfaceAlias -eq 'NordLynx'}|Select-Object -First 1)
             $coord=@(@('Opticon Coordinator (Tailscale only)','Taildesk Coordinator (Tailscale only)') | ForEach-Object { Get-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue } | Where-Object {$_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow'} | ForEach-Object { $r=$_;$p=$r|Get-NetFirewallPortFilter;$a=$r|Get-NetFirewallAddressFilter;[pscustomobject]@{Name=$r.DisplayName;Protocol=$p.Protocol;Port=$p.LocalPort;Local=@($a.LocalAddress);Remote=@($a.RemoteAddress)} })
-            $taskError=@()
             $task=Get-ScheduledTask -TaskName 'Taildesk Fly Route' -ErrorAction SilentlyContinue -ErrorVariable taskError
             $taskInfo=if($task){Get-ScheduledTaskInfo -TaskName 'Taildesk Fly Route'}
-            $savedErrorPreference=$ErrorActionPreference
-            $ErrorActionPreference='Continue'
-            $taskQuery=@(& schtasks.exe /Query /TN 'Taildesk Fly Route' 2>&1);$taskExitCode=$LASTEXITCODE
-            $ErrorActionPreference=$savedErrorPreference
-            $taskProtected=($taskExitCode -ne 0 -and (($taskQuery -join ' ') -match 'Access is denied'))
-            $helper=Join-Path $env:ProgramData 'Taildesk\Set-TaildeskFlyBypassRoute.ps1'
-            $helperHash=if(Test-Path -LiteralPath $helper){(Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash}else{''}
+            $taskXml64=''
+            if($task){
+              $taskXml=Export-ScheduledTask -TaskName 'Taildesk Fly Route'
+              if($taskXml.Length -gt 131072){throw 'The route-task definition is unexpectedly large.'}
+              $taskXml64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($taskXml))
+            }
             $route=Get-NetRoute -DestinationPrefix '__FLYIP__/32' | Where-Object {$_.Protocol -eq 'NetMgmt'} | Sort-Object RouteMetric | Select-Object -First 1
             $physical=if($route){Get-NetAdapter -InterfaceIndex $route.InterfaceIndex}
             function RuleOk([string]$name){ $r=Get-NetFirewallRule -DisplayName $name|Where-Object {$_.Enabled -eq 'True' -and $_.Direction -eq 'Outbound' -and $_.Action -eq 'Block'}|Select-Object -First 1;if(-not $r){return $false};$app=$r|Get-NetFirewallApplicationFilter;return $app.Program -eq $rust }
             $inbound=@(Get-NetFirewallApplicationFilter -Program $rust -ErrorAction SilentlyContinue | Get-NetFirewallRule | Where-Object {$_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow'})
-            $shell=New-Object -ComObject WScript.Shell
-            $startup=Join-Path ([Environment]::GetFolderPath('Startup')) 'Opticon.lnk';$menu=Join-Path ([Environment]::GetFolderPath('Programs')) 'Opticon.lnk'
-            $startupTarget=if(Test-Path $startup){$shell.CreateShortcut($startup).TargetPath}else{''};$menuTarget=if(Test-Path $menu){$shell.CreateShortcut($menu).TargetPath}else{''}
+            $profiles=@(Get-NetFirewallProfile)
             [pscustomobject]@{
               TailscaleState=$ts.State;TailscaleStartMode=$ts.StartMode
-              NordServiceState=$nordService.State;NordSplitEnabled=[bool]$nord.IsSplitTunnelingEnabled;NordSplitMode=[string]$nord.SplitTunnelingMode;NordSplitApps=@($nord.SplitTunnelingApps|ForEach-Object{$_.Path});NordDefaultRoutePresent=$nordDefault
+              NordServiceState=$nordService.State;NordSplitEnabled=[bool]$nord.IsSplitTunnelingEnabled;NordSplitMode=[string]$nord.SplitTunnelingMode;NordSplitApps=@($nord.SplitTunnelingApps|Select-Object -First 32|ForEach-Object{$_.Path});NordDefaultRoutePresent=$nordDefault
               RustDeskState=$rs.State;RustDeskStartMode=$rs.StartMode;RustDeskProcessCount=@(Get-Process rustdesk).Count
               CoordinatorRules=$coord
-              RouteTaskPresent=[bool]$task;RouteTaskProtected=$taskProtected;RouteHelperHash=$helperHash;RouteTaskState=[string]$task.State;RouteTaskUser=$task.Principal.UserId;RouteTaskRunLevel=[string]$task.Principal.RunLevel;RouteTaskTriggerCount=@($task.Triggers).Count;RouteTaskAction=(@($task.Actions|ForEach-Object{$_.Execute+' '+$_.Arguments})-join ' ');RouteTaskLastResult=$taskInfo.LastTaskResult
+              RouteTaskPresent=[bool]$task;RouteTaskXmlBase64=$taskXml64;RouteTaskState=[string]$task.State;RouteTaskLastResult=$taskInfo.LastTaskResult
               RoutePresent=[bool]$route;RouteNextHop=$route.NextHop;RouteInterface=$physical.Name;RouteIsPhysical=[bool]$physical.HardwareInterface
               RustDeskV4Block=(RuleOk 'RustDesk External IPv4 Block');RustDeskV6Block=(RuleOk 'RustDesk External IPv6 Block');RustDeskInboundAllowCount=$inbound.Count
-              FirewallProfilesEnabled=(@(Get-NetFirewallProfile|Where-Object{$_.Enabled -ne 'True'}).Count -eq 0)
-              StartupTarget=$startupTarget;StartMenuTarget=$menuTarget;ExpectedExecutable=$exe
+              FirewallProfilesEnabledAndBlocking=(@($profiles|Where-Object{$_.Enabled -ne 'True' -or $_.DefaultInboundAction -ne 'Block'}).Count -eq 0)
             }|ConvertTo-Json -Depth 6 -Compress
             """
             .Replace("__IP64__", ip64, StringComparison.Ordinal)
             .Replace("__RUST64__", rust64, StringComparison.Ordinal)
-            .Replace("__EXE64__", exe64, StringComparison.Ordinal)
             .Replace("__FLYIP__", FlyDedicatedIpv4, StringComparison.Ordinal);
         var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-        var result = await ProcessRunner.RunAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], TimeSpan.FromSeconds(45), cancellationToken);
+        var result = await ProcessRunner.RunAsync(
+            RequireSystemExecutable(@"WindowsPowerShell\v1.0\powershell.exe"),
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted", "-EncodedCommand", encoded],
+            TimeSpan.FromSeconds(45), cancellationToken,
+            environment: BuildSystemProcessEnvironment(), clearEnvironment: true);
         if (!result.Succeeded || string.IsNullOrWhiteSpace(result.StandardOutput)) return null;
-        try { return JsonSerializer.Deserialize<WindowsSnapshot>(result.StandardOutput, JsonDefaults.Options); }
-        catch { return null; }
+        try
+        {
+            var snapshot = JsonSerializer.Deserialize<WindowsSnapshot>(result.StandardOutput, JsonDefaults.Options);
+            if (snapshot is null) return null;
+
+            snapshot.RouteHelperPath = Path.Combine(AppPaths.InstallDirectory, "Admin", "Tools", "Taildesk.RouteKeeper.exe");
+            try
+            {
+                await ProductSigning.VerifyAuthenticodeAsync(snapshot.RouteHelperPath, cancellationToken);
+                snapshot.RouteHelperTrusted = true;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                snapshot.RouteHelperTrusted = false;
+            }
+
+            var rustDeskPath = Environment.ExpandEnvironmentVariables(config.RustDeskPath);
+            snapshot.RustDeskPath = rustDeskPath;
+            if (File.Exists(rustDeskPath))
+            {
+                try
+                {
+                    var artifact = DependencyArtifacts.RustDesk(RuntimeInformation.ProcessArchitecture);
+                    await VerifyVendorExecutableAsync(rustDeskPath, artifact, cancellationToken);
+                    snapshot.RustDeskVersion = FileVersionInfo.GetVersionInfo(rustDeskPath).ProductVersion ?? string.Empty;
+                    snapshot.RustDeskTrusted = HasExactThreePartVersion(snapshot.RustDeskVersion, artifact.Version);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    snapshot.RustDeskTrusted = false;
+                }
+            }
+            return snapshot;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     private static void CheckWindowsSnapshot(AdminConfig config, WindowsSnapshot? snapshot,
@@ -363,14 +412,11 @@ public sealed class SystemHealthChecker
         add("Firewall", "Coordinator isolation", coordinatorRule is not null ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
             coordinatorRule is not null ? $"{coordinatorRule.Name} permits TCP {config.CoordinatorPort} only on the hub IP from the tailnet." : "The exact Tailscale-only coordinator firewall rule is missing or drifted.");
 
-        var routeTaskVisibleAndValid = snapshot.RouteTaskPresent && snapshot.RouteTaskUser.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase)
-                             && snapshot.RouteTaskRunLevel.Equals("Highest", StringComparison.OrdinalIgnoreCase)
-                             && snapshot.RouteTaskTriggerCount >= 3
-                             && snapshot.RouteTaskAction.Contains("Set-TaildeskFlyBypassRoute.ps1", StringComparison.OrdinalIgnoreCase)
-                             && snapshot.RouteTaskAction.Contains(FlyDedicatedIpv4, StringComparison.OrdinalIgnoreCase);
-        var routeTaskValid = routeTaskVisibleAndValid || snapshot.RouteTaskProtected && snapshot.RouteHelperHash.Equals(RouteHelperSha256, StringComparison.OrdinalIgnoreCase);
+        var routeTaskValid = snapshot.RouteTaskPresent
+                             && snapshot.RouteHelperTrusted
+                             && IsExactRouteTask(snapshot.RouteTaskXmlBase64, snapshot.RouteHelperPath);
         add("Network", "Roaming route maintenance", routeTaskValid ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
-            routeTaskVisibleAndValid ? $"SYSTEM task is {snapshot.RouteTaskState}; last result {snapshot.RouteTaskLastResult}." : routeTaskValid ? "The SYSTEM task is administrator-protected and its pinned helper is intact." : "The SYSTEM startup/sign-in/five-minute Fly route task is missing or has drifted.");
+            routeTaskValid ? $"The exact signed RouteKeeper SYSTEM task is {snapshot.RouteTaskState}; last result {snapshot.RouteTaskLastResult}." : "The exact signed RouteKeeper SYSTEM startup/sign-in/five-minute task is missing, unreadable, untrusted, or has drifted.");
         add("Network", "Current Fly host route", snapshot.RoutePresent && snapshot.RouteIsPhysical ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
             snapshot.RoutePresent ? $"{FlyDedicatedIpv4}/32 uses {snapshot.RouteInterface} via {snapshot.RouteNextHop}." : "The dedicated Fly IPv4 route is missing.");
         var expectedNordApps = new[]
@@ -392,32 +438,201 @@ public sealed class SystemHealthChecker
         add("Network", "NordVPN and private mesh coexistence", nordValid ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
             nordValid ? "NordVPN is the default route and excludes only Tailscale, the Opticon UI/CLI, Windows OpenSSH, and the pinned RustDesk controller."
                 : "NordVPN must be running as the default route with split tunneling set to exclude exactly the three Tailscale executables, Opticon UI and CLI, the Windows OpenSSH client, and RustDesk.");
-
-
-        var rustDeskPresent = File.Exists(Environment.ExpandEnvironmentVariables(config.RustDeskPath));
-        var rustDeskVersion = rustDeskPresent ? FileVersionInfo.GetVersionInfo(Environment.ExpandEnvironmentVariables(config.RustDeskPath)).ProductVersion ?? string.Empty : string.Empty;
-        var rustDeskVersionValid = rustDeskPresent && rustDeskVersion.StartsWith(DependencyArtifacts.RustDesk(RuntimeInformation.ProcessArchitecture).Version, StringComparison.Ordinal);
-        add("RustDesk", "Pinned controller engine", rustDeskVersionValid ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
-            rustDeskVersionValid ? $"Installed controller engine is {rustDeskVersion}." : "RustDesk is missing or is not the pinned version.");
+        add("RustDesk", "Pinned controller engine", snapshot.RustDeskTrusted ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
+            snapshot.RustDeskTrusted ? $"Installed controller engine is {snapshot.RustDeskVersion} with the pinned publisher." : "RustDesk is missing, outside its fixed Program Files path, not exactly the pinned version, or failed its publisher check.");
         var controllerOnly = snapshot.RustDeskState == "Stopped" && snapshot.RustDeskStartMode == "Disabled" && snapshot.RustDeskInboundAllowCount == 0;
         add("RustDesk", "Controller-only posture", controllerOnly ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
             controllerOnly ? "Hosting service is disabled and no inbound RustDesk allow rule exists." : $"Expected stopped/disabled with no inbound allow rule; state={snapshot.RustDeskState}, mode={snapshot.RustDeskStartMode}, inbound rules={snapshot.RustDeskInboundAllowCount}.");
         add("RustDesk", "External network blocks", snapshot.RustDeskV4Block && snapshot.RustDeskV6Block ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
             snapshot.RustDeskV4Block && snapshot.RustDeskV6Block ? "RustDesk is blocked from non-Tailscale IPv4 and all IPv6 destinations." : "One or both RustDesk outbound isolation rules are missing or drifted.");
 
-        add("Firewall", "Windows Firewall profiles", snapshot.FirewallProfilesEnabled ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
-            snapshot.FirewallProfilesEnabled ? "Domain, private, and public firewall profiles are enabled." : "At least one Windows Firewall profile is disabled.");
-        var shortcutsValid = PathsEqual(snapshot.StartupTarget, snapshot.ExpectedExecutable) && PathsEqual(snapshot.StartMenuTarget, snapshot.ExpectedExecutable);
-        add("Opticon", "Sign-in and Start Menu shortcuts", shortcutsValid ? SystemCheckSeverity.Pass : SystemCheckSeverity.Warning,
-            shortcutsValid ? "Startup and Start Menu shortcuts target the running installed Opticon." : "A startup or Start Menu shortcut is missing or targets another executable.");
+        add("Firewall", "Windows Firewall profiles", snapshot.FirewallProfilesEnabledAndBlocking ? SystemCheckSeverity.Pass : SystemCheckSeverity.Failure,
+            snapshot.FirewallProfilesEnabledAndBlocking ? "Domain, private, and public firewall profiles are enabled with default inbound blocking." : "At least one Windows Firewall profile is disabled or does not default to blocking inbound traffic.");
     }
 
     private static async Task<JsonDocument?> ReadJsonProcessAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
-        var result = await ProcessRunner.RunAsync(executable, arguments, TimeSpan.FromSeconds(25), cancellationToken);
+        var result = await RunFixedProcessAsync(executable, arguments, TimeSpan.FromSeconds(25), cancellationToken);
         if (!result.Succeeded || string.IsNullOrWhiteSpace(result.StandardOutput)) return null;
         try { return JsonDocument.Parse(result.StandardOutput); }
         catch { return null; }
+    }
+
+    private static Task<ProcessResult> RunFixedProcessAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        TimeSpan timeout,
+        CancellationToken cancellationToken) =>
+        ProcessRunner.RunAsync(
+            executable, arguments, timeout, cancellationToken,
+            environment: BuildSystemProcessEnvironment(), clearEnvironment: true);
+
+    private static async Task VerifyVendorExecutableAsync(
+        string path,
+        DependencyArtifact artifact,
+        CancellationToken cancellationToken)
+    {
+        var fixedPath = RequireFixedExecutable(
+            path,
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
+        if (!PathsEqual(fixedPath, path))
+            throw new InvalidDataException($"The {artifact.Product} executable path is not canonical.");
+
+        var path64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(fixedPath));
+        var command =
+            "$ErrorActionPreference='Stop';" +
+            "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + path64 + "'));" +
+            "$s=Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $p;" +
+            "if($s.Status.ToString() -cne 'Valid' -or $null -eq $s.SignerCertificate -or $null -eq $s.TimeStamperCertificate){exit 41};" +
+            "$codeEku=@($s.SignerCertificate.EnhancedKeyUsageList|Where-Object{$_.ObjectId -eq '1.3.6.1.5.5.7.3.3'});" +
+            "$timeEku=@($s.TimeStamperCertificate.EnhancedKeyUsageList|Where-Object{$_.ObjectId -eq '1.3.6.1.5.5.7.3.8'});" +
+            "if($codeEku.Count -ne 1 -or $timeEku.Count -ne 1){exit 42};" +
+            "[Console]::Out.Write($s.SignerCertificate.Thumbprint.ToUpperInvariant())";
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+        var result = await ProcessRunner.RunAsync(
+            RequireSystemExecutable(@"WindowsPowerShell\v1.0\powershell.exe"),
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted", "-EncodedCommand", encoded],
+            TimeSpan.FromSeconds(45), cancellationToken,
+            environment: BuildSystemProcessEnvironment(), clearEnvironment: true);
+        var actual = result.StandardOutput.Trim().ToUpperInvariant();
+        var expected = artifact.ExpectedSignerThumbprint.ToUpperInvariant();
+        if (!result.Succeeded || actual.Length != 40 || expected.Length != 40
+            || !CryptographicOperations.FixedTimeEquals(
+                Encoding.ASCII.GetBytes(actual), Encoding.ASCII.GetBytes(expected)))
+            throw new InvalidDataException($"The {artifact.Product} executable does not have its pinned, trusted, timestamped publisher signature.");
+    }
+
+    private static string RequireSystemExecutable(string relativePath)
+    {
+        if (Path.IsPathRooted(relativePath)
+            || relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Any(component => component is "" or "." or ".." || component.Contains(':')))
+            throw new InvalidDataException("A Windows system-tool path was not canonical.");
+        var system32 = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32");
+        return RequireFixedExecutable(Path.Combine(system32, relativePath), system32);
+    }
+
+    private static string RequireFixedExecutable(string path, string allowedRoot)
+    {
+        var root = Path.GetFullPath(allowedRoot).TrimEnd(Path.DirectorySeparatorChar);
+        var fullPath = Path.GetFullPath(path);
+        var relative = Path.GetRelativePath(root, fullPath);
+        if (Path.IsPathRooted(relative) || relative == ".."
+            || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            || relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Any(component => component is "" or "." or ".." || component.Contains(':')))
+            throw new InvalidDataException("A fixed executable escaped its protected root.");
+
+        var current = root;
+        foreach (var component in relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+        {
+            var attributes = File.GetAttributes(current);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException($"A fixed executable path is a reparse point: {current}");
+            current = Path.Combine(current, component);
+        }
+        var finalAttributes = File.GetAttributes(fullPath);
+        if ((finalAttributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new InvalidDataException($"A fixed executable is not a regular file: {fullPath}");
+        return fullPath;
+    }
+
+    private static IReadOnlyDictionary<string, string?> BuildSystemProcessEnvironment()
+    {
+        var windows = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        var system32 = Path.Combine(windows, "System32");
+        return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SystemRoot"] = windows,
+            ["WINDIR"] = windows,
+            ["SystemDrive"] = Path.GetPathRoot(windows)?.TrimEnd(Path.DirectorySeparatorChar),
+            ["ComSpec"] = RequireSystemExecutable("cmd.exe"),
+            ["ProgramFiles"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            ["ProgramData"] = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            ["PROCESSOR_ARCHITECTURE"] = RuntimeInformation.ProcessArchitecture switch
+            {
+                Architecture.X64 => "AMD64",
+                Architecture.Arm64 => "ARM64",
+                Architecture.X86 => "x86",
+                _ => throw new PlatformNotSupportedException("Windows process architecture is unsupported.")
+            },
+            ["PATH"] = string.Join(Path.PathSeparator,
+                system32,
+                Path.Combine(system32, "Wbem"),
+                Path.Combine(system32, @"WindowsPowerShell\v1.0")),
+            ["PATHEXT"] = ".COM;.EXE",
+            ["PSModulePath"] = Path.Combine(system32, @"WindowsPowerShell\v1.0\Modules"),
+            ["TEMP"] = Path.Combine(windows, "Temp"),
+            ["TMP"] = Path.Combine(windows, "Temp")
+        };
+    }
+
+    private static bool HasExactThreePartVersion(string actual, string expected)
+    {
+        if (!Version.TryParse(actual.Trim(), out var actualVersion)
+            || !Version.TryParse(expected, out var expectedVersion)) return false;
+        return actualVersion.Major == expectedVersion.Major
+               && actualVersion.Minor == expectedVersion.Minor
+               && actualVersion.Build == expectedVersion.Build
+               && actualVersion.Revision <= 0;
+    }
+
+    private static bool IsExactRouteTask(string xmlBase64, string expectedHelper)
+    {
+        try
+        {
+            var bytes = Convert.FromBase64String(xmlBase64);
+            if (bytes.Length is 0 or > 131072) return false;
+            var document = XDocument.Parse(Encoding.UTF8.GetString(bytes), LoadOptions.None);
+            XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+            var root = document.Root;
+            if (root?.Name != task + "Task") return false;
+            var actions = root.Element(task + "Actions");
+            var principals = root.Element(task + "Principals");
+            var triggers = root.Element(task + "Triggers");
+            var settings = root.Element(task + "Settings");
+            if (actions is null || principals is null || triggers is null || settings is null) return false;
+
+            var actionNodes = actions.Elements().ToArray();
+            var principalNodes = principals.Elements(task + "Principal").ToArray();
+            var triggerNodes = triggers.Elements().ToArray();
+            if (actionNodes.Length != 1 || actionNodes[0].Name != task + "Exec"
+                || principalNodes.Length != 1 || principals.Elements().Count() != 1
+                || triggerNodes.Length != 3
+                || triggerNodes.Count(node => node.Name == task + "BootTrigger") != 1
+                || triggerNodes.Count(node => node.Name == task + "LogonTrigger") != 1
+                || triggerNodes.Count(node => node.Name == task + "TimeTrigger") != 1)
+                return false;
+
+            string Value(XElement parent, string name) => parent.Element(task + name)?.Value ?? string.Empty;
+            var exec = actionNodes[0];
+            var principal = principalNodes[0];
+            var time = triggerNodes.Single(node => node.Name == task + "TimeTrigger");
+            var repetition = time.Element(task + "Repetition");
+            return actions.Attribute("Context")?.Value == "Author"
+                   && PathsEqual(Value(exec, "Command"), expectedHelper)
+                   && Value(exec, "Arguments") == $"--controller-ip={FlyDedicatedIpv4}"
+                   && Value(principal, "UserId") == "S-1-5-18"
+                   && Value(principal, "LogonType") == "ServiceAccount"
+                   && Value(principal, "RunLevel") == "HighestAvailable"
+                   && triggerNodes.All(node => Value(node, "Enabled") == "true")
+                   && repetition is not null
+                   && Value(repetition, "Interval") == "PT5M"
+                   && repetition.Element(task + "Duration") is null
+                   && Value(settings, "MultipleInstancesPolicy") == "IgnoreNew"
+                   && Value(settings, "DisallowStartIfOnBatteries") == "false"
+                   && Value(settings, "StopIfGoingOnBatteries") == "false"
+                   && Value(settings, "AllowStartOnDemand") == "true"
+                   && Value(settings, "Enabled") == "true"
+                   && Value(settings, "RunOnlyIfNetworkAvailable") == "false"
+                   && Value(settings, "StartWhenAvailable") == "true"
+                   && Value(settings, "ExecutionTimeLimit") == "PT0S";
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool IsTailnetRange(string value) => value.Equals("100.64.0.0/10", StringComparison.OrdinalIgnoreCase)
@@ -442,15 +657,15 @@ public sealed class SystemHealthChecker
         public string RustDeskState { get; set; } = string.Empty;
         public string RustDeskStartMode { get; set; } = string.Empty;
         public int RustDeskProcessCount { get; set; }
+        public string RustDeskPath { get; set; } = string.Empty;
+        public string RustDeskVersion { get; set; } = string.Empty;
+        public bool RustDeskTrusted { get; set; }
         public FirewallRuleSnapshot[] CoordinatorRules { get; set; } = [];
         public bool RouteTaskPresent { get; set; }
-        public bool RouteTaskProtected { get; set; }
-        public string RouteHelperHash { get; set; } = string.Empty;
+        public string RouteTaskXmlBase64 { get; set; } = string.Empty;
+        public string RouteHelperPath { get; set; } = string.Empty;
+        public bool RouteHelperTrusted { get; set; }
         public string RouteTaskState { get; set; } = string.Empty;
-        public string RouteTaskUser { get; set; } = string.Empty;
-        public string RouteTaskRunLevel { get; set; } = string.Empty;
-        public int RouteTaskTriggerCount { get; set; }
-        public string RouteTaskAction { get; set; } = string.Empty;
         public int? RouteTaskLastResult { get; set; }
         public bool RoutePresent { get; set; }
         public string RouteNextHop { get; set; } = string.Empty;
@@ -459,10 +674,7 @@ public sealed class SystemHealthChecker
         public bool RustDeskV4Block { get; set; }
         public bool RustDeskV6Block { get; set; }
         public int RustDeskInboundAllowCount { get; set; }
-        public bool FirewallProfilesEnabled { get; set; }
-        public string StartupTarget { get; set; } = string.Empty;
-        public string StartMenuTarget { get; set; } = string.Empty;
-        public string ExpectedExecutable { get; set; } = string.Empty;
+        public bool FirewallProfilesEnabledAndBlocking { get; set; }
     }
 
     private sealed class FirewallRuleSnapshot

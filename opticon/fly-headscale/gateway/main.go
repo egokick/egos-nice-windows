@@ -38,8 +38,9 @@ const (
 	maxInviteBody             = 64 << 10
 	maxBundleChunk            = 4 << 20
 	maxAdminBody              = 1 << 20
-	pinnedSDKVersion          = "8.0.423"
-	pinnedRuntimeVersion      = "8.0.29"
+	maxBootstrapArtifactBytes = 128 << 20
+	pinnedSDKVersion          = "10.0.302"
+	pinnedRuntimeVersion      = "10.0.10"
 	invitationSigningKeyID    = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
 )
 
@@ -47,22 +48,24 @@ var trustedSourceManifestKeyID string
 var trustedProductSignerThumbprint string
 
 type gateway struct {
-	proxy        *httputil.ReverseProxy
-	adminSecret  []byte
-	headscaleKey string
-	artifactDir  string
-	manifestPath string
-	bundleDir    string
-	inviteDir    string
-	nonceDir     string
-	publicOrigin string
-	nonces       map[string]time.Time
-	nonceMu      sync.Mutex
-	inviteMu     sync.Mutex
-	bundleMu     sync.Mutex
-	manifestMu   sync.RWMutex
-	adminSlots   chan struct{}
+	proxy         *httputil.ReverseProxy
+	adminSecret   []byte
+	headscaleKey  string
+	artifactDir   string
+	manifestPath  string
+	bundleDir     string
+	inviteDir     string
+	nonceDir      string
+	publicOrigin  string
+	nonces        map[string]time.Time
+	nonceMu       sync.Mutex
+	inviteMu      sync.Mutex
+	bundleMu      sync.Mutex
+	manifestMu    sync.RWMutex
+	adminSlots    chan struct{}
 	artifactSlots chan struct{}
+	proxySlots    chan struct{}
+	streamSlots   chan struct{}
 }
 
 func main() {
@@ -79,13 +82,7 @@ func main() {
 		if err := fixPermissions("/var/lib/headscale", 65532, 65532); err != nil {
 			log.Fatal(err)
 		}
-		if err := syscall.Setgroups([]int{65532}); err != nil {
-			log.Fatal(err)
-		}
-		if err := syscall.Setgid(65532); err != nil {
-			log.Fatal(err)
-		}
-		if err := syscall.Setuid(65532); err != nil {
+		if err := setRuntimeIdentity(65532, 65532); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -138,7 +135,8 @@ func main() {
 		nonceDir:     "/var/lib/headscale/opticon-nonces",
 		manifestPath: "/var/lib/headscale/opticon-release/manifest.json",
 		publicOrigin: "https://" + appName + ".fly.dev", nonces: make(map[string]time.Time),
-		adminSlots: make(chan struct{}, 16), artifactSlots: make(chan struct{}, 8)}
+		adminSlots: make(chan struct{}, 16), artifactSlots: make(chan struct{}, 8),
+		proxySlots: make(chan struct{}, 64), streamSlots: make(chan struct{}, 64)}
 	if err := os.MkdirAll(g.inviteDir, 0700); err != nil {
 		log.Fatal(err)
 	}
@@ -210,10 +208,35 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isPublicControlRoute(r.Method, r.URL.Path) {
-		g.proxy.ServeHTTP(w, r)
+		g.servePublicControl(w, r)
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func (g *gateway) servePublicControl(w http.ResponseWriter, r *http.Request) {
+	slots := g.proxySlots
+	if strings.HasPrefix(r.URL.Path, "/derp") || strings.HasPrefix(r.URL.Path, "/ts2021") {
+		slots = g.streamSlots
+	}
+	if slots != nil {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		default:
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "control service is busy", http.StatusTooManyRequests)
+			return
+		}
+	}
+	if g.proxy == nil {
+		http.Error(w, "control service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	// DERP, ts2021, and machine-map responses can legitimately remain open.
+	// Their resource bound is the route-specific slot, not a global writer
+	// timeout that would sever healthy Tailscale sessions.
+	g.proxy.ServeHTTP(w, r)
 }
 
 func (g *gateway) readAdminBody(w http.ResponseWriter, r *http.Request, maximum int64) ([]byte, error) {
@@ -343,6 +366,8 @@ func (w *idleDeadlineWriter) Write(p []byte) (int, error) {
 	w.refresh()
 	return w.ResponseWriter.Write(p)
 }
+
+func (w *idleDeadlineWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *idleDeadlineWriter) refresh() {
 	_ = w.controller.SetWriteDeadline(time.Now().Add(w.idle))
@@ -758,7 +783,7 @@ func validCloudFrontDownloadURL(artifact bundleArtifact) bool {
 }
 
 func validBootstrapArtifact(artifact bundleArtifact) bool {
-	if artifact.Product != "OpticonBootstrap" || artifact.Architecture != "x64" || artifact.Size <= 0 ||
+	if artifact.Product != "OpticonBootstrap" || artifact.Architecture != "x64" || artifact.Size <= 0 || artifact.Size > maxBootstrapArtifactBytes ||
 		!safeBootstrapFilePattern.MatchString(artifact.File) || !inviteHashPattern.MatchString(strings.ToLower(artifact.SHA256)) ||
 		!publisherThumbprintPattern.MatchString(artifact.SignerThumbprint) || !validProductionArtifactTrust(artifact) ||
 		artifact.SignerThumbprint != artifact.ProductSigner {
@@ -840,7 +865,7 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 			invite.SigningProfile != "Production" || invite.SourceManifestKeyID != trustedSourceManifestKeyID ||
 			invite.ProductSigner != trustedProductSignerThumbprint || invite.BootstrapSigner != invite.ProductSigner ||
 			invite.BootstrapVersion != invite.ReleaseVersion ||
-			invite.BootstrapFile != "opticon-bootstrap-"+invite.ReleaseVersion+".exe" || invite.BootstrapSize <= 0 ||
+			invite.BootstrapFile != "opticon-bootstrap-"+invite.ReleaseVersion+".exe" || invite.BootstrapSize <= 0 || invite.BootstrapSize > maxBootstrapArtifactBytes ||
 			!inviteHashPattern.MatchString(strings.ToLower(invite.BootstrapSHA256)) || !publisherThumbprintPattern.MatchString(invite.BootstrapSigner) {
 			http.Error(w, "invalid invitation", http.StatusBadRequest)
 			return
@@ -1393,21 +1418,6 @@ func (g *gateway) authenticate(r *http.Request, body []byte, now time.Time) bool
 func (g *gateway) consumePersistentNonce(nonce string, now time.Time) bool {
 	g.nonceMu.Lock()
 	defer g.nonceMu.Unlock()
-	entries, err := os.ReadDir(g.nonceDir)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".nonce") {
-			continue
-		}
-		path := filepath.Join(g.nonceDir, entry.Name())
-		data, readErr := os.ReadFile(path)
-		expiry, parseErr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-		if readErr != nil || parseErr != nil || now.Unix() > expiry {
-			_ = os.Remove(path)
-		}
-	}
 	hash := sha256.Sum256([]byte(nonce))
 	path := filepath.Join(g.nonceDir, hex.EncodeToString(hash[:])+".nonce")
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
@@ -1424,6 +1434,25 @@ func (g *gateway) consumePersistentNonce(nonce string, now time.Time) bool {
 	if writeErr != nil {
 		_ = os.Remove(path)
 		return false
+	}
+	if err := syncDirectory(g.nonceDir); err != nil {
+		return false
+	}
+	// Pruning is deliberately after the O_EXCL commit. Another gateway may be
+	// between creating and writing a nonce, so recent or target files are never
+	// parsed or removed. Old residue is only a bounded availability concern.
+	entries, readErr := os.ReadDir(g.nonceDir)
+	if readErr == nil {
+		pruneBefore := now.Add(-20 * time.Minute)
+		for _, entry := range entries {
+			if entry.IsDir() || entry.Name() == filepath.Base(path) || !strings.HasSuffix(entry.Name(), ".nonce") {
+				continue
+			}
+			info, infoErr := entry.Info()
+			if infoErr == nil && info.ModTime().Before(pruneBefore) {
+				_ = os.Remove(filepath.Join(g.nonceDir, entry.Name()))
+			}
+		}
 	}
 	return true
 }

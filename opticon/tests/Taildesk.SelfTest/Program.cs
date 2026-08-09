@@ -25,6 +25,7 @@ var tests = new (string Name, Action Body)[]
     ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
     ("process runner supports commands with inherited standard handles", TestProcessRunnerWithoutCapture),
     ("process runner applies its deadline to inherited output handles", TestProcessRunnerStreamDeadline),
+    ("machine install crash recovery is exact-source bound and roll-forward only", TestMachineInstallCrashRecovery),
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
     ("RustDesk virtual-display privacy is opt-in", TestRustDeskVirtualDisplayDefault),
     ("RustDesk remote sessions pass the saved password to the native connection command", TestRustDeskRemoteSessionLaunch),
@@ -88,6 +89,88 @@ static void TestTokens()
     Assert(first != second, "two tokens unexpectedly matched");
     Assert(SecurityHelpers.FixedTimeEquals(SecurityHelpers.HashToken(first), SecurityHelpers.HashToken(first)), "equal hashes did not match");
     Assert(!SecurityHelpers.FixedTimeEquals(SecurityHelpers.HashToken(first), SecurityHelpers.HashToken(second)), "different hashes matched");
+}
+
+static void TestMachineInstallCrashRecovery()
+{
+    var binding = new SourceInstallationBinding(
+        new string('a', 32),
+        Guid.NewGuid(),
+        new string('b', 64),
+        new string('c', 64),
+        new string('d', 64));
+    var journal = MachineInstallTransactionPersistence.Create(binding);
+    Assert(journal.Phase == MachineInstallTransactionPhase.Prepared,
+        "a new machine-install journal did not start before machine mutation");
+    Assert(!MachineInstallTransactionPersistence.RequiresNetworkRollForward(journal),
+        "a prepared transaction incorrectly bypassed Tailscale reauthentication consent");
+
+    foreach (var phase in Enum.GetValues<MachineInstallTransactionPhase>()
+                 .OrderBy(value => (int)value)
+                 .Skip(1))
+    {
+        MachineInstallTransactionPersistence.Advance(journal, phase);
+        var serialized = JsonSerializer.SerializeToUtf8Bytes(journal, JsonDefaults.Options);
+        var recovered = JsonSerializer.Deserialize<MachineInstallTransactionJournal>(
+                            serialized, JsonDefaults.Options)
+                        ?? throw new InvalidOperationException("serialized machine-install recovery was empty");
+        MachineInstallTransactionPersistence.RequireMatches(recovered, binding);
+        Assert(recovered.Phase == phase, $"machine-install crash recovery lost phase {phase}");
+        Assert(MachineInstallTransactionPersistence.RequiresNetworkRollForward(recovered)
+               == (phase >= MachineInstallTransactionPhase.NetworkEnrollmentStarted),
+            $"machine-install phase {phase} chose the wrong reauthentication policy");
+        journal = recovered;
+    }
+
+    AssertThrows<InvalidDataException>(() =>
+        MachineInstallTransactionPersistence.Advance(journal, MachineInstallTransactionPhase.Prepared));
+    AssertThrows<InvalidDataException>(() =>
+        MachineInstallTransactionPersistence.Advance(journal, (MachineInstallTransactionPhase)999));
+    AssertThrows<InvalidDataException>(() =>
+        MachineInstallTransactionPersistence.RequireMatches(
+            journal, binding with { TransactionId = new string('e', 32) }));
+    AssertThrows<InvalidDataException>(() =>
+        MachineInstallTransactionPersistence.RequireMatches(
+            journal, binding with { InviteId = Guid.NewGuid() }));
+    AssertThrows<InvalidDataException>(() =>
+        MachineInstallTransactionPersistence.RequireMatches(
+            journal, binding with { SourceSha256 = new string('f', 64) }));
+    AssertThrows<InvalidDataException>(() =>
+        MachineInstallTransactionPersistence.RequireMatches(
+            journal, binding with { SourceManifestSha256 = new string('0', 64) }));
+
+    var installer = ReadSource("src", "Taildesk.Setup", "InstallerServices.cs");
+    var provenance = ReadSource("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
+    var journalStart = installer.IndexOf(
+        "await EnsureMachineInstallTransactionAsync(sourceBinding", StringComparison.Ordinal);
+    var tailscaleMutation = installer.IndexOf(
+        "var installedNetworkComponent = await EnsureTailscaleAsync", StringComparison.Ordinal);
+    var enrollmentJournal = installer.IndexOf(
+        "MachineInstallTransactionPhase.NetworkEnrollmentStarted", StringComparison.Ordinal);
+    var enrollmentMutation = installer.IndexOf(
+        "TailscaleCommandLine.BuildEnrollmentArguments", StringComparison.Ordinal);
+    var remoteJournal = installer.IndexOf(
+        "MachineInstallTransactionPhase.RemoteConfigurationStarted", StringComparison.Ordinal);
+    var remoteMutation = installer.IndexOf(
+        "await ConfigureRustDeskAsync(rustDesk", StringComparison.Ordinal);
+    var receiptVerified = installer.IndexOf(
+        "The protected enrollment success receipt did not verify after commit.", StringComparison.Ordinal);
+    var journalCleared = installer.IndexOf(
+        "await CompleteMachineInstallTransactionAsync(cancellationToken)", StringComparison.Ordinal);
+    var provenanceCommitted = installer.IndexOf(
+        "SourceBuildProvenance.CommitActiveInstallation()", StringComparison.Ordinal);
+    Assert(journalStart >= 0 && tailscaleMutation > journalStart,
+        "the protected machine-install journal is not durable before Tailscale installation");
+    Assert(enrollmentJournal >= 0 && enrollmentMutation > enrollmentJournal,
+        "Tailscale auth-key consumption is not preceded by a durable roll-forward phase");
+    Assert(remoteJournal >= 0 && remoteMutation > remoteJournal,
+        "RustDesk password/service mutation is not preceded by a durable recovery phase");
+    Assert(receiptVerified >= 0 && journalCleared > receiptVerified
+           && provenanceCommitted > journalCleared,
+        "machine-install recovery is not retained through exact enrollment receipt validation");
+    Assert(provenance.Contains("MachineInstallTransactionPersistence.Load() is not null", StringComparison.Ordinal)
+           && provenance.Contains("pending source trust was preserved for roll-forward recovery", StringComparison.Ordinal),
+        "source provenance can still be discarded while external machine effects require recovery");
 }
 
 static void TestScheduledTransferCron()
@@ -519,8 +602,21 @@ static void TestRustDeskInstallerProfiles()
            && !source.Contains("taskkill.exe", StringComparison.Ordinal),
         "RustDesk profiles are not hardened through held no-follow handles or still use a name-wide process kill");
     var configureIndex = source.IndexOf("await ConfigureRustDeskAsync(rustDesk", StringComparison.Ordinal);
-    var listenerIndex = source.IndexOf("WaitForListeningPortAsync(21118", StringComparison.Ordinal);
-    Assert(configureIndex >= 0 && listenerIndex > configureIndex, "RustDesk listener is checked before configuration");
+    var firewallIndex = source.IndexOf("await ConfigureFirewallAsync(snapshot.Ip, expectedRustDesk", StringComparison.Ordinal);
+    var listenerIndex = source.IndexOf("WaitForListeningExecutableAsync(", StringComparison.Ordinal);
+    Assert(firewallIndex >= 0 && configureIndex > firewallIndex && listenerIndex > configureIndex
+           && source.Contains("RequireFirewallProfilesSecureAsync", StringComparison.Ordinal)
+           && source.Contains("DefaultInboundAction.ToString() -ne 'Block'", StringComparison.Ordinal)
+           && source.Contains("AssertExactFirewallConfigurationAsync", StringComparison.Ordinal),
+        "RustDesk can start before exact firewall isolation and enabled default-block profiles are verified");
+    Assert(source.Contains("InstalledDependencyMatchesAsync", StringComparison.Ordinal)
+           && source.Contains("RequireFixedProgramFilesExecutable", StringComparison.Ordinal)
+           && source.Contains("RequireInstallerSignatureAsync(full", StringComparison.Ordinal)
+           && source.Contains("CryptographicOperations.FixedTimeEquals", StringComparison.Ordinal)
+           && !source.Contains("StartsWith(artifact.Version", StringComparison.Ordinal)
+           && source.Contains("GetExtendedTcpTable", StringComparison.Ordinal)
+           && source.Contains("process.MainModule?.FileName", StringComparison.Ordinal),
+        "existing vendor executables must pass exact fixed-path, version, publisher, timestamp, and listener-owner checks before privileged reuse");
 }
 static void TestControllerRegistryShape()
 {
@@ -633,6 +729,7 @@ static void TestReleaseDistributionDesign()
     var hostedBootstrap = Read("src", "Taildesk.Setup", "HostedBootstrap.cs");
     var sourceBootstrap = Read("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
     var sourceInstaller = Read("source-package", "Install-OpticonFromSource.ps1");
+    var sourceNuget = Read("source-package", "NuGet.Config");
     var sourceProvenance = Read("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
     var agentInstallJournal = Read("src", "Taildesk.Shared", "AgentInstallTransactionPersistence.cs");
     var setupInstaller = Read("src", "Taildesk.Setup", "InstallerServices.cs");
@@ -657,7 +754,11 @@ static void TestReleaseDistributionDesign()
            && publisher.Contains("FullStreamVerified", StringComparison.Ordinal)
            && publisher.Contains("Publish-ManifestAtomically", StringComparison.Ordinal)
            && publisher.Contains("Assert-OpticonSourceArchive", StringComparison.Ordinal)
-           && publisher.Contains("artifact.product -eq 'OpticonSource'", StringComparison.Ordinal)
+           && publisher.Contains("Assert-OpticonBundleArchive", StringComparison.Ordinal)
+           && publisher.Contains("Assert-ProductionArtifactTrust", StringComparison.Ordinal)
+           && publisher.Contains("ChecksumSHA256).Equals($expectedChecksum", StringComparison.Ordinal)
+           && publisher.Contains("$total -gt $ExpectedSize", StringComparison.Ordinal)
+           && publisher.Contains("Read-PublicManifestBounded", StringComparison.Ordinal)
            && !publisher.Contains("flyctl deploy", StringComparison.Ordinal)
            && publisher.Contains("Refusing to overwrite immutable", StringComparison.Ordinal),
         "publisher no longer enforces immutable S3 upload, bounded CloudFront readback, and atomic manifest publication");
@@ -729,8 +830,15 @@ static void TestReleaseDistributionDesign()
            && sourceInstaller.Contains("--no-restore", StringComparison.Ordinal)
            && sourceInstaller.Contains("--self-contained', 'false", StringComparison.Ordinal)
            && sourceInstaller.Contains("Microsoft.WindowsDesktop.App", StringComparison.Ordinal)
+           && sourceNuget.Contains("opticon-offline", StringComparison.Ordinal)
+           && sourceNuget.Contains("./packages", StringComparison.Ordinal)
+           && builder.Contains("$offlinePackageDirectory", StringComparison.Ordinal)
+           && builder.Contains("microsoft.aspnetcore.app.runtime.win-x64", StringComparison.Ordinal)
+           && builder.Contains("microsoft.aspnetcore.app.runtime.win-arm64", StringComparison.Ordinal)
+           && builder.Contains("microsoft.netcore.app.host.win-arm64", StringComparison.Ordinal)
+           && builder.Contains("microsoft.windows.sdk.net.ref", StringComparison.Ordinal)
            && sourceInstaller.Contains("$setupExitCode -ne 0", StringComparison.Ordinal),
-        "the elevated source build does not isolate MSBuild/PowerShell or propagate Setup failure");
+        "the elevated source build does not isolate MSBuild/PowerShell, carry its signed offline feed, or propagate Setup failure");
     Assert(sourceProvenance.Contains("public int SchemaVersion { get; set; } = 5", StringComparison.Ordinal)
             && sourceProvenance.Contains("List<InstalledSourceGeneration> Installed", StringComparison.Ordinal)
             && sourceProvenance.Contains("InstalledSourceGeneration? Pending", StringComparison.Ordinal)
@@ -742,13 +850,18 @@ static void TestReleaseDistributionDesign()
             && sourceProvenance.Contains(".rollback-", StringComparison.Ordinal)
             && sourceProvenance.Contains("CommitActiveComponent", StringComparison.Ordinal)
             && sourceProvenance.Contains("store.Pending = null", StringComparison.Ordinal)
-            && agentInstallJournal.Contains("PreviousConfig", StringComparison.Ordinal)
-            && agentInstallJournal.Contains("PreviousReceipt", StringComparison.Ordinal)
-            && setupInstaller.Contains("Directory.Move(destination, rollback)", StringComparison.Ordinal)
+             && agentInstallJournal.Contains("PreviousConfig", StringComparison.Ordinal)
+             && agentInstallJournal.Contains("PreviousReceipt", StringComparison.Ordinal)
+             && agentInstallJournal.Contains("PreviousTaskXml", StringComparison.Ordinal)
+             && agentInstallJournal.Contains("TaskStateRestored", StringComparison.Ordinal)
+             && setupInstaller.Contains("Directory.Move(destination, rollback)", StringComparison.Ordinal)
             && setupInstaller.Contains("Directory.Move(candidate, destination)", StringComparison.Ordinal)
             && setupInstaller.Contains("RollbackAgentInstallTransactionAsync", StringComparison.Ordinal)
-            && setupInstaller.Contains("AgentInstallOperationId", StringComparison.Ordinal)
-            && setupWindow.Contains("TryRollbackSourceProvenance", StringComparison.Ordinal),
+             && setupInstaller.Contains("AgentInstallOperationId", StringComparison.Ordinal)
+             && setupInstaller.Contains("CaptureAgentTaskSnapshotAsync", StringComparison.Ordinal)
+             && setupInstaller.Contains("RestoreAgentTaskSnapshotAsync", StringComparison.Ordinal)
+             && setupInstaller.Contains("The restored Agent task did not restart the prior Agent", StringComparison.Ordinal)
+             && setupWindow.Contains("TryRollbackSourceProvenance", StringComparison.Ordinal),
         "failed source reinstalls can replace current provenance or cannot validate exact rollback generations");
     Assert(!builder.Contains("reuseCommandCenterPublish", StringComparison.Ordinal)
            && !builder.Contains("commandCenterPublish", StringComparison.Ordinal)
@@ -1502,6 +1615,18 @@ static void TestOpenSshRecoveryDesign()
            && nordPython.Contains(@"Admin\Cli\opticon.exe", StringComparison.Ordinal)
            && nordPython.Contains("\"System32\", \"OpenSSH\", \"ssh.exe\"", StringComparison.Ordinal),
         "NordVPN split tunneling and drift checks must include the Opticon CLI and exact Windows OpenSSH client");
+    Assert(systemHealth.Contains("DirectHttp.CreateClient", StringComparison.Ordinal)
+           && systemHealth.Contains("ResponseHeadersRead", StringComparison.Ordinal)
+           && systemHealth.Contains("RequireSystemExecutable", StringComparison.Ordinal)
+           && systemHealth.Contains("clearEnvironment: true", StringComparison.Ordinal)
+           && systemHealth.Contains("VerifyVendorExecutableAsync", StringComparison.Ordinal)
+           && systemHealth.Contains("ProductSigning.VerifyAuthenticodeAsync(snapshot.RouteHelperPath", StringComparison.Ordinal)
+           && systemHealth.Contains("IsExactRouteTask", StringComparison.Ordinal)
+           && !systemHealth.Contains("Set-TaildeskFlyBypassRoute.ps1", StringComparison.Ordinal)
+           && !systemHealth.Contains("RouteTaskProtected", StringComparison.Ordinal)
+           && !systemHealth.Contains("WScript.Shell", StringComparison.Ordinal)
+           && !systemHealth.Contains("new HttpClient", StringComparison.Ordinal),
+        "health diagnostics must use direct bounded HTTP, fixed sanitized tools, exact signed RouteKeeper state, and no elevated-profile legacy helpers");
 
     var manager = ReadSource("src", "Taildesk.Agent", "SshAccessManager.cs");
     foreach (var unsupported in new[]
@@ -1831,6 +1956,7 @@ static void TestOpenSshRecoveryDesign()
         "Command Center shutdown must terminate SSH and report remote/local cleanup independently");
 
     var buildScript = ReadSource("build.ps1");
+    var buildProps = ReadSource("Directory.Build.props");
     var targetReleaseCheck = ReadSource("scripts", "Ensure-OpticonTargetRelease.ps1");
     var repositoryRoot = root.Parent
         ?? throw new InvalidOperationException("Repository root was not found above Opticon.");
@@ -1847,8 +1973,10 @@ static void TestOpenSshRecoveryDesign()
            && hostedBuild.Contains("The clean $component publish must contain only", StringComparison.Ordinal)
            && hostedBuild.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal),
         "release packaging must fail on native build/test errors and ship a single signed CLI app");
-    Assert(buildScript.Contains("8.0.423", StringComparison.Ordinal)
-           && buildScript.Contains("RuntimeFrameworkVersion", StringComparison.Ordinal)
+    Assert(buildScript.Contains("10.0.302", StringComparison.Ordinal)
+           && buildProps.Contains("net10.0-windows10.0.19041.0", StringComparison.Ordinal)
+           && buildProps.Contains("<OpticonRuntimeVersion>10.0.10</OpticonRuntimeVersion>", StringComparison.Ordinal)
+           && buildProps.Contains("<TargetLatestRuntimePatch>true</TargetLatestRuntimePatch>", StringComparison.Ordinal)
            && buildScript.Contains("OpticonSigningProfile", StringComparison.Ordinal)
            && buildScript.Contains("SourceReleaseSigningCertificateThumbprint", StringComparison.Ordinal)
            && buildScript.Contains("CodeSigningCertificateThumbprint", StringComparison.Ordinal)
@@ -1875,7 +2003,7 @@ static void TestOpenSshRecoveryDesign()
     Assert(buildScript.Contains("SkipTargetReleaseDeployment", StringComparison.Ordinal)
            && buildScript.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
            && buildWorkflow.Contains("contents: read", StringComparison.Ordinal)
-           && buildWorkflow.Contains("8.0.423", StringComparison.Ordinal)
+           && buildWorkflow.Contains("10.0.302", StringComparison.Ordinal)
            && buildWorkflow.Contains("go test -race", StringComparison.Ordinal)
            && buildWorkflow.Contains("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("Test-CompleteRelease", StringComparison.Ordinal)
@@ -1887,12 +2015,13 @@ static void TestOpenSshRecoveryDesign()
     const string packageBuildLock = ".opticon-package-build.lock";
     const string acquirePackageBuildLock = "$packageBuildLock = Enter-OpticonPackageBuildLock";
     const string firstStandaloneBuildInvocation = "Invoke-DotNet -Arguments @('--version')";
+    const string firstHostedBuildMutation = "foreach ($path in @($buildRoot, $stageRoot))";
     Assert(buildScript.Contains(packageBuildLock, StringComparison.Ordinal)
            && hostedBuild.Contains(packageBuildLock, StringComparison.Ordinal)
            && buildScript.Contains("[IO.FileShare]::None", StringComparison.Ordinal)
-           && hostedBuild.Contains("[IO.FileShare]::None", StringComparison.Ordinal)
-           && buildScript.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < buildScript.IndexOf(firstStandaloneBuildInvocation, StringComparison.Ordinal)
-           && hostedBuild.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < hostedBuild.IndexOf("dotnet publish", StringComparison.Ordinal)
+            && hostedBuild.Contains("[IO.FileShare]::None", StringComparison.Ordinal)
+            && buildScript.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < buildScript.IndexOf(firstStandaloneBuildInvocation, StringComparison.Ordinal)
+            && hostedBuild.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < hostedBuild.IndexOf(firstHostedBuildMutation, StringComparison.Ordinal)
            && buildScript.LastIndexOf("$packageBuildLock.Dispose()", StringComparison.Ordinal) > buildScript.LastIndexOf("New-ReproducibleZip", StringComparison.Ordinal)
            && hostedBuild.LastIndexOf("$packageBuildLock.Dispose()", StringComparison.Ordinal) > hostedBuild.LastIndexOf("Compress-Archive", StringComparison.Ordinal),
         "standalone and hosted packaging must share one exclusive lock across every build and publication mutation");
@@ -1952,10 +2081,21 @@ static void TestOpenSshRecoveryDesign()
                < installer.IndexOf("Write-ControllerReadyMarker -Directory $destination", StringComparison.Ordinal)
            && setup.IndexOf("await configureActivatedPayload()", StringComparison.Ordinal)
                < setup.IndexOf("WriteControllerReadyMarker(destination)", StringComparison.Ordinal)
-           && installer.Contains("Restore-ControllerConfigurationSnapshot", StringComparison.Ordinal)
-           && setup.IndexOf("await MachineStorageSecurity.WriteUserBootstrapAsync", StringComparison.Ordinal)
-               < setup.IndexOf("WriteControllerReadyMarker(destination)", StringComparison.Ordinal)
-           && setup.Contains("MachineStorageSecurity.DeleteUserBootstrap", StringComparison.Ordinal),
+            && installer.Contains("Restore-RouteTaskSnapshot", StringComparison.Ordinal)
+            && installer.Contains("Restore-UiTaskSnapshot", StringComparison.Ordinal)
+            && installer.Contains("Register-ExactRouteKeeperTask", StringComparison.Ordinal)
+            && installer.Contains("Register-ExactUiTask", StringComparison.Ordinal)
+            && installer.Contains("InteractiveToken", StringComparison.Ordinal)
+            && installer.Contains("LeastPrivilege", StringComparison.Ordinal)
+            && !installer.Contains("& $tailscale login", StringComparison.Ordinal)
+            && !installer.Contains("Install-TaildeskFlyRouteTask.ps1", StringComparison.Ordinal)
+            && !installer.Contains("New-Object -ComObject WScript.Shell", StringComparison.Ordinal)
+            && setup.IndexOf("await MachineStorageSecurity.WriteUserBootstrapAsync", StringComparison.Ordinal)
+                < setup.IndexOf("WriteControllerReadyMarker(destination)", StringComparison.Ordinal)
+            && setup.Contains("MachineStorageSecurity.DeleteUserBootstrap", StringComparison.Ordinal)
+            && setup.Contains("BuildRouteKeeperTaskXml", StringComparison.Ordinal)
+            && setup.Contains("BuildControllerUiTaskXml", StringComparison.Ordinal)
+            && setup.Contains("StartControllerTasksIfInstalledAsync", StringComparison.Ordinal),
         "ready must be written after protected handoff, and handoff failure must delete it while payload rollback restores the prior directory");
 
     Assert(installer.Contains("@($destination, $backup)", StringComparison.Ordinal)

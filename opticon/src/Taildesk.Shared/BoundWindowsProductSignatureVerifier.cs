@@ -476,7 +476,7 @@ internal static class BoundWindowsProductSignatureVerifier
         Marshal.Copy(context.Encoded, raw, 0, raw.Length);
         try
         {
-            return new X509Certificate2(raw);
+            return X509CertificateLoader.LoadCertificate(raw);
         }
         catch (CryptographicException exception)
         {

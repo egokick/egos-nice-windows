@@ -24,15 +24,15 @@ The primary command center is intentionally an interactive tray application, not
 
 1. Opticon asks Headscale for a tagged, single-use pre-authentication key.
 2. It signs the personalized enrollment material, encrypts it with a random key, and copies a single-use URL with a default 14-day expiry to the clipboard. The decryption key is in the URL fragment, which browsers do not send to Fly.
-3. The recipient opens the URL. The page fetches the signed bootstrap directly from CloudFront and creates a local `Install-Opticon-<id>--<key>.exe` download so the client-only fragment survives browser filename handling. They open it and approve UAC. The bootstrap downloads the reusable role-specific Opticon bundle from its immutable CloudFront HTTPS URL, verifies its pinned size, SHA-256, and Authenticode signer, then starts Setup. Setup verifies the signed invitation and installs the pinned dependencies.
+3. The recipient opens the URL. The page downloads the exact versioned source archive and signed bootstrap from CloudFront, verifies both byte counts and SHA-256 hashes in browser WebCrypto, and gives the bootstrap an invite-bearing filename. The recipient keeps both files together, opens `Install-Opticon-<id>--<key>--<bootstrap-sha256>.exe`, and approves UAC. The bootstrap rechecks its own hash and production signature, decrypts and verifies the signed invitation, verifies the source archive and its RSA-PSS manifest, and builds the requested x64 or ARM64 payload locally with the exact pinned .NET SDK.
 4. The new agent calls the laptop coordinator through its stable Tailscale address. The coordinator consumes the invitation, records the device, and supplies the final device-specific credentials.
 5. Normal remote-control, file, and media traffic goes directly between peers when NAT traversal succeeds. If it cannot, the encrypted WireGuard traffic is relayed through the private DERP endpoint on Fly.
 
-Invitation URLs contain a high-entropy identifier and a separate fragment decryption key. Fly stores the encrypted envelope, device label, role, and expiry; it never receives the fragment key or plaintext enrollment credentials. The default lifetime is 14 days. From the Invitations grid, right-click a row to copy its URL, extend its expiry, or expire it immediately. Extension preserves the URL but rotates the Headscale one-use key and re-signs/re-encrypts the payload. Successful enrollment immediately consumes the invitation, expires the local record, and removes the hosted ciphertext. Browsers deliberately do not auto-run downloads, so the unavoidable recipient flow is: open link, open the downloaded starter, approve UAC.
+Invitation URLs contain a high-entropy identifier and a separate fragment decryption key. Fly stores the encrypted envelope, device label, role, expiry, and exact authenticated release metadata; it never receives the fragment key or plaintext enrollment credentials. The default lifetime is 14 days. From the Invitations grid, right-click a row to copy its URL, extend its expiry, or expire it immediately. Extension preserves the URL but rotates the Headscale one-use key and re-signs/re-encrypts the payload. Successful enrollment immediately consumes the invitation, expires the local record, and removes the hosted ciphertext. Browsers deliberately do not auto-run downloads, so the recipient flow is: open the link, download both authenticated files, keep them together, open the signed bootstrap, and approve UAC.
 
-Setup keeps a redacted per-run diagnostic log under `%LOCALAPPDATA%\Opticon\Logs\Setup`. Errors expand the **Detailed setup log** section automatically; the same section can be opened at any time to copy the log or open its file. Invitation fragment keys are redacted from filenames, arguments, exceptions, and persisted diagnostics.
+Elevated source verification, build state, and redacted setup diagnostics stay in ACL-protected machine storage rather than user-writable profile paths. Invitation fragment keys are redacted from arguments, exceptions, and persisted diagnostics.
 
-Browsers that permit the direct CloudFront fetch receive the signed `.exe`. If a restricted browser disables that API, the invitation page instead creates a tiny local compatibility `.cmd`; it downloads the same immutable bootstrap and verifies its exact size, SHA-256, and Authenticode signer before requesting elevation. The compatibility file contains the client-only fragment key, but neither the key nor the generated file is uploaded to Fly or CloudFront.
+The invitation page requires a current browser with WebCrypto SHA-256. There is no unsigned compatibility script or length-only fallback. If the exact .NET SDK 10.0.302 or matching host architecture is missing, Setup shows the fixed official Microsoft SDK URL and offers Copy URL, Retry, or Exit; elevated code never opens a browser or executes an unpinned SDK installer. The isolated build disables user MSBuild imports and online package sources, then Setup installs the attested output and automatically consumes the one-time invitation to join the private Headscale mesh.
 
 ## Private remote-session boundary
 
@@ -151,7 +151,7 @@ Fly CLI references: [deploy](https://fly.io/docs/flyctl/deploy/), [status](https
 
 ## Build and install
 
-Production packaging requires exact .NET SDK 8.0.423, a publicly trusted product
+Production packaging requires exact .NET SDK 10.0.302, a publicly trusted product
 code-signing certificate, a separate offline source-release certificate, and an
 RFC 3161 timestamp service:
 
@@ -164,7 +164,7 @@ Set-Location 'C:\source\egos-nice-windows\opticon'
 
 The production build starts from a clean committed tree, creates fresh isolated outputs, signs every executable with the product certificate and RFC 3161 timestamp, then signs the exact package manifest with the offline source-release key. It writes `dist\Opticon-CommandCenter-win-x64.zip` and checks the same version's hosted target release. Extract the ZIP, verify the Windows publisher, and open only `Install-Opticon.exe`; no loose PowerShell entry point is distributed.
 
-Hosted invitations no longer carry prebuilt Agent binaries. The invitation pins the exact bootstrap and source archive by version, filename, size, SHA-256, signing profile, source-release key, product signer, SDK, runtime, and target architecture. The recipient verifies and builds that source locally with .NET SDK 8.0.423, after an explicit install prompt if the exact SDK is absent, and Setup then enrolls the device into the private mesh using the encrypted one-time invitation.
+Hosted invitations no longer carry prebuilt Agent binaries. The invitation pins the exact bootstrap and source archive by version, filename, size, SHA-256, signing profile, source-release key, product signer, SDK, runtime, and target architecture. The recipient verifies and builds that source locally with .NET SDK 10.0.302, after an explicit install prompt if the exact SDK is absent, and Setup then enrolls the device into the private mesh using the encrypted one-time invitation.
 
 Developer packages require explicit, separate development certificates plus `-BuildProfile Developer -SkipTargetReleaseDeployment`; their filename contains `DEV-UNTRUSTED` and they cannot be published. A skipped production build does not make that version available through **Update Opticon**.
 

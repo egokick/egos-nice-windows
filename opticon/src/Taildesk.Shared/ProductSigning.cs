@@ -52,7 +52,7 @@ public static class ProductSigning
         X509Certificate2 certificate;
         if (!BuildSigningTrust.IsProduction && string.IsNullOrWhiteSpace(BuildSigningTrust.ProductSigningCertificateBase64))
         {
-            certificate = new X509Certificate2(InvitationSigning.PinnedCertificate.RawData);
+            certificate = X509CertificateLoader.LoadCertificate(InvitationSigning.PinnedCertificate.RawData);
         }
         else
         {

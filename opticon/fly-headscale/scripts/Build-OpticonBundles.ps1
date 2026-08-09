@@ -4,10 +4,227 @@ param(
     [string]$Runtime = "win-x64",
     [string]$Version = "1.1.38",
     [string]$MinimumGuardianVersion = "1.1.2",
-    [string]$CertificateThumbprint = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
+    [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
+    [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
+    [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
+    [Parameter(Mandatory)][string]$SignToolPath
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+$invitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
+$SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint.ToUpperInvariant()
+$ProductCertificateThumbprint = $ProductCertificateThumbprint.ToUpperInvariant()
+$script:git = $null
+
+function Assert-NoReparseTraversal {
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Path)
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Root))
+    $current = [IO.Path]::GetFullPath($Path)
+    if ($current -ne $root -and -not $current.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "A trusted build tool escaped its fixed root: $current"
+    }
+    while ($true) {
+        if ((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "A trusted build-tool path is a reparse point: $current"
+        }
+        if ($current.Equals($root, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $current = Split-Path $current -Parent
+    }
+}
+
+function Get-FixedGit {
+    foreach ($root in @(
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) | Select-Object -Unique) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        foreach ($relative in @('Git\cmd\git.exe', 'Git\bin\git.exe')) {
+            $candidate = Join-Path $root $relative
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                Assert-NoReparseTraversal -Root $root -Path $candidate
+                return $candidate
+            }
+        }
+    }
+    throw 'A production hosted build requires Git at a fixed Program Files path.'
+}
+
+function Invoke-FixedGit {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    if ([string]::IsNullOrWhiteSpace($script:git)) { $script:git = Get-FixedGit }
+    $windows = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
+    $system32 = Join-Path $windows 'System32'
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $script:git
+    $start.WorkingDirectory = $repo
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
+    $start.Environment.Clear()
+    $start.Environment['SystemRoot'] = $windows
+    $start.Environment['WINDIR'] = $windows
+    $start.Environment['PATH'] = [string]::Join([IO.Path]::PathSeparator, @((Split-Path $script:git -Parent), $system32))
+    $start.Environment['PATHEXT'] = '.COM;.EXE'
+    $process = [Diagnostics.Process]::Start($start)
+    if (-not $process) { throw 'Windows could not start fixed Git.' }
+    try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw "Fixed Git failed: $($stderr.Trim())" }
+        return $stdout
+    } finally { $process.Dispose() }
+}
+
+function Get-ReleaseCertificate {
+    param([Parameter(Mandatory)][string]$Thumbprint, [Parameter(Mandatory)][string]$Purpose)
+    $certificate = Get-ChildItem Cert:\CurrentUser\My |
+        Where-Object { $_.Thumbprint.ToUpperInvariant() -eq $Thumbprint -and $_.HasPrivateKey } |
+        Select-Object -First 1
+    if (-not $certificate) { throw "$Purpose certificate $Thumbprint with an accessible private key is unavailable in CurrentUser\\My." }
+    return $certificate
+}
+
+function Get-ArtifactString {
+    param([Parameter(Mandatory)]$Artifact, [Parameter(Mandatory)][string]$Name)
+    $property = $Artifact.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) { return '' }
+    return [string]$property.Value
+}
+
+function Test-ProductionArtifactTrust {
+    param([Parameter(Mandatory)]$Artifact)
+    return (Get-ArtifactString $Artifact 'signingProfile') -ceq 'Production' -and
+        (Get-ArtifactString $Artifact 'sourceManifestKeyId') -eq $SourceReleaseCertificateThumbprint -and
+        (Get-ArtifactString $Artifact 'productSignerThumbprint') -eq $ProductCertificateThumbprint
+}
+
+function Get-LocalArtifactPath {
+    param([Parameter(Mandatory)][string]$FileName)
+    if ([string]::IsNullOrWhiteSpace($FileName) -or
+        -not [IO.Path]::GetFileName($FileName).Equals($FileName, [StringComparison]::Ordinal) -or
+        $FileName.Contains('/') -or $FileName.Contains('\')) {
+        throw 'A release-manifest artifact filename is unsafe.'
+    }
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($artifactDirectory))
+    $path = [IO.Path]::GetFullPath((Join-Path $root $FileName))
+    if (-not [IO.Path]::GetDirectoryName($path).Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "The exact local artifact is missing or escaped its directory: $FileName"
+    }
+    Assert-NoReparseTraversal -Root $root -Path $path
+    return $path
+}
+
+function Assert-ProductSigningCertificate {
+    param([Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+    if ($Certificate.Subject -eq $Certificate.Issuer) {
+        throw 'The production Authenticode certificate must not be self-signed.'
+    }
+    $ekuExtension = $Certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
+    if ($null -eq $ekuExtension) { throw 'The production Authenticode certificate has no EKU restriction.' }
+    $enhanced = [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$ekuExtension
+    if (-not ($enhanced.EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' })) {
+        throw 'The production Authenticode certificate lacks the Code Signing EKU.'
+    }
+    $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+    try {
+        $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+        $chain.ChainPolicy.RevocationFlag = [Security.Cryptography.X509Certificates.X509RevocationFlag]::EntireChain
+        $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+        if (-not $chain.Build($Certificate)) {
+            $detail = ($chain.ChainStatus | ForEach-Object { $_.Status.ToString() }) -join ', '
+            throw "The production Authenticode certificate does not build to a trusted public Windows root: $detail"
+        }
+    } finally { $chain.Dispose() }
+}
+
+function Assert-ProductSignature {
+    param([Parameter(Mandatory)][string]$Path)
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+        $null -eq $signature.SignerCertificate -or
+        -not $signature.SignerCertificate.Thumbprint.Equals($ProductCertificateThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
+        $null -eq $signature.TimeStamperCertificate) {
+        throw "Production Authenticode verification, publisher pinning, or RFC3161 timestamp validation failed for $Path."
+    }
+    $eku = $signature.SignerCertificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
+    if ($null -eq $eku -or -not (([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$eku).EnhancedKeyUsages |
+            Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' })) {
+        throw "The verified production signer for $Path lacks the Code Signing EKU."
+    }
+    $timestampEku = $signature.TimeStamperCertificate.Extensions |
+        Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
+    if ($null -eq $timestampEku -or -not (([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$timestampEku).EnhancedKeyUsages |
+            Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.8' })) {
+        throw "The RFC3161 timestamp for $Path lacks the Time Stamping EKU."
+    }
+}
+
+function Assert-PinnedDependencySignature {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ExpectedThumbprint
+    )
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+        $null -eq $signature.SignerCertificate -or
+        -not $signature.SignerCertificate.Thumbprint.Equals($ExpectedThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
+        $null -eq $signature.TimeStamperCertificate) {
+        throw "Pinned dependency Authenticode or timestamp validation failed for $Path."
+    }
+    $codeEku = $signature.SignerCertificate.Extensions |
+        Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
+    if ($null -eq $codeEku -or -not (([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$codeEku).EnhancedKeyUsages |
+            Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' })) {
+        throw "The pinned dependency signer for $Path lacks the Code Signing EKU."
+    }
+    $timestampEku = $signature.TimeStamperCertificate.Extensions |
+        Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
+    if ($null -eq $timestampEku -or -not (([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$timestampEku).EnhancedKeyUsages |
+            Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.8' })) {
+        throw "The dependency timestamp for $Path lacks the Time Stamping EKU."
+    }
+}
+
+function Invoke-SignTool {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    $windows = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
+    $system32 = Join-Path $windows 'System32'
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $SignToolPath
+    $start.WorkingDirectory = $system32
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
+    $start.Environment.Clear()
+    $start.Environment['SystemRoot'] = $windows
+    $start.Environment['WINDIR'] = $windows
+    $start.Environment['ProgramFiles'] = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    $start.Environment['ProgramFiles(x86)'] = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+    $start.Environment['ProgramData'] = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    $start.Environment['PATH'] = [string]::Join([IO.Path]::PathSeparator, @((Split-Path $SignToolPath -Parent), $system32))
+    $start.Environment['PATHEXT'] = '.COM;.EXE'
+    $start.Environment['TEMP'] = $sdkAnchor
+    $start.Environment['TMP'] = $sdkAnchor
+    $process = [Diagnostics.Process]::Start($start)
+    if (-not $process) { throw 'Windows could not start the fixed Windows SDK signer.' }
+    try {
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw "signtool failed with exit code $($process.ExitCode)." }
+    } finally { $process.Dispose() }
+}
+
+function Invoke-ProductSigning {
+    param([Parameter(Mandatory)][string]$Path)
+    Invoke-SignTool -Arguments @('sign', '/fd', 'SHA256', '/sha1', $ProductCertificateThumbprint,
+        '/tr', $Rfc3161TimestampUrl, '/td', 'SHA256', $Path)
+    Assert-ProductSignature -Path $Path
+}
 
 function Get-OpticonManifestSigningKey {
     param([Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
@@ -174,38 +391,171 @@ if ((Compare-SemanticVersion $MinimumGuardianVersion $Version) -gt 0) {
 
 $flyRoot = Split-Path $PSScriptRoot -Parent
 $repo = Split-Path $flyRoot -Parent
-$dotnet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
-if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf) -or
-    -not ((& $dotnet --list-sdks) | Where-Object { $_ -match '^8\.0\.423\s' })) {
-    throw 'Release builds require exact .NET SDK 8.0.423 (the SDK carrying runtime 8.0.29).'
+$gitRoot = (Invoke-FixedGit -Arguments @('-C', $repo, 'rev-parse', '--show-toplevel')).Trim()
+if ([string]::IsNullOrWhiteSpace($gitRoot) -or $gitRoot.Contains([Environment]::NewLine)) {
+    throw 'A production hosted build must originate from one committed Git checkout.'
 }
-$buildRoot = Join-Path $repo "artifacts\hosted-build"
-$stageRoot = Join-Path $repo "artifacts\hosted-bundle-stage"
+$gitRoot = [IO.Path]::GetFullPath($gitRoot)
+$relativeRepo = [IO.Path]::GetRelativePath($gitRoot, $repo).Replace('\', '/')
+$gitStatus = Invoke-FixedGit -Arguments @(
+    '-C', $gitRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', $relativeRepo)
+if (-not [string]::IsNullOrWhiteSpace($gitStatus)) {
+    throw 'A production hosted build requires a clean committed Opticon source tree, including no untracked files.'
+}
+$dotnetRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'dotnet'
+$dotnet = Join-Path $dotnetRoot 'dotnet.exe'
+$timestampUri = $null
+if (-not [Uri]::TryCreate($Rfc3161TimestampUrl, [UriKind]::Absolute, [ref]$timestampUri) -or
+    $timestampUri.Scheme -ne [Uri]::UriSchemeHttps -or -not [string]::IsNullOrEmpty($timestampUri.UserInfo)) {
+    throw 'Rfc3161TimestampUrl must be an absolute HTTPS URL without user information.'
+}
+$SignToolPath = [IO.Path]::GetFullPath($SignToolPath)
+$windowsKitsRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'Windows Kits\10\bin'
+if (-not (Test-Path -LiteralPath $SignToolPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $windowsKitsRoot -PathType Container) -or
+    -not $SignToolPath.StartsWith([IO.Path]::GetFullPath($windowsKitsRoot).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    (Split-Path $SignToolPath -Leaf) -ne 'signtool.exe' -or
+    (Split-Path (Split-Path $SignToolPath -Parent) -Leaf) -ne 'x64') {
+    throw 'SignToolPath must name the fixed x64 signtool.exe under Program Files (x86)\Windows Kits\10\bin\<version>\x64.'
+}
+Assert-NoReparseTraversal -Root ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) -Path $SignToolPath
+if ($SourceReleaseCertificateThumbprint -eq $invitationSigningThumbprint -or
+    $ProductCertificateThumbprint -eq $invitationSigningThumbprint -or
+    $SourceReleaseCertificateThumbprint -eq $ProductCertificateThumbprint) {
+    throw 'Production invitation, source-release, and Authenticode trust domains must be pairwise distinct.'
+}
+if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) {
+    throw 'Release builds require exact .NET SDK 10.0.302 (the SDK carrying runtime 10.0.10).'
+}
+Assert-NoReparseTraversal -Root ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) -Path $dotnet
 $artifactDirectory = Join-Path $flyRoot "artifacts"
+Assert-NoReparseTraversal -Root $repo -Path $artifactDirectory
+$sdkAnchor = Join-Path ([IO.Path]::GetTempPath()) ('opticon-sdk-' + [Guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($sdkAnchor) | Out-Null
+$buildRoot = Join-Path $sdkAnchor 'hosted-build'
+$stageRoot = Join-Path $sdkAnchor 'hosted-bundle-stage'
+[IO.File]::WriteAllText(
+    (Join-Path $sdkAnchor 'global.json'),
+    '{"sdk":{"version":"10.0.302","rollForward":"disable","allowPrerelease":false}}',
+    [Text.UTF8Encoding]::new($false))
+$packageCache = Join-Path $sdkAnchor 'packages'
+$nugetHttpCache = Join-Path $sdkAnchor 'nuget-http-cache'
+$cliHome = Join-Path $sdkAnchor 'dotnet-home'
+$buildTemp = Join-Path $sdkAnchor 'temp'
+$userExtensions = Join-Path $sdkAnchor 'empty-msbuild-user-extensions'
+$intermediateRoot = Join-Path $sdkAnchor 'obj'
+foreach ($directory in @($packageCache, $nugetHttpCache, $cliHome, $buildTemp, $userExtensions, $intermediateRoot)) {
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+}
+$emptyTargets = Join-Path $sdkAnchor 'Directory.Build.targets'
+[IO.File]::WriteAllText($emptyTargets, '<Project />', [Text.UTF8Encoding]::new($false))
+$nugetConfig = Join-Path $sdkAnchor 'NuGet.Config'
+[IO.File]::WriteAllText($nugetConfig, @"
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />
+  </packageSources>
+  <disabledPackageSources><clear /></disabledPackageSources>
+  <packageSourceMapping><clear /><packageSource key="nuget.org"><package pattern="*" /></packageSource></packageSourceMapping>
+  <config>
+    <add key="globalPackagesFolder" value="$([Security.SecurityElement]::Escape($packageCache))" />
+    <add key="httpCachePath" value="$([Security.SecurityElement]::Escape($nugetHttpCache))" />
+  </config>
+</configuration>
+"@, [Text.UTF8Encoding]::new($false))
+
+function Invoke-ExactDotNet {
+    param([Parameter(Mandatory)][string[]]$Arguments, [switch]$CaptureOutput)
+    $windows = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
+    $system32 = [IO.Path]::GetFullPath([Environment]::SystemDirectory)
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $dotnet
+    $start.WorkingDirectory = $sdkAnchor
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
+    $start.Environment.Clear()
+    $safeEnvironment = [ordered]@{
+        SystemRoot = $windows; WINDIR = $windows; SystemDrive = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
+        ProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+        'ProgramFiles(x86)' = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+        ProgramW6432 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+        ProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+        ComSpec = (Join-Path $system32 'cmd.exe'); PATH = [string]::Join([IO.Path]::PathSeparator, @($dotnetRoot, $system32)); PATHEXT = '.COM;.EXE'
+        TEMP = $buildTemp; TMP = $buildTemp; DOTNET_ROOT = $dotnetRoot
+        DOTNET_CLI_HOME = $cliHome; NUGET_PACKAGES = $packageCache; NUGET_HTTP_CACHE_PATH = $nugetHttpCache
+        NUGET_XMLDOC_MODE = 'skip'; NUGET_CERT_REVOCATION_MODE = 'online'
+        DOTNET_MULTILEVEL_LOOKUP = '0'; DOTNET_NOLOGO = '1'; DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+        DOTNET_CLI_TELEMETRY_OPTOUT = '1'; MSBUILDDISABLENODEREUSE = '1'
+    }
+    foreach ($entry in $safeEnvironment.GetEnumerator()) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$entry.Value)) { $start.Environment[[string]$entry.Key] = [string]$entry.Value }
+    }
+    $process = [Diagnostics.Process]::Start($start)
+    if (-not $process) { throw 'Windows could not start the fixed .NET SDK host.' }
+    try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw "The exact .NET SDK command failed ($($process.ExitCode)): $($stderr.Trim())" }
+        if ($CaptureOutput) { return $stdout }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host $stdout.TrimEnd() }
+    } finally { $process.Dispose() }
+}
+
+$installedSdks = @((Invoke-ExactDotNet -Arguments @('--list-sdks') -CaptureOutput) -split "`r?`n")
+if (-not ($installedSdks | Where-Object { $_ -match '^10\.0\.200\s' })) {
+    throw 'Release builds require exact .NET SDK 10.0.302 (the SDK carrying runtime 10.0.10).'
+}
+$selectedSdk = (Invoke-ExactDotNet -Arguments @('--version') -CaptureOutput).Trim()
+if ($selectedSdk -ne '10.0.302') { throw "global.json selected SDK '$selectedSdk', not exact SDK 10.0.302." }
 $packageBuildLock = Enter-OpticonPackageBuildLock (Join-Path $repo "artifacts\.opticon-package-build.lock")
 try {
-$certificate = Get-ChildItem Cert:\CurrentUser\My |
-    Where-Object { $_.Thumbprint -eq $CertificateThumbprint -and $_.HasPrivateKey } |
-    Select-Object -First 1
-if (-not $certificate) { throw "The pinned Opticon signing certificate is unavailable." }
+$sourceReleaseCertificate = Get-ReleaseCertificate -Thumbprint $SourceReleaseCertificateThumbprint -Purpose 'Offline source-release signing'
+$productCertificate = Get-ReleaseCertificate -Thumbprint $ProductCertificateThumbprint -Purpose 'Production Authenticode signing'
+$sourceRsaProbe = Get-OpticonManifestSigningKey -Certificate $sourceReleaseCertificate
+try {
+    if ($sourceRsaProbe.KeySize -lt 3072) { throw 'The production source-release RSA key must be at least 3072 bits.' }
+} finally { $sourceRsaProbe.Dispose() }
+Assert-ProductSigningCertificate -Certificate $productCertificate
+$sourceReleaseCertificateBase64 = [Convert]::ToBase64String($sourceReleaseCertificate.RawData)
+$productSigningCertificateBase64 = [Convert]::ToBase64String($productCertificate.RawData)
 $manifestPath = Join-Path $artifactDirectory "manifest.json"
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $dependencies = @($manifest.artifacts | Where-Object { $_.product -in @("Tailscale", "RustDesk") })
 if ($dependencies.Count -ne 4) { throw "The release manifest must declare four pinned dependency installers." }
+$expectedDependencies = @{
+    'Tailscale|x64' = $true; 'Tailscale|arm64' = $true
+    'RustDesk|x64' = $true; 'RustDesk|arm64' = $true
+}
+$seenDependencies = @{}
 foreach ($artifact in $dependencies) {
-    $path = Join-Path $artifactDirectory ([string]$artifact.file)
+    $dependencyKey = '{0}|{1}' -f ([string]$artifact.product), ([string]$artifact.architecture)
+    if (-not $expectedDependencies.ContainsKey($dependencyKey) -or $seenDependencies.ContainsKey($dependencyKey)) {
+        throw "The release manifest has a missing, duplicate, or unsupported dependency tuple: $dependencyKey"
+    }
+    $seenDependencies[$dependencyKey] = $true
+    $path = Get-LocalArtifactPath ([string]$artifact.file)
     $file = Get-Item -LiteralPath $path
     $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-    $signature = Get-AuthenticodeSignature -LiteralPath $path
     if ($file.Length -ne [long]$artifact.size -or $hash -ne [string]$artifact.sha256 -or
-        [string]::IsNullOrWhiteSpace([string]$artifact.signerThumbprint) -or
-        $signature.Status -ne "Valid" -or -not $signature.SignerCertificate -or
-        $signature.SignerCertificate.Thumbprint -ne [string]$artifact.signerThumbprint) {
+        [string]$artifact.sha256 -notmatch '^[a-f0-9]{64}$' -or
+        [string]$artifact.signerThumbprint -notmatch '^[A-F0-9]{40}$') {
         throw "Release dependency verification failed for $($artifact.file)."
     }
+    Assert-PinnedDependencySignature -Path $path -ExpectedThumbprint ([string]$artifact.signerThumbprint)
 }
+if ($seenDependencies.Count -ne $expectedDependencies.Count) { throw 'The release manifest omits a required dependency architecture.' }
 
-$existingBundles = @($manifest.artifacts | Where-Object { $_.product -eq "OpticonBundle" })
+$existingBundles = @($manifest.artifacts | Where-Object {
+    $_.product -eq "OpticonBundle" -and (Test-ProductionArtifactTrust $_)
+})
 foreach ($role in @("ManagedOnly", "ControllerAndManaged")) {
     $published = @($existingBundles | Where-Object { $_.role -eq $role -and $_.architecture -eq "x64" })
     if ($published.Count -eq 0) { continue }
@@ -232,12 +582,34 @@ foreach ($path in @($buildRoot, $stageRoot)) {
 }
 
 $publishArguments = @(
-    "-c", "Release", "-r", $Runtime, "--self-contained", "true",
+    "-c", "Release", "-r", $Runtime, "--self-contained", "true", "--no-restore", "-t:Rebuild", "--nologo",
     "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true",
     "-p:EnableCompressionInSingleFile=true", "-p:DebugType=None", "-p:DebugSymbols=false",
-    "-p:EnableWindowsTargeting=true", "-p:RuntimeFrameworkVersion=8.0.29",
+    "-p:EnableWindowsTargeting=true",
     "-p:Version=$Version", "-p:InformationalVersion=$Version",
-    "-p:IncludeSourceRevisionInInformationalVersion=false"
+    "-p:IncludeSourceRevisionInInformationalVersion=false", "-p:ContinuousIntegrationBuild=true",
+    "-p:OpticonSigningProfile=Production",
+    "-p:OpticonSourceReleaseKeyId=$SourceReleaseCertificateThumbprint",
+    "-p:OpticonSourceReleaseCertificateBase64=$sourceReleaseCertificateBase64",
+    "-p:OpticonProductSignerThumbprint=$ProductCertificateThumbprint",
+    "-p:OpticonProductSigningCertificateBase64=$productSigningCertificateBase64",
+    "-p:DirectoryBuildPropsPath=$(Join-Path $repo 'Directory.Build.props')",
+    "-p:DirectoryBuildTargetsPath=$emptyTargets", "-p:MSBuildUserExtensionsPath=$userExtensions",
+    "-p:ImportUserLocationsByWildcardBeforeMicrosoftCommonProps=false",
+    "-p:ImportUserLocationsByWildcardAfterMicrosoftCommonProps=false",
+    "-p:ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets=false",
+    "-p:ImportUserLocationsByWildcardAfterMicrosoftCommonTargets=false",
+    "-p:ImportUserLocationsByWildcardBeforeMicrosoftCSharpTargets=false",
+    "-p:ImportUserLocationsByWildcardAfterMicrosoftCSharpTargets=false",
+    "-p:ImportByWildcardBeforeMicrosoftCommonProps=false",
+    "-p:ImportByWildcardAfterMicrosoftCommonProps=false",
+    "-p:ImportByWildcardBeforeMicrosoftCommonTargets=false",
+    "-p:ImportByWildcardAfterMicrosoftCommonTargets=false",
+    "-p:ImportByWildcardBeforeMicrosoftCSharpTargets=false",
+    "-p:ImportByWildcardAfterMicrosoftCSharpTargets=false",
+    "-p:ImportByWildcardBeforeMicrosoftCommonCrossTargetingTargets=false",
+    "-p:ImportByWildcardAfterMicrosoftCommonCrossTargetingTargets=false",
+    "-p:UseSharedCompilation=false", "-nodeReuse:false"
 )
 $executables = [ordered]@{
     Setup = "Taildesk.Setup.exe"
@@ -245,12 +617,21 @@ $executables = [ordered]@{
     Admin = "Opticon.exe"
     Cli = "opticon.exe"
     UpdateGuardian = "Taildesk.UpdateGuardian.exe"
+    RouteKeeper = "Taildesk.RouteKeeper.exe"
 }
 foreach ($component in $executables.Keys) {
     $project = Join-Path $repo "src\Taildesk.$component\Taildesk.$component.csproj"
     $output = Join-Path $buildRoot $component
-    & $dotnet publish $project @publishArguments -o $output
-    if ($LASTEXITCODE -ne 0) { throw "Publishing $component failed." }
+    $componentArtifacts = Join-Path $intermediateRoot $component
+    $trustArguments = @($publishArguments | Where-Object { $_ -like '-p:Opticon*' -or $_ -like '-p:DirectoryBuild*' -or
+            $_ -like '-p:MSBuildUserExtensionsPath*' -or $_ -like '-p:Import*' -or $_ -eq '-p:UseSharedCompilation=false' -or $_ -eq '-nodeReuse:false' })
+    Invoke-ExactDotNet -Arguments (@(
+        'restore', $project, '-r', $Runtime, '--configfile', $nugetConfig, '--packages', $packageCache,
+        '--no-cache', '--force', '--force-evaluate', '--disable-parallel',
+        '--artifacts-path', $componentArtifacts, '-p:EnableWindowsTargeting=true'
+    ) + $trustArguments)
+    Invoke-ExactDotNet -Arguments (@('publish', $project) + $publishArguments + @(
+        '--artifacts-path', $componentArtifacts, '-o', $output))
     if ($component -eq "Cli") {
         $publishedCli = Join-Path $output "Taildesk.OpticonCli.exe"
         if (-not (Test-Path -LiteralPath $publishedCli -PathType Leaf)) { throw "The Opticon CLI apphost was not published." }
@@ -270,12 +651,7 @@ foreach ($component in $executables.Keys) {
     if ($productVersion -ne $Version) {
         throw "$component reported product version '$productVersion' instead of release version '$Version'."
     }
-    $null = Set-AuthenticodeSignature -FilePath $executable -Certificate $certificate -HashAlgorithm SHA256
-    $signature = Get-AuthenticodeSignature -FilePath $executable
-    if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $CertificateThumbprint -or
-        $signature.Status -in @("NotSigned", "HashMismatch")) {
-        throw "Authenticode verification failed for $executable."
-    }
+    Invoke-ProductSigning -Path $executable
 }
 
 $bootstrapFile = "opticon-bootstrap-$Version.exe"
@@ -284,6 +660,10 @@ $bootstrapTemporary = "$bootstrapPath.new.exe"
 if (Test-Path -LiteralPath $bootstrapTemporary) { Remove-Item -LiteralPath $bootstrapTemporary -Force }
 Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $bootstrapTemporary
 $bootstrapInfo = Get-Item -LiteralPath $bootstrapTemporary
+if ($bootstrapInfo.Length -gt 128MB) {
+    Remove-Item -LiteralPath $bootstrapTemporary -Force
+    throw 'The signed source bootstrap exceeds the 128 MiB invitation/download safety cap.'
+}
 $bootstrapRecord = [pscustomobject]@{
     product = "OpticonBootstrap"
     version = $Version
@@ -291,7 +671,10 @@ $bootstrapRecord = [pscustomobject]@{
     file = $bootstrapFile
     size = $bootstrapInfo.Length
     sha256 = (Get-FileHash -LiteralPath $bootstrapTemporary -Algorithm SHA256).Hash.ToLowerInvariant()
-    signerThumbprint = $CertificateThumbprint.ToUpperInvariant()
+    signerThumbprint = $ProductCertificateThumbprint
+    signingProfile = 'Production'
+    sourceManifestKeyId = $SourceReleaseCertificateThumbprint
+    productSignerThumbprint = $ProductCertificateThumbprint
 }
 $existingBootstraps = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonBootstrap' -and $_.version -eq $Version })
 if ($existingBootstraps.Count -gt 1) { throw "The outer manifest declares bootstrap release $Version more than once." }
@@ -340,13 +723,8 @@ function Write-SignedReleaseManifest {
             $relativePath = $fullPath.Substring($stagePrefix.Length).Replace('\', '/')
             $signerThumbprint = ""
             if ($file.Extension.Equals('.exe', [StringComparison]::OrdinalIgnoreCase)) {
-                $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
-                if (-not $signature.SignerCertificate -or
-                    -not $signature.SignerCertificate.Thumbprint.Equals($CertificateThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
-                    $signature.Status -in @("NotSigned", "HashMismatch")) {
-                    throw "Release executable $relativePath is unsigned, altered, or signed by an unexpected certificate."
-                }
-                $signerThumbprint = $signature.SignerCertificate.Thumbprint.ToUpperInvariant()
+                Assert-ProductSignature -Path $file.FullName
+                $signerThumbprint = $ProductCertificateThumbprint
             }
             $files += [pscustomobject][ordered]@{
                 path = $relativePath
@@ -359,6 +737,9 @@ function Write-SignedReleaseManifest {
     $releaseManifest = [pscustomobject][ordered]@{
         schemaVersion = 1
         version = $Version
+        signingProfile = 'Production'
+        sourceReleaseKeyId = $SourceReleaseCertificateThumbprint
+        productSignerThumbprint = $ProductCertificateThumbprint
         role = $Role
         architecture = $Architecture
         updateProtocolVersion = 1
@@ -368,8 +749,8 @@ function Write-SignedReleaseManifest {
     $utf8 = New-Object Text.UTF8Encoding($false)
     $manifestBytes = $utf8.GetBytes(($releaseManifest | ConvertTo-Json -Depth 8))
     [IO.File]::WriteAllBytes((Join-Path $Stage "release-manifest.json"), $manifestBytes)
-    $rsa = Get-OpticonManifestSigningKey -Certificate $certificate
-    if ($null -eq $rsa) { throw "The pinned Opticon signing certificate has no RSA private key." }
+    $rsa = Get-OpticonManifestSigningKey -Certificate $sourceReleaseCertificate
+    if ($null -eq $rsa) { throw "The offline source-release signing certificate has no RSA private key." }
     try {
         $signatureBytes = $rsa.SignData(
             $manifestBytes,
@@ -401,6 +782,8 @@ foreach ($definition in $definitions) {
         Copy-Item -Path (Join-Path $buildRoot "Admin\*") -Destination (Join-Path $stage "Payload\Admin") -Recurse -Force
         New-Item -Path (Join-Path $stage "Payload\Admin\Cli") -ItemType Directory -Force | Out-Null
         Copy-Item -Path (Join-Path $buildRoot "Cli\*") -Destination (Join-Path $stage "Payload\Admin\Cli") -Recurse -Force
+        New-Item -Path (Join-Path $stage "Payload\Admin\Tools") -ItemType Directory -Force | Out-Null
+        Copy-Item -Path (Join-Path $buildRoot "RouteKeeper\*") -Destination (Join-Path $stage "Payload\Admin\Tools") -Recurse -Force
     }
     Write-SignedReleaseManifest -Stage $stage -Role $definition.Role -Architecture "x64" -IncludeAdmin $definition.IncludeAdmin
     $fileName = "opticon-bundle-$Version-$($definition.Suffix)-$Runtime.zip"
@@ -413,6 +796,8 @@ foreach ($definition in $definitions) {
         product = "OpticonBundle"; version = $Version; role = $definition.Role
         architecture = "x64"; file = $fileName; size = $file.Length
         sha256 = (Get-FileHash -LiteralPath $temporaryDestination -Algorithm SHA256).Hash.ToLowerInvariant()
+        signingProfile = 'Production'; sourceManifestKeyId = $SourceReleaseCertificateThumbprint
+        productSignerThumbprint = $ProductCertificateThumbprint
     }
     $sameRelease = @($existingBundles | Where-Object {
         $_.role -eq $record.role -and $_.architecture -eq $record.architecture -and $_.version -eq $record.version
@@ -433,12 +818,68 @@ foreach ($definition in $definitions) {
 # metadata can never enter the source release by accident.
 $sourceStage = Join-Path $stageRoot 'source'
 New-Item -Path $sourceStage -ItemType Directory -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $repo 'Directory.Build.props') -Destination (Join-Path $sourceStage 'Directory.Build.props')
+$sourceProps = [xml](Get-Content -Raw -LiteralPath (Join-Path $repo 'Directory.Build.props'))
+$sourcePropertyValues = [ordered]@{
+    Version = $Version
+    OpticonSigningProfile = 'Production'
+    OpticonSourceReleaseKeyId = $SourceReleaseCertificateThumbprint
+    OpticonSourceReleaseCertificateBase64 = $sourceReleaseCertificateBase64
+    OpticonProductSignerThumbprint = $ProductCertificateThumbprint
+    OpticonProductSigningCertificateBase64 = $productSigningCertificateBase64
+}
+foreach ($property in $sourcePropertyValues.GetEnumerator()) {
+    $node = $sourceProps.SelectSingleNode("/Project/PropertyGroup/$($property.Key)")
+    if ($null -eq $node) { throw "Directory.Build.props lacks required production property $($property.Key)." }
+    $node.RemoveAttribute('Condition')
+    $node.InnerText = [string]$property.Value
+}
+$propsSettings = [Xml.XmlWriterSettings]::new()
+$propsSettings.Encoding = [Text.UTF8Encoding]::new($false)
+$propsSettings.Indent = $true
+$propsWriter = [Xml.XmlWriter]::Create((Join-Path $sourceStage 'Directory.Build.props'), $propsSettings)
+try { $sourceProps.Save($propsWriter) } finally { $propsWriter.Dispose() }
 Copy-Item -LiteralPath (Join-Path $repo 'source-package\Directory.Build.targets') -Destination (Join-Path $sourceStage 'Directory.Build.targets')
-$sourceGlobalJson = [ordered]@{ sdk = [ordered]@{ version = '8.0.423'; rollForward = 'disable'; allowPrerelease = $false } }
+$sourceGlobalJson = [ordered]@{ sdk = [ordered]@{ version = '10.0.302'; rollForward = 'disable'; allowPrerelease = $false } }
 [IO.File]::WriteAllText((Join-Path $sourceStage 'global.json'), ($sourceGlobalJson | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath (Join-Path $repo 'source-package\Install-OpticonFromSource.ps1') -Destination (Join-Path $sourceStage 'Install-OpticonFromSource.ps1')
 Copy-Item -LiteralPath (Join-Path $repo 'source-package\NuGet.Config') -Destination (Join-Path $sourceStage 'NuGet.Config')
+$sourceRestoreTrustArguments = @($publishArguments | Where-Object {
+        $_ -like '-p:Opticon*' -or $_ -like '-p:DirectoryBuild*' -or
+        $_ -like '-p:MSBuildUserExtensionsPath*' -or $_ -like '-p:Import*' -or
+        $_ -eq '-p:UseSharedCompilation=false' -or $_ -eq '-nodeReuse:false'
+    })
+$sourceRestoreProject = Join-Path $repo 'src\Taildesk.Setup\Taildesk.Setup.csproj'
+foreach ($sourceRuntime in @('win-x64', 'win-arm64')) {
+    Invoke-ExactDotNet -Arguments (@(
+        'restore', $sourceRestoreProject, '-r', $sourceRuntime,
+        '--configfile', $nugetConfig, '--packages', $packageCache,
+        '--no-cache', '--force', '--force-evaluate', '--disable-parallel',
+        '--artifacts-path', (Join-Path $intermediateRoot "source-$sourceRuntime"),
+        '-p:SelfContained=false', '-p:EnableWindowsTargeting=true'
+    ) + $sourceRestoreTrustArguments)
+}
+$offlinePackageDirectory = Join-Path $sourceStage 'packages'
+New-Item -Path $offlinePackageDirectory -ItemType Directory | Out-Null
+$offlinePackages = @(
+    @('microsoft.aspnetcore.app.runtime.win-x64', '10.0.10'),
+    @('microsoft.netcore.app.runtime.win-x64', '10.0.10'),
+    @('microsoft.windowsdesktop.app.runtime.win-x64', '10.0.10'),
+    @('microsoft.aspnetcore.app.runtime.win-arm64', '10.0.10'),
+    @('microsoft.netcore.app.host.win-arm64', '10.0.10'),
+    @('microsoft.netcore.app.runtime.win-arm64', '10.0.10'),
+    @('microsoft.windowsdesktop.app.runtime.win-arm64', '10.0.10'),
+    @('microsoft.windows.sdk.net.ref', '10.0.19041.57')
+)
+foreach ($package in $offlinePackages) {
+    $packageId = $package[0]
+    $packageVersion = $package[1]
+    $packageFile = "$packageId.$packageVersion.nupkg"
+    $packagePath = Join-Path $packageCache "$packageId\$packageVersion\$packageFile"
+    if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+        throw "The authenticated source archive dependency is missing: $packageFile"
+    }
+    Copy-Item -LiteralPath $packagePath -Destination (Join-Path $offlinePackageDirectory $packageFile)
+}
 New-Item -Path (Join-Path $sourceStage 'assets') -ItemType Directory -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'assets\opticon.ico') -Destination (Join-Path $sourceStage 'assets\opticon.ico')
 $sourceProjects = @('Taildesk.Shared', 'Taildesk.Setup', 'Taildesk.Agent', 'Taildesk.UpdateGuardian', 'Taildesk.Admin', 'Taildesk.Cli', 'Taildesk.RouteKeeper')
@@ -470,8 +911,13 @@ foreach ($file in Get-ChildItem -LiteralPath $sourceStage -File -Recurse | Sort-
 $sourceManifest = [pscustomobject][ordered]@{
     schemaVersion = 1
     version = $Version
-    sdkVersion = '8.0.423'
-    runtimeVersion = '8.0.29'
+    signingProfile = 'Production'
+    sourceReleaseKeyId = $SourceReleaseCertificateThumbprint
+    sourceReleaseCertificateBase64 = $sourceReleaseCertificateBase64
+    productSignerThumbprint = $ProductCertificateThumbprint
+    productSigningCertificateBase64 = $productSigningCertificateBase64
+    sdkVersion = '10.0.302'
+    runtimeVersion = '10.0.10'
     targetRuntimes = @('win-x64', 'win-arm64')
     files = $sourceFiles
 }
@@ -480,7 +926,7 @@ $sourceManifestBytes = $utf8.GetBytes(($sourceManifest | ConvertTo-Json -Depth 8
 $sourceManifestPath = Join-Path $sourceStage 'source-manifest.json'
 [IO.File]::WriteAllBytes($sourceManifestPath, $sourceManifestBytes)
 $sourceManifestHash = (Get-FileHash -LiteralPath $sourceManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$sourceRsa = Get-OpticonManifestSigningKey -Certificate $certificate
+$sourceRsa = Get-OpticonManifestSigningKey -Certificate $sourceReleaseCertificate
 try {
     $sourceSignature = $sourceRsa.SignData($sourceManifestBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pss)
 } finally { $sourceRsa.Dispose() }
@@ -512,11 +958,13 @@ $sourceRecord = [pscustomobject][ordered]@{
     file = $sourceFileName
     size = $sourceInfo.Length
     sha256 = (Get-FileHash -LiteralPath $sourceTemporary -Algorithm SHA256).Hash.ToLowerInvariant()
-    sdkVersion = '8.0.423'
-    runtimeVersion = '8.0.29'
+    sdkVersion = '10.0.302'
+    runtimeVersion = '10.0.10'
     targetRuntimes = @('win-x64', 'win-arm64')
     sourceManifestSha256 = $sourceManifestHash
-    sourceManifestKeyId = $CertificateThumbprint.ToUpperInvariant()
+    sourceManifestKeyId = $SourceReleaseCertificateThumbprint
+    signingProfile = 'Production'
+    productSignerThumbprint = $ProductCertificateThumbprint
 }
 $existingSources = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonSource' -and $_.version -eq $Version })
 if ($existingSources.Count -gt 1) { throw "The outer manifest declares source release $Version more than once." }
@@ -559,20 +1007,25 @@ foreach ($group in $groups) {
     }
 }
 foreach ($artifact in $retained) {
-    $path = Join-Path $artifactDirectory ([string]$artifact.file)
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Retained rollback bundle $($artifact.file) is missing." }
+    $path = Get-LocalArtifactPath ([string]$artifact.file)
     $file = Get-Item -LiteralPath $path
     $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     if ($file.Length -ne [long]$artifact.size -or -not $hash.Equals([string]$artifact.sha256, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Retained rollback bundle verification failed for $($artifact.file)."
     }
 }
-$retainedBootstraps = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonBootstrap' -and $_.version -ne $Version })
-$retainedSources = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonSource' -and $_.version -ne $Version })
+$retainedBootstraps = @($manifest.artifacts | Where-Object {
+    $_.product -eq 'OpticonBootstrap' -and $_.version -ne $Version -and
+    (Test-ProductionArtifactTrust $_) -and
+    (Get-ArtifactString $_ 'signerThumbprint') -eq $ProductCertificateThumbprint
+})
+$retainedSources = @($manifest.artifacts | Where-Object {
+    $_.product -eq 'OpticonSource' -and $_.version -ne $Version -and
+    (Test-ProductionArtifactTrust $_)
+})
 foreach ($artifact in @($retainedBootstraps) + @($retainedSources)) {
     if ([string]::IsNullOrWhiteSpace([string]$artifact.downloadUrl)) {
-        $path = Join-Path $artifactDirectory ([string]$artifact.file)
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Retained invitation artifact $($artifact.file) is missing." }
+        $path = Get-LocalArtifactPath ([string]$artifact.file)
         $file = Get-Item -LiteralPath $path
         $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         if ($file.Length -ne [long]$artifact.size -or -not $hash.Equals([string]$artifact.sha256, [StringComparison]::OrdinalIgnoreCase)) {
@@ -586,5 +1039,8 @@ $json = $manifest | ConvertTo-Json -Depth 8
 $retained | Format-Table role, version, file, size, sha256 -AutoSize
 Write-Host "Run .\scripts\Publish-OpticonBundles.ps1 after deploying the gateway manifest." -ForegroundColor Green
 } finally {
+    if (Get-Variable -Name sourceReleaseCertificate -ErrorAction SilentlyContinue) { $sourceReleaseCertificate.Dispose() }
+    if (Get-Variable -Name productCertificate -ErrorAction SilentlyContinue) { $productCertificate.Dispose() }
     $packageBuildLock.Dispose()
+    if (Test-Path -LiteralPath $sdkAnchor) { Remove-Item -LiteralPath $sdkAnchor -Recurse -Force -ErrorAction SilentlyContinue }
 }

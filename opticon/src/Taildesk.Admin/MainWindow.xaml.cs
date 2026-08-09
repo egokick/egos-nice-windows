@@ -441,7 +441,7 @@ public partial class MainWindow : Window
 
     private async void InviteGrid_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if ((sender as DataGrid)?.SelectedItem is not InviteRecord invite) return;
+        if ((sender as System.Windows.Controls.DataGrid)?.SelectedItem is not InviteRecord invite) return;
         try
         {
             if (!string.IsNullOrWhiteSpace(invite.HostedUrl)) await CopyInviteUrlAsync(invite);
@@ -650,7 +650,13 @@ public partial class MainWindow : Window
 
     private static void RevealFile(string path)
     {
-        var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
+        var windows = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        var explorer = Path.Combine(windows, "explorer.exe");
+        if (!File.Exists(explorer)
+            || (File.GetAttributes(windows) & FileAttributes.ReparsePoint) != 0
+            || (File.GetAttributes(explorer) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new InvalidDataException("The fixed Windows Explorer executable is unavailable or unsafe.");
+        var start = new ProcessStartInfo(explorer) { UseShellExecute = false };
         start.ArgumentList.Add("/select,");
         start.ArgumentList.Add(path);
         Process.Start(start);

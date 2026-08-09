@@ -39,7 +39,7 @@ if ($SourceVersion -notmatch '^[1-9][0-9]*\.[0-9]+\.[0-9]+$' -or
     $SourceManifestKeyId -eq 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
     $ProductSignerThumbprint -eq 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
     $ProductSignerThumbprint -eq $SourceManifestKeyId -or
-    $SdkVersion -ne '8.0.423' -or $RuntimeVersion -ne '8.0.29' -or
+    $SdkVersion -ne '10.0.302' -or $RuntimeVersion -ne '10.0.10' -or
     $BootstrapVersion -ne $SourceVersion -or $BootstrapFile -ne "opticon-bootstrap-$SourceVersion.exe" -or
     $BootstrapSize -le 0 -or $BootstrapSha256 -notmatch '^[a-f0-9]{64}$' -or
     $BootstrapSignerThumbprint -notmatch '^[A-Fa-f0-9]{40}$') {
@@ -138,8 +138,8 @@ try {
     $publishCommon = @(
         'publish', '-c', 'Release', '-r', $TargetRuntime, '--self-contained', 'false', '--no-restore',
         '-p:PublishSingleFile=true', '-p:IncludeNativeLibrariesForSelfExtract=true',
-        '-p:EnableCompressionInSingleFile=true', '-p:DebugType=None', '-p:DebugSymbols=false',
-        '-p:EnableWindowsTargeting=true', "-p:RuntimeFrameworkVersion=$RuntimeVersion",
+        '-p:DebugType=None', '-p:DebugSymbols=false',
+        '-p:EnableWindowsTargeting=true',
         "-p:Version=$SourceVersion", "-p:InformationalVersion=$SourceVersion", '-p:RollForward=Disable',
         '-p:IncludeSourceRevisionInInformationalVersion=false'
     ) + $signingProperties + $msbuildIsolation
@@ -149,7 +149,7 @@ try {
         New-Item -Path $Destination -ItemType Directory -Force | Out-Null
         $projectPath = Join-Path $SourceRoot $Project
         & $DotnetPath restore $projectPath '-r' $TargetRuntime '--configfile' (Join-Path $SourceRoot 'NuGet.Config') `
-            '-p:EnableWindowsTargeting=true' "-p:RuntimeFrameworkVersion=$RuntimeVersion" @signingProperties @msbuildIsolation
+            '-p:EnableWindowsTargeting=true' @signingProperties @msbuildIsolation
         if ($LASTEXITCODE -ne 0) { throw "Offline local source restore failed for $Project." }
         & $DotnetPath @publishCommon $projectPath '-o' $Destination
         if ($LASTEXITCODE -ne 0) { throw "Local source publish failed for $Project." }

@@ -1,5 +1,7 @@
 using System.Net.Http.Json;
 using System.Reflection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Taildesk.Shared;
 
 namespace Taildesk.Agent;

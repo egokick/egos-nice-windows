@@ -30,7 +30,7 @@ public static class SourceReleaseSigning
     private static X509Certificate2 LoadPinnedCertificate()
     {
         if (!BuildSigningTrust.IsProduction && string.IsNullOrWhiteSpace(BuildSigningTrust.SourceReleaseCertificateBase64))
-            return new X509Certificate2(InvitationSigning.PinnedCertificate.RawData);
+            return X509CertificateLoader.LoadCertificate(InvitationSigning.PinnedCertificate.RawData);
 
         var certificate = LoadPublicCertificate(BuildSigningTrust.SourceReleaseCertificateBase64, "source-release");
         var actual = NormalizeThumbprint(certificate.Thumbprint);
@@ -47,7 +47,7 @@ public static class SourceReleaseSigning
             throw new InvalidOperationException($"The embedded Opticon {purpose} public certificate is missing.");
         try
         {
-            var certificate = new X509Certificate2(Convert.FromBase64String(value));
+            var certificate = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(value));
             if (certificate.HasPrivateKey)
             {
                 certificate.Dispose();

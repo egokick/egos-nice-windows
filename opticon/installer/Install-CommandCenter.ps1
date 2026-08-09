@@ -16,6 +16,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:InvitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
 $script:RouteTaskName = 'Taildesk Fly Route'
+$script:UiTaskName = 'Opticon Command Center'
 $script:ControllerIPv4 = '213.188.217.227'
 $script:IsDevelopmentBuild = $DevelopmentOnly -eq '1'
 $ExpectedCodeSigningThumbprint = $ExpectedCodeSigningThumbprint.ToUpperInvariant()
@@ -848,17 +849,7 @@ function Configure-PrivateRustDeskController {
 
 function New-Shortcut {
     param([string]$Target, [string]$Path)
-    $directory = Split-Path $Path
-    if (-not (Test-Path -LiteralPath $directory)) {
-        New-Item -Path $directory -ItemType Directory -Force | Out-Null
-    }
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($Path)
-    $shortcut.TargetPath = $Target
-    $shortcut.WorkingDirectory = Split-Path $Target
-    $shortcut.Description = 'Opticon command center'
-    $shortcut.IconLocation = "$Target,0"
-    $shortcut.Save()
+    throw 'Elevated user-profile shortcut creation is intentionally disabled; Opticon uses a least-privilege interactive task.'
 }
 
 function Expand-InteractivePath {
@@ -933,6 +924,13 @@ function Resolve-InteractiveUserProfile {
         $sid = $account.Translate([System.Security.Principal.SecurityIdentifier]).Value
     }
 
+    if ($sid -notmatch '^S-1-(?:5|12)-(?:\d+-){1,14}\d+$') {
+        throw 'The signed-in interactive Windows user SID is invalid.'
+    }
+    return [PSCustomObject]@{ AccountName = $accountName; Sid = $sid }
+
+    <# Legacy profile discovery is deliberately unreachable. Elevated installation
+       no longer reads user-controlled Shell Folders or writes to a user profile. #>
     $profileKeyPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
     $profileValue = (Get-ItemProperty -LiteralPath $profileKeyPath -ErrorAction Stop).ProfileImagePath
     if ([string]::IsNullOrWhiteSpace($profileValue)) {
@@ -1313,6 +1311,91 @@ function Start-ExactRouteKeeperTask {
     if ($LASTEXITCODE -ne 0) { throw 'Windows could not start the exact RouteKeeper task.' }
 }
 
+function Get-UiTaskXml {
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    $output = @(& $schtasks /Query /TN $script:UiTaskName /XML 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $xml = $output -join "`r`n"
+    if ($xml.Length -le 0 -or $xml.Length -gt 1048576) { throw 'The command-center task XML has an invalid size.' }
+    return $xml
+}
+
+function Invoke-RegisterUiTaskXml {
+    param([Parameter(Mandatory)][string]$Xml)
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    $path = Write-ProtectedTaskXml $Xml
+    try {
+        & $schtasks /Create /TN $script:UiTaskName /XML $path /F | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Windows refused the protected command-center task XML.' }
+    } finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+}
+
+function New-UiTaskXml {
+    param([Parameter(Mandatory)][string]$Executable,[Parameter(Mandatory)][string]$Sid)
+    if ($Sid -notmatch '^S-1-(?:5|12)-(?:\d+-){1,14}\d+$') { throw 'The interactive user SID is invalid.' }
+    $command = [Security.SecurityElement]::Escape([IO.Path]::GetFullPath($Executable))
+    $user = [Security.SecurityElement]::Escape($Sid)
+    return @"
+<?xml version="1.0" encoding="utf-8"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Runs the signed Opticon command center for its selected interactive user.</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>$user</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>$user</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
+  <Actions Context="Author"><Exec><Command>$command</Command></Exec></Actions>
+</Task>
+"@
+}
+
+function Assert-ExactUiTask {
+    param([Parameter(Mandatory)][string]$Executable,[Parameter(Mandatory)][string]$Sid)
+    $raw = Get-UiTaskXml
+    if ([string]::IsNullOrWhiteSpace($raw)) { throw 'The command-center task is missing.' }
+    [xml]$xml = $raw
+    $ns = New-Object Xml.XmlNamespaceManager($xml.NameTable)
+    $ns.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
+    function UiNode([string]$xpath) { $node=$xml.SelectSingleNode($xpath,$ns); if($null -eq $node){return ''}; return [string]$node.InnerText }
+    $actions=$xml.SelectNodes('/t:Task/t:Actions/*',$ns)
+    $principals=$xml.SelectNodes('/t:Task/t:Principals/t:Principal',$ns)
+    $triggers=$xml.SelectNodes('/t:Task/t:Triggers/*',$ns)
+    if($actions.Count -ne 1 -or $actions[0].LocalName -cne 'Exec' -or $principals.Count -ne 1 -or
+       $triggers.Count -ne 1 -or $triggers[0].LocalName -cne 'LogonTrigger' -or
+       -not (UiNode '/t:Task/t:Actions/t:Exec/t:Command').Equals([IO.Path]::GetFullPath($Executable),[StringComparison]::OrdinalIgnoreCase) -or
+       -not [string]::IsNullOrWhiteSpace((UiNode '/t:Task/t:Actions/t:Exec/t:Arguments')) -or
+       (UiNode '/t:Task/t:Principals/t:Principal/t:UserId') -cne $Sid -or
+       (UiNode '/t:Task/t:Principals/t:Principal/t:LogonType') -cne 'InteractiveToken' -or
+       (UiNode '/t:Task/t:Principals/t:Principal/t:RunLevel') -cne 'LeastPrivilege' -or
+       (UiNode '/t:Task/t:Triggers/t:LogonTrigger/t:UserId') -cne $Sid -or
+       (UiNode '/t:Task/t:Settings/t:MultipleInstancesPolicy') -cne 'IgnoreNew' -or
+       (UiNode '/t:Task/t:Settings/t:DisallowStartIfOnBatteries') -cne 'false' -or
+       (UiNode '/t:Task/t:Settings/t:StopIfGoingOnBatteries') -cne 'false' -or
+       (UiNode '/t:Task/t:Settings/t:StartWhenAvailable') -cne 'true' -or
+       (UiNode '/t:Task/t:Settings/t:ExecutionTimeLimit') -cne 'PT0S') { throw 'The command-center task does not match the exact least-privilege contract.' }
+}
+
+function Register-ExactUiTask {
+    param([Parameter(Mandatory)][string]$Executable,[Parameter(Mandatory)][string]$Sid)
+    Assert-PinnedOpticonExecutable $Executable
+    Invoke-RegisterUiTaskXml (New-UiTaskXml -Executable $Executable -Sid $Sid)
+    Assert-ExactUiTask -Executable $Executable -Sid $Sid
+}
+
+function Restore-UiTaskSnapshot {
+    param([AllowNull()][string]$Snapshot)
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    if([string]::IsNullOrWhiteSpace($Snapshot)){
+        & $schtasks /Delete /TN $script:UiTaskName /F 2>$null | Out-Null
+    } else { Invoke-RegisterUiTaskXml $Snapshot }
+}
+
+function Start-ExactUiTask {
+    param([Parameter(Mandatory)][string]$Executable,[Parameter(Mandatory)][string]$Sid)
+    Assert-ExactUiTask -Executable $Executable -Sid $Sid
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    & $schtasks /Run /TN $script:UiTaskName | Out-Null
+    if($LASTEXITCODE -ne 0){throw 'Windows could not start the least-privilege command-center task.'}
+}
+
 function Test-ExactOpenSshClient {
     $openSshDirectory = Join-Path $env:WINDIR 'System32\OpenSSH'
     $ssh = Join-Path $openSshDirectory 'ssh.exe'
@@ -1389,9 +1472,11 @@ Ensure-OpenSshClientCapability
 
 Write-Host 'Installing Opticon command center...' -ForegroundColor Cyan
 Write-Host "Installing for signed-in user $($interactiveProfile.AccountName)."
-$tailscale = Install-Tailscale
-$rustDesk = Install-RustDesk
-Configure-PrivateRustDeskController $rustDesk
+$tailscale = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+if (-not (Test-Path -LiteralPath $tailscale -PathType Leaf)) {
+    throw 'This machine is not enrolled in the Opticon mesh. Install the command center through a source-build invitation; this elevated package will not open a browser or choose a control server.'
+}
+Assert-FixedVendorExecutable -Path $tailscale -Artifact (Get-PinnedArtifact -Name 'Tailscale')
 
 $statusText = (& $tailscale status --json 2>$null) -join "`n"
 $running = $false
@@ -1402,8 +1487,7 @@ if ($statusText) {
     } catch { $running = $false }
 }
 if (-not $running) {
-    Write-Host 'A browser window will open so you can sign this laptop into Tailscale.' -ForegroundColor Yellow
-    & $tailscale login
+    throw 'The pinned Tailscale client is not already connected to the Opticon mesh. Use a source-build invitation; elevated browser login is intentionally disabled.'
 }
 
 # Validate every fallible input we can before swapping the controller payload.
@@ -1413,60 +1497,63 @@ $ip = $ipValue.Trim()
 if ($ip -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.') {
     throw "Tailscale returned an address outside 100.64.0.0/10: $ip"
 }
-$routeTaskInstaller = Join-Path $PSScriptRoot 'Tools\Install-TaildeskFlyRouteTask.ps1'
-if (-not (Test-Path -LiteralPath $routeTaskInstaller -PathType Leaf)) {
-    throw 'The Opticon roaming-route task installer is missing from the extracted package.'
+$profiles = @(Get-NetFirewallProfile)
+if($profiles.Count -ne 3 -or @($profiles | Where-Object { -not $_.Enabled -or $_.DefaultInboundAction.ToString() -ne 'Block' }).Count -ne 0){
+    throw 'All Windows Firewall profiles must be enabled with default inbound blocking before Opticon installs remote access.'
 }
+$netsh = Join-Path ([Environment]::SystemDirectory) 'netsh.exe'
+$expectedRustDesk = Join-Path $env:ProgramFiles 'RustDesk\rustdesk.exe'
+& $netsh advfirewall firewall delete rule 'name=all' 'dir=in' "program=$expectedRustDesk" | Out-Null
+& $netsh advfirewall firewall add rule 'name=RustDesk Direct (Tailscale only)' 'dir=in' 'action=allow' 'protocol=TCP' 'localport=21118' "localip=$ip" 'remoteip=100.64.0.0/10' "program=$expectedRustDesk" 'profile=any' 'enable=yes' | Out-Null
+if($LASTEXITCODE -ne 0){throw 'Windows could not pre-isolate RustDesk before installation.'}
+$rustDesk = Install-RustDesk
+Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
+Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue | Set-Service -StartupType Disabled
+Configure-PrivateRustDeskController $rustDesk
+& $netsh advfirewall firewall add rule 'name=RustDesk Direct (Tailscale only)' 'dir=in' 'action=allow' 'protocol=TCP' 'localport=21118' "localip=$ip" 'remoteip=100.64.0.0/10' "program=$rustDesk" 'profile=any' 'enable=yes' | Out-Null
+if($LASTEXITCODE -ne 0){throw 'Windows could not retain the exact private RustDesk allow rule.'}
+Get-Service -Name 'RustDesk' -ErrorAction Stop | Set-Service -StartupType Automatic
+Get-Service -Name 'RustDesk' -ErrorAction Stop | Start-Service
 # Network setup is a verified prerequisite before the directory swap. A
 # failure here cannot activate a new controller payload.
 $deleteRuleArguments = @('advfirewall', 'firewall', 'delete', 'rule', 'name=Opticon Coordinator (Tailscale only)')
-& netsh.exe @deleteRuleArguments | Out-Null
+& $netsh @deleteRuleArguments | Out-Null
 $deleteLegacyRuleArguments = @('advfirewall', 'firewall', 'delete', 'rule', 'name=Taildesk Coordinator (Tailscale only)')
-& netsh.exe @deleteLegacyRuleArguments | Out-Null
+& $netsh @deleteLegacyRuleArguments | Out-Null
 $addRuleArguments = @(
     'advfirewall', 'firewall', 'add', 'rule',
     'name=Opticon Coordinator (Tailscale only)', 'dir=in', 'action=allow',
     'protocol=TCP', 'localport=45830', "localip=$ip", 'remoteip=100.64.0.0/10',
     'profile=any', 'enable=yes'
 )
-& netsh.exe @addRuleArguments | Out-Null
+& $netsh @addRuleArguments | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Windows could not create the Tailscale-only coordinator firewall rule.' }
-& $routeTaskInstaller -ControllerIPv4 '213.188.217.227' | Out-Null
 }
 
 $admin = Join-Path $InstallDirectory 'Opticon.exe'
-$cliDirectory = Join-Path $InstallDirectory 'Cli'
-$desktopLink = Join-Path $interactiveProfile.Desktop 'Opticon.lnk'
-$startupLink = Join-Path $interactiveProfile.Startup 'Opticon.lnk'
-$startMenuLink = Join-Path $interactiveProfile.Programs 'Opticon.lnk'
-$legacyLinks = @(
-    (Join-Path $interactiveProfile.Desktop 'Taildesk.lnk'),
-    (Join-Path $interactiveProfile.Startup 'Taildesk.lnk'),
-    (Join-Path $interactiveProfile.Programs 'Taildesk.lnk')
-)
-$configurationSnapshot = Get-ControllerConfigurationSnapshot -InteractiveProfile $interactiveProfile
+$routeTaskSnapshot = Get-RouteTaskXml
+$uiTaskSnapshot = Get-UiTaskXml
 try {
     Install-OpticonPayloadTransaction -Source $source -Destination $InstallDirectory -ConfigureActivatedPayload {
-
-        foreach ($legacyLink in $legacyLinks) { Remove-Item -LiteralPath $legacyLink -Force -ErrorAction SilentlyContinue }
-        New-Shortcut $admin $desktopLink
-        New-Shortcut $admin $startupLink
-        New-Shortcut $admin $startMenuLink
-        Add-InteractiveUserPathEntry -Sid $interactiveProfile.Sid -Directory $cliDirectory
+        Register-ExactRouteKeeperTask
+        Register-ExactUiTask -Executable $admin -Sid $interactiveProfile.Sid
     }
 } catch {
     $installFailure = $_
     try {
-        Restore-ControllerConfigurationSnapshot -Sid $interactiveProfile.Sid -Snapshot $configurationSnapshot
+        Restore-RouteTaskSnapshot -Snapshot $routeTaskSnapshot
+        Restore-UiTaskSnapshot -Snapshot $uiTaskSnapshot
     } catch {
-        throw "Opticon installation failed and its user configuration rollback also failed. Install error: $($installFailure.Exception.Message). Configuration rollback error: $($_.Exception.Message)"
+        throw "Opticon installation failed and its scheduled-task rollback also failed. Install error: $($installFailure.Exception.Message). Task rollback error: $($_.Exception.Message)"
     }
     throw $installFailure
 }
 
+Start-ExactRouteKeeperTask
+Start-ExactUiTask -Executable $admin -Sid $interactiveProfile.Sid
 Write-Host "Installed for $($interactiveProfile.AccountName)." -ForegroundColor Green
-Write-Host 'Close this elevated installer, then open Opticon from that user''s desktop shortcut.' -ForegroundColor Green
-Write-Host 'The command center starts at sign-in and remains available while that user stays signed in; locking the screen is fine.' -ForegroundColor Yellow
+Write-Host 'The signed command center has been started through its least-privilege interactive task.' -ForegroundColor Green
+Write-Host 'It starts again at sign-in and remains available while that user stays signed in; locking the screen is fine.' -ForegroundColor Yellow
 } finally {
     $installLock.Dispose()
 }
