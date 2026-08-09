@@ -246,6 +246,14 @@ function Read-ZipEntryBounded {
     } finally { $memory.Dispose(); $input.Dispose() }
 }
 
+function Test-CompositeSha256Checksum {
+    param([Parameter(Mandatory)][string]$Value)
+    if ($Value -notmatch '^(?<digest>[A-Za-z0-9+/]{43}=)-(?<parts>[1-9][0-9]*)$' -or [int]$Matches.parts -lt 2) {
+        return $false
+    }
+    try { return [Convert]::FromBase64String($Matches.digest).Length -eq 32 } catch { return $false }
+}
+
 function Get-NextReleaseVersion {
     $listResult = Invoke-AwsCli -Arguments @('s3api', 'list-objects-v2', '--bucket', $bucket,
         '--prefix', 'opticon/releases/', '--query', 'Contents[].Key', '--output', 'json')
@@ -709,7 +717,7 @@ foreach ($bundle in @($allOpticonArtifacts | Where-Object { $_.product -eq 'Opti
 $fullStreamFiles = @($releaseArtifacts | ForEach-Object { [string]$_.file })
 
 $temporaryConfig = Join-Path $script:AwsScratchDirectory 'aws.config'
-@("[default]", "s3 =", "    max_concurrent_requests = 20", "    multipart_threshold = 64MB", "    multipart_chunksize = 16MB") | Set-Content -LiteralPath $temporaryConfig -Encoding ascii
+@("[default]", "s3 =", "    max_concurrent_requests = 20", "    multipart_threshold = 5GB", "    multipart_chunksize = 64MB") | Set-Content -LiteralPath $temporaryConfig -Encoding ascii
 $previousConfig = $script:AwsConfigFile
 $script:AwsConfigFile = $temporaryConfig
 try {
@@ -738,9 +746,12 @@ try {
             if ($headResult.ExitCode -ne 0) { throw "S3 head-object verification failed: $($headResult.Error.Trim())" }
             $head = $headResult.Output | ConvertFrom-Json
         }
+        $directChecksum = ([string]$head.ChecksumSHA256).Equals($expectedChecksum, [StringComparison]::Ordinal)
+        $migratedCompositeChecksum = $objectExists -and [string]$head.ChecksumType -eq 'COMPOSITE' -and
+            (Test-CompositeSha256Checksum ([string]$head.ChecksumSHA256))
         if ($head.ContentLength -ne $info.Length -or
             -not ([string]$head.Metadata.sha256).Equals($hash, [StringComparison]::OrdinalIgnoreCase) -or
-            -not ([string]$head.ChecksumSHA256).Equals($expectedChecksum, [StringComparison]::Ordinal) -or
+            (-not $directChecksum -and -not $migratedCompositeChecksum) -or
             $head.ContentType -ne $contentType -or $head.CacheControl -ne "public, max-age=31536000, immutable" -or
             $head.ServerSideEncryption -ne "AES256") {
             if ($objectExists) { throw "Refusing to overwrite immutable release object s3://$bucket/$key because it does not match the local release." }
