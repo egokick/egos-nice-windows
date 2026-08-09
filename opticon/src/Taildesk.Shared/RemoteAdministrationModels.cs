@@ -30,6 +30,14 @@ public static class RemoteAdministrationProtocol
         var bytes = address.GetAddressBytes();
         return bytes[0] == 100 && bytes[1] is >= 64 and <= 127;
     }
+
+    public static bool IsSshLeaseWithinRequestedLifetime(
+        DateTimeOffset createdAt,
+        DateTimeOffset expiresAt,
+        TimeSpan requestedLifetime) =>
+        createdAt != default
+        && expiresAt > createdAt
+        && expiresAt - createdAt <= requestedLifetime;
 }
 
 public sealed class SshAdminAttestation
@@ -49,6 +57,10 @@ public sealed class SshAdminAttestation
 public sealed class SshAccessRequest
 {
     public string PublicKey { get; set; } = string.Empty;
+    // New Agents use a duration so provisioning latency and clock skew cannot
+    // extend or invalidate the requested lease. ExpiresAt remains populated by
+    // new clients for compatibility with installed Agents that predate this field.
+    public int? RequestedLifetimeSeconds { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
 }
 
@@ -58,6 +70,9 @@ public sealed class SshAccessResponse
     public string UserName { get; set; } = RemoteAdministrationProtocol.SshAccountName;
     public int Port { get; set; } = RemoteAdministrationProtocol.SshPort;
     public string Host { get; set; } = string.Empty;
+    // Null on older Agents. New clients validate the target-relative interval
+    // instead of comparing the target's wall clock with the command center.
+    public DateTimeOffset? CreatedAt { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public string HostPublicKey { get; set; } = string.Empty;
     public string SystemRoot { get; set; } = string.Empty;

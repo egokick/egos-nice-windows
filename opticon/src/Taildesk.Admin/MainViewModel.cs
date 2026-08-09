@@ -421,10 +421,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 var response = await _agents.OpenSshAsync(device, token, new SshAccessRequest
                 {
                     PublicKey = publicKey,
+                    RequestedLifetimeSeconds = checked((int)lifetime.TotalSeconds),
                     ExpiresAt = requestedAt.Add(lifetime)
                 }, innerCancellation);
-                if (response.ExpiresAt > requestedAt.Add(lifetime).AddSeconds(10))
-                    throw new InvalidDataException("The target granted a longer SSH lease than requested.");
                 return response;
             },
             (sessionId, innerCancellation) => _agents.RevokeSshAsync(device, token, sessionId, innerCancellation),

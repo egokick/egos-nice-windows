@@ -703,10 +703,21 @@ public static class SshSessionLauncher
         }
         if (grant.Port != DedicatedPort)
             throw new InvalidDataException($"Opticon SSH must use dedicated port {DedicatedPort}.");
-        var now = DateTimeOffset.UtcNow;
-        if (grant.ExpiresAt <= now
-            || grant.ExpiresAt > now.Add(requestedLifetime).AddMinutes(1))
-            throw new InvalidDataException("The target returned an SSH lease longer than requested or already expired.");
+        if (grant.CreatedAt is DateTimeOffset createdAt)
+        {
+            if (!RemoteAdministrationProtocol.IsSshLeaseWithinRequestedLifetime(
+                    createdAt, grant.ExpiresAt, requestedLifetime))
+                throw new InvalidDataException("The target returned an SSH lease longer than requested or already expired.");
+        }
+        else
+        {
+            // Compatibility with Agents that predate target-relative lease
+            // durations. Their response contains only the legacy absolute expiry.
+            var now = DateTimeOffset.UtcNow;
+            if (grant.ExpiresAt <= now
+                || grant.ExpiresAt > now.Add(requestedLifetime).AddMinutes(1))
+                throw new InvalidDataException("The target returned an SSH lease longer than requested or already expired.");
+        }
         if (string.IsNullOrWhiteSpace(grant.SessionId) || grant.SessionId.Length > 128
             || grant.SessionId.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
             throw new InvalidDataException("The target returned an invalid SSH session identifier.");

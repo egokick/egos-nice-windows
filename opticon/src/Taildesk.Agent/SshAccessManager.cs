@@ -223,6 +223,7 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
                 Port = DedicatedPort,
                 UserName = AccountName,
                 HostPublicKey = await ReadHostPublicKeyAsync(cancellationToken),
+                CreatedAt = addedLease.CreatedAt,
                 ExpiresAt = addedLease.ExpiresAt,
                 SystemRoot = GetAutomationSystemRoot()
             };

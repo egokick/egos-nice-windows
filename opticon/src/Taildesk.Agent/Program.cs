@@ -337,9 +337,11 @@ app.MapPost("/api/v1/ssh/access", async (
 {
     var caller = context.Connection.RemoteIpAddress
                  ?? throw new UnauthorizedAccessException("The SSH caller address is unavailable.");
-    var lifetime = request.ExpiresAt - DateTimeOffset.UtcNow;
+    var lifetime = request.RequestedLifetimeSeconds is int requestedLifetimeSeconds
+        ? TimeSpan.FromSeconds(requestedLifetimeSeconds)
+        : request.ExpiresAt - DateTimeOffset.UtcNow;
     if (lifetime <= TimeSpan.Zero || lifetime > RemoteAdministrationProtocol.MaximumSshSession)
-        throw new ArgumentOutOfRangeException(nameof(request.ExpiresAt), "The SSH lease expiry is outside the allowed window.");
+        throw new ArgumentOutOfRangeException(nameof(request), "The SSH lease lifetime is outside the allowed window.");
     var grant = await ssh.ProvisionAsync(caller, request.PublicKey, lifetime, cancellationToken);
     return Results.Ok(new SshAccessResponse
     {
@@ -347,6 +349,7 @@ app.MapPost("/api/v1/ssh/access", async (
         UserName = grant.UserName,
         Port = grant.Port,
         Host = grant.Host,
+        CreatedAt = grant.CreatedAt,
         ExpiresAt = grant.ExpiresAt,
         HostPublicKey = grant.HostPublicKey,
         SystemRoot = grant.SystemRoot

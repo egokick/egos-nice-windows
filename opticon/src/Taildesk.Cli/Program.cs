@@ -333,10 +333,9 @@ internal sealed class CliApplication
                 var grant = await _agents.OpenSshAsync(device, token, new SshAccessRequest
                 {
                     PublicKey = publicKey,
+                    RequestedLifetimeSeconds = checked((int)lifetime.TotalSeconds),
                     ExpiresAt = requestedAt.Add(lifetime)
                 }, innerCancellation);
-                if (grant.ExpiresAt > requestedAt.Add(lifetime).AddSeconds(10))
-                    throw new InvalidDataException("The target granted a longer SSH lease than requested.");
                 return grant;
             },
             (sessionId, innerCancellation) =>

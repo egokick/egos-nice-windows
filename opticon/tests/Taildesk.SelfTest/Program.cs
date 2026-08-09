@@ -369,15 +369,38 @@ static void TestRemoteAdministrationProtocol()
     request.Architecture = "x86";
     AssertThrows<InvalidDataException>(() => UpdatePackageVerifier.ValidateRequest(request));
 
+    var sshRequestJson = JsonSerializer.Serialize(new SshAccessRequest
+    {
+        PublicKey = "ssh-ed25519 AAAA",
+        RequestedLifetimeSeconds = 3600,
+        ExpiresAt = DateTimeOffset.Parse("2030-01-01T04:00:00Z")
+    }, JsonDefaults.Options);
+    using var sshRequestDocument = JsonDocument.Parse(sshRequestJson);
+    Assert(sshRequestDocument.RootElement.GetProperty("requestedLifetimeSeconds").GetInt32() == 3600,
+        "the target-relative SSH lease duration did not serialize");
+
     var sshJson = JsonSerializer.Serialize(new SshAccessResponse
     {
         SessionId = "lease_123",
         Host = "100.64.0.25",
-        ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(30),
+        CreatedAt = DateTimeOffset.Parse("2030-01-01T12:00:00+09:00"),
+        ExpiresAt = DateTimeOffset.Parse("2030-01-01T12:30:00+09:00"),
         HostPublicKey = "ssh-ed25519 AAAA"
     }, JsonDefaults.Options);
     var ssh = JsonSerializer.Deserialize<SshAccessResponse>(sshJson, JsonDefaults.Options);
-    Assert(ssh?.SessionId == "lease_123" && ssh.Host == "100.64.0.25", "SSH lease identity/host did not round-trip");
+    Assert(ssh?.SessionId == "lease_123" && ssh.Host == "100.64.0.25" && ssh.CreatedAt is not null,
+        "SSH lease identity, host, and target-relative timing did not round-trip");
+
+    var targetCreatedAt = DateTimeOffset.Parse("2030-01-01T12:00:00+09:00");
+    Assert(RemoteAdministrationProtocol.IsSshLeaseWithinRequestedLifetime(
+            targetCreatedAt, targetCreatedAt.AddHours(1), TimeSpan.FromHours(1)),
+        "a target-relative SSH lease equal to the requested duration was rejected");
+    Assert(!RemoteAdministrationProtocol.IsSshLeaseWithinRequestedLifetime(
+            targetCreatedAt, targetCreatedAt.AddHours(1).AddSeconds(1), TimeSpan.FromHours(1)),
+        "an SSH lease longer than requested was accepted");
+    Assert(!RemoteAdministrationProtocol.IsSshLeaseWithinRequestedLifetime(
+            targetCreatedAt, targetCreatedAt, TimeSpan.FromHours(1)),
+        "an already-expired SSH lease was accepted");
 }
 static void TestReleaseDistributionDesign()
 {
