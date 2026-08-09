@@ -504,16 +504,33 @@ func (g *gateway) readArtifactManifest() (artifactManifest, error) {
 }
 
 func (g *gateway) readArtifactManifestUnlocked() (artifactManifest, error) {
+	manifest, err := g.readStoredArtifactManifestUnlocked()
+	if err != nil {
+		return artifactManifest{}, err
+	}
+	if err := validateArtifactManifest(manifest); err != nil {
+		return artifactManifest{}, err
+	}
+	return manifest, nil
+}
+
+// readStoredArtifactManifestUnlocked performs only the bounded structural read
+// needed to migrate an older, now-untrusted release manifest. Callers must not
+// serve or select artifacts from this result without validateArtifactManifest.
+func (g *gateway) readStoredArtifactManifestUnlocked() (artifactManifest, error) {
 	data, err := os.ReadFile(g.artifactManifestPath())
 	if err != nil {
 		return artifactManifest{}, err
+	}
+	if len(data) == 0 || len(data) > maxAdminBody {
+		return artifactManifest{}, errors.New("release manifest size is invalid")
 	}
 	var manifest artifactManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return artifactManifest{}, err
 	}
-	if err := validateArtifactManifest(manifest); err != nil {
-		return artifactManifest{}, err
+	if manifest.SchemaVersion != 1 || len(manifest.Artifacts) < 1 || len(manifest.Artifacts) > 1024 {
+		return artifactManifest{}, errors.New("release manifest structure is invalid")
 	}
 	return manifest, nil
 }
@@ -628,8 +645,15 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 	defer g.manifestMu.Unlock()
 	current, err := g.readArtifactManifestUnlocked()
 	if err != nil {
-		http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable)
-		return
+		// A trust-domain rotation can make the last otherwise well-formed
+		// manifest unservable. Preserve its version/dependency downgrade guards,
+		// but permit only this authenticated endpoint to replace it with a fully
+		// validated manifest. Active invitations are still checked below.
+		current, err = g.readStoredArtifactManifestUnlocked()
+		if err != nil {
+			http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	currentVersion, currentOK := highestBundleVersion(current)
 	nextVersion, nextOK := highestBundleVersion(next)
@@ -1473,7 +1497,11 @@ func abs(value int64) int64 {
 func migrateBundleUploads(stagingDir, artifactDir, bundleDir string) error {
 	g := &gateway{artifactDir: artifactDir, bundleDir: bundleDir}
 	if _, err := g.readArtifactManifest(); err != nil {
-		return err
+		// Legacy uploads are optional migration residue. An obsolete release
+		// manifest must make artifacts unavailable, not crash-loop the control
+		// plane before an authenticated replacement can be published.
+		log.Printf("legacy bundle migration skipped: %v", err)
+		return nil
 	}
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil {

@@ -580,6 +580,45 @@ func TestAuthenticatedManifestPublicationIsAtomicPersistentAndReplaySafe(t *test
 	}
 }
 
+func TestAuthenticatedManifestPublicationCanRotateAnObsoleteTrustDomain(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, "manifest.json")
+	hash := strings.Repeat("a", 64)
+	legacy := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{
+		{Product: "OpticonBundle", Version: "1.1.38", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.1.38-managed-win-x64.zip", Size: 10, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.38/opticon-bundle-1.1.38-managed-win-x64.zip"},
+		{Product: "OpticonBundle", Version: "1.1.38", Role: "ControllerAndManaged", Architecture: "x64", File: "opticon-bundle-1.1.38-controller-win-x64.zip", Size: 20, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.38/opticon-bundle-1.1.38-controller-win-x64.zip"},
+		{Product: "OpticonBootstrap", Version: "1.1.38", Architecture: "x64", File: "opticon-bootstrap-1.1.38.exe", Size: 7, SHA256: hash, SignerThumbprint: invitationSigningKeyID, SigningProfile: "Production", SourceManifestKeyID: invitationSigningKeyID, ProductSigner: invitationSigningKeyID, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.38/opticon-bootstrap-1.1.38.exe"},
+	}}
+	legacyBytes, _ := json.Marshal(legacy)
+	if err := os.WriteFile(manifestPath, legacyBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateArtifactManifest(legacy); err == nil {
+		t.Fatal("legacy invitation-key bootstrap unexpectedly remained trusted")
+	}
+	next := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{
+		{Product: "OpticonBundle", Version: "1.1.39", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.1.39-managed-win-x64.zip", Size: 11, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.39/opticon-bundle-1.1.39-managed-win-x64.zip"},
+		{Product: "OpticonBundle", Version: "1.1.39", Role: "ControllerAndManaged", Architecture: "x64", File: "opticon-bundle-1.1.39-controller-win-x64.zip", Size: 21, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.39/opticon-bundle-1.1.39-controller-win-x64.zip"},
+		productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.1.39", Architecture: "x64", File: "opticon-bootstrap-1.1.39.exe", Size: 7, SHA256: hash, SignerThumbprint: strings.Repeat("C", 40), DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.39/opticon-bootstrap-1.1.39.exe"}),
+		productionArtifact(bundleArtifact{Product: "OpticonSource", Version: "1.1.39", Architecture: "source", File: "opticon-source-1.1.39.zip", Size: 30, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.39/opticon-source-1.1.39.zip", SDKVersion: pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion, TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash}),
+	}}
+	body, _ := json.Marshal(next)
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	g := &gateway{artifactDir: root, manifestPath: manifestPath, adminSecret: secret, nonces: make(map[string]time.Time)}
+	result := httptest.NewRecorder()
+	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPut, releaseAdminPath, "trust-rotation-nonce-012345", body))
+	if result.Code != http.StatusCreated {
+		t.Fatalf("trust-domain rotation returned %d: %s", result.Code, result.Body.String())
+	}
+	published, err := g.readArtifactManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version, ok := highestBundleVersion(published); !ok || version != "1.1.39" {
+		t.Fatalf("rotated manifest version is %q", version)
+	}
+}
+
 func TestSourceInvitationPinsAndHashesBothImmutableDownloads(t *testing.T) {
 	root := t.TempDir()
 	hash := strings.Repeat("b", 64)
