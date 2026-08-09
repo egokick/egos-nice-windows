@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
-using System.Text.Json;
 using System.Windows;
 using Taildesk.Shared;
 
@@ -14,8 +13,10 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _cancellation;
     private bool _installationRunning;
     private bool _maintenanceMode;
+    private bool _sourceAttestedAutomaticInstall;
     private MaintenanceExpectedTarget? _maintenanceTarget;
     private string _logPath = string.Empty;
+    private StreamWriter? _logWriter;
     private static readonly Regex InviteFileSecretPattern = new(
         "(Install-Opticon-[A-Za-z0-9_-]{24,128}--)[A-Za-z0-9_-]{32,128}",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
@@ -30,6 +31,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         InitializeLog();
+        Closed += (_, _) => _logWriter?.Dispose();
         Loaded += OnLoaded;
     }
 
@@ -38,6 +40,10 @@ public partial class MainWindow : Window
         try
         {
             var arguments = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            _sourceAttestedAutomaticInstall = arguments.Any(argument =>
+                argument.StartsWith("--source-attestation=", StringComparison.OrdinalIgnoreCase));
+            if (_sourceAttestedAutomaticInstall)
+                Environment.ExitCode = 1;
             AppendLog($"Opticon Setup {typeof(MainWindow).Assembly.GetName().Version} started.");
             AppendLog("Executable: " + (Environment.ProcessPath ?? "unavailable"));
             AppendLog("Launch inputs: " + DescribeLaunchInputs(arguments));
@@ -74,18 +80,27 @@ public partial class MainWindow : Window
             }
 
             _invitePath = ResolveInvitePath();
-            if (!string.IsNullOrWhiteSpace(_hostedFragmentKey))
+            HostedBootstrapper.RequireProtectedHandoff(_invitePath, AppContext.BaseDirectory);
+            var encrypted = await File.ReadAllBytesAsync(_invitePath);
+            var signedEnvelope = HostedInviteFile.Decrypt(_hostedFragmentKey, encrypted);
+            try { _invite = HostedInviteFile.ReadSigned(signedEnvelope); }
+            finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(signedEnvelope); }
+            var sourceAttestationArgument = arguments.FirstOrDefault(value =>
+                value.StartsWith("--source-attestation=", StringComparison.OrdinalIgnoreCase));
+            if (_invite.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion)
+                throw new InvalidDataException(
+                    "This legacy invitation is retained for history only and cannot install software. Ask for a new source-build invitation.");
+            if (_invite.SchemaVersion == InvitationPolicy.HostedLinkSchemaVersion)
             {
-                var encrypted = await File.ReadAllBytesAsync(_invitePath);
-                var signedEnvelope = HostedInviteFile.Decrypt(_hostedFragmentKey, encrypted);
-                try { _invite = HostedInviteFile.ReadSigned(signedEnvelope); }
-                finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(signedEnvelope); }
+                if (sourceAttestationArgument is null)
+                    throw new InvalidDataException("This source-build invitation requires an elevated build attestation.");
+                await SourceBuildProvenance.ActivateForSetupAsync(
+                    sourceAttestationArgument[21..].Trim('"'), _invitePath, _invite, AppContext.BaseDirectory);
+                AppendLog($"Authenticated local source build {_invite.ReleaseVersion} was reverified after elevation.");
             }
-            else
+            else if (sourceAttestationArgument is not null)
             {
-                await using var stream = File.OpenRead(_invitePath);
-                _invite = await JsonSerializer.DeserializeAsync<InvitePayload>(stream, JsonDefaults.Options)
-                          ?? throw new InvalidDataException("The invitation file is empty.");
+                throw new InvalidDataException("A source-build attestation cannot be applied to a legacy invitation.");
             }
             DeviceNameText.Text = _invite.DeviceName;
             RoleText.Text = _invite.Role == DeviceRole.ManagedOnly ? "Remote control target only" : "Can manage other machines and be managed";
@@ -143,6 +158,7 @@ public partial class MainWindow : Window
             {
                 var installer = new InstallCoordinator(_invite!, AppContext.BaseDirectory, progress);
                 await installer.InstallAsync(_cancellation.Token);
+                MarkAutomaticInstallSucceeded();
                 StatusText.Text = "Connected. This machine is ready.";
             }
             AppendLog("Setup finished successfully.");
@@ -167,6 +183,7 @@ public partial class MainWindow : Window
                 {
                     var installer = new InstallCoordinator(_invite!, AppContext.BaseDirectory, progress, allowTailscaleReauthentication: true);
                     await installer.InstallAsync(_cancellation.Token);
+                    MarkAutomaticInstallSucceeded();
                     AppendLog("Setup finished successfully.");
                     InstallProgress.Value = 100;
                     StatusText.Text = "Connected. This machine is ready.";
@@ -179,15 +196,18 @@ public partial class MainWindow : Window
                 }
                 catch (Exception retryException)
                 {
+                    TryRollbackSourceProvenance();
                     StatusText.Text = "Installation stopped. See the error below.";
                     AppendException(retryException);
                 }
             }
+            TryRollbackSourceProvenance();
             InstallButton.Content = "Try again";
             InstallButton.IsEnabled = true;
         }
         catch (Exception exception)
         {
+            TryRollbackSourceProvenance();
             StatusText.Text = "Installation stopped. See the error below.";
             AppendException(exception);
             InstallButton.Content = "Try again";
@@ -197,6 +217,19 @@ public partial class MainWindow : Window
         {
             _installationRunning = false;
         }
+    }
+
+    private void TryRollbackSourceProvenance()
+    {
+        if (!_sourceAttestedAutomaticInstall) return;
+        try { SourceBuildProvenance.RollbackActiveInstallation(); }
+        catch (Exception exception) { AppendLog("WARNING: protected source provenance rollback failed: " + exception.Message); }
+    }
+
+    private void MarkAutomaticInstallSucceeded()
+    {
+        if (_sourceAttestedAutomaticInstall)
+            Environment.ExitCode = 0;
     }
 
     private string ResolveInvitePath()
@@ -218,12 +251,8 @@ public partial class MainWindow : Window
                 throw new InvalidDataException("The hosted invitation is missing its private link key.");
             return File.Exists(hostedPath) ? Path.GetFullPath(hostedPath) : throw new FileNotFoundException("The encrypted hosted invitation was not downloaded.");
         }
-        var argument = arguments.FirstOrDefault(value => value.StartsWith("--invite=", StringComparison.OrdinalIgnoreCase));
-        if (argument is null && HostedBootstrapper.IsPublishedBootstrap(Environment.ProcessPath))
-            throw new FileNotFoundException(
-                "This installer lost its invitation identity while downloading. Return to the Opticon invitation page and download it again.");
-        var path = argument is null ? Path.Combine(AppContext.BaseDirectory, "invite.tdinvite") : argument[9..].Trim('"');
-        return File.Exists(path) ? Path.GetFullPath(path) : throw new FileNotFoundException("invite.tdinvite was not found next to Opticon Setup.");
+        throw new InvalidDataException(
+            "Plaintext and legacy local invitation files are no longer accepted. Return to the Opticon invitation page and download a current authenticated installer.");
     }
 
     private void AppendLog(string message)
@@ -231,8 +260,8 @@ public partial class MainWindow : Window
         var entry = $"[{DateTime.Now:HH:mm:ss}] {SanitizeForLog(message)}{Environment.NewLine}";
         LogText.AppendText(entry);
         LogText.ScrollToEnd();
-        if (string.IsNullOrWhiteSpace(_logPath)) return;
-        try { File.AppendAllText(_logPath, entry); }
+        if (_logWriter is null) return;
+        try { _logWriter.Write(entry); }
         catch { OpenLogButton.IsEnabled = false; }
     }
 
@@ -247,12 +276,11 @@ public partial class MainWindow : Window
     {
         try
         {
-            var directory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Opticon", "Logs", "Setup");
-            Directory.CreateDirectory(directory);
+            var directory = HostedBootstrapper.CreateProtectedHandoffDirectory();
             _logPath = Path.Combine(directory, $"setup-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Environment.ProcessId}.log");
-            File.WriteAllText(_logPath, string.Empty);
+            var stream = new FileStream(_logPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read,
+                4096, FileOptions.WriteThrough);
+            _logWriter = new StreamWriter(stream, new System.Text.UTF8Encoding(false)) { AutoFlush = true };
             LogPathText.Text = _logPath;
             LogPathText.ToolTip = _logPath;
         }
@@ -305,11 +333,12 @@ public partial class MainWindow : Window
         try
         {
             if (string.IsNullOrWhiteSpace(_logPath)) throw new FileNotFoundException("No persistent setup log is available.");
-            Process.Start(new ProcessStartInfo(_logPath) { UseShellExecute = true });
+            Clipboard.SetText(_logPath);
+            StatusText.Text = "The protected setup-log path was copied. Open it after Setup exits.";
         }
         catch (Exception exception)
         {
-            AppendLog("The setup log file could not be opened: " + exception.Message);
+            AppendLog("The setup log path could not be copied: " + exception.Message);
         }
     }
 }

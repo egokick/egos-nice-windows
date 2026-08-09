@@ -42,7 +42,7 @@ public static partial class UpdatePackageVerifier
         byte[] signature;
         try { signature = Convert.FromBase64String(signatureText); }
         catch (FormatException exception) { throw new InvalidDataException("The Opticon release signature is malformed.", exception); }
-        if (!InvitationSigning.Verify(manifestBytes, signature))
+        if (!SourceReleaseSigning.Verify(manifestBytes, signature))
             throw new InvalidDataException("The Opticon release manifest signature is invalid.");
 
         var manifest = JsonSerializer.Deserialize<OpticonReleaseManifest>(manifestBytes, JsonDefaults.Options)
@@ -98,7 +98,7 @@ public static partial class UpdatePackageVerifier
             }
 
             var executable = Path.Combine(destination, "Taildesk.Agent.exe");
-            await InvitationSigning.VerifyAuthenticodeAsync(executable, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(executable, cancellationToken);
             var reported = NormalizeVersion(FileVersionInfo.GetVersionInfo(executable).ProductVersion ?? string.Empty);
             if (!reported.Equals(NormalizeVersion(request.TargetVersion), StringComparison.Ordinal))
                 throw new InvalidDataException($"The signed Agent binary reports version {reported}, not {request.TargetVersion}.");
@@ -141,7 +141,7 @@ public static partial class UpdatePackageVerifier
         byte[] signature;
         try { signature = Convert.FromBase64String(signatureText); }
         catch (FormatException exception) { throw new InvalidDataException("The Opticon release signature is malformed.", exception); }
-        if (!InvitationSigning.Verify(manifestBytes, signature))
+        if (!SourceReleaseSigning.Verify(manifestBytes, signature))
             throw new InvalidDataException("The Opticon release manifest signature is invalid.");
 
         var manifest = JsonSerializer.Deserialize<OpticonReleaseManifest>(manifestBytes, JsonDefaults.Options)
@@ -195,7 +195,7 @@ public static partial class UpdatePackageVerifier
             }
             // Authenticode opens the staged image independently. Both archive
             // and destination streams must be closed before this call.
-            await InvitationSigning.VerifyAuthenticodeAsync(output, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(output, cancellationToken);
             var reported = NormalizeVersion(FileVersionInfo.GetVersionInfo(output).ProductVersion ?? string.Empty);
             if (!reported.Equals(NormalizeVersion(request.TargetVersion), StringComparison.Ordinal))
                 throw new InvalidDataException($"The signed Guardian binary reports version {reported}, not {request.TargetVersion}.");
@@ -246,7 +246,10 @@ public static partial class UpdatePackageVerifier
 
     private static void ValidateManifest(OpticonReleaseManifest manifest, OpticonUpdateRequest request)
     {
-        if (manifest.SchemaVersion != 1 || manifest.UpdateProtocolVersion != RemoteAdministrationProtocol.UpdateVersion)
+        if (manifest.SchemaVersion != 1 || manifest.UpdateProtocolVersion != RemoteAdministrationProtocol.UpdateVersion
+            || manifest.SigningProfile != OpticonSigningProfile.Production.ToString()
+            || manifest.SourceReleaseKeyId != SourceReleaseSigning.KeyId
+            || manifest.ProductSignerThumbprint != ProductSigning.CertificateThumbprint)
             throw new InvalidDataException("The signed release requires an unsupported update protocol.");
         if (!NormalizeVersion(manifest.Version).Equals(NormalizeVersion(request.TargetVersion), StringComparison.Ordinal)
             || manifest.Role != request.Role
@@ -268,7 +271,7 @@ public static partial class UpdatePackageVerifier
         if (file.Size is < 0 or > MaximumExpandedBytes || file.Sha256.Length != 64 || file.Sha256.Any(character => !Uri.IsHexDigit(character)))
             throw new InvalidDataException($"The signed release metadata is invalid for {normalized}.");
         if (normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-            && !file.SignerThumbprint.Equals(InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
+            && !file.SignerThumbprint.Equals(ProductSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"The executable signer pin is invalid for {normalized}.");
     }
 

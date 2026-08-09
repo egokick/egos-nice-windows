@@ -191,6 +191,9 @@ public sealed class OpticonReleaseManifest
 {
     public int SchemaVersion { get; set; } = 1;
     public string Version { get; set; } = string.Empty;
+    public string SigningProfile { get; set; } = string.Empty;
+    public string SourceReleaseKeyId { get; set; } = string.Empty;
+    public string ProductSignerThumbprint { get; set; } = string.Empty;
     public DeviceRole Role { get; set; }
     public string Architecture { get; set; } = string.Empty;
     public int UpdateProtocolVersion { get; set; } = RemoteAdministrationProtocol.UpdateVersion;
@@ -221,7 +224,16 @@ public sealed class ArtifactRecordDto
     public string File { get; set; } = string.Empty;
     public long Size { get; set; }
     public string Sha256 { get; set; } = string.Empty;
+    public string SignerThumbprint { get; set; } = string.Empty;
     // Optional during the Fly-volume migration.  New immutable bundles use an
     // absolute, CloudFront HTTPS URL rather than the control-plane origin.
     public string DownloadUrl { get; set; } = string.Empty;
+    public string SdkVersion { get; set; } = string.Empty;
+    public string RuntimeVersion { get; set; } = string.Empty;
+    public string SourceManifestSha256 { get; set; } = string.Empty;
+    public string SourceManifestKeyId { get; set; } = string.Empty;
+    public string SigningProfile { get; set; } = string.Empty;
+    public string ProductSignerThumbprint { get; set; } = string.Empty;
+    public string TargetRuntime { get; set; } = string.Empty;
+    public List<string> TargetRuntimes { get; set; } = [];
 }

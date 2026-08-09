@@ -12,6 +12,7 @@
         <SolidColorBrush x:Key="BorderStrongBrush" Color="#46505A" />
         <SolidColorBrush x:Key="TextBrush" Color="#EDF1F5" />
         <SolidColorBrush x:Key="MutedBrush" Color="#9DA7B1" />
+        <SolidColorBrush x:Key="DisabledTextBrush" Color="#ABB4BD" />
         <SolidColorBrush x:Key="AccentBrush" Color="#52D39A" />
         <SolidColorBrush x:Key="AccentDimBrush" Color="#17392D" />
         <SolidColorBrush x:Key="WarningBrush" Color="#F3B65B" />
@@ -83,8 +84,8 @@
                     <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
-                    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-                    <Setter Property="Opacity" Value="0.58" />
+                    <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
+                    <Setter Property="Opacity" Value="1" />
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -225,7 +226,7 @@
                                 <Setter TargetName="ComboBorder" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter Property="Foreground" Value="#5C6268" />
+                                <Setter Property="Foreground" Value="#4F565D" />
                                 <Setter TargetName="ComboBorder" Property="Background" Value="#C8CDD1" />
                             </Trigger>
                         </ControlTemplate.Triggers>
@@ -305,8 +306,8 @@
                                 <Setter TargetName="CheckBorder" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-                                <Setter Property="Opacity" Value="0.58" />
+                                <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
+                                <Setter Property="Opacity" Value="1" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -336,7 +337,7 @@
                     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
-                    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+                    <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -357,7 +358,7 @@
                     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
-                    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+                    <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
                 </Trigger>
             </Style.Triggers>
         </Style>

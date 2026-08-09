@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using Taildesk.Shared;
 
 namespace Taildesk.Agent;
@@ -11,14 +10,17 @@ public sealed class AgentRuntime
     private readonly TailscaleCli _tailscale;
     private readonly UpdateManager _updates;
     private readonly SshAccessManager _ssh;
+    private readonly BatteryStatusProvider _battery;
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
-    public AgentRuntime(AgentState state, TailscaleCli tailscale, UpdateManager updates, SshAccessManager ssh)
+    public AgentRuntime(AgentState state, TailscaleCli tailscale, UpdateManager updates, SshAccessManager ssh,
+        BatteryStatusProvider battery)
     {
         _state = state;
         _tailscale = tailscale;
         _updates = updates;
         _ssh = ssh;
+        _battery = battery;
     }
 
     public async Task<DeviceStatusDto> GetStatusAsync(CancellationToken cancellationToken)
@@ -56,6 +58,8 @@ public sealed class AgentRuntime
             FreeDiskBytes = systemDrive?.AvailableFreeSpace ?? 0,
             TotalDiskBytes = systemDrive?.TotalSize ?? 0,
             StartedAt = _startedAt,
+            OnlineDurationSeconds = Math.Max(0, Environment.TickCount64 / 1000),
+            BatteryPercentage = _battery.GetBatteryPercentage(),
             ServerTime = DateTimeOffset.UtcNow,
             UpdateStatus = _updates.GetStatus()
         };
@@ -135,45 +139,11 @@ public sealed class AgentRuntime
 
     public async Task SetRoleAsync(DeviceRole role, CancellationToken cancellationToken)
     {
-        _state.Config.Role = role;
-        await _state.SaveAsync(cancellationToken);
         var admin = Path.Combine(AppPaths.InstallDirectory, "Admin", "Opticon.exe");
-        if (!File.Exists(admin))
-        {
+        if (role == DeviceRole.ControllerAndManaged && !File.Exists(admin))
             throw new FileNotFoundException("The controller payload is not installed on this machine.");
-        }
-
-        IReadOnlyList<string> shortcutPaths = _state.Config.ControllerShortcutPaths.Count > 0
-            ? _state.Config.ControllerShortcutPaths
-            : new[]
-            {
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "Opticon.lnk"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup), "Opticon.lnk")
-            };
-        if (role == DeviceRole.ControllerAndManaged)
-        {
-            foreach (var shortcutPath in shortcutPaths) CreateShortcut(admin, shortcutPath);
-        }
-        else
-        {
-            foreach (var shortcutPath in shortcutPaths)
-            {
-                try { File.Delete(shortcutPath); } catch { }
-            }
-        }
-    }
-
-    private static void CreateShortcut(string target, string shortcutPath)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(shortcutPath)!);
-        var shellType = Type.GetTypeFromProgID("WScript.Shell") ?? throw new InvalidOperationException("Windows Script Host is unavailable.");
-        dynamic shell = Activator.CreateInstance(shellType)!;
-        dynamic shortcut = shell.CreateShortcut(shortcutPath);
-        shortcut.TargetPath = target;
-        shortcut.WorkingDirectory = Path.GetDirectoryName(target);
-        shortcut.Description = "Opticon command center";
-        shortcut.Save();
-        Marshal.FinalReleaseComObject(shortcut);
-        Marshal.FinalReleaseComObject(shell);
+        _state.Config.Role = role;
+        _state.Config.ControllerShortcutPaths = [];
+        await _state.SaveAsync(cancellationToken);
     }
 }

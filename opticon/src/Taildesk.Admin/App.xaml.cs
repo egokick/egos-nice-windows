@@ -22,6 +22,7 @@ public partial class App : System.Windows.Application
     public HeadscaleApiClient Headscale { get; private set; } = null!;
     public AgentClient Agents { get; } = new();
     public TransferManager Transfers { get; } = new();
+    public ScheduledTransferManager ScheduledTransfers { get; private set; } = null!;
 
     private async void Application_Startup(object sender, StartupEventArgs e)
     {
@@ -64,7 +65,9 @@ public partial class App : System.Windows.Application
                     "Opticon CLI unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             Headscale = new HeadscaleApiClient(State);
-            _viewModel = new MainViewModel(State, Headscale, Agents, Transfers);
+            ScheduledTransfers = new ScheduledTransferManager(State, Agents);
+            await ScheduledTransfers.StartAsync();
+            _viewModel = new MainViewModel(State, Headscale, Agents, Transfers, ScheduledTransfers);
             var window = new MainWindow(_viewModel);
             MainWindow = window;
             window.Show();
@@ -162,6 +165,7 @@ public partial class App : System.Windows.Application
             }
         }
         if (_coordinator is not null) await _coordinator.DisposeAsync();
+        if (ScheduledTransfers is not null) await ScheduledTransfers.DisposeAsync();
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;

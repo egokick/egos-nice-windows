@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>Taildesk.RouteKeeper</AssemblyName>
+    <RootNamespace>Taildesk.RouteKeeper</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\..\assets\opticon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Taildesk.Shared\Taildesk.Shared.csproj" />
+  </ItemGroup>
+</Project>

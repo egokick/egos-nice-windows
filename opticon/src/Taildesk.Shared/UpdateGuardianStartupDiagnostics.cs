@@ -19,19 +19,18 @@ public static class UpdateGuardianStartupDiagnostics
 
     public static void Clear()
     {
-        if (File.Exists(AppPaths.UpdateGuardianStartupFailureFile))
-            File.Delete(AppPaths.UpdateGuardianStartupFailureFile);
+        MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.UpdateDataDirectory);
+        MachineStorageSecurity.DeleteRestrictedFileIfExists(
+            AppPaths.UpdateGuardianStartupFailureFile);
     }
 
     public static UpdateGuardianStartupFailure? Read()
     {
         var path = AppPaths.UpdateGuardianStartupFailureFile;
         if (!File.Exists(path)) return null;
-        var info = new FileInfo(path);
-        if (info.Length is <= 0 or > MaximumFileBytes)
-            throw new InvalidDataException("The Guardian startup diagnostic has an invalid size.");
+        var content = MachineStorageSecurity.ReadRestrictedFile(path, MaximumFileBytes);
         var failure = JsonSerializer.Deserialize<UpdateGuardianStartupFailure>(
-            File.ReadAllText(path), JsonDefaults.Options)
+            content, JsonDefaults.Options)
             ?? throw new InvalidDataException("The Guardian startup diagnostic is empty.");
         if (failure.SchemaVersion != 1
             || failure.RecordedAt == default
@@ -45,6 +44,7 @@ public static class UpdateGuardianStartupDiagnostics
     {
         try
         {
+            MachineStorageSecurity.EnsureOpticonMachineState();
             var journal = TryReadJournal();
             var error = exception.ToString();
             if (error.Length > MaximumErrorCharacters)
@@ -59,18 +59,9 @@ public static class UpdateGuardianStartupDiagnostics
                 Error = error
             };
             var path = AppPaths.UpdateGuardianStartupFailureFile;
-            Directory.CreateDirectory(Path.GetDirectoryName(path)
-                                      ?? throw new InvalidOperationException("The Guardian diagnostic has no parent directory."));
-            var temporary = path + "." + Environment.ProcessId + ".new";
-            try
-            {
-                File.WriteAllText(temporary, JsonSerializer.Serialize(failure, JsonDefaults.Options));
-                File.Move(temporary, path, true);
-            }
-            finally
-            {
-                try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
-            }
+            var content = JsonSerializer.SerializeToUtf8Bytes(failure, JsonDefaults.Options);
+            MachineStorageSecurity.WriteRestrictedFileAtomicAsync(path, content)
+                .GetAwaiter().GetResult();
         }
         catch
         {

@@ -1,11 +1,58 @@
 <Project>
   <PropertyGroup>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <RuntimeFrameworkVersion Condition="'$(RuntimeIdentifier)' != ''">8.0.29</RuntimeFrameworkVersion>
+    <TargetLatestRuntimePatch>false</TargetLatestRuntimePatch>
     <Version>1.1.38</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
+    <OpticonSigningProfile Condition="'$(OpticonSigningProfile)' == ''">Developer</OpticonSigningProfile>
+    <OpticonInvitationSigningThumbprint>FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53</OpticonInvitationSigningThumbprint>
+    <OpticonSourceReleaseKeyId Condition="'$(OpticonSourceReleaseKeyId)' == '' and '$(OpticonSigningProfile)' == 'Developer'">$(OpticonInvitationSigningThumbprint)</OpticonSourceReleaseKeyId>
+    <OpticonSourceReleaseCertificateBase64 Condition="'$(OpticonSourceReleaseCertificateBase64)' == ''"></OpticonSourceReleaseCertificateBase64>
+    <OpticonProductSignerThumbprint Condition="'$(OpticonProductSignerThumbprint)' == '' and '$(OpticonSigningProfile)' == 'Developer'">$(OpticonInvitationSigningThumbprint)</OpticonProductSignerThumbprint>
+    <OpticonProductSigningCertificateBase64 Condition="'$(OpticonProductSigningCertificateBase64)' == ''"></OpticonProductSigningCertificateBase64>
+    <_OpticonInvitationSigningThumbprintNormalized>$([System.String]::Concat('$(OpticonInvitationSigningThumbprint)').ToUpperInvariant())</_OpticonInvitationSigningThumbprintNormalized>
+    <_OpticonSourceReleaseKeyIdNormalized>$([System.String]::Concat('$(OpticonSourceReleaseKeyId)').ToUpperInvariant())</_OpticonSourceReleaseKeyIdNormalized>
+    <_OpticonProductSignerThumbprintNormalized>$([System.String]::Concat('$(OpticonProductSignerThumbprint)').ToUpperInvariant())</_OpticonProductSignerThumbprintNormalized>
+    <_OpticonInvitationSigningThumbprintValid>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_OpticonInvitationSigningThumbprintNormalized)', '^[0-9A-F]{40}$'))</_OpticonInvitationSigningThumbprintValid>
+    <_OpticonSourceReleaseKeyIdValid>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_OpticonSourceReleaseKeyIdNormalized)', '^[0-9A-F]{40}$'))</_OpticonSourceReleaseKeyIdValid>
+    <_OpticonProductSignerThumbprintValid>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_OpticonProductSignerThumbprintNormalized)', '^[0-9A-F]{40}$'))</_OpticonProductSignerThumbprintValid>
   </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="OpticonSigningProfile" Value="$(OpticonSigningProfile)" />
+    <AssemblyMetadata Include="OpticonSourceReleaseKeyId" Value="$(_OpticonSourceReleaseKeyIdNormalized)" />
+    <AssemblyMetadata Include="OpticonSourceReleaseCertificateBase64" Value="$(OpticonSourceReleaseCertificateBase64)" />
+    <AssemblyMetadata Include="OpticonProductSignerThumbprint" Value="$(_OpticonProductSignerThumbprintNormalized)" />
+    <AssemblyMetadata Include="OpticonProductSigningCertificateBase64" Value="$(OpticonProductSigningCertificateBase64)" />
+  </ItemGroup>
+
+  <Target Name="ValidateOpticonSigningConfiguration" BeforeTargets="CoreCompile">
+    <Error Condition="'$(OpticonSigningProfile)' != 'Developer' and '$(OpticonSigningProfile)' != 'Production'"
+           Text="OpticonSigningProfile must be exactly Developer or Production." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(OpticonSourceReleaseKeyId)' == ''"
+           Text="Production builds require OpticonSourceReleaseKeyId." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(OpticonSourceReleaseCertificateBase64)' == ''"
+           Text="Production builds require OpticonSourceReleaseCertificateBase64." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(OpticonProductSignerThumbprint)' == ''"
+           Text="Production builds require OpticonProductSignerThumbprint." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(OpticonProductSigningCertificateBase64)' == ''"
+           Text="Production builds require OpticonProductSigningCertificateBase64." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(_OpticonInvitationSigningThumbprintValid)' != 'True'"
+           Text="The invitation signer thumbprint must be exactly 40 hexadecimal characters." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(_OpticonSourceReleaseKeyIdValid)' != 'True'"
+           Text="OpticonSourceReleaseKeyId must be exactly 40 hexadecimal characters." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(_OpticonProductSignerThumbprintValid)' != 'True'"
+           Text="OpticonProductSignerThumbprint must be exactly 40 hexadecimal characters." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(_OpticonSourceReleaseKeyIdNormalized)' == '$(_OpticonInvitationSigningThumbprintNormalized)'"
+           Text="The production source-release key must be separate from the online invitation key." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(_OpticonProductSignerThumbprintNormalized)' == '$(_OpticonInvitationSigningThumbprintNormalized)'"
+           Text="The production product signer must be separate from the online invitation key." />
+    <Error Condition="'$(OpticonSigningProfile)' == 'Production' and '$(_OpticonProductSignerThumbprintNormalized)' == '$(_OpticonSourceReleaseKeyIdNormalized)'"
+           Text="The production product signer must be separate from the offline source-release key." />
+  </Target>
 </Project>

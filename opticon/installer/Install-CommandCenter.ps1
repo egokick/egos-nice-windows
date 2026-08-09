@@ -1,11 +1,110 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')]
+    [string]$ExpectedCodeSigningThumbprint,
+    [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')]
+    [string]$ExpectedSourceReleaseKeyId,
+    [Parameter(Mandatory)][ValidateRange(1,2147483647)]
+    [int]$BootstrapProcessId,
+    [Parameter(Mandatory)][ValidateSet('0','1')]
+    [string]$DevelopmentOnly,
     [string]$InstallDirectory = "$env:ProgramFiles\Taildesk\Admin",
     [switch]$ControllerOnlyRepair
 )
 
 $ErrorActionPreference = 'Stop'
+$script:InvitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
+$script:RouteTaskName = 'Taildesk Fly Route'
+$script:ControllerIPv4 = '213.188.217.227'
+$script:IsDevelopmentBuild = $DevelopmentOnly -eq '1'
+$ExpectedCodeSigningThumbprint = $ExpectedCodeSigningThumbprint.ToUpperInvariant()
+$ExpectedSourceReleaseKeyId = $ExpectedSourceReleaseKeyId.ToUpperInvariant()
+if ($script:IsDevelopmentBuild) {
+    if ($ExpectedCodeSigningThumbprint -ceq $script:InvitationSigningThumbprint -or
+        $ExpectedSourceReleaseKeyId -ceq $script:InvitationSigningThumbprint -or
+        $ExpectedCodeSigningThumbprint -ceq $ExpectedSourceReleaseKeyId) {
+        throw 'Developer artifacts must use explicit, separate nonpublishable product and source-release identities.'
+    }
+} elseif ($ExpectedCodeSigningThumbprint -ceq $script:InvitationSigningThumbprint -or
+          $ExpectedSourceReleaseKeyId -ceq $script:InvitationSigningThumbprint -or
+          $ExpectedCodeSigningThumbprint -ceq $ExpectedSourceReleaseKeyId) {
+    throw 'Production code-signing, source-release, and invitation trust roots must be distinct.'
+}
+
+function Assert-ProtectedInstallerHandoff {
+    $programData = [IO.Path]::GetFullPath(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)).TrimEnd('\')
+    $root = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
+    if (-not [IO.Path]::GetDirectoryName($root).Equals(
+            $programData,[StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($root) -notmatch '^OpticonSecureInstall-[a-f0-9]{32}$') {
+        throw 'The embedded installer is not running from its exact protected ProgramData handoff.'
+    }
+    foreach ($path in @($programData,$root)) {
+        $item = Get-Item -LiteralPath $path -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The protected installer handoff contains a reparse point: $path"
+        }
+    }
+    $acl = (Get-Item -LiteralPath $root -Force).GetAccessControl(
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Access)
+    $system = New-Object Security.Principal.SecurityIdentifier(
+        [Security.Principal.WellKnownSidType]::LocalSystemSid,$null)
+    $administrators = New-Object Security.Principal.SecurityIdentifier(
+        [Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid,$null)
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
+    $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    if (-not ($owner.Equals($system) -or $owner.Equals($administrators)) -or
+        -not $acl.AreAccessRulesProtected -or $rules.Count -ne 2) {
+        throw 'The protected installer handoff owner or ACL is invalid.'
+    }
+    foreach ($sid in @($system,$administrators)) {
+        $matches = @($rules | Where-Object {
+            -not $_.IsInherited -and $_.IdentityReference.Equals($sid) -and
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $_.FileSystemRights -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+            $_.InheritanceFlags -eq $inheritance -and
+            $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None
+        })
+        if ($matches.Count -ne 1) { throw 'The protected installer handoff ACL is not exact.' }
+    }
+
+    $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+    $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$BootstrapProcessId"
+    if ($null -eq $self -or [int]$self.ParentProcessId -ne $BootstrapProcessId -or
+        $null -eq $parent -or [string]::IsNullOrWhiteSpace([string]$parent.ExecutablePath) -or
+        -not [IO.Path]::GetFileName([string]$parent.ExecutablePath).Equals(
+            'Install-Opticon.exe',[StringComparison]::Ordinal)) {
+        throw 'The signed Install-Opticon.exe wrapper is not the direct parent process.'
+    }
+    Assert-PinnedOpticonExecutable -Path ([string]$parent.ExecutablePath)
+}
+
+function New-ProtectedInstallerDirectory {
+    param([Parameter(Mandatory)][string]$Prefix)
+    if ($Prefix -notmatch '^[A-Za-z0-9_-]+$') { throw 'The protected installer prefix is invalid.' }
+    $parentAcl = (Get-Item -LiteralPath $PSScriptRoot -Force).GetAccessControl(
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Access)
+    for ($attempt=0;$attempt -lt 16;$attempt++) {
+        $candidate = Join-Path $PSScriptRoot ($Prefix + [Guid]::NewGuid().ToString('N'))
+        try {
+            ([IO.DirectoryInfo]$candidate).Create($parentAcl)
+            $item = Get-Item -LiteralPath $candidate -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'A protected installer child is a reparse point.'
+            }
+            return $candidate
+        } catch [IO.IOException] {
+            if (-not (Test-Path -LiteralPath $candidate)) { throw }
+        }
+    }
+    throw 'Could not create a unique protected installer directory.'
+}
 $source = Join-Path $PSScriptRoot 'App'
 if (-not (Test-Path (Join-Path $source 'Opticon.exe')) -or
     -not (Test-Path (Join-Path $source 'Cli\opticon.exe'))) {
@@ -68,9 +167,28 @@ function Assert-PinnedOpticonExecutable {
     }
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     if (-not $signature.SignerCertificate -or
-        $signature.SignerCertificate.Thumbprint -ne 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
-        $signature.Status -in @('NotSigned','HashMismatch')) {
+        -not $signature.SignerCertificate.Thumbprint.Equals(
+            $ExpectedCodeSigningThumbprint,[StringComparison]::OrdinalIgnoreCase)) {
         throw "The Opticon executable is unsigned, altered, or signed by an unexpected key: $Path"
+    }
+    $codeSigning = $false
+    foreach ($extension in $signature.SignerCertificate.Extensions) {
+        if ($extension -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
+            foreach ($oid in $extension.EnhancedKeyUsages) {
+                if ($oid.Value -ceq '1.3.6.1.5.5.7.3.3') { $codeSigning = $true }
+            }
+        }
+    }
+    if (-not $codeSigning) { throw "The Opticon signer lacks the Code Signing EKU: $Path" }
+    if ($script:IsDevelopmentBuild) {
+        if ($signature.Status -notin @(
+                [Management.Automation.SignatureStatus]::Valid,
+                [Management.Automation.SignatureStatus]::UnknownError)) {
+            throw "The development Authenticode signature is invalid: $Path ($($signature.Status))"
+        }
+    } elseif ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+              $null -eq $signature.TimeStamperCertificate) {
+        throw "The production executable lacks a trusted timestamped signature: $Path"
     }
 }
 
@@ -429,14 +547,41 @@ function Install-OpticonPayloadTransaction {
     }
 }
 function Assert-ValidPublisher {
-    param([string]$Path, [string[]]$PublisherTerms)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')]
+        [string]$ExpectedSignerThumbprint
+    )
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne 'Valid') {
+    if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) {
         throw "Invalid Authenticode signature on $([IO.Path]::GetFileName($Path)): $($signature.Status)"
     }
-    $subject = $signature.SignerCertificate.Subject
-    if (-not ($PublisherTerms | Where-Object { $subject -match [regex]::Escape($_) })) {
-        throw "Unexpected publisher on $([IO.Path]::GetFileName($Path)): $subject"
+    $actualText = (($signature.SignerCertificate.Thumbprint.ToUpperInvariant().ToCharArray() |
+        Where-Object { [Uri]::IsHexDigit($_) }) -join '')
+    $actual = [Convert]::FromHexString($actualText)
+    $expected = [Convert]::FromHexString($ExpectedSignerThumbprint.ToUpperInvariant())
+    if ($actual.Length -ne $expected.Length -or
+        -not [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($actual,$expected)) {
+        throw "Unexpected publisher certificate on $([IO.Path]::GetFileName($Path))."
+    }
+    $codeSigningOid = '1.3.6.1.5.5.7.3.3'
+    $hasCodeSigning = @($signature.SignerCertificate.Extensions |
+        Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } |
+        ForEach-Object { $_.EnhancedKeyUsages } |
+        Where-Object { $_.Value -eq $codeSigningOid }).Count -gt 0
+    if (-not $hasCodeSigning) {
+        throw "The pinned publisher lacks the Code Signing EKU on $([IO.Path]::GetFileName($Path))."
+    }
+    if ($null -eq $signature.TimeStamperCertificate) {
+        throw "The pinned publisher signature has no trusted timestamp on $([IO.Path]::GetFileName($Path))."
+    }
+    $timestampingOid = '1.3.6.1.5.5.7.3.8'
+    $hasTimestamping = @($signature.TimeStamperCertificate.Extensions |
+        Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } |
+        ForEach-Object { $_.EnhancedKeyUsages } |
+        Where-Object { $_.Value -eq $timestampingOid }).Count -gt 0
+    if (-not $hasTimestamping) {
+        throw "The pinned publisher timestamp lacks the Time Stamping EKU on $([IO.Path]::GetFileName($Path))."
     }
 }
 
@@ -444,48 +589,218 @@ function Get-PinnedArtifact {
     param([Parameter(Mandatory)][ValidateSet('Tailscale','RustDesk')][string]$Name)
     $arm64 = $env:PROCESSOR_ARCHITECTURE -eq 'ARM64'
     if ($Name -eq 'Tailscale') {
-        if ($arm64) { return [PSCustomObject]@{ Name='Tailscale'; Version='1.102.1'; FileName='tailscale-setup-1.102.1-arm64.msi'; Size=36000256L; Sha256='f81002c5b971fe2de197703606e81107eacc83c6ea40478976fe5de154aed177'; Vendor='https://pkgs.tailscale.com/stable/tailscale-setup-1.102.1-arm64.msi'; Publishers=@('Tailscale') } }
-        return [PSCustomObject]@{ Name='Tailscale'; Version='1.102.1'; FileName='tailscale-setup-1.102.1-amd64.msi'; Size=38354432L; Sha256='988a38ab854ad176778955b0c92b27b1af14bf5e0146ea43076d829496d7ac77'; Vendor='https://pkgs.tailscale.com/stable/tailscale-setup-1.102.1-amd64.msi'; Publishers=@('Tailscale') }
+        if ($arm64) { return [PSCustomObject]@{ Name='Tailscale'; Version='1.102.1'; FileName='tailscale-setup-1.102.1-arm64.msi'; Size=36000256L; Sha256='f81002c5b971fe2de197703606e81107eacc83c6ea40478976fe5de154aed177'; Vendor='https://pkgs.tailscale.com/stable/tailscale-setup-1.102.1-arm64.msi'; SignerThumbprint='108F172FDE945B21A5C0696731D6220D67D1C39E' } }
+        return [PSCustomObject]@{ Name='Tailscale'; Version='1.102.1'; FileName='tailscale-setup-1.102.1-amd64.msi'; Size=38354432L; Sha256='988a38ab854ad176778955b0c92b27b1af14bf5e0146ea43076d829496d7ac77'; Vendor='https://pkgs.tailscale.com/stable/tailscale-setup-1.102.1-amd64.msi'; SignerThumbprint='108F172FDE945B21A5C0696731D6220D67D1C39E' }
     }
-    if ($arm64) { return [PSCustomObject]@{ Name='RustDesk'; Version='1.4.9'; FileName='rustdesk-1.4.9-aarch64.msi'; Size=22855680L; Sha256='30bc8925e62c7ade52371758c2b944036ed2386f6c554e9e59f3bcfef06c7cd9'; Vendor='https://github.com/rustdesk/rustdesk/releases/download/1.4.9/rustdesk-1.4.9-aarch64.msi'; Publishers=@('RustDesk','PURSLANE') } }
-    return [PSCustomObject]@{ Name='RustDesk'; Version='1.4.9'; FileName='rustdesk-1.4.9-x86_64.msi'; Size=24825856L; Sha256='c87d2f4cef2a5acd6003b6507dcfbf5d5168a256db082cd90b54d35193224aaa'; Vendor='https://github.com/rustdesk/rustdesk/releases/download/1.4.9/rustdesk-1.4.9-x86_64.msi'; Publishers=@('RustDesk','PURSLANE') }
+    if ($arm64) { return [PSCustomObject]@{ Name='RustDesk'; Version='1.4.9'; FileName='rustdesk-1.4.9-aarch64.msi'; Size=22855680L; Sha256='30bc8925e62c7ade52371758c2b944036ed2386f6c554e9e59f3bcfef06c7cd9'; Vendor='https://github.com/rustdesk/rustdesk/releases/download/1.4.9/rustdesk-1.4.9-aarch64.msi'; SignerThumbprint='4230334F8A7DD84E50D0273EF379E8B4A82F5DA5' } }
+    return [PSCustomObject]@{ Name='RustDesk'; Version='1.4.9'; FileName='rustdesk-1.4.9-x86_64.msi'; Size=24825856L; Sha256='c87d2f4cef2a5acd6003b6507dcfbf5d5168a256db082cd90b54d35193224aaa'; Vendor='https://github.com/rustdesk/rustdesk/releases/download/1.4.9/rustdesk-1.4.9-x86_64.msi'; SignerThumbprint='4230334F8A7DD84E50D0273EF379E8B4A82F5DA5' }
 }
 
 function Get-VerifiedArtifact {
     param([Parameter(Mandatory)][object]$Artifact)
-    $destination = Join-Path $env:TEMP ("opticon-" + $Artifact.FileName)
     $primary = "https://taildesk-egokick-control.fly.dev/opticon/artifacts/v1/$($Artifact.FileName)"
     $errors = @()
     foreach ($uri in @($primary, $Artifact.Vendor)) {
-        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        if (([uri]$uri).Scheme -cne 'https') { throw 'Dependency download URLs must use HTTPS.' }
+        $destination = Join-Path $script:DependencyStaging (
+            [Guid]::NewGuid().ToString('N') + '-' + $Artifact.FileName)
+        $handler = $null
+        $client = $null
+        $response = $null
+        $input = $null
+        $output = $null
         try {
             Write-Host "Downloading pinned $($Artifact.Name) $($Artifact.Version) from $(([uri]$uri).Host)..."
-            Invoke-WebRequest $uri -OutFile $destination -UseBasicParsing
-            $actualSize = (Get-Item -LiteralPath $destination).Length
-            if ($actualSize -ne $Artifact.Size) { throw "size $actualSize does not match $($Artifact.Size)" }
-            $actualHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+            $handler = New-Object Net.Http.HttpClientHandler
+            $handler.AllowAutoRedirect = $false
+            $handler.UseProxy = $false
+            $handler.AutomaticDecompression = [Net.DecompressionMethods]::None
+            $client = New-Object Net.Http.HttpClient($handler,$true)
+            $client.Timeout = [TimeSpan]::FromMinutes(5)
+            $request = New-Object Net.Http.HttpRequestMessage(
+                [Net.Http.HttpMethod]::Get,[uri]$uri)
+            [void]$request.Headers.TryAddWithoutValidation('Accept-Encoding','identity')
+            try {
+                $response = $client.SendAsync(
+                    $request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            } finally { $request.Dispose() }
+            if (-not $response.IsSuccessStatusCode) {
+                throw "HTTP status $([int]$response.StatusCode)"
+            }
+            if ($response.Content.Headers.ContentEncoding.Count -ne 0) {
+                throw 'encoded dependency responses are forbidden'
+            }
+            if ($response.Content.Headers.ContentLength.HasValue -and
+                $response.Content.Headers.ContentLength.Value -ne $Artifact.Size) {
+                throw "declared size $($response.Content.Headers.ContentLength.Value) does not match $($Artifact.Size)"
+            }
+            $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $output = New-Object IO.FileStream(
+                $destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,
+                [IO.FileShare]::None,1048576,
+                [IO.FileOptions]::WriteThrough -bor [IO.FileOptions]::SequentialScan)
+            $hasher = [Security.Cryptography.IncrementalHash]::CreateHash(
+                [Security.Cryptography.HashAlgorithmName]::SHA256)
+            try {
+                $buffer = New-Object byte[] 1048576
+                [long]$remaining = $Artifact.Size
+                while ($remaining -gt 0) {
+                    $read = $input.Read($buffer,0,[Math]::Min($buffer.Length,[int64]$remaining))
+                    if ($read -eq 0) { throw 'dependency download ended before its pinned size' }
+                    $hasher.AppendData($buffer,0,$read)
+                    $output.Write($buffer,0,$read)
+                    $remaining -= $read
+                }
+                if ($input.ReadByte() -ne -1) { throw 'dependency download exceeds its pinned size' }
+                $output.Flush($true)
+                $actualHash = (($hasher.GetHashAndReset() | ForEach-Object { $_.ToString('x2') }) -join '')
+            } finally { $hasher.Dispose() }
             if ($actualHash -ne $Artifact.Sha256) { throw "SHA-256 $actualHash does not match the pinned hash" }
-            Assert-ValidPublisher $destination $Artifact.Publishers
+            $output.Dispose()
+            $output = $null
+            $input.Dispose()
+            $input = $null
+            Assert-ValidPublisher $destination $Artifact.SignerThumbprint
             return $destination
-        } catch { $errors += "$uri : $($_.Exception.Message)" }
+        } catch {
+            $errors += "$uri : $($_.Exception.GetBaseException().Message)"
+            Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        } finally {
+            if ($null -ne $output) { $output.Dispose() }
+            if ($null -ne $input) { $input.Dispose() }
+            if ($null -ne $response) { $response.Dispose() }
+            if ($null -ne $client) { $client.Dispose() }
+        }
     }
-    Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
     throw "Both verified download sources failed for $($Artifact.Name): $($errors -join '; ')"
 }
+
+function Install-VerifiedMsi {
+    param(
+        [Parameter(Mandatory)][object]$Artifact,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $lease = New-Object IO.FileStream(
+        $Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read,
+        1048576,[IO.FileOptions]::SequentialScan)
+    try {
+        if ($lease.Length -ne $Artifact.Size) { throw 'The held MSI size changed.' }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $actualHash = (($sha.ComputeHash($lease) | ForEach-Object { $_.ToString('x2') }) -join '') }
+        finally { $sha.Dispose() }
+        if ($actualHash -ne $Artifact.Sha256) { throw 'The held MSI hash changed.' }
+        Assert-ValidPublisher $Path $Artifact.SignerThumbprint
+        $msiexec = Join-Path ([Environment]::SystemDirectory) 'msiexec.exe'
+        if (-not (Test-Path -LiteralPath $msiexec -PathType Leaf) -or
+            ((Get-Item -LiteralPath $msiexec -Force).Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The exact System32 msiexec.exe is unavailable or is a reparse point.'
+        }
+        $process = Start-Process -FilePath $msiexec -ArgumentList @(
+            '/i',$Path,'/qn','/norestart') -Wait -PassThru
+        if ($process.ExitCode -notin @(0,3010)) {
+            throw "$($Artifact.Name) installer returned $($process.ExitCode)."
+        }
+    } finally { $lease.Dispose() }
+}
+
+function Assert-FixedVendorExecutable {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][object]$Artifact
+    )
+    $programFiles = [IO.Path]::GetFullPath(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)).TrimEnd('\')
+    $full = [IO.Path]::GetFullPath($Path)
+    if (-not $full.StartsWith(
+            $programFiles + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $full -PathType Leaf)) {
+        throw "$($Artifact.Name) is not installed at its fixed Program Files path."
+    }
+    foreach ($candidate in @($programFiles,(Split-Path $full -Parent),$full)) {
+        if (((Get-Item -LiteralPath $candidate -Force).Attributes -band
+            [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "A fixed $($Artifact.Name) path is a reparse point: $candidate"
+        }
+    }
+    Assert-ValidPublisher -Path $full -ExpectedSignerThumbprint $Artifact.SignerThumbprint
+}
+
+function Invoke-FixedVendorExecutable {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [TimeSpan]$Timeout = [TimeSpan]::FromSeconds(30)
+    )
+    $windows = [IO.Path]::GetFullPath(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
+    $system32 = Join-Path $windows 'System32'
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $Path
+    $start.WorkingDirectory = Split-Path $Path -Parent
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
+    $start.Environment.Clear()
+    $start.Environment['SystemRoot'] = $windows
+    $start.Environment['WINDIR'] = $windows
+    $start.Environment['ProgramFiles'] =
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    $start.Environment['ProgramData'] =
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    $start.Environment['PATH'] = $system32
+    $start.Environment['PATHEXT'] = '.COM;.EXE'
+    $process = [Diagnostics.Process]::Start($start)
+    if (-not $process) { throw "Windows could not start $([IO.Path]::GetFileName($Path))." }
+    try {
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit([int]$Timeout.TotalMilliseconds)) {
+            try { $process.Kill($true) } catch { }
+            throw "$([IO.Path]::GetFileName($Path)) did not exit within $([int]$Timeout.TotalSeconds) seconds."
+        }
+        $standardOutput = $outputTask.GetAwaiter().GetResult()
+        $standardError = $errorTask.GetAwaiter().GetResult()
+        return [PSCustomObject]@{
+            ExitCode = $process.ExitCode
+            StandardOutput = $standardOutput
+            StandardError = $standardError
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Get-NormalizedThreePartVersion {
+    param([Parameter(Mandatory)][string]$Value)
+    $match = [Regex]::Match($Value.Trim(),'^([0-9]+\.[0-9]+\.[0-9]+)(?:[.+-].*)?$')
+    if (-not $match.Success) { return '' }
+    return $match.Groups[1].Value
+}
+
 function Install-Tailscale {
     $artifact = Get-PinnedArtifact Tailscale
     $cli = "$env:ProgramFiles\Tailscale\tailscale.exe"
-    if (Test-Path $cli) {
-        $installed = ((& $cli version 2>$null | Select-Object -First 1) -as [string]).Trim()
+    if (Test-Path -LiteralPath $cli) {
+        Assert-FixedVendorExecutable -Path $cli -Artifact $artifact
+        $versionResult = Invoke-FixedVendorExecutable -Path $cli -Arguments @('version')
+        if ($versionResult.ExitCode -ne 0) { throw 'The pinned Tailscale CLI could not report its version.' }
+        $installed = Get-NormalizedThreePartVersion (
+            ($versionResult.StandardOutput -split "`r?`n" | Select-Object -First 1))
         if ($installed -eq $artifact.Version) { return $cli }
     }
     $installer = Get-VerifiedArtifact $artifact
     try {
-        $process = Start-Process msiexec.exe -ArgumentList @('/i', $installer, '/qn', '/norestart') -Wait -PassThru
-        if ($process.ExitCode -notin @(0, 3010)) { throw "Tailscale installer returned $($process.ExitCode)." }
+        Install-VerifiedMsi -Artifact $artifact -Path $installer
     } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
-    if (-not (Test-Path $cli)) { throw 'Tailscale installed, but tailscale.exe was not found.' }
-    $installed = ((& $cli version 2>$null | Select-Object -First 1) -as [string]).Trim()
+    Assert-FixedVendorExecutable -Path $cli -Artifact $artifact
+    $versionResult = Invoke-FixedVendorExecutable -Path $cli -Arguments @('version')
+    if ($versionResult.ExitCode -ne 0) { throw 'The installed Tailscale CLI could not report its version.' }
+    $installed = Get-NormalizedThreePartVersion (
+        ($versionResult.StandardOutput -split "`r?`n" | Select-Object -First 1))
     if ($installed -ne $artifact.Version) { throw "Tailscale version $installed was installed instead of pinned version $($artifact.Version)." }
     return $cli
 }
@@ -493,60 +808,41 @@ function Install-Tailscale {
 function Install-RustDesk {
     $artifact = Get-PinnedArtifact RustDesk
     $client = "$env:ProgramFiles\RustDesk\rustdesk.exe"
-    if (Test-Path $client) {
-        $installed = (Get-Item -LiteralPath $client).VersionInfo.ProductVersion
-        if ($installed -like "$($artifact.Version)*") { return $client }
+    if (Test-Path -LiteralPath $client) {
+        Assert-FixedVendorExecutable -Path $client -Artifact $artifact
+        $installed = Get-NormalizedThreePartVersion (
+            [string](Get-Item -LiteralPath $client).VersionInfo.ProductVersion)
+        if ($installed -eq $artifact.Version) { return $client }
     }
     $installer = Get-VerifiedArtifact $artifact
     try {
-        $process = Start-Process msiexec.exe -ArgumentList @('/i', $installer, '/qn', '/norestart') -Wait -PassThru
-        if ($process.ExitCode -notin @(0, 3010)) { throw "RustDesk installer returned $($process.ExitCode)." }
+        Install-VerifiedMsi -Artifact $artifact -Path $installer
     } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
-    if (-not (Test-Path $client)) { throw 'RustDesk installed, but rustdesk.exe was not found.' }
-    $installed = (Get-Item -LiteralPath $client).VersionInfo.ProductVersion
-    if ($installed -notlike "$($artifact.Version)*") { throw "RustDesk version $installed was installed instead of pinned version $($artifact.Version)." }
+    Assert-FixedVendorExecutable -Path $client -Artifact $artifact
+    $installed = Get-NormalizedThreePartVersion (
+        [string](Get-Item -LiteralPath $client).VersionInfo.ProductVersion)
+    if ($installed -ne $artifact.Version) { throw "RustDesk version $installed was installed instead of pinned version $($artifact.Version)." }
     return $client
 }
 
 function Configure-PrivateRustDeskController {
-    param([Parameter(Mandatory)][string]$Client, [Parameter(Mandatory)][string]$ProfilePath)
+    param([Parameter(Mandatory)][string]$Client)
     Write-Host 'Restricting the remote-session engine to Opticon and the private Tailscale mesh...'
     $options = @(@('direct-server','N'),@('custom-rendezvous-server','127.0.0.1'),@('relay-server','127.0.0.1'),@('enable-lan-discovery','N'),@('hide-tray','Y'),@('hide-stop-service','Y'),@('disable-discovery-panel','Y'),@('allow-auto-update','N'),@('enable-udp-punch','N'),@('enable-ipv6-punch','N'))
     foreach ($option in $options) {
-        $process = Start-Process $Client -ArgumentList @('--option',$option[0],$option[1]) -WindowStyle Hidden -PassThru
-        if (-not $process.WaitForExit(15000)) {
-            $process.Kill()
-            throw "RustDesk timed out applying private option $($option[0])."
-        }
-        if ($process.ExitCode -ne 0) { throw "RustDesk rejected private option $($option[0])." }
+        $result = Invoke-FixedVendorExecutable -Path $Client `
+            -Arguments @('--option',$option[0],$option[1]) -Timeout ([TimeSpan]::FromSeconds(15))
+        if ($result.ExitCode -ne 0) { throw "RustDesk rejected private option $($option[0])." }
     }
     Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
     Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue | Set-Service -StartupType Disabled
-    Get-Process -Name 'RustDesk' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    $configRoots = @(
-        (Join-Path $ProfilePath 'AppData\Roaming\RustDesk\config'),
-        (Join-Path $env:APPDATA 'RustDesk\config'),
-        (Join-Path $env:WINDIR 'ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config'),
-        (Join-Path $env:WINDIR 'ServiceProfiles\NetworkService\AppData\Roaming\RustDesk\config'),
-        (Join-Path $env:WINDIR 'System32\config\systemprofile\AppData\Roaming\RustDesk\config')
-    ) | Select-Object -Unique
-    foreach ($configRoot in $configRoots) {
-        if (-not (Test-Path -LiteralPath $configRoot)) { continue }
-        foreach ($configFile in Get-ChildItem -LiteralPath $configRoot -File -Filter '*.toml' -ErrorAction SilentlyContinue) {
-            $content = Get-Content -LiteralPath $configFile.FullName -Raw
-            $content = [regex]::Replace($content,'(?m)^\s*rendezvous-server\s*=.*(?:\r?\n)?','')
-            if ($content -match '(?m)^\s*rendezvous_server\s*=') { $content = [regex]::Replace($content,'(?m)^\s*rendezvous_server\s*=.*$',"rendezvous_server = '127.0.0.1:21116'") } else { $content = "rendezvous_server = '127.0.0.1:21116'`r`n" + $content }
-            [IO.File]::WriteAllText($configFile.FullName,$content,[Text.UTF8Encoding]::new($false))
-        }
-    }
-    $commonStartup=[Environment]::GetFolderPath('CommonStartup');$commonDesktop=[Environment]::GetFolderPath('CommonDesktopDirectory');$commonPrograms=[Environment]::GetFolderPath('CommonPrograms')
-    foreach($shortcut in @((Join-Path $commonStartup 'RustDesk Tray.lnk'),(Join-Path $commonDesktop 'RustDesk.lnk'))){Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue}
-    $rustDeskPrograms=Join-Path $commonPrograms 'RustDesk';if(Test-Path -LiteralPath $rustDeskPrograms){Remove-Item -LiteralPath $rustDeskPrograms -Recurse -Force}
-    & netsh.exe advfirewall firewall delete rule 'name=all' 'dir=in' "program=$Client" | Out-Null
-    foreach($rule in @('RustDesk External IPv4 Block','RustDesk External IPv6 Block')){& netsh.exe advfirewall firewall delete rule "name=$rule" | Out-Null}
-    & netsh.exe advfirewall firewall add rule 'name=RustDesk External IPv4 Block' 'dir=out' 'action=block' 'remoteip=0.0.0.0-100.63.255.255,100.128.0.0-255.255.255.255' "program=$Client" 'profile=any' 'enable=yes' | Out-Null
+    $netsh = Join-Path ([Environment]::SystemDirectory) 'netsh.exe'
+    if (-not (Test-Path -LiteralPath $netsh -PathType Leaf)) { throw 'System32 netsh.exe is unavailable.' }
+    & $netsh advfirewall firewall delete rule 'name=all' 'dir=in' "program=$Client" | Out-Null
+    foreach($rule in @('RustDesk External IPv4 Block','RustDesk External IPv6 Block')){& $netsh advfirewall firewall delete rule "name=$rule" | Out-Null}
+    & $netsh advfirewall firewall add rule 'name=RustDesk External IPv4 Block' 'dir=out' 'action=block' 'remoteip=0.0.0.0-100.63.255.255,100.128.0.0-255.255.255.255' "program=$Client" 'profile=any' 'enable=yes' | Out-Null
     if($LASTEXITCODE -ne 0){throw 'Windows could not restrict RustDesk to Tailscale IPv4 destinations.'}
-    & netsh.exe advfirewall firewall add rule 'name=RustDesk External IPv6 Block' 'dir=out' 'action=block' 'remoteip=::/1,8000::/1' "program=$Client" 'profile=any' 'enable=yes' | Out-Null
+    & $netsh advfirewall firewall add rule 'name=RustDesk External IPv6 Block' 'dir=out' 'action=block' 'remoteip=::/1,8000::/1' "program=$Client" 'profile=any' 'enable=yes' | Out-Null
     if($LASTEXITCODE -ne 0){throw 'Windows could not block external RustDesk IPv6 destinations.'}
 }
 
@@ -880,6 +1176,143 @@ function Restore-ControllerConfigurationSnapshot {
     }
     Publish-InteractiveEnvironmentChange
 }
+function Write-ProtectedTaskXml {
+    param([Parameter(Mandatory)][string]$Xml)
+    $path = Join-Path $PSScriptRoot ('.route-task-' + [Guid]::NewGuid().ToString('N') + '.xml')
+    $stream = New-Object IO.FileStream(
+        $path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,
+        4096,[IO.FileOptions]::WriteThrough)
+    try {
+        $document = New-Object Xml.XmlDocument
+        $document.PreserveWhitespace = $true
+        $document.LoadXml($Xml)
+        $declaration = $document.FirstChild -as [Xml.XmlDeclaration]
+        if ($null -eq $declaration) {
+            $declaration = $document.CreateXmlDeclaration('1.0','utf-8',$null)
+            [void]$document.PrependChild($declaration)
+        } else {
+            $declaration.Encoding = 'utf-8'
+        }
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($document.OuterXml)
+        $stream.Write($bytes,0,$bytes.Length)
+        $stream.Flush($true)
+    } finally { $stream.Dispose() }
+    return $path
+}
+
+function Get-RouteTaskXml {
+    $task = Get-ScheduledTask -TaskName $script:RouteTaskName -ErrorAction SilentlyContinue
+    if ($null -eq $task) { return $null }
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    $output = @(& $schtasks /Query /TN $script:RouteTaskName /XML 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'The existing route task could not be snapshotted.' }
+    $xml = $output -join "`r`n"
+    if ($xml.Length -le 0 -or $xml.Length -gt 1048576) {
+        throw 'The existing route task XML has an invalid size.'
+    }
+    return $xml
+}
+
+function Invoke-RegisterTaskXml {
+    param([Parameter(Mandatory)][string]$Xml)
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    $path = Write-ProtectedTaskXml $Xml
+    try {
+        & $schtasks /Create /TN $script:RouteTaskName /XML $path /F | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Windows refused the protected RouteKeeper task XML.' }
+    } finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+}
+
+function New-RouteKeeperTaskXml {
+    param([Parameter(Mandatory)][string]$Helper)
+    $command = [Security.SecurityElement]::Escape([IO.Path]::GetFullPath($Helper))
+    $start = [Xml.XmlConvert]::ToString(
+        [DateTime]::UtcNow.AddMinutes(1),[Xml.XmlDateTimeSerializationMode]::Utc)
+    return @"
+<?xml version="1.0" encoding="utf-8"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Maintains the fixed Opticon control-endpoint route.</Description></RegistrationInfo>
+  <Triggers>
+    <BootTrigger><Enabled>true</Enabled></BootTrigger>
+    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+    <TimeTrigger><Repetition><Interval>PT5M</Interval></Repetition><StartBoundary>$start</StartBoundary><Enabled>true</Enabled></TimeTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority></Settings>
+  <Actions Context="Author"><Exec><Command>$command</Command><Arguments>--controller-ip=$($script:ControllerIPv4)</Arguments></Exec></Actions>
+</Task>
+"@
+}
+
+function Assert-ExactRouteKeeperTask {
+    param([Parameter(Mandatory)][string]$ExpectedHelper)
+    $raw = Get-RouteTaskXml
+    if ([string]::IsNullOrWhiteSpace($raw)) { throw 'The RouteKeeper task is missing.' }
+    [xml]$xml = $raw
+    $namespace = New-Object Xml.XmlNamespaceManager($xml.NameTable)
+    $namespace.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
+    function NodeText([string]$xpath) {
+        $node = $xml.SelectSingleNode($xpath,$namespace)
+        if ($null -eq $node) { return '' }
+        return [string]$node.InnerText
+    }
+    $expectedCommand = [IO.Path]::GetFullPath($ExpectedHelper)
+    $triggerNodes = $xml.SelectNodes('/t:Task/t:Triggers/*',$namespace)
+    $actionNodes = $xml.SelectNodes('/t:Task/t:Actions/*',$namespace)
+    $principalNodes = $xml.SelectNodes('/t:Task/t:Principals/t:Principal',$namespace)
+    if ($xml.DocumentElement.LocalName -cne 'Task' -or
+        $xml.DocumentElement.NamespaceURI -cne 'http://schemas.microsoft.com/windows/2004/02/mit/task' -or
+        $actionNodes.Count -ne 1 -or $actionNodes[0].LocalName -cne 'Exec' -or
+        $principalNodes.Count -ne 1 -or $triggerNodes.Count -ne 3 -or
+        -not (NodeText '/t:Task/t:Actions/t:Exec/t:Command').Equals(
+            $expectedCommand,[StringComparison]::OrdinalIgnoreCase) -or
+        (NodeText '/t:Task/t:Actions/t:Exec/t:Arguments') -cne "--controller-ip=$($script:ControllerIPv4)" -or
+        (NodeText '/t:Task/t:Actions/@Context') -cne 'Author' -or
+        (NodeText '/t:Task/t:Principals/t:Principal/t:UserId') -cne 'S-1-5-18' -or
+        (NodeText '/t:Task/t:Principals/t:Principal/t:LogonType') -cne 'ServiceAccount' -or
+        (NodeText '/t:Task/t:Principals/t:Principal/t:RunLevel') -cne 'HighestAvailable' -or
+        (NodeText '/t:Task/t:Settings/t:MultipleInstancesPolicy') -cne 'IgnoreNew' -or
+        (NodeText '/t:Task/t:Settings/t:DisallowStartIfOnBatteries') -cne 'false' -or
+        (NodeText '/t:Task/t:Settings/t:StopIfGoingOnBatteries') -cne 'false' -or
+        (NodeText '/t:Task/t:Settings/t:AllowStartOnDemand') -cne 'true' -or
+        (NodeText '/t:Task/t:Settings/t:Enabled') -cne 'true' -or
+        (NodeText '/t:Task/t:Settings/t:RunOnlyIfNetworkAvailable') -cne 'false' -or
+        (NodeText '/t:Task/t:Settings/t:StartWhenAvailable') -cne 'true' -or
+        (NodeText '/t:Task/t:Settings/t:ExecutionTimeLimit') -cne 'PT0S' -or
+        (NodeText '/t:Task/t:Triggers/t:TimeTrigger/t:Repetition/t:Interval') -cne 'PT5M' -or
+        $xml.SelectNodes('/t:Task/t:Triggers/t:TimeTrigger/t:Repetition/t:Duration',$namespace).Count -ne 0 -or
+        $xml.SelectNodes('/t:Task/t:Triggers/t:BootTrigger',$namespace).Count -ne 1 -or
+        $xml.SelectNodes('/t:Task/t:Triggers/t:LogonTrigger',$namespace).Count -ne 1 -or
+        $xml.SelectNodes('/t:Task/t:Triggers/t:TimeTrigger',$namespace).Count -ne 1) {
+        throw 'The installed RouteKeeper task does not match the exact signed task contract.'
+    }
+}
+
+function Register-ExactRouteKeeperTask {
+    $helper = Join-Path $script:CanonicalControllerInstallDirectory 'Tools\Taildesk.RouteKeeper.exe'
+    Assert-PinnedOpticonExecutable $helper
+    Invoke-RegisterTaskXml (New-RouteKeeperTaskXml $helper)
+    Assert-ExactRouteKeeperTask $helper
+}
+
+function Restore-RouteTaskSnapshot {
+    param([AllowNull()][string]$Snapshot)
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    if ([string]::IsNullOrWhiteSpace($Snapshot)) {
+        & $schtasks /Delete /TN $script:RouteTaskName /F 2>$null | Out-Null
+        return
+    }
+    Invoke-RegisterTaskXml $Snapshot
+}
+
+function Start-ExactRouteKeeperTask {
+    $helper = Join-Path $script:CanonicalControllerInstallDirectory 'Tools\Taildesk.RouteKeeper.exe'
+    Assert-ExactRouteKeeperTask $helper
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    & $schtasks /Run /TN $script:RouteTaskName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Windows could not start the exact RouteKeeper task.' }
+}
+
 function Test-ExactOpenSshClient {
     $openSshDirectory = Join-Path $env:WINDIR 'System32\OpenSSH'
     $ssh = Join-Path $openSshDirectory 'ssh.exe'
@@ -919,6 +1352,8 @@ function Ensure-OpenSshClientCapability {
         throw 'Windows did not make the exact System32 OpenSSH Client binaries ready. Finish servicing or reboot, then rerun this installer; Opticon has not been changed.'
     }
 }
+Assert-ProtectedInstallerHandoff
+Assert-NoDirectoryReparsePoints -Directory $source
 $sourceExecutable = Join-Path $source 'Opticon.exe'
 $sourceCli = Join-Path $source 'Cli\opticon.exe'
 Assert-PinnedOpticonExecutable -Path $sourceExecutable
@@ -956,7 +1391,7 @@ Write-Host 'Installing Opticon command center...' -ForegroundColor Cyan
 Write-Host "Installing for signed-in user $($interactiveProfile.AccountName)."
 $tailscale = Install-Tailscale
 $rustDesk = Install-RustDesk
-Configure-PrivateRustDeskController $rustDesk $interactiveProfile.ProfilePath
+Configure-PrivateRustDeskController $rustDesk
 
 $statusText = (& $tailscale status --json 2>$null) -join "`n"
 $running = $false

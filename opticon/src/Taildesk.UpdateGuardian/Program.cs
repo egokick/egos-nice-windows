@@ -15,6 +15,18 @@ internal static class Program
             return 2;
         }
 
+        try
+        {
+            var paths = new GuardianPathPolicy();
+            paths.ValidateRunningGuardian();
+            await ProductSigning.VerifyAuthenticodeAsync(paths.GuardianExecutable);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine("Taildesk Update Guardian rejected its executable identity: " + exception.Message);
+            return 1;
+        }
+
         if (SshSupervisor.IsRequested(args))
             return await SshSupervisor.RunFromArgumentsAsync(args, CancellationToken.None);
         if (SshAdminProbe.IsRequested(args))

@@ -4,10 +4,10 @@ using Taildesk.Shared;
 
 public sealed class AgentState
 {
-    private readonly JsonFileStore<AgentConfig> _store;
+    private readonly MachineJsonFileStore<AgentConfig> _store;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public AgentState(AgentConfig config, JsonFileStore<AgentConfig> store)
+    public AgentState(AgentConfig config, MachineJsonFileStore<AgentConfig> store)
     {
         Config = config;
         _store = store;

@@ -23,7 +23,7 @@ $result = @{}
 foreach ($output in $outputs) { $result[$output.OutputKey] = $output.OutputValue }
 
 $versioning = aws s3api get-bucket-versioning --bucket $bucket --output json | ConvertFrom-Json
-if ($versioning.Status -eq "Enabled") { throw "Bucket versioning is enabled; this violates the Opticon release policy." }
+if ($versioning.Status -ne "Enabled") { throw "Bucket versioning is not enabled; immutable release recovery is unavailable." }
 $publicAccess = aws s3api get-public-access-block --bucket $bucket --query "PublicAccessBlockConfiguration" --output json | ConvertFrom-Json
 foreach ($property in "BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets") {
     if ($publicAccess.$property -ne $true) { throw "S3 Block Public Access $property is not enabled." }

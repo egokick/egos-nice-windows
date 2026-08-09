@@ -145,21 +145,27 @@ flyctl status --app taildesk-egokick-control --all
 flyctl releases --app taildesk-egokick-control
 ```
 
-Never copy the Fly token into this repository, `fly.toml`, the image, Opticon configuration, or an invitation. If the dedicated IPv4 changes, update `fly-headscale\config.yaml`, the DNS pin/route scripts under `scripts`, and the installed roaming task before considering the migration complete.
+Never copy the Fly token into this repository, `fly.toml`, the image, Opticon configuration, or an invitation. If the dedicated IPv4 changes, update `fly-headscale\config.yaml`, rebuild the signed `Taildesk.RouteKeeper.exe`, and replace the installed route task through the signed installer before considering the migration complete.
 
 Fly CLI references: [deploy](https://fly.io/docs/flyctl/deploy/), [status](https://fly.io/docs/flyctl/status/), [IP management](https://fly.io/docs/flyctl/ips/).
 
 ## Build and install
 
-From a Windows PowerShell prompt with the .NET 8 SDK:
+Production packaging requires exact .NET SDK 8.0.423, a publicly trusted product
+code-signing certificate, a separate offline source-release certificate, and an
+RFC 3161 timestamp service:
 
 ```powershell
 Set-Location 'C:\source\egos-nice-windows\opticon'
-.\build.ps1 -Runtime win-x64
+.\build.ps1 -Runtime win-x64 -BuildProfile Production `
+  -CodeSigningCertificateThumbprint '<product-code-signing-thumbprint>' `
+  -SourceReleaseSigningCertificateThumbprint '<offline-release-thumbprint>'
 ```
 
-The build runs the solution and self-tests, publishes self-contained Windows binaries, writes `dist\Opticon-CommandCenter-win-x64.zip`, and ensures that the same version's signed target bundles are deployed through S3/CloudFront and the live manifest. Extract the command-center ZIP and run `Install-Opticon.ps1` as Administrator. The installer preserves the compatibility data paths, creates Opticon desktop/startup/Start Menu shortcuts with the Opticon icon, installs the narrowly scoped roaming-route maintenance task, and removes legacy Taildesk shortcuts.
+The production build starts from a clean committed tree, creates fresh isolated outputs, signs every executable with the product certificate and RFC 3161 timestamp, then signs the exact package manifest with the offline source-release key. It writes `dist\Opticon-CommandCenter-win-x64.zip` and checks the same version's hosted target release. Extract the ZIP, verify the Windows publisher, and open only `Install-Opticon.exe`; no loose PowerShell entry point is distributed.
 
-Use `-SkipTargetReleaseDeployment` only for explicit development or CI builds that must not mutate production. A skipped build does not make that version available through **Update Opticon**.
+Hosted invitations no longer carry prebuilt Agent binaries. The invitation pins the exact bootstrap and source archive by version, filename, size, SHA-256, signing profile, source-release key, product signer, SDK, runtime, and target architecture. The recipient verifies and builds that source locally with .NET SDK 8.0.423, after an explicit install prompt if the exact SDK is absent, and Setup then enrolls the device into the private mesh using the encrypted one-time invitation.
+
+Developer packages require explicit, separate development certificates plus `-BuildProfile Developer -SkipTargetReleaseDeployment`; their filename contains `DEV-UNTRUSTED` and they cannot be published. A skipped production build does not make that version available through **Update Opticon**.
 
 For deeper implementation details, continue with `docs\ARCHITECTURE.md` and `docs\SECURITY.md`, then read the code under `src\Taildesk.Admin`, `src\Taildesk.Agent`, `src\Taildesk.Setup`, and `src\Taildesk.Shared`.

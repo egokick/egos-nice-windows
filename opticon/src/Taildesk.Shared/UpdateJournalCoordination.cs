@@ -17,9 +17,24 @@ public static class UpdateJournalCoordination
         if (timeout <= TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
             throw new ArgumentOutOfRangeException(nameof(timeout));
 
-        path ??= AppPaths.UpdateCoordinationLockFile;
-        Directory.CreateDirectory(Path.GetDirectoryName(path)
-                                  ?? throw new InvalidOperationException("The update coordination lock has no parent directory."));
+        path = Path.GetFullPath(path ?? AppPaths.UpdateCoordinationLockFile);
+        var protectedMachineLock = path.Equals(
+            Path.GetFullPath(AppPaths.UpdateCoordinationLockFile), StringComparison.OrdinalIgnoreCase);
+        var parent = Path.GetDirectoryName(path)
+                     ?? throw new InvalidOperationException("The update coordination lock has no parent directory.");
+        if (protectedMachineLock)
+        {
+            MachineStorageSecurity.EnsureOpticonMachineState();
+            MachineStorageSecurity.RequireRestrictedDirectory(parent);
+            _ = await MachineStorageSecurity.WriteRestrictedFileCreateNewAsync(
+                path, new byte[] { 0 }, cancellationToken);
+            MachineStorageSecurity.RequireRestrictedFile(path);
+        }
+        else
+        {
+            // A custom path is retained solely as a non-production test seam.
+            Directory.CreateDirectory(parent);
+        }
         var deadline = timeout == Timeout.InfiniteTimeSpan
             ? DateTimeOffset.MaxValue
             : DateTimeOffset.UtcNow.Add(timeout);
@@ -31,8 +46,13 @@ public static class UpdateJournalCoordination
             try
             {
                 var stream = new FileStream(
-                    path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None,
-                    bufferSize: 1, FileOptions.None);
+                    path,
+                    protectedMachineLock ? FileMode.Open : FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    bufferSize: 1,
+                    FileOptions.WriteThrough);
+                if (protectedMachineLock) MachineStorageSecurity.RequireRestrictedFile(path);
                 return new Lease(stream);
             }
             catch (IOException exception)

@@ -1,0 +1,97 @@
+<Window x:Class="Taildesk.Admin.ScheduledTransferEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Scheduled transfer" Width="720" Height="760" MinWidth="660" MinHeight="680"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Grid Margin="22">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="Scheduled transfer" Style="{StaticResource SectionTitle}"/>
+            <TextBlock Text="Choose what moves, where it goes, and when it runs. Opticon creates the cron expression for you." Margin="0,5,0,16" Foreground="{StaticResource MutedBrush}"/>
+        </StackPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <Grid Margin="0,0,10,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="155"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="48"/><RowDefinition Height="48"/><RowDefinition Height="48"/>
+                    <RowDefinition Height="48"/><RowDefinition Height="48"/><RowDefinition Height="48"/>
+                    <RowDefinition Height="48"/><RowDefinition Height="48"/><RowDefinition Height="48"/>
+                    <RowDefinition Height="48"/><RowDefinition Height="48"/><RowDefinition Height="48"/>
+                    <RowDefinition Height="48"/><RowDefinition Height="48"/><RowDefinition Height="58"/>
+                </Grid.RowDefinitions>
+                <TextBlock Text="Name" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <TextBox x:Name="NameText" Grid.Column="1" Grid.ColumnSpan="2" VerticalAlignment="Center"/>
+
+                <TextBlock Grid.Row="1" Text="Device" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <ComboBox x:Name="DeviceCombo" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" DisplayMemberPath="Name" SelectedValuePath="Id" SelectionChanged="DeviceCombo_SelectionChanged"/>
+
+                <TextBlock Grid.Row="2" Text="Direction" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <ComboBox x:Name="DirectionCombo" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" SelectionChanged="DirectionCombo_SelectionChanged">
+                    <ComboBoxItem Content="Upload — this PC to device" Tag="Upload"/>
+                    <ComboBoxItem Content="Download — device to this PC" Tag="Download"/>
+                </ComboBox>
+
+                <TextBlock Grid.Row="3" Text="Local folder" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <TextBox x:Name="LocalFolderText" Grid.Row="3" Grid.Column="1" VerticalAlignment="Center"/>
+                <Button Grid.Row="3" Grid.Column="2" Margin="8,0,0,0" Content="Browse" Click="BrowseLocal_Click"/>
+
+                <TextBlock Grid.Row="4" Text="Remote shared folder" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <ComboBox x:Name="RemoteRootCombo" Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" DisplayMemberPath="DisplayName" SelectedValuePath="Id"/>
+
+                <TextBlock Grid.Row="5" Text="Folder inside share" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <TextBox x:Name="RemoteFolderText" Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" VerticalAlignment="Center" ToolTip="Leave blank for the top of the shared folder."/>
+
+                <TextBlock Grid.Row="6" Text="Files" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <ComboBox x:Name="FilterCombo" Grid.Row="6" Grid.Column="1" SelectionChanged="FilterCombo_SelectionChanged">
+                    <ComboBoxItem Content="All files" Tag="All"/>
+                    <ComboBoxItem Content="One file type" Tag="Extension"/>
+                    <ComboBoxItem Content="Regular expression" Tag="Regex"/>
+                </ComboBox>
+                <TextBox x:Name="FilterPatternText" Grid.Row="6" Grid.Column="2" Width="190" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Example: .pdf or ^invoice-.*\.csv$"/>
+
+                <CheckBox x:Name="RecursiveCheck" Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2" Content="Include files in subfolders" VerticalAlignment="Center"/>
+
+                <TextBlock Grid.Row="8" Text="After success" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <ComboBox x:Name="ModeCombo" Grid.Row="8" Grid.Column="1" Grid.ColumnSpan="2">
+                    <ComboBoxItem Content="Copy files — keep originals" Tag="Copy"/>
+                    <ComboBoxItem Content="Transfer files — delete each original after confirmation" Tag="Move"/>
+                </ComboBox>
+
+                <CheckBox x:Name="OverwriteCheck" Grid.Row="9" Grid.Column="1" Grid.ColumnSpan="2" Content="Replace files that already exist at the destination" VerticalAlignment="Center"/>
+
+                <TextBlock Grid.Row="10" Text="Run" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <ComboBox x:Name="FrequencyCombo" Grid.Row="10" Grid.Column="1" SelectionChanged="Frequency_Changed">
+                    <ComboBoxItem Content="Every minute" Tag="Minute"/>
+                    <ComboBoxItem Content="Every hour" Tag="Hour"/>
+                    <ComboBoxItem Content="Every day" Tag="Day"/>
+                    <ComboBoxItem Content="Every week" Tag="Week"/>
+                    <ComboBoxItem Content="Custom cron" Tag="Custom"/>
+                </ComboBox>
+                <StackPanel Grid.Row="10" Grid.Column="2" Orientation="Horizontal" Margin="8,0,0,0">
+                    <ComboBox x:Name="WeekdayCombo" Width="105" SelectionChanged="Frequency_Changed">
+                        <ComboBoxItem Content="Sunday" Tag="0"/><ComboBoxItem Content="Monday" Tag="1"/>
+                        <ComboBoxItem Content="Tuesday" Tag="2"/><ComboBoxItem Content="Wednesday" Tag="3"/>
+                        <ComboBoxItem Content="Thursday" Tag="4"/><ComboBoxItem Content="Friday" Tag="5"/>
+                        <ComboBoxItem Content="Saturday" Tag="6"/>
+                    </ComboBox>
+                    <TextBox x:Name="TimeText" Width="72" Margin="7,0,0,0" Text="09:00" TextChanged="Frequency_Changed" ToolTip="24-hour time, HH:mm"/>
+                </StackPanel>
+
+                <TextBlock Grid.Row="11" Text="Cron expression" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <TextBox x:Name="CronText" Grid.Row="11" Grid.Column="1" Grid.ColumnSpan="2" VerticalAlignment="Center" TextChanged="CronText_Changed" FontFamily="Cascadia Mono,Consolas"/>
+
+                <TextBlock Grid.Row="12" Text="Time zone" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <ComboBox x:Name="TimeZoneCombo" Grid.Row="12" Grid.Column="1" Grid.ColumnSpan="2" DisplayMemberPath="DisplayName" SelectedValuePath="Id" SelectionChanged="CronText_Changed"/>
+
+                <TextBlock Grid.Row="13" Text="Schedule preview" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                <TextBlock x:Name="PreviewText" Grid.Row="13" Grid.Column="1" Grid.ColumnSpan="2" VerticalAlignment="Center" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}"/>
+
+                <CheckBox x:Name="EnabledCheck" Grid.Row="14" Grid.Column="1" Grid.ColumnSpan="2" Content="Enabled — run automatically while Opticon is running" VerticalAlignment="Center"/>
+            </Grid>
+        </ScrollViewer>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Cancel" IsCancel="True"/>
+            <Button Content="Save schedule" Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Click="Save_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

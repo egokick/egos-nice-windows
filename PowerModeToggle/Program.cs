@@ -34,6 +34,18 @@ internal static class Program
             return;
         }
 
+        if (args.Length == 2
+            && string.Equals(args[0], "--probe-power-settings", StringComparison.OrdinalIgnoreCase))
+        {
+            var state = PowerProfileService.ReadState();
+            File.WriteAllText(
+                args[1],
+                JsonSerializer.Serialize(
+                    PowerProfileService.GetSettings(state),
+                    new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
+
         if (args.Length == 3
             && string.Equals(args[0], "--apply-power-profile", StringComparison.OrdinalIgnoreCase))
         {
@@ -90,6 +102,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _statusMenuItem;
+    private readonly ToolStripMenuItem _managedSettingsMenuItem;
     private readonly ToolStripMenuItem _highUsageMenuItem;
     private readonly ToolStripMenuItem _lowUsageMenuItem;
     private readonly ToolStripMenuItem _savingRateMenuItem;
@@ -111,6 +124,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private AppSettings _settings;
     private LaptopPowerMode _currentMode;
+    private LaptopPowerMode _lastRequestedMode;
+    private PowerProfileState? _lastPowerState;
+    private readonly Dictionary<string, PowerSettingApplyResult> _lastSettingResults = new(StringComparer.Ordinal);
     private PowerLineStatus _lastPowerSource = PowerLineStatus.Unknown;
     private LaptopPowerMode? _queuedMode;
     private string _queuedReason = "Manual switch";
@@ -126,6 +142,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = SettingsStore.Load();
         _currentMode = _settings.LastHighPowerMode ? LaptopPowerMode.HighPower : LaptopPowerMode.LowPower;
+        _lastRequestedMode = _currentMode;
         _powerProfileBroker = new PowerProfileBroker();
         _powerTelemetryService = new PowerTelemetryService(PowerProfileService.Machine.Profile);
         _powerSavingsEstimator = new PowerSavingsEstimator(
@@ -148,6 +165,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _energySavedMenuItem = CreateTelemetryMenuItem("Energy saved in ECO: 0.000 Wh");
         _measurementMenuItem = CreateTelemetryMenuItem("Measurement: detecting sensors...");
 
+        _managedSettingsMenuItem = new ToolStripMenuItem("Managed power settings");
+        _managedSettingsMenuItem.DropDownItems.Add(new ToolStripMenuItem("Reading current settings...") { Enabled = false });
+
         _autoSwitchMenuItem = new ToolStripMenuItem("Auto Switch When Plugged In")
         {
             CheckOnClick = true,
@@ -164,8 +184,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var exitMenuItem = new ToolStripMenuItem("Exit");
         exitMenuItem.Click += (_, _) => ExitThread();
 
-        var menu = new ContextMenuStrip();
+        var menu = new ContextMenuStrip
+        {
+            ShowItemToolTips = true
+        };
         menu.Items.Add(_statusMenuItem);
+        menu.Items.Add(_managedSettingsMenuItem);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_highUsageMenuItem);
         menu.Items.Add(_lowUsageMenuItem);
         menu.Items.Add(_savingRateMenuItem);
@@ -501,6 +526,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void RequestPowerMode(LaptopPowerMode targetMode, string reason)
     {
+        _lastRequestedMode = targetMode;
         _queuedMode = targetMode;
         _queuedReason = reason;
         if (!_modeChangeRunning)
@@ -523,6 +549,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 try
                 {
                     var result = await _powerProfileBroker.ApplyAsync(targetMode);
+                    RememberSettingResults(result);
                     var detectedMode = result.State.DetectedMode;
                     if (detectedMode is not null)
                     {
@@ -610,10 +637,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (readHardwareState && !_modeChangeRunning)
         {
-            var detectedMode = PowerProfileService.ReadState().DetectedMode;
+            _lastPowerState = PowerProfileService.ReadState();
+            var detectedMode = _lastPowerState.DetectedMode;
             if (detectedMode is not null)
             {
                 _currentMode = detectedMode.Value;
+                if (_lastSettingResults.Count == 0)
+                {
+                    _lastRequestedMode = detectedMode.Value;
+                }
                 _settings.LastHighPowerMode = detectedMode == LaptopPowerMode.HighPower;
             }
         }
@@ -622,11 +654,146 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _statusMenuItem.Text = highPower ? "HIGH POWER - ACTIVE" : "LOW POWER - ACTIVE";
         _autoSwitchMenuItem.Checked = _settings.AutoSwitchWhenPluggedIn;
         _startupMenuItem.Checked = StartupService.IsRunAtStartupEnabled();
+        RefreshManagedSettingsMenu();
         if (!_modeChangeRunning)
         {
             _notifyIcon.Icon = highPower ? _highPowerIcon : _lowPowerIcon;
         }
         RefreshNotifyText();
+    }
+
+    private void RememberSettingResults(PowerProfileApplyResult result)
+    {
+        _lastPowerState = result.State;
+        foreach (var settingResult in result.SettingResults)
+        {
+            _lastSettingResults[settingResult.Setting.Id] = settingResult;
+        }
+    }
+
+    private void RefreshManagedSettingsMenu()
+    {
+        _managedSettingsMenuItem.DropDownItems.Clear();
+        if (_lastPowerState is null)
+        {
+            _managedSettingsMenuItem.DropDownItems.Add(
+                new ToolStripMenuItem("Current settings unavailable") { Enabled = false });
+            return;
+        }
+
+        var settings = PowerProfileService.GetSettings(_lastPowerState);
+        if (settings.Count == 0)
+        {
+            _managedSettingsMenuItem.DropDownItems.Add(
+                new ToolStripMenuItem("No managed settings for this machine") { Enabled = false });
+            return;
+        }
+
+        foreach (var setting in settings)
+        {
+            _lastSettingResults.TryGetValue(setting.Id, out var lastResult);
+            if (lastResult is not null
+                && !string.Equals(lastResult.Setting.CurrentValue, setting.CurrentValue, StringComparison.OrdinalIgnoreCase))
+            {
+                lastResult = null;
+            }
+            var target = GetIndividualToggleTarget(setting);
+            var targetValue = target == LaptopPowerMode.HighPower
+                ? setting.HighPowerValue
+                : setting.LowPowerValue;
+            var prefix = lastResult switch
+            {
+                { Success: true } => "✓",
+                { Success: false } => "✗",
+                _ when setting.MatchesHighPower || setting.MatchesLowPower => "✓",
+                _ => "!"
+            };
+            var resultLabel = lastResult switch
+            {
+                { Success: true } => "  [worked]",
+                { Success: false } => "  [FAILED]",
+                _ => string.Empty
+            };
+            var item = new ToolStripMenuItem(
+                $"{prefix} {setting.Name}: {setting.CurrentValue}  →  {targetValue}{resultLabel}")
+            {
+                Enabled = !_modeChangeRunning,
+                ToolTipText = lastResult?.Error ??
+                              $"Click to set only this item to {targetValue}."
+            };
+            item.Click += async (_, _) => await ApplyIndividualSettingAsync(setting.Id);
+            _managedSettingsMenuItem.DropDownItems.Add(item);
+        }
+    }
+
+    private LaptopPowerMode GetIndividualToggleTarget(PowerSettingState setting)
+    {
+        if (setting.MatchesHighPower)
+        {
+            return LaptopPowerMode.LowPower;
+        }
+
+        if (setting.MatchesLowPower)
+        {
+            return LaptopPowerMode.HighPower;
+        }
+
+        // A failed/mismatched item retries the most recently requested profile.
+        return _lastRequestedMode;
+    }
+
+    private async Task ApplyIndividualSettingAsync(string settingId)
+    {
+        if (_modeChangeRunning || _lastPowerState is null)
+        {
+            return;
+        }
+
+        var setting = PowerProfileService.GetSettings(_lastPowerState)
+            .FirstOrDefault(candidate => candidate.Id == settingId);
+        if (setting is null)
+        {
+            return;
+        }
+
+        var target = GetIndividualToggleTarget(setting);
+        _lastRequestedMode = target;
+        _modeChangeRunning = true;
+        ShowSwitchingState(target);
+        RefreshManagedSettingsMenu();
+        try
+        {
+            var result = await _powerProfileBroker.ApplySettingAsync(settingId, target);
+            RememberSettingResults(result);
+            if (result.State.DetectedMode is { } detectedMode)
+            {
+                SetCurrentMode(detectedMode);
+            }
+
+            var settingResult = result.SettingResults.FirstOrDefault();
+            if (settingResult?.Success == true)
+            {
+                ShowInfo($"{settingResult.Setting.Name} changed to {settingResult.Setting.CurrentValue}.");
+            }
+            else
+            {
+                ShowError($"{setting.Name} failed: {settingResult?.Error ?? string.Join("; ", result.Errors)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowError($"{setting.Name} failed: {ex.Message}");
+        }
+        finally
+        {
+            _modeChangeRunning = false;
+            StopSwitchingAnimation();
+            RefreshUi(readHardwareState: true);
+            if (_queuedMode is not null)
+            {
+                _ = ProcessPowerModeQueueAsync();
+            }
+        }
     }
 
     private void ShowInfo(string message)

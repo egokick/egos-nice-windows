@@ -6,7 +6,27 @@ using Taildesk.Shared;
 namespace Taildesk.Admin;
 
 public sealed record HostedInvitePublication(string IdHash, string Url);
-internal sealed record HostedInviteUpload(string DeviceName, string Role, DateTimeOffset ExpiresAt, byte[] Ciphertext);
+internal sealed record HostedInviteUpload(
+    string DeviceName,
+    string Role,
+    DateTimeOffset ExpiresAt,
+    string ReleaseVersion,
+    string SourceSha256,
+    string SourceFile,
+    long SourceSize,
+    string SourceManifestSha256,
+    string SourceManifestKeyId,
+    string SigningProfile,
+    string ProductSignerThumbprint,
+    string SdkVersion,
+    string RuntimeVersion,
+    string[] TargetRuntimes,
+    string BootstrapVersion,
+    string BootstrapFile,
+    long BootstrapSize,
+    string BootstrapSha256,
+    string BootstrapSignerThumbprint,
+    byte[] Ciphertext);
 
 public sealed class HostedInviteClient
 {
@@ -27,8 +47,14 @@ public sealed class HostedInviteClient
         string fragmentKey,
         CancellationToken cancellationToken = default)
     {
+        BuildSigningTrust.RequirePublishable();
         var idHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(publicId))).ToLowerInvariant();
-        var upload = new HostedInviteUpload(payload.DeviceName, payload.Role.ToString(), payload.ExpiresAt, encryptedEnvelope);
+        var upload = new HostedInviteUpload(payload.DeviceName, payload.Role.ToString(), payload.ExpiresAt,
+            payload.ReleaseVersion, payload.SourceSha256, payload.SourceFile, payload.SourceSize,
+            payload.SourceManifestSha256, payload.SourceManifestKeyId,
+            payload.SigningProfile, payload.ProductSignerThumbprint, payload.SdkVersion,
+            payload.RuntimeVersion, payload.TargetRuntimes, payload.BootstrapVersion, payload.BootstrapFile,
+            payload.BootstrapSize, payload.BootstrapSha256, payload.BootstrapSignerThumbprint, encryptedEnvelope);
         var body = JsonSerializer.SerializeToUtf8Bytes(upload, JsonDefaults.Options);
         var uri = BuildUri(InviteAdminPath + idHash);
         using var response = await SendSignedAsync(HttpMethod.Put, uri, body, cancellationToken);

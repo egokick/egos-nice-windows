@@ -11,7 +11,7 @@ internal sealed class AgentTaskController(GuardianPathPolicy paths)
     public async Task VerifyDefinitionAsync(CancellationToken cancellationToken)
     {
         var result = await WindowsCommand.RunAsync(
-            "schtasks.exe",
+            WindowsCommand.RequireSystemExecutable("schtasks.exe"),
             ["/Query", "/TN", RemoteAdministrationProtocol.AgentTaskName, "/XML"],
             CommandTimeout,
             cancellationToken);
@@ -50,7 +50,7 @@ internal sealed class AgentTaskController(GuardianPathPolicy paths)
         // /End may report that the task was not running. The path-scoped process
         // check below is authoritative and deliberately avoids a name-wide kill.
         _ = await WindowsCommand.RunAsync(
-            "schtasks.exe",
+            WindowsCommand.RequireSystemExecutable("schtasks.exe"),
             ["/End", "/TN", RemoteAdministrationProtocol.AgentTaskName],
             CommandTimeout,
             cancellationToken);
@@ -89,7 +89,7 @@ internal sealed class AgentTaskController(GuardianPathPolicy paths)
     public async Task StartAgentAsync(CancellationToken cancellationToken)
     {
         var result = await WindowsCommand.RunAsync(
-            "schtasks.exe",
+            WindowsCommand.RequireSystemExecutable("schtasks.exe"),
             ["/Run", "/TN", RemoteAdministrationProtocol.AgentTaskName],
             CommandTimeout,
             cancellationToken);

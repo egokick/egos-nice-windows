@@ -229,7 +229,36 @@ public sealed class FileOperations
         else lease.Delete();
     }
 
-    public string ResolveFile(string root, string relativePath) => _paths.Resolve(root, relativePath);
+    public async Task DeleteIfMatchAsync(
+        string root,
+        string relativePath,
+        long expectedLength,
+        string expectedSha256,
+        CancellationToken cancellationToken)
+    {
+        if (expectedLength < 0 || string.IsNullOrWhiteSpace(expectedSha256) || expectedSha256.Length != 64)
+            throw new InvalidDataException("A valid SHA-256 digest and length are required for conditional deletion.");
+        using var lease = _paths.Acquire(root, relativePath, readFile: true, delete: true);
+        if (lease.IsDirectory) throw new IOException("Conditional deletion is available only for files.");
+        if (lease.Length != expectedLength) throw new IOException("The source file changed after transfer; it was not deleted.");
+        string digest;
+        await using (var stream = lease.OpenReadStream(keepLeaseOpen: true))
+        {
+            digest = Convert.ToHexString(
+                await System.Security.Cryptography.SHA256.HashDataAsync(stream, cancellationToken)).ToLowerInvariant();
+        }
+        if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                System.Text.Encoding.ASCII.GetBytes(digest),
+                System.Text.Encoding.ASCII.GetBytes(expectedSha256.ToLowerInvariant())))
+            throw new IOException("The source file changed after transfer; it was not deleted.");
+        lease.Delete();
+    }
+    public string ResolveFile(string root, string relativePath)
+    {
+        using var lease = _paths.Acquire(root, relativePath, readFile: true);
+        if (lease.IsDirectory) throw new FileNotFoundException("The requested media file was not found.");
+        return lease.FullPath;
+    }
 
     private (string SafeName, string TemporaryName) ValidateUpload(string fileName, Guid transferId, long totalLength)
     {

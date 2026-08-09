@@ -16,6 +16,7 @@ if not exist "%APP_DIR%\" (
 
 if /I "%APP_ID%"=="parakeet-mic" goto :parakeet
 if /I "%APP_ID%"=="continuous-transcriber" goto :continuousTranscriber
+if /I "%APP_ID%"=="continuous-transcriber-dashboard" goto :continuousTranscriberDashboard
 if /I "%APP_ID%"=="nemotron-mic" goto :nemotron
 if /I "%APP_ID%"=="ollama-coder-agent" goto :ollama
 if /I "%APP_ID%"=="workflow-manager" goto :workflow
@@ -59,6 +60,10 @@ if not exist "%APP_DIR%\prepare-runtime.ps1" (
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0ensure-python.ps1" -Version "3.12" -AppDirectory "%APP_DIR%"
 if errorlevel 1 exit /b 1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%APP_DIR%\prepare-runtime.ps1"
+exit /b %ERRORLEVEL%
+
+:continuousTranscriberDashboard
+call :restoreDotnet "%APP_DIR%\ContinuousTranscriber.Dashboard.csproj"
 exit /b %ERRORLEVEL%
 
 :nemotron

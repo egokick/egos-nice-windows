@@ -1,3 +1,5 @@
+using System.Security.Principal;
+using System.Text.Json;
 using Taildesk.Shared;
 
 namespace Taildesk.Admin;
@@ -60,19 +62,32 @@ public sealed class AdminState
         {
             Config.HeadscaleControlUrl = Config.HeadscaleApiUrl;
         }
-        var bootstrapPath = Path.Combine(AppPaths.AdminDataDirectory, "bootstrap.json");
+        var bootstrapPath = AppPaths.ControllerBootstrapFile;
         if (File.Exists(bootstrapPath))
         {
-            var bootstrap = await new JsonFileStore<AdminBootstrap>(bootstrapPath).LoadAsync(cancellationToken);
+            var sid = WindowsIdentity.GetCurrent().User?.Value
+                      ?? throw new InvalidOperationException("The current Windows user SID is unavailable.");
+            var content = MachineStorageSecurity.ReadUserBootstrap(
+                bootstrapPath, sid, maximumBytes: 64 * 1024);
+            var bootstrap = JsonSerializer.Deserialize<AdminBootstrap>(content, JsonDefaults.Options)
+                            ?? throw new InvalidDataException("The protected controller bootstrap is empty.");
+            if (bootstrap.SchemaVersion != 1
+                || !bootstrap.IsMachineProtected
+                || string.IsNullOrWhiteSpace(bootstrap.ControllerTokenProtected)
+                || string.IsNullOrWhiteSpace(bootstrap.DeviceName)
+                || !Uri.TryCreate(bootstrap.CoordinatorUrl, UriKind.Absolute, out var coordinator)
+                || coordinator.Scheme != Uri.UriSchemeHttps
+                || !string.IsNullOrEmpty(coordinator.UserInfo))
+                throw new InvalidDataException("The protected controller bootstrap metadata is invalid.");
             var bootstrapToken = SecretProtector.Unprotect(
                 bootstrap.ControllerTokenProtected,
-                bootstrap.IsMachineProtected ? SecretScope.LocalMachine : SecretScope.CurrentUser);
+                SecretScope.LocalMachine);
             Config.Mode = AdminMode.Secondary;
             Config.SetupComplete = true;
             Config.CoordinatorUrl = bootstrap.CoordinatorUrl;
             Config.ControllerTokenProtected = SecretProtector.Protect(bootstrapToken, SecretScope.CurrentUser);
             await SaveAsync(cancellationToken);
-            try { File.Delete(bootstrapPath); } catch { }
+            MachineStorageSecurity.DeleteUserBootstrap(bootstrapPath, sid);
         }
     }
 

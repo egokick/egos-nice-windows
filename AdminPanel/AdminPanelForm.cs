@@ -1629,6 +1629,9 @@ internal static class AdminAppLogoFactory
             case "continuous-transcriber":
                 DrawMicrophone(graphics, Color.FromArgb(56, 189, 248));
                 break;
+            case "continuous-transcriber-dashboard":
+                DrawMicrophone(graphics, Color.FromArgb(167, 139, 250));
+                break;
             case "wifidevices":
                 DrawWifi(graphics);
                 break;

@@ -18,7 +18,7 @@ public static class StableGuardianMaintenance
             throw new FileNotFoundException("Stable Guardian maintenance requires both signed executables.");
 
         RequireSingleExecutable(sourceDirectory, "signed release Guardian");
-        await InvitationSigning.VerifyAuthenticodeAsync(sourceExecutable, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(sourceExecutable, cancellationToken);
         var sourceVersion = ReadVersion(sourceExecutable);
 
         EnsureNoActiveUpdate();
@@ -30,7 +30,7 @@ public static class StableGuardianMaintenance
         // Everything derived from, or deleted beneath, the installed Guardian
         // is re-read while the cross-process lease is held. A second Setup can
         // no longer remove the active transaction's rollback artifacts.
-        await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
         var installedVersion = ReadVersion(installedExecutable);
         var installedFiles = RequireRecognizedInstalledFiles(installedDirectory);
         var contentMatches = await FilesMatchAsync(sourceExecutable, installedExecutable, cancellationToken);
@@ -53,10 +53,12 @@ public static class StableGuardianMaintenance
                  })
         {
             _ = await ProcessRunner.RunAsync(
-                "schtasks.exe",
+                RequireSystemExecutable("schtasks.exe"),
                 ["/End", "/TN", taskName],
                 TimeSpan.FromSeconds(15),
-                cancellationToken);
+                cancellationToken,
+                environment: BuildPrivilegedEnvironment(),
+                clearEnvironment: true);
         }
         await Task.Delay(750, cancellationToken);
 
@@ -68,14 +70,14 @@ public static class StableGuardianMaintenance
         try
         {
             File.Copy(sourceExecutable, staged, overwrite: false);
-            await InvitationSigning.VerifyAuthenticodeAsync(staged, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(staged, cancellationToken);
 
             // File.Replace uses Windows ReplaceFile semantics: the signed new
             // executable is promoted at the fixed path while the prior signed
             // Guardian is retained as a rollback copy.
             await ReplaceWithRetryAsync(staged, installedExecutable, backup, cancellationToken);
             promoted = true;
-            await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
             if (ReadVersion(installedExecutable) != sourceVersion)
                 throw new InvalidDataException("The promoted stable Guardian version does not match the signed release.");
             if (!await FilesMatchAsync(sourceExecutable, installedExecutable, cancellationToken))
@@ -104,7 +106,7 @@ public static class StableGuardianMaintenance
                 try
                 {
                     File.Replace(backup, installedExecutable, failed, ignoreMetadataErrors: true);
-                    await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, CancellationToken.None);
+                    await ProductSigning.VerifyAuthenticodeAsync(installedExecutable, CancellationToken.None);
                 }
                 catch
                 {
@@ -234,5 +236,42 @@ public static class StableGuardianMaintenance
                 and not UpdatePhase.RolledBack)
             throw new InvalidOperationException(
                 $"Stable Guardian maintenance cannot interrupt update {journal.OperationId:N}, which is {journal.Phase}.");
+    }
+
+    private static string RequireSystemExecutable(string fileName)
+    {
+        if (Path.GetFileName(fileName) != fileName)
+            throw new InvalidDataException("A Windows system-tool name was not canonical.");
+
+        var windows = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        var system32 = Path.Combine(windows, "System32");
+        var executable = Path.Combine(system32, fileName);
+        foreach (var path in new[] { windows, system32, executable })
+        {
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException($"A Windows system-tool path is a reparse point: {path}");
+        }
+        if ((File.GetAttributes(executable) & FileAttributes.Directory) != 0)
+            throw new InvalidDataException($"A Windows system tool is not a regular file: {executable}");
+        return executable;
+    }
+
+    private static IReadOnlyDictionary<string, string?> BuildPrivilegedEnvironment()
+    {
+        var windows = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        var system32 = Path.Combine(windows, "System32");
+        return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SystemRoot"] = windows,
+            ["WINDIR"] = windows,
+            ["ComSpec"] = RequireSystemExecutable("cmd.exe"),
+            ["PATH"] = string.Join(Path.PathSeparator, system32, Path.Combine(system32, "Wbem")),
+            ["PATHEXT"] = ".COM;.EXE",
+            ["TEMP"] = Path.Combine(windows, "Temp"),
+            ["TMP"] = Path.Combine(windows, "Temp")
+        };
     }
 }

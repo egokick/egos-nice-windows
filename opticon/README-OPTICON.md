@@ -20,6 +20,39 @@ The design is intended for a small trusted fleet where the operator wants direct
 
 The primary command center is intentionally an interactive tray application, not a pre-logon Windows service. Locking the Windows session is fine; signing out or choosing **Exit** stops the coordinator until Opticon is started again.
 
+## Scheduled file transfers
+
+The **Scheduled transfers** workspace automates local-to-device uploads and device-to-local downloads while Opticon is running (including while it is minimized to the notification area). A schedule can copy files and preserve the source, or transfer files and delete each source only after that individual file has been confirmed at the destination.
+
+The editor offers **every minute**, **every hour**, **every day**, and **every week** choices with time/day controls. It generates a standard five-field cron expression and shows the next run in the selected Windows time zone. Advanced users can select **Custom cron** and enter the expression directly. Each schedule can:
+
+- transfer every file in one folder, optionally including subfolders;
+- select one extension such as `.pdf`, or match the relative file path with a bounded regular expression;
+- preserve subfolder structure, control destination overwrite, pause without deleting the schedule, and run immediately;
+- retain durable run and per-file results, including failures, byte counts, and whether move-mode source deletion completed; and
+- retry a failed or partially successful run. A retry targets failed files; when transfer succeeded but move-mode deletion failed, it retries only the deletion.
+
+Scheduled-transfer state and history are stored separately at `%LOCALAPPDATA%\Taildesk\Admin\scheduled-transfers.json`. UI and CLI updates use the same cross-process lock so a due run cannot be claimed twice. At most two scheduled runs execute concurrently, each run is limited to 10,000 matching files, and local traversal skips links and junctions.
+
+The installed `opticon` CLI exposes the complete lifecycle. For example:
+
+```powershell
+opticon schedule add --name "Hourly reports" --device "Office PC" --direction upload `
+  --local-folder "C:\Reports" --remote-root Documents --remote-folder Incoming `
+  --every hour --extension .pdf --move
+
+opticon schedule add --name "Monday photos" --device "Studio PC" --direction download `
+  --local-folder "D:\Studio archive" --remote-root Pictures --remote-folder Exports `
+  --every week --day monday --at 09:30 --regex "^final/.*\.(png|jpg)$" --recursive
+
+opticon schedule list --json
+opticon schedule run <schedule-id>
+opticon schedule history --schedule <schedule-id> --limit 25
+opticon schedule retry <run-id>
+```
+
+Run `opticon help` for add/edit, enable/disable, remove, custom `--cron`, time-zone, copy/move, recursion, overwrite, history, retry, and JSON options.
+
 ## Enrollment and operation
 
 1. Opticon asks Headscale for a tagged, single-use pre-authentication key.
@@ -133,19 +166,27 @@ flyctl status --app taildesk-egokick-control --all
 flyctl releases --app taildesk-egokick-control
 ```
 
-Never copy the Fly token into this repository, `fly.toml`, the image, Opticon configuration, or an invitation. If the dedicated IPv4 changes, update `fly-headscale\config.yaml`, the DNS pin/route scripts under `scripts`, and the installed roaming task before considering the migration complete.
+Never copy the Fly token into this repository, `fly.toml`, the image, Opticon configuration, or an invitation. If the dedicated IPv4 changes, update `fly-headscale\config.yaml`, rebuild the signed `Taildesk.RouteKeeper.exe`, and replace the installed route task through the signed installer before considering the migration complete.
 
 Fly CLI references: [deploy](https://fly.io/docs/flyctl/deploy/), [status](https://fly.io/docs/flyctl/status/), [IP management](https://fly.io/docs/flyctl/ips/).
 
 ## Build and install
 
-From a Windows PowerShell prompt with the .NET 8 SDK:
+Production packaging requires exact .NET SDK 8.0.423, a publicly trusted product
+code-signing certificate, a separate offline source-release certificate, and an
+RFC 3161 timestamp service:
 
 ```powershell
 Set-Location 'C:\source\egos-nice-windows\opticon'
-.\build.ps1 -Runtime win-x64
+.\build.ps1 -Runtime win-x64 -BuildProfile Production `
+  -CodeSigningCertificateThumbprint '<product-code-signing-thumbprint>' `
+  -SourceReleaseSigningCertificateThumbprint '<offline-release-thumbprint>'
 ```
 
-The build runs the solution and self-tests, publishes self-contained Windows binaries, writes `dist\Opticon-CommandCenter-win-x64.zip`, and checks the live target-release manifest. If this version is missing, a clean and pushed `main` build automatically publishes its signed target bundles through S3/CloudFront. Use `-SkipTargetReleaseDeployment` only for explicit development or CI builds. Extract the command-center ZIP and run `Install-Opticon.ps1` as Administrator. The installer preserves the compatibility data paths, creates Opticon desktop/startup/Start Menu shortcuts with the Opticon icon, installs the narrowly scoped roaming-route maintenance task, and removes legacy Taildesk shortcuts.
+The production build requires a clean committed tree, recreates every publish directory, signs each executable with the product signer and RFC 3161 timestamp, and signs the exact package manifest with the offline source-release key. It writes `dist\Opticon-CommandCenter-win-x64.zip` and checks the hosted release manifest. Extract the ZIP, verify its Windows publisher, and open only `Install-Opticon.exe`; a loose PowerShell installer is never a release entry point.
+
+Hosted invitations pin the exact bootstrap and source archive by version, size, SHA-256, signing profile, release key, product signer, SDK/runtime, and architecture. The recipient verifies and builds that source locally with .NET SDK 8.0.423, receives a clear prompt when it is missing, and Setup automatically consumes the encrypted one-time invitation to join the private mesh.
+
+Developer packages require explicit separate development certificates and `-BuildProfile Developer -SkipTargetReleaseDeployment`; they are named `DEV-UNTRUSTED` and are intentionally non-publishable.
 
 For deeper implementation details, continue with `docs\ARCHITECTURE.md` and `docs\SECURITY.md`, then read the code under `src\Taildesk.Admin`, `src\Taildesk.Agent`, `src\Taildesk.Setup`, and `src\Taildesk.Shared`.

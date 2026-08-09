@@ -35,7 +35,9 @@ public static class ProcessRunner
         IEnumerable<string> arguments,
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default,
-        bool captureOutput = true)
+        bool captureOutput = true,
+        IReadOnlyDictionary<string, string?>? environment = null,
+        bool clearEnvironment = false)
     {
         var start = new ProcessStartInfo(executable)
         {
@@ -49,6 +51,15 @@ public static class ProcessRunner
         foreach (var argument in arguments)
         {
             start.ArgumentList.Add(argument);
+        }
+        if (clearEnvironment) start.Environment.Clear();
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                if (value is null) start.Environment.Remove(name);
+                else start.Environment[name] = value;
+            }
         }
 
         using var process = new Process { StartInfo = start };

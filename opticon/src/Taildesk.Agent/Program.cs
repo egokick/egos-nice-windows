@@ -14,14 +14,25 @@ if (!OperatingSystem.IsWindows())
     return;
 }
 
-var configPath = args.FirstOrDefault(argument => argument.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
-                 ?? AppPaths.AgentConfigFile;
-var configStore = new JsonFileStore<AgentConfig>(configPath);
-var config = await configStore.LoadAsync();
-if (string.IsNullOrWhiteSpace(config.AgentTokenHash)
-    || (!config.ExposeAllLocalVolumes && config.SharedRoots.Count == 0))
+if (args.Length != 0)
 {
-    Console.Error.WriteLine($"Taildesk Agent is not configured. Expected {configPath}.");
+    Console.Error.WriteLine("Taildesk Agent does not accept command-line configuration paths.");
+    Environment.ExitCode = 2;
+    return;
+}
+MachineStorageSecurity.EnsureOpticonMachineState();
+var configStore = new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile);
+var config = await configStore.LoadAsync();
+if (config.ExposeAllLocalVolumes)
+{
+    // Old releases persisted this unsafe compatibility switch. Keep accepting
+    // the configuration document, but durably retire the SYSTEM-wide grant.
+    config.ExposeAllLocalVolumes = false;
+    await configStore.SaveAsync(config);
+}
+if (string.IsNullOrWhiteSpace(config.AgentTokenHash) || config.SharedRoots.Count == 0)
+{
+    Console.Error.WriteLine($"Taildesk Agent is not configured. Expected {AppPaths.AgentConfigFile}.");
     return;
 }
 
@@ -55,7 +66,8 @@ builder.Services.AddSingleton(config);
 builder.Services.AddSingleton<AgentState>();
 builder.Services.AddSingleton<TailscaleCli>();
 builder.Services.AddSingleton<AgentRuntime>();
-builder.Services.AddSingleton(new PathGuard(config.SharedRoots, config.ExposeAllLocalVolumes));
+builder.Services.AddSingleton<BatteryStatusProvider>();
+builder.Services.AddSingleton(new PathGuard(config.SharedRoots));
 builder.Services.AddSingleton<FileOperations>();
 builder.Services.AddSingleton<UpdateManager>();
 builder.Services.AddSingleton<SshAccessManager>();
@@ -85,7 +97,7 @@ var updateHealthToken =
 app.UseRateLimiter();
 app.Use(async (context, next) =>
 {
-    if (string.Equals(context.Request.Path.Value, "/internal/update-health", StringComparison.Ordinal))
+    if (AgentEndpointPolicy.IsInternalUpdateHealth(context.Request.Path.Value))
     {
         var remote = context.Connection.RemoteIpAddress;
         var healthHeader = context.Request.Headers["X-Opticon-Update-Health"].ToString();
@@ -99,7 +111,7 @@ app.Use(async (context, next) =>
         return;
     }
 
-    if (string.Equals(context.Request.Path.Value, "/api/v1/media", StringComparison.Ordinal))
+    if (AgentEndpointPolicy.IsSignedMediaDownload(context.Request.Path.Value))
     {
         await next();
         return;
@@ -107,7 +119,8 @@ app.Use(async (context, next) =>
 
     var header = context.Request.Headers.Authorization.ToString();
     var token = header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? header[7..].Trim() : string.Empty;
-    var isRotationRequest = string.Equals(context.Request.Path.Value, "/api/v1/security/rotate", StringComparison.Ordinal);
+    var isRotationRequest = string.Equals(
+        context.Request.Path.Value, "/api/v1/security/rotate", StringComparison.OrdinalIgnoreCase);
     if (!CredentialRotationState.CanAuthenticate(config, token, isRotationRequest, DateTimeOffset.UtcNow))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
@@ -120,10 +133,7 @@ app.Use(async (context, next) =>
 
 app.Use(async (context, next) =>
 {
-    var sensitive = context.Request.Path.StartsWithSegments("/api/v1/security")
-                    || context.Request.Path.StartsWithSegments("/api/v1/ssh")
-                    || context.Request.Path.StartsWithSegments("/api/v1/update")
-                    || string.Equals(context.Request.Path.Value, "/api/v1/actions/exit-node", StringComparison.Ordinal);
+    var sensitive = AgentEndpointPolicy.RequiresPrimaryCommandCenter(context.Request.Path.Value);
     if (sensitive)
     {
         var remote = context.Connection.RemoteIpAddress;
@@ -280,6 +290,17 @@ app.MapDelete("/api/v1/files", (string root, string path, bool? recursive, FileO
     files.Delete(root, path, recursive == true);
     return Results.NoContent();
 });
+
+app.MapPost("/api/v1/files/delete-if-match", async (
+    ConditionalDeleteRequest request,
+    FileOperations files,
+    CancellationToken cancellationToken) =>
+{
+    await files.DeleteIfMatchAsync(
+        request.Root, request.RelativePath, request.ExpectedLength, request.ExpectedSha256, cancellationToken);
+    return Results.NoContent();
+});
+
 app.MapPost("/api/v1/media-link", (MediaLinkRequest request, AgentState state, FileOperations files) =>
 {
     _ = files.ResolveFile(request.Root, request.RelativePath);

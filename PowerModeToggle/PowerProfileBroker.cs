@@ -23,18 +23,30 @@ internal sealed class PowerProfileBroker : IDisposable
 
     public async Task<PowerProfileApplyResult> ApplyAsync(LaptopPowerMode mode)
     {
+        return await SendAsync(new PowerProfileRequest(mode, null));
+    }
+
+    public async Task<PowerProfileApplyResult> ApplySettingAsync(string settingId, LaptopPowerMode mode)
+    {
+        return await SendAsync(new PowerProfileRequest(mode, settingId));
+    }
+
+    private async Task<PowerProfileApplyResult> SendAsync(PowerProfileRequest request)
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         if (IsElevated())
         {
-            return await Task.Run(() => PowerProfileService.Apply(mode));
+            return await Task.Run(() => string.IsNullOrWhiteSpace(request.SettingId)
+                ? PowerProfileService.Apply(request.Mode)
+                : PowerProfileService.ApplySetting(request.SettingId, request.Mode));
         }
 
         await _requestLock.WaitAsync();
         try
         {
             await EnsureHelperConnectedAsync();
-            await _writer!.WriteLineAsync(mode.ToString());
+            await _writer!.WriteLineAsync(JsonSerializer.Serialize(request));
 
             var response = await _reader!.ReadLineAsync();
             if (string.IsNullOrWhiteSpace(response))
@@ -81,18 +93,36 @@ internal sealed class PowerProfileBroker : IDisposable
 
             using var reader = new StreamReader(pipe);
             using var writer = new StreamWriter(pipe) { AutoFlush = true };
-            while (reader.ReadLine() is { } request)
+            while (reader.ReadLine() is { } requestJson)
             {
-                if (!Enum.TryParse<LaptopPowerMode>(request, ignoreCase: true, out var mode))
+                PowerProfileRequest? request = null;
+                try
+                {
+                    request = JsonSerializer.Deserialize<PowerProfileRequest>(requestJson);
+                }
+                catch (JsonException)
+                {
+                    // Accept the previous helper protocol during rolling local builds.
+                    if (Enum.TryParse<LaptopPowerMode>(requestJson, ignoreCase: true, out var legacyMode))
+                    {
+                        request = new PowerProfileRequest(legacyMode, null);
+                    }
+                }
+
+                if (request is null)
                 {
                     writer.WriteLine(JsonSerializer.Serialize(new PowerProfileApplyResult(
                         LaptopPowerMode.LowPower,
                         PowerProfileService.ReadState(),
-                        ["The requested power profile was not recognized."])));
+                        ["The requested power profile was not recognized."],
+                        [])));
                     continue;
                 }
 
-                writer.WriteLine(JsonSerializer.Serialize(PowerProfileService.Apply(mode)));
+                var result = string.IsNullOrWhiteSpace(request.SettingId)
+                    ? PowerProfileService.Apply(request.Mode)
+                    : PowerProfileService.ApplySetting(request.SettingId, request.Mode);
+                writer.WriteLine(JsonSerializer.Serialize(result));
             }
         }
         catch
@@ -188,3 +218,5 @@ internal sealed class PowerProfileBroker : IDisposable
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
     }
 }
+
+internal sealed record PowerProfileRequest(LaptopPowerMode Mode, string? SettingId);

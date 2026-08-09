@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>Install-Opticon</AssemblyName>
+    <RootNamespace>Taildesk.CommandCenterInstaller</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\..\assets\opticon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Taildesk.Shared\Taildesk.Shared.csproj" />
+    <EmbeddedResource Include="..\..\installer\Install-CommandCenter.ps1"
+                      Link="Payload\Install-CommandCenter.ps1"
+                      LogicalName="Taildesk.CommandCenterInstaller.Install-CommandCenter.ps1" />
+  </ItemGroup>
+</Project>

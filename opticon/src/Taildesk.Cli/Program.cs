@@ -157,7 +157,7 @@ internal static class Program
     {
         if (args.Count == 0) return false;
         var command = args[0].ToLowerInvariant();
-        return command is "devices" or "status" or "update"
+        return command is "devices" or "status" or "update" or "schedule" or "transcriptions"
                && args.Skip(1).Any(value => value.Equals("--json", StringComparison.Ordinal));
     }
 
@@ -218,6 +218,8 @@ internal sealed class CliApplication
             "status" => await RunStatusAsync(args[1..], cancellationToken),
             "ssh" => await RunSshAsync(args[1..], cancellationToken),
             "update" => await RunUpdateAsync(args[1..], cancellationToken),
+            "schedule" => await new ScheduledTransferCli().RunAsync(args[1..], cancellationToken),
+            "transcriptions" or "transcripts" => await new TranscriptionCli().RunAsync(args[1..], cancellationToken),
             "version" or "--version" or "-v" => RunVersion(args[1..]),
             _ => throw CliException.Usage($"Unknown command '{Clean(args[0])}'. Run 'opticon help' for usage.")
         };
@@ -507,6 +509,12 @@ internal sealed class CliApplication
         device.SshReady = status.SshReady;
         device.SshPort = status.SshPort;
         device.UpdateStatus = status.UpdateStatus;
+        device.OnlineSince = status.OnlineDurationSeconds is long seconds
+                             && seconds >= 0
+                             && seconds <= TimeSpan.MaxValue.TotalSeconds
+            ? DateTimeOffset.UtcNow.Subtract(TimeSpan.FromSeconds(seconds))
+            : null;
+        device.BatteryPercentage = status.BatteryPercentage;
     }
 
     private static async Task<AdminState> LoadStateAsync(
@@ -709,6 +717,21 @@ internal sealed class CliApplication
               opticon ssh <device> [--minutes 5..480] --command <command>
               opticon ssh <device> [--minutes 5..480] --powershell <script|->
               opticon update <device> --yes [--json]
+              opticon transcriptions devices [--json]
+              opticon transcriptions sync --device <device> --destination <folder>
+                  --start <ISO-8601> --end <ISO-8601> [--metadata-only] [--move] [--json]
+              opticon schedule list [--json]
+              opticon schedule add --name <name> --device <device> --direction <upload|download>
+                  --local-folder <path> --remote-root <root> [--remote-folder <path>]
+                  (--every <minute|hour|day|week> [--at HH:mm] [--day <day>] | --cron "<expression>")
+                  [--extension <.ext> | --regex <pattern>] [--recursive] [--move]
+                  [--overwrite] [--disabled] [--timezone <id>] [--json]
+              opticon schedule edit <schedule-id> [the same options] [--copy] [--all-files] [--enabled] [--json]
+              opticon schedule run <schedule-id> [--json]
+              opticon schedule enable|disable <schedule-id> [--json]
+              opticon schedule remove <schedule-id> --yes [--json]
+              opticon schedule history [--schedule <schedule-id>] [--limit <count>] [--json]
+              opticon schedule retry <run-id> [--json]
               opticon version
 
             Device selectors are exact: device ID, Tailnet device ID, Tailscale IPv4
@@ -722,6 +745,10 @@ internal sealed class CliApplication
 
             Updates use the guarded Agent/Guardian transaction and require verified
             RustDesk recovery. Legacy one-time maintenance bootstrap remains UI-only.
+
+            Scheduled transfers support standard five-field cron expressions. Friendly
+            --every options generate cron without requiring cron knowledge. Move mode
+            deletes each source file only after its individual transfer is confirmed.
 
             Run the CLI as the same Windows user that configured the command center.
             JSON output never includes Agent tokens, passwords, or protected values.

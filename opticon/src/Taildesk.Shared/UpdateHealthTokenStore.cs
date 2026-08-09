@@ -21,9 +21,9 @@ public static class UpdateHealthTokenStore
 
     public static string LoadFromAgentConfigFile(string? sidecarPath = null)
     {
-        using var stream = new FileStream(
-            AppPaths.AgentConfigFile, FileMode.Open, FileAccess.Read, FileShare.Read);
-        using var document = JsonDocument.Parse(stream, new JsonDocumentOptions
+        var content = MachineStorageSecurity.ReadRestrictedFile(
+            AppPaths.AgentConfigFile, 4 * 1024 * 1024);
+        using var document = JsonDocument.Parse(content, new JsonDocumentOptions
         {
             AllowTrailingCommas = false,
             CommentHandling = JsonCommentHandling.Disallow,
@@ -64,8 +64,8 @@ public static class UpdateHealthTokenStore
         var path = Path.GetFullPath(sidecarPath ?? AppPaths.UpdateHealthTokenSidecarFile);
         var directory = Path.GetDirectoryName(path)
                         ?? throw new InvalidOperationException("The update health sidecar has no parent directory.");
-        if (!Directory.Exists(directory))
-            throw new InvalidOperationException("The protected update directory must exist before creating its health credential.");
+        RequireUpdateSidecarPath(path);
+        MachineStorageSecurity.RequireRestrictedDirectory(directory);
         if (File.Exists(path)) return Load(null, expectedDeviceId, path);
 
         var envelope = new UpdateHealthTokenSidecar
@@ -78,47 +78,21 @@ public static class UpdateHealthTokenStore
         if (bytes.Length is <= 0 or > MaximumSidecarBytes)
             throw new InvalidDataException("The protected update health sidecar has an invalid size.");
 
-        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".new";
-        try
-        {
-            await using (var output = new FileStream(
-                             temporary,
-                             FileMode.CreateNew,
-                             FileAccess.Write,
-                             FileShare.None,
-                             4096,
-                             FileOptions.Asynchronous | FileOptions.WriteThrough))
-            {
-                await output.WriteAsync(bytes, cancellationToken);
-                await output.FlushAsync(cancellationToken);
-            }
-
-            try { File.Move(temporary, path, false); }
-            catch (IOException) when (File.Exists(path))
-            {
-                // Another protected process won the write-once creation race.
-            }
-            return Load(null, expectedDeviceId, path);
-        }
-        finally
-        {
-            try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
-        }
+        await MachineStorageSecurity.WriteRestrictedFileCreateNewAsync(
+            path, bytes, cancellationToken);
+        return Load(null, expectedDeviceId, path);
     }
 
     private static string LoadSidecar(Guid expectedDeviceId, string path)
     {
-        var information = new FileInfo(path);
-        if (!information.Exists)
+        path = RequireUpdateSidecarPath(path);
+        if (!File.Exists(path))
             throw new FileNotFoundException("The Agent has no protected local update health credential.", path);
-        if (information.Length is <= 0 or > MaximumSidecarBytes)
-            throw new InvalidDataException("The protected update health sidecar has an invalid size.");
-
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var content = MachineStorageSecurity.ReadRestrictedFile(path, MaximumSidecarBytes);
         UpdateHealthTokenSidecar envelope;
         try
         {
-            envelope = JsonSerializer.Deserialize<UpdateHealthTokenSidecar>(stream, JsonDefaults.Options)
+            envelope = JsonSerializer.Deserialize<UpdateHealthTokenSidecar>(content, JsonDefaults.Options)
                        ?? throw new InvalidDataException("The protected update health sidecar is empty.");
         }
         catch (JsonException exception)
@@ -130,6 +104,15 @@ public static class UpdateHealthTokenStore
             || string.IsNullOrWhiteSpace(envelope.TokenProtected))
             throw new InvalidDataException("The protected update health sidecar does not match this device.");
         return UnprotectAndValidate(envelope.TokenProtected);
+    }
+
+    private static string RequireUpdateSidecarPath(string path)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppPaths.UpdateDataDirectory));
+        var full = Path.GetFullPath(path);
+        if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The update health sidecar escaped the protected update directory.");
+        return full;
     }
 
     private static string UnprotectAndValidate(string protectedToken)

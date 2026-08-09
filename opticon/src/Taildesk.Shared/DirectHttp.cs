@@ -8,7 +8,7 @@ public static class DirectHttp
     {
         UseProxy = false,
         AllowAutoRedirect = false,
-        AutomaticDecompression = DecompressionMethods.All,
+            AutomaticDecompression = DecompressionMethods.None,
         PooledConnectionLifetime = TimeSpan.FromMinutes(5)
     };
 

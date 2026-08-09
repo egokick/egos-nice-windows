@@ -14,6 +14,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly HeadscaleApiClient _headscale;
     private readonly AgentClient _agents;
     private readonly TransferManager _transfers;
+    private readonly ScheduledTransferManager _scheduledTransfers;
     private readonly OpticonReleaseClient _releases = new();
     private readonly RemoteDeviceUpdateCoordinator _deviceUpdates;
     private readonly SemaphoreSlim _updateGate = new(1, 1);
@@ -26,19 +27,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _checksLastRun = "Not yet run";
     private readonly SemaphoreSlim _checksGate = new(1, 1);
 
-    public MainViewModel(AdminState state, HeadscaleApiClient headscale, AgentClient agents, TransferManager transfers)
+    public MainViewModel(AdminState state, HeadscaleApiClient headscale, AgentClient agents, TransferManager transfers,
+        ScheduledTransferManager scheduledTransfers)
     {
         _state = state;
         _headscale = headscale;
         _agents = agents;
         _transfers = transfers;
+        _scheduledTransfers = scheduledTransfers;
         _deviceUpdates = new RemoteDeviceUpdateCoordinator(agents);
         Transfers = transfers.Items;
+        ScheduledTransfers = scheduledTransfers.Schedules;
+        ScheduledTransferHistory = scheduledTransfers.History;
     }
 
     public ObservableCollection<DeviceRecord> Devices { get; } = [];
     public ObservableCollection<InviteRecord> Invites { get; } = [];
     public ObservableCollection<TransferRow> Transfers { get; }
+    public ObservableCollection<ScheduledTransferRow> ScheduledTransfers { get; }
+    public ObservableCollection<ScheduledTransferHistoryRow> ScheduledTransferHistory { get; }
+    public ScheduledTransferManager ScheduledTransferManager => _scheduledTransfers;
 
     public void CancelTransfer(TransferRow transfer) => _transfers.Cancel(transfer);
 
@@ -632,7 +640,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ReplaceInvites();
         Status = $"Invitation extended: {invite.DeviceName}";
         Log($"Extended the single-use invitation for {invite.DeviceName} by {additionalDays} day(s), through {invite.ExpiresAt.LocalDateTime:g}.");
-        if (!oldKeyRevoked) Log("The replacement link is active, but retry expiration of the superseded Headscale key from Fly diagnostics.");
+        if (!oldKeyRevoked) Log("The replacement link is active; the superseded Headscale key is durably queued for revocation and will be retried automatically.");
     }
     public async Task CancelInviteAsync(InviteRecord invite, CancellationToken cancellationToken = default)
     {
@@ -644,6 +652,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (invite.RedeemedAt.HasValue) throw new InvalidOperationException("A redeemed invitation cannot be canceled; change or remove the enrolled device instead.");
             await _headscale.RevokeKeyAsync(invite.TailscaleKeyId, cancellationToken);
+            if (!await new InviteBundleService(_state, _headscale).RevokePendingKeysAsync(invite, cancellationToken))
+                throw new InvalidOperationException(
+                    "A superseded Headscale key could not be revoked. Cancellation remains pending and will be retried.");
             if (invite.RedeemedAt.HasValue) throw new InvalidOperationException("The device completed enrollment before cancellation; the invitation was not canceled.");
             if (!string.IsNullOrWhiteSpace(invite.HostedInviteIdHash))
             {
@@ -831,11 +842,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             device.SshReady = status.SshReady;
             device.SshPort = status.SshPort;
             device.UpdateStatus = status.UpdateStatus;
+            device.OnlineSince = ToOnlineSince(status.OnlineDurationSeconds);
+            device.BatteryPercentage = status.BatteryPercentage;
             if (AgentClient.IsTailscaleIp(status.TailscaleIp)) device.TailscaleIp = status.TailscaleIp;
         }
         catch
         {
             device.State = device.State == DeviceConnectionState.TailscaleOnly ? DeviceConnectionState.TailscaleOnly : DeviceConnectionState.Offline;
+            device.OnlineSince = null;
         }
     }
 
@@ -886,10 +900,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
         await _state.SaveAsync(CancellationToken.None);
     }
 
+    private static DateTimeOffset? ToOnlineSince(long? durationSeconds)
+    {
+        if (durationSeconds is not long seconds || seconds < 0 || seconds > TimeSpan.MaxValue.TotalSeconds) return null;
+        return DateTimeOffset.UtcNow.Subtract(TimeSpan.FromSeconds(seconds));
+    }
+
     private async Task CleanupInactiveHostedInvitationsAsync(CancellationToken cancellationToken)
     {
         var pending = Config.Invites
-            .Where(invite => !string.IsNullOrWhiteSpace(invite.HostedInviteIdHash) && (invite.RedeemedAt.HasValue || invite.IsExpired))
+            .Where(invite => (invite.PendingTailscaleKeyRevocations?.Count ?? 0) > 0
+                             || (!string.IsNullOrWhiteSpace(invite.HostedInviteIdHash)
+                                 && (invite.RedeemedAt.HasValue || invite.IsExpired)))
             .ToArray();
         if (pending.Length == 0) return;
         var changed = false;
@@ -898,6 +920,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             foreach (var invite in pending)
             {
+                var pendingCount = invite.PendingTailscaleKeyRevocations?.Count ?? 0;
+                try
+                {
+                    var allRevoked = await new InviteBundleService(_state, _headscale)
+                        .RevokePendingKeysAsync(invite, cancellationToken);
+                    changed |= pendingCount != (invite.PendingTailscaleKeyRevocations?.Count ?? 0);
+                    if (!allRevoked) Log($"Superseded key cleanup pending for {invite.DeviceName}.");
+                }
+                catch (Exception exception)
+                {
+                    Log($"Superseded key cleanup pending for {invite.DeviceName}: {exception.Message}");
+                }
+
+                if (string.IsNullOrWhiteSpace(invite.HostedInviteIdHash)
+                    || (!invite.RedeemedAt.HasValue && !invite.IsExpired))
+                    continue;
                 if (!invite.RedeemedAt.HasValue)
                 {
                     try { await _headscale.RevokeKeyAsync(invite.TailscaleKeyId, cancellationToken); }

@@ -82,6 +82,18 @@ internal static class AdminAppCatalog
             HasLaunchSettings = true
         },
         new(
+            "continuous-transcriber-dashboard",
+            "Continuous Transcriber Dashboard",
+            "Browse, search, sync, and schedule transcription transfers across Opticon devices.",
+            "continuous-transcriber-dashboard",
+            AdminAppLogoKind.Generated,
+            "continuous-transcriber-dashboard",
+            "NiceWindows.ContinuousTranscriberDashboard")
+        {
+            BatchExitsAfterLaunch = true,
+            SupportsRuntimeControl = false
+        },
+        new(
             "power-mode-toggle",
             "Power Mode Toggle",
             "Switch between low-power and high-performance system profiles.",

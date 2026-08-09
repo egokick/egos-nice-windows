@@ -38,14 +38,6 @@ internal static class CliPathIntegration
 
         using var stateKey = Registry.CurrentUser.CreateSubKey("Software\\Taildesk\\Opticon", writable: true)
                              ?? throw new InvalidOperationException("The Opticon user installation key could not be opened.");
-        var recordedDirectory = NormalizePathEntry(
-            stateKey.GetValue(InstallDirectoryValueName, null, RegistryValueOptions.DoNotExpandEnvironmentNames) as string);
-        if (recordedDirectory is null
-            || !recordedDirectory.Equals(defaultInstalledDirectory, StringComparison.OrdinalIgnoreCase)
-            || !runningDirectory.Equals(recordedDirectory, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException(
-                "The running Opticon directory is not the recorded canonical installation. Run command-center repair.");
-
         if (!await HasExactControllerMarkersAsync(runningDirectory, cancellationToken))
             throw new InvalidDataException(
                 "The recorded Opticon installation ownership or ready marker is missing or invalid. Run command-center repair.");
@@ -62,13 +54,28 @@ internal static class CliPathIntegration
             throw new FileNotFoundException(
                 "The installed Opticon CLI is missing. Run command-center repair before using agent automation.",
                 cliExecutable);
-        await InvitationSigning.VerifyAuthenticodeAsync(cliExecutable, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(uiExecutable, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(cliExecutable, cancellationToken);
 
         var uiVersion = ReadExactFileVersion(uiExecutable, "Opticon UI");
         var cliVersion = ReadExactFileVersion(cliExecutable, "Opticon CLI");
         if (uiVersion != cliVersion)
             throw new InvalidDataException(
                 $"The installed Opticon UI ({uiVersion}) and CLI ({cliVersion}) versions do not match. Run command-center repair.");
+        var recordedDirectory = NormalizePathEntry(
+            stateKey.GetValue(
+                InstallDirectoryValueName,
+                null,
+                RegistryValueOptions.DoNotExpandEnvironmentNames) as string);
+        if (recordedDirectory is null)
+            stateKey.SetValue(
+                InstallDirectoryValueName,
+                defaultInstalledDirectory,
+                RegistryValueKind.String);
+        else if (!recordedDirectory.Equals(defaultInstalledDirectory, StringComparison.OrdinalIgnoreCase)
+                 || !runningDirectory.Equals(recordedDirectory, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                "The current user's recorded Opticon installation conflicts with the verified canonical payload. Run command-center repair.");
 
         using var key = Registry.CurrentUser.CreateSubKey("Environment", writable: true)
                         ?? throw new InvalidOperationException("The current user environment key could not be opened.");

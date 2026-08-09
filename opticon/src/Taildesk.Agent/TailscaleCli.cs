@@ -13,15 +13,11 @@ public sealed class TailscaleSnapshot
 
 public sealed class TailscaleCli
 {
-    private static readonly string[] KnownPaths =
-    [
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe"),
-        "tailscale.exe"
-    ];
-
     public async Task<TailscaleSnapshot> GetStatusAsync(CancellationToken cancellationToken = default)
     {
-        var result = await ProcessRunner.RunAsync(FindExecutable(), ["status", "--json"], TimeSpan.FromSeconds(15), cancellationToken);
+        var result = await ProcessRunner.RunAsync(
+            RequireExecutable(), ["status", "--json"], TimeSpan.FromSeconds(15), cancellationToken,
+            environment: BuildEnvironment(), clearEnvironment: true);
         if (!result.Succeeded)
         {
             throw new InvalidOperationException(result.StandardError.Trim());
@@ -45,19 +41,51 @@ public sealed class TailscaleCli
     public async Task SetAdvertiseExitNodeAsync(bool enabled, CancellationToken cancellationToken = default)
     {
         var result = await ProcessRunner.RunAsync(
-            FindExecutable(),
+            RequireExecutable(),
             ["set", $"--advertise-exit-node={enabled.ToString().ToLowerInvariant()}"],
             TimeSpan.FromSeconds(30),
-            cancellationToken);
+            cancellationToken,
+            environment: BuildEnvironment(), clearEnvironment: true);
         if (!result.Succeeded)
         {
             throw new InvalidOperationException(result.StandardError.Trim());
         }
     }
 
-    private static string FindExecutable() => KnownPaths.FirstOrDefault(File.Exists)
-        ?? ProcessRunner.FindOnPath("tailscale.exe")
-        ?? throw new FileNotFoundException("Tailscale CLI was not found.");
+    private static string RequireExecutable()
+    {
+        var programFiles = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
+        var tailscaleDirectory = Path.Combine(programFiles, "Tailscale");
+        var executable = Path.Combine(tailscaleDirectory, "tailscale.exe");
+        foreach (var path in new[] { programFiles, tailscaleDirectory, executable })
+        {
+            if (!File.Exists(path) && !Directory.Exists(path))
+                throw new FileNotFoundException("The fixed Tailscale CLI was not found.", executable);
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException($"A fixed Tailscale path is a reparse point: {path}");
+        }
+        if ((File.GetAttributes(executable) & FileAttributes.Directory) != 0)
+            throw new InvalidDataException("The fixed Tailscale CLI path is not a regular file.");
+        return executable;
+    }
+
+    private static IReadOnlyDictionary<string, string?> BuildEnvironment()
+    {
+        var windows = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        var system32 = Path.Combine(windows, "System32");
+        return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SystemRoot"] = windows,
+            ["WINDIR"] = windows,
+            ["ProgramFiles"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            ["ProgramData"] = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            ["PATH"] = string.Join(Path.PathSeparator, system32, Path.Combine(system32, "Wbem")),
+            ["PATHEXT"] = ".COM;.EXE"
+        };
+    }
 
     private static string ReadString(JsonElement element, string propertyName) =>
         element.TryGetProperty(propertyName, out var property) ? property.GetString() ?? string.Empty : string.Empty;

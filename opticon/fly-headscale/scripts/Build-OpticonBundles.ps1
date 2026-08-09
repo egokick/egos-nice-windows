@@ -2,7 +2,7 @@
 param(
     [ValidateSet("win-x64")]
     [string]$Runtime = "win-x64",
-    [string]$Version = "1.1.12",
+    [string]$Version = "1.1.38",
     [string]$MinimumGuardianVersion = "1.1.2",
     [string]$CertificateThumbprint = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
 )
@@ -174,6 +174,11 @@ if ((Compare-SemanticVersion $MinimumGuardianVersion $Version) -gt 0) {
 
 $flyRoot = Split-Path $PSScriptRoot -Parent
 $repo = Split-Path $flyRoot -Parent
+$dotnet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
+if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf) -or
+    -not ((& $dotnet --list-sdks) | Where-Object { $_ -match '^8\.0\.423\s' })) {
+    throw 'Release builds require exact .NET SDK 8.0.423 (the SDK carrying runtime 8.0.29).'
+}
 $buildRoot = Join-Path $repo "artifacts\hosted-build"
 $stageRoot = Join-Path $repo "artifacts\hosted-bundle-stage"
 $artifactDirectory = Join-Path $flyRoot "artifacts"
@@ -230,7 +235,8 @@ $publishArguments = @(
     "-c", "Release", "-r", $Runtime, "--self-contained", "true",
     "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true",
     "-p:EnableCompressionInSingleFile=true", "-p:DebugType=None", "-p:DebugSymbols=false",
-    "-p:EnableWindowsTargeting=true", "-p:Version=$Version", "-p:InformationalVersion=$Version",
+    "-p:EnableWindowsTargeting=true", "-p:RuntimeFrameworkVersion=8.0.29",
+    "-p:Version=$Version", "-p:InformationalVersion=$Version",
     "-p:IncludeSourceRevisionInInformationalVersion=false"
 )
 $executables = [ordered]@{
@@ -240,39 +246,12 @@ $executables = [ordered]@{
     Cli = "opticon.exe"
     UpdateGuardian = "Taildesk.UpdateGuardian.exe"
 }
-$commandCenterPublish = Join-Path $repo "artifacts\publish-$Runtime"
-$buildInputs = @(Get-ChildItem -LiteralPath (Join-Path $repo "src") -File -Recurse |
-    Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' })
-$buildInputs += @(Get-ChildItem -LiteralPath $repo -File |
-    Where-Object { $_.Name -like "Directory.Build.*" -or $_.Name -like "Directory.Packages.*" })
-$latestSourceWrite = ($buildInputs | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
-$reuseCommandCenterPublish = $true
-foreach ($component in $executables.Keys) {
-    $candidateDirectory = Join-Path $commandCenterPublish $component
-    $candidateExecutable = Join-Path $candidateDirectory $executables[$component]
-    if (-not (Test-Path -LiteralPath $candidateExecutable -PathType Leaf) -or
-        (Get-Item -LiteralPath $candidateExecutable).VersionInfo.ProductVersion -ne $Version -or
-        (Get-Item -LiteralPath $candidateExecutable).LastWriteTimeUtc -lt $latestSourceWrite) {
-        $reuseCommandCenterPublish = $false
-        break
-    }
-}
-if ($reuseCommandCenterPublish) {
-    Write-Host "Reusing the current $Version command-center component publish outputs." -ForegroundColor Cyan
-    foreach ($component in $executables.Keys) {
-        $output = Join-Path $buildRoot $component
-        New-Item -Path $output -ItemType Directory -Force | Out-Null
-        Copy-Item -Path (Join-Path $commandCenterPublish "$component\*") -Destination $output -Recurse -Force
-    }
-}
 foreach ($component in $executables.Keys) {
     $project = Join-Path $repo "src\Taildesk.$component\Taildesk.$component.csproj"
     $output = Join-Path $buildRoot $component
-    if (-not $reuseCommandCenterPublish) {
-        dotnet publish $project @publishArguments -o $output
-        if ($LASTEXITCODE -ne 0) { throw "Publishing $component failed." }
-    }
-    if ($component -eq "Cli" -and -not $reuseCommandCenterPublish) {
+    & $dotnet publish $project @publishArguments -o $output
+    if ($LASTEXITCODE -ne 0) { throw "Publishing $component failed." }
+    if ($component -eq "Cli") {
         $publishedCli = Join-Path $output "Taildesk.OpticonCli.exe"
         if (-not (Test-Path -LiteralPath $publishedCli -PathType Leaf)) { throw "The Opticon CLI apphost was not published." }
         Move-Item -LiteralPath $publishedCli -Destination (Join-Path $output "opticon.exe") -Force
@@ -280,10 +259,11 @@ foreach ($component in $executables.Keys) {
         if (Test-Path -LiteralPath $referencedAdminRuntimeConfig -PathType Leaf) {
             Remove-Item -LiteralPath $referencedAdminRuntimeConfig -Force
         }
-        $cliFiles = @(Get-ChildItem -LiteralPath $output -File)
-        if ($cliFiles.Count -ne 1 -or $cliFiles[0].Name -ne "opticon.exe") {
-            throw "The hosted CLI directory must contain only the signed opticon.exe single-file app."
-        }
+    }
+    $publishedFiles = @(Get-ChildItem -LiteralPath $output -File -Recurse)
+    if ($publishedFiles.Count -ne 1 -or $publishedFiles[0].Name -ne $executables[$component] -or
+        -not $publishedFiles[0].DirectoryName.Equals([IO.Path]::GetFullPath($output), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The clean $component publish must contain only the declared single-file executable $($executables[$component])."
     }
     $executable = Join-Path $output $executables[$component]
     $productVersion = (Get-Item -LiteralPath $executable).VersionInfo.ProductVersion
@@ -300,17 +280,28 @@ foreach ($component in $executables.Keys) {
 
 $bootstrapFile = "opticon-bootstrap-$Version.exe"
 $bootstrapPath = Join-Path $artifactDirectory $bootstrapFile
-Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $bootstrapPath -Force
-$bootstrapInfo = Get-Item -LiteralPath $bootstrapPath
+$bootstrapTemporary = "$bootstrapPath.new.exe"
+if (Test-Path -LiteralPath $bootstrapTemporary) { Remove-Item -LiteralPath $bootstrapTemporary -Force }
+Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $bootstrapTemporary
+$bootstrapInfo = Get-Item -LiteralPath $bootstrapTemporary
 $bootstrapRecord = [pscustomobject]@{
     product = "OpticonBootstrap"
     version = $Version
     architecture = "x64"
     file = $bootstrapFile
     size = $bootstrapInfo.Length
-    sha256 = (Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    sha256 = (Get-FileHash -LiteralPath $bootstrapTemporary -Algorithm SHA256).Hash.ToLowerInvariant()
     signerThumbprint = $CertificateThumbprint.ToUpperInvariant()
 }
+$existingBootstraps = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonBootstrap' -and $_.version -eq $Version })
+if ($existingBootstraps.Count -gt 1) { throw "The outer manifest declares bootstrap release $Version more than once." }
+if ($existingBootstraps.Count -eq 1 -and (([long]$existingBootstraps[0].size -ne [long]$bootstrapRecord.size) -or
+    -not ([string]$existingBootstraps[0].sha256).Equals([string]$bootstrapRecord.sha256, [StringComparison]::OrdinalIgnoreCase) -or
+    -not ([string]$existingBootstraps[0].signerThumbprint).Equals([string]$bootstrapRecord.signerThumbprint, [StringComparison]::OrdinalIgnoreCase))) {
+    Remove-Item -LiteralPath $bootstrapTemporary -Force
+    throw "Bootstrap release $Version is already declared with different bytes or publisher. Bump -Version."
+}
+Move-Item -LiteralPath $bootstrapTemporary -Destination $bootstrapPath -Force
 
 function Write-SignedReleaseManifest {
     param(
@@ -437,6 +428,106 @@ foreach ($definition in $definitions) {
     $records += $record
 }
 
+# Build a separate, immutable source archive.  Only this explicit allowlist is
+# shipped; bin/obj/artifacts, local configuration, credentials, and repository
+# metadata can never enter the source release by accident.
+$sourceStage = Join-Path $stageRoot 'source'
+New-Item -Path $sourceStage -ItemType Directory -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'Directory.Build.props') -Destination (Join-Path $sourceStage 'Directory.Build.props')
+Copy-Item -LiteralPath (Join-Path $repo 'source-package\Directory.Build.targets') -Destination (Join-Path $sourceStage 'Directory.Build.targets')
+$sourceGlobalJson = [ordered]@{ sdk = [ordered]@{ version = '8.0.423'; rollForward = 'disable'; allowPrerelease = $false } }
+[IO.File]::WriteAllText((Join-Path $sourceStage 'global.json'), ($sourceGlobalJson | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
+Copy-Item -LiteralPath (Join-Path $repo 'source-package\Install-OpticonFromSource.ps1') -Destination (Join-Path $sourceStage 'Install-OpticonFromSource.ps1')
+Copy-Item -LiteralPath (Join-Path $repo 'source-package\NuGet.Config') -Destination (Join-Path $sourceStage 'NuGet.Config')
+New-Item -Path (Join-Path $sourceStage 'assets') -ItemType Directory -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'assets\opticon.ico') -Destination (Join-Path $sourceStage 'assets\opticon.ico')
+$sourceProjects = @('Taildesk.Shared', 'Taildesk.Setup', 'Taildesk.Agent', 'Taildesk.UpdateGuardian', 'Taildesk.Admin', 'Taildesk.Cli', 'Taildesk.RouteKeeper')
+foreach ($projectName in $sourceProjects) {
+    $sourceProject = Join-Path $repo "src\$projectName"
+    $targetProject = Join-Path $sourceStage "src\$projectName"
+    New-Item -Path $targetProject -ItemType Directory -Force | Out-Null
+    foreach ($file in Get-ChildItem -LiteralPath $sourceProject -File -Recurse |
+             Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and $_.Extension -in @('.cs', '.csproj', '.xaml', '.ico', '.manifest') }) {
+        if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Source package input is a reparse point: $($file.FullName)" }
+        $relative = $file.FullName.Substring($sourceProject.Length).TrimStart('\', '/')
+        $destination = Join-Path $targetProject $relative
+        New-Item -Path (Split-Path $destination -Parent) -ItemType Directory -Force | Out-Null
+        Copy-Item -LiteralPath $file.FullName -Destination $destination
+    }
+}
+
+$sourcePrefix = [IO.Path]::GetFullPath($sourceStage).TrimEnd('\') + '\'
+$sourceFiles = @()
+foreach ($file in Get-ChildItem -LiteralPath $sourceStage -File -Recurse | Sort-Object FullName) {
+    $full = [IO.Path]::GetFullPath($file.FullName)
+    if (-not $full.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'A source package input escaped its stage.' }
+    $sourceFiles += [pscustomobject][ordered]@{
+        path = $full.Substring($sourcePrefix.Length).Replace('\', '/')
+        size = $file.Length
+        sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+}
+$sourceManifest = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    version = $Version
+    sdkVersion = '8.0.423'
+    runtimeVersion = '8.0.29'
+    targetRuntimes = @('win-x64', 'win-arm64')
+    files = $sourceFiles
+}
+$utf8 = [Text.UTF8Encoding]::new($false)
+$sourceManifestBytes = $utf8.GetBytes(($sourceManifest | ConvertTo-Json -Depth 8))
+$sourceManifestPath = Join-Path $sourceStage 'source-manifest.json'
+[IO.File]::WriteAllBytes($sourceManifestPath, $sourceManifestBytes)
+$sourceManifestHash = (Get-FileHash -LiteralPath $sourceManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$sourceRsa = Get-OpticonManifestSigningKey -Certificate $certificate
+try {
+    $sourceSignature = $sourceRsa.SignData($sourceManifestBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pss)
+} finally { $sourceRsa.Dispose() }
+[IO.File]::WriteAllText((Join-Path $sourceStage 'source-manifest.sig'), [Convert]::ToBase64String($sourceSignature), $utf8)
+
+$sourceFileName = "opticon-source-$Version.zip"
+$sourceDestination = Join-Path $artifactDirectory $sourceFileName
+$sourceTemporary = "$sourceDestination.new.zip"
+if (Test-Path -LiteralPath $sourceTemporary) { Remove-Item -LiteralPath $sourceTemporary -Force }
+Add-Type -AssemblyName System.IO.Compression
+$sourceStream = [IO.File]::Open($sourceTemporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+try {
+    $sourceZip = [IO.Compression.ZipArchive]::new($sourceStream, [IO.Compression.ZipArchiveMode]::Create, $true)
+    try {
+        foreach ($file in Get-ChildItem -LiteralPath $sourceStage -File -Recurse | Sort-Object FullName) {
+            $relative = ([IO.Path]::GetFullPath($file.FullName).Substring($sourcePrefix.Length)).Replace('\', '/')
+            $entry = $sourceZip.CreateEntry($relative, [IO.Compression.CompressionLevel]::Optimal)
+            $entryStream = $entry.Open()
+            $input = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try { $input.CopyTo($entryStream) } finally { $input.Dispose(); $entryStream.Dispose() }
+        }
+    } finally { $sourceZip.Dispose() }
+} finally { $sourceStream.Dispose() }
+$sourceInfo = Get-Item -LiteralPath $sourceTemporary
+$sourceRecord = [pscustomobject][ordered]@{
+    product = 'OpticonSource'
+    version = $Version
+    architecture = 'source'
+    file = $sourceFileName
+    size = $sourceInfo.Length
+    sha256 = (Get-FileHash -LiteralPath $sourceTemporary -Algorithm SHA256).Hash.ToLowerInvariant()
+    sdkVersion = '8.0.423'
+    runtimeVersion = '8.0.29'
+    targetRuntimes = @('win-x64', 'win-arm64')
+    sourceManifestSha256 = $sourceManifestHash
+    sourceManifestKeyId = $CertificateThumbprint.ToUpperInvariant()
+}
+$existingSources = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonSource' -and $_.version -eq $Version })
+if ($existingSources.Count -gt 1) { throw "The outer manifest declares source release $Version more than once." }
+if ($existingSources.Count -eq 1 -and (([long]$existingSources[0].size -ne [long]$sourceRecord.size) -or
+    -not ([string]$existingSources[0].sha256).Equals([string]$sourceRecord.sha256, [StringComparison]::OrdinalIgnoreCase) -or
+    -not ([string]$existingSources[0].sourceManifestSha256).Equals($sourceManifestHash, [StringComparison]::OrdinalIgnoreCase))) {
+    Remove-Item -LiteralPath $sourceTemporary -Force
+    throw "Source release $Version is already declared with different bytes. Bump -Version."
+}
+Move-Item -LiteralPath $sourceTemporary -Destination $sourceDestination -Force
+
 $candidates = @($existingBundles | Where-Object {
     $existing = $_
     -not ($records | Where-Object {
@@ -476,7 +567,20 @@ foreach ($artifact in $retained) {
         throw "Retained rollback bundle verification failed for $($artifact.file)."
     }
 }
-$manifest.artifacts = @($manifest.artifacts | Where-Object { $_.product -notin @("OpticonBundle", "OpticonBootstrap") }) + @($retained) + @($bootstrapRecord)
+$retainedBootstraps = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonBootstrap' -and $_.version -ne $Version })
+$retainedSources = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonSource' -and $_.version -ne $Version })
+foreach ($artifact in @($retainedBootstraps) + @($retainedSources)) {
+    if ([string]::IsNullOrWhiteSpace([string]$artifact.downloadUrl)) {
+        $path = Join-Path $artifactDirectory ([string]$artifact.file)
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Retained invitation artifact $($artifact.file) is missing." }
+        $file = Get-Item -LiteralPath $path
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if ($file.Length -ne [long]$artifact.size -or -not $hash.Equals([string]$artifact.sha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Retained invitation artifact verification failed for $($artifact.file)."
+        }
+    }
+}
+$manifest.artifacts = @($manifest.artifacts | Where-Object { $_.product -notin @("OpticonBundle", "OpticonBootstrap", "OpticonSource") }) + @($retained) + @($retainedBootstraps) + @($bootstrapRecord) + @($retainedSources) + @($sourceRecord)
 $json = $manifest | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($manifestPath, $json, (New-Object Text.UTF8Encoding($false)))
 $retained | Format-Table role, version, file, size, sha256 -AutoSize

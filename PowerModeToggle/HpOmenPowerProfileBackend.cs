@@ -102,7 +102,30 @@ internal static class HpOmenPowerProfileBackend
             errors.Add($"Verification: the HP OMEN laptop did not remain fully in {mode} ({state.ToSummary()}).");
         }
 
-        return new PowerProfileApplyResult(mode, PowerProfileState.FromHpOmen(state), errors);
+        return new PowerProfileApplyResult(mode, PowerProfileState.FromHpOmen(state), errors, []);
+    }
+
+    public static void ApplySetting(string settingId, LaptopPowerMode mode)
+    {
+        var highPower = mode == LaptopPowerMode.HighPower;
+        switch (settingId)
+        {
+            case PowerSettingIds.HpOmenFirmwareMode:
+                HpOmenFirmwareService.SetMode(highPower);
+                return;
+            case PowerSettingIds.WindowsPowerMode:
+                WindowsPowerService.SetPowerMode(highPower);
+                return;
+            case PowerSettingIds.DisplayRefreshRate:
+                var rate = highPower
+                    ? DisplayRefreshRateService.TryGetHighestPrimaryDisplayRefreshRate()
+                      ?? throw new InvalidOperationException("Windows could not determine the display's maximum refresh rate.")
+                    : 60;
+                DisplayRefreshRateService.SetPrimaryDisplayRefreshRate(rate);
+                return;
+            default:
+                throw new InvalidOperationException($"Setting '{settingId}' is not managed by the HP OMEN profile.");
+        }
     }
 
     public static HpOmenPowerProfileState ReadState()

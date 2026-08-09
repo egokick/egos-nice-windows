@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace Taildesk.Shared;
 
@@ -99,20 +98,4 @@ public static class InvitationSigning
         return rsa.VerifyData(data, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
     }
 
-    public static async Task SignAuthenticodeAsync(string path, CancellationToken cancellationToken = default)
-    {
-        var pathBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(Path.GetFullPath(path)));
-        var command = $"$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{pathBase64}'));$c=Get-Item 'Cert:\\CurrentUser\\My\\{CertificateThumbprint}';$s=Set-AuthenticodeSignature -LiteralPath $p -Certificate $c -HashAlgorithm SHA256;if(-not $s.SignerCertificate -or $s.SignerCertificate.Thumbprint -ne '{CertificateThumbprint}'){{Write-Error 'Authenticode signing failed';exit 9}}";
-        var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
-        var result = await ProcessRunner.RunAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedCommand], TimeSpan.FromMinutes(2), cancellationToken);
-        if (!result.Succeeded) throw new InvalidOperationException("Windows could not Authenticode-sign the invitation: " + result.StandardError.Trim());
-    }
-
-    public static Task VerifyAuthenticodeAsync(string path, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        AuthenticodeFileVerifier.VerifyPinned(path, PinnedCertificate);
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.CompletedTask;
-    }
 }

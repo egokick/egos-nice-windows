@@ -35,13 +35,14 @@
                 <StackPanel Margin="0,14,0,0">
                     <TextBlock Text="WORKSPACE" Margin="16,0,0,8" Style="{StaticResource LabelText}" />
                     <Button Style="{StaticResource NavButton}" Content="Devices" Tag="0" Click="Navigation_Click" />
-                    <Button Style="{StaticResource NavButton}" Content="Files &amp; media" Tag="1" Click="Navigation_Click" />
-                    <Button Style="{StaticResource NavButton}" Content="Transfers" Tag="2" Click="Navigation_Click" />
-                    <Button Style="{StaticResource NavButton}" Content="Invitations" Tag="3" Click="Navigation_Click" />
-                    <Button Style="{StaticResource NavButton}" Content="Activity log" Tag="4" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Files &amp; media" Tag="2" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Transfers" Tag="3" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Scheduled transfers" Tag="1" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Invitations" Tag="4" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Activity log" Tag="5" Click="Navigation_Click" />
                     <Separator Margin="14,12" Background="{StaticResource BorderBrush}" />
-                    <Button Style="{StaticResource NavButton}" Content="System checks" Tag="5" Click="Navigation_Click" />
-                    <Button Style="{StaticResource NavButton}" Content="Settings" Tag="6" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="System checks" Tag="6" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Settings" Tag="7" Click="Navigation_Click" />
                 </StackPanel>
                 <Border Grid.Row="1" Margin="12" Padding="10" Background="#121519" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="4">
                     <StackPanel>
@@ -91,6 +92,8 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="2*" />
                                 <DataGridTextColumn Header="STATE" Binding="{Binding State}" Width="110" />
+                                <DataGridTextColumn Header="ONLINE TIME" Binding="{Binding OnlineTime}" Width="105" />
+                                <DataGridTextColumn Header="BATTERY LIFE" Binding="{Binding BatteryLife}" Width="100" />
                                 <DataGridTextColumn Header="MESH IP" Binding="{Binding TailscaleIp}" Width="135" />
                                 <DataGridTextColumn Header="OPTICON VERSION" Binding="{Binding AgentVersion, TargetNullValue=Unknown, FallbackValue=Unknown}" Width="135" />
                                 <DataGridTextColumn Header="ROLE" Binding="{Binding Role}" Width="175" />
@@ -161,6 +164,54 @@
                             </ScrollViewer>
                         </Border>
                     </Grid>
+                </Grid>
+            </TabItem>
+
+            <TabItem>
+                <Grid Margin="20">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="2*"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="Scheduled transfers" Style="{StaticResource SectionTitle}"/>
+                            <TextBlock Text="Automatic folder transfers with friendly schedules, filters, safe move semantics, and retryable history." Margin="0,4,0,0" Foreground="{StaticResource MutedBrush}"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <Button Content="New schedule" Style="{StaticResource PrimaryButton}" Click="NewScheduledTransfer_Click"/>
+                            <Button Content="Edit" Margin="7,0,0,0" Click="EditScheduledTransfer_Click"/>
+                            <Button Content="Run now" Margin="7,0,0,0" Click="RunScheduledTransfer_Click"/>
+                            <Button Content="Pause / enable" Margin="7,0,0,0" Click="ToggleScheduledTransfer_Click"/>
+                            <Button Content="Delete" Margin="7,0,0,0" Style="{StaticResource DangerButton}" Click="DeleteScheduledTransfer_Click"/>
+                        </StackPanel>
+                    </Grid>
+                    <TextBlock Grid.Row="1" Margin="0,14,0,7" Text="SCHEDULES" Style="{StaticResource LabelText}"/>
+                    <DataGrid x:Name="ScheduledTransferGrid" Grid.Row="2" ItemsSource="{Binding ScheduledTransfers}" IsReadOnly="True" MouseDoubleClick="EditScheduledTransfer_Click">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="180"/>
+                            <DataGridTextColumn Header="DEVICE" Binding="{Binding Device}" Width="140"/>
+                            <DataGridTextColumn Header="DIRECTION" Binding="{Binding Direction}" Width="90"/>
+                            <DataGridTextColumn Header="MODE" Binding="{Binding Mode}" Width="75"/>
+                            <DataGridTextColumn Header="FILES" Binding="{Binding Files}" Width="2*"/>
+                            <DataGridTextColumn Header="SCHEDULE" Binding="{Binding Schedule}" Width="170"/>
+                            <DataGridTextColumn Header="NEXT RUN" Binding="{Binding NextRun, StringFormat={}{0:g}}" Width="145"/>
+                            <DataGridTextColumn Header="STATUS" Binding="{Binding Enabled}" Width="85"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <Grid Grid.Row="3" Margin="0,14,0,7">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="RUN HISTORY" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
+                        <Button Grid.Column="1" Content="Retry selected failure" Click="RetryScheduledTransfer_Click"/>
+                    </Grid>
+                    <DataGrid x:Name="ScheduledHistoryGrid" Grid.Row="4" ItemsSource="{Binding ScheduledTransferHistory}" IsReadOnly="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="STARTED" Binding="{Binding Started, StringFormat={}{0:g}}" Width="145"/>
+                            <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="180"/>
+                            <DataGridTextColumn Header="TRIGGER" Binding="{Binding Trigger}" Width="85"/>
+                            <DataGridTextColumn Header="RESULT" Binding="{Binding Result}" Width="135"/>
+                            <DataGridTextColumn Header="FILES" Binding="{Binding Files}" Width="70"/>
+                            <DataGridTextColumn Header="DETAIL" Binding="{Binding Message}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
                 </Grid>
             </TabItem>
 
@@ -392,7 +443,7 @@
             <Grid Margin="12,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                 <TextBlock Text="{Binding Status}" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedBrush}" />
-                <TextBlock Grid.Column="1" VerticalAlignment="Center" FontFamily="Cascadia Mono,Consolas" FontSize="10" Foreground="#707A84">
+                <TextBlock Grid.Column="1" VerticalAlignment="Center" FontFamily="Cascadia Mono,Consolas" FontSize="10" Foreground="{StaticResource MutedBrush}">
                     <Run Text="Agent 45831  ·  Coordinator 45830  ·  SSH 45832 (hub only)  ·  RustDesk 21118  ·  Opticon " />
                     <Run Text="{Binding OpticonVersion, Mode=OneWay}" />
                 </TextBlock>

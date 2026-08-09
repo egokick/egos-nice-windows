@@ -1,0 +1,115 @@
+name: Opticon security validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'opticon/**'
+      - '.github/workflows/opticon-security.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'opticon/**'
+      - '.github/workflows/opticon-security.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opticon-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows build and security self-tests
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install exact .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: '8.0.423'
+          cache: false
+
+      - name: Verify exact SDK
+        shell: pwsh
+        working-directory: opticon
+        run: |
+          if ((dotnet --version) -ne '8.0.423') {
+            throw 'CI did not resolve exact .NET SDK 8.0.423.'
+          }
+
+      - name: Parse every PowerShell source file
+        shell: pwsh
+        working-directory: opticon
+        run: |
+          $failed = $false
+          Get-ChildItem -File -Recurse -Filter *.ps1 |
+            Where-Object { $_.FullName -notmatch '[\\/]artifacts[\\/]' } |
+            ForEach-Object {
+              $tokens = $null
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName, [ref]$tokens, [ref]$errors)
+              foreach ($error in $errors) {
+                $failed = $true
+                Write-Error "$($error.Extent.File):$($error.Extent.StartLineNumber): $($error.Message)"
+              }
+            }
+          if ($failed) { throw 'One or more PowerShell files did not parse.' }
+
+      - name: Build every supported component
+        shell: pwsh
+        working-directory: opticon
+        env:
+          MSBUILDDISABLENODEREUSE: '1'
+        run: |
+          $arguments = @(
+            'build', 'Taildesk.sln', '-c', 'Release', '-t:Rebuild', '--nologo',
+            '-p:EnableWindowsTargeting=true',
+            '-p:UseSharedCompilation=false',
+            '-p:ImportUserLocationsByWildcardBeforeMicrosoftCommonProps=false',
+            '-p:ImportUserLocationsByWildcardAfterMicrosoftCommonProps=false',
+            '-p:ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets=false',
+            '-p:ImportUserLocationsByWildcardAfterMicrosoftCommonTargets=false',
+            '-p:ImportUserLocationsByWildcardBeforeMicrosoftCSharpTargets=false',
+            '-p:ImportUserLocationsByWildcardAfterMicrosoftCSharpTargets=false',
+            '-nodeReuse:false')
+          & dotnet @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'Opticon solution build failed.' }
+
+      - name: Run security and behavior self-tests
+        shell: pwsh
+        working-directory: opticon
+        run: |
+          dotnet run --project tests/Taildesk.SelfTest/Taildesk.SelfTest.csproj -c Release --no-build
+          if ($LASTEXITCODE -ne 0) { throw 'Opticon self-tests failed.' }
+
+  gateway:
+    name: Gateway tests and vet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install exact Go toolchain
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: opticon/fly-headscale/gateway/go.mod
+
+      - name: Test gateway
+        working-directory: opticon/fly-headscale/gateway
+        run: go test -race ./...
+
+      - name: Vet gateway
+        working-directory: opticon/fly-headscale/gateway
+        run: go vet ./...

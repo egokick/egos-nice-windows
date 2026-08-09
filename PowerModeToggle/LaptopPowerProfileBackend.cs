@@ -30,7 +30,6 @@ internal sealed record LaptopPowerProfileState(
             }
 
             if (RefreshRateHz is > 0 and <= 70
-                && AsusGpuEco == 1
                 && string.Equals(ArmouryGpuMode, "Eco", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(ArmouryOperatingMode, "Silent", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(WindowsPlanName, "Silent", StringComparison.OrdinalIgnoreCase)
@@ -46,18 +45,19 @@ internal sealed record LaptopPowerProfileState(
     public string ToSummary()
     {
         var refresh = RefreshRateHz is { } rate ? $"{rate} Hz" : "refresh unknown";
-        var gpu = AsusGpuEco switch
-        {
-            1 => "GPU Eco",
-            0 => "GPU enabled",
-            _ => "GPU mode unknown"
-        };
-        var armoury = string.IsNullOrWhiteSpace(ArmouryGpuMode) ? "Armoury mode unknown" : $"Armoury {ArmouryGpuMode}";
+        var gpu = string.IsNullOrWhiteSpace(ArmouryGpuMode)
+            ? AsusGpuEco switch
+            {
+                1 => "GPU Eco",
+                0 => "GPU enabled",
+                _ => "GPU mode unknown"
+            }
+            : $"GPU {ArmouryGpuMode}";
         var operatingMode = string.IsNullOrWhiteSpace(ArmouryOperatingMode)
             ? "fan mode unknown"
             : $"{ArmouryOperatingMode} fans";
         var plan = string.IsNullOrWhiteSpace(WindowsPlanName) ? "Windows plan unknown" : WindowsPlanName;
-        return $"{refresh}; {gpu}; {armoury}; {operatingMode}; {plan}";
+        return $"{refresh}; {gpu}; {operatingMode}; {plan}";
     }
 }
 internal static class LaptopPowerProfileBackend
@@ -79,7 +79,16 @@ internal static class LaptopPowerProfileBackend
 
         try
         {
-            WindowsPowerService.SetProfile(highPower);
+            WindowsPowerService.SetPlan(highPower);
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"Windows power plan: {ex.Message}");
+        }
+
+        try
+        {
+            WindowsPowerService.SetPowerMode(highPower);
         }
         catch (Exception ex)
         {
@@ -93,13 +102,20 @@ internal static class LaptopPowerProfileBackend
         try
         {
             using var asus = new AsusHardwareService();
-            if (!asus.TrySetAndVerify(AsusHardwareService.GpuEcoEndpoint, gpuEco, out var gpuError))
+            var expectedGpuMode = highPower ? "Optimized" : "Eco";
+            // Current ASUS laptops (including the GA403) can apply Eco correctly
+            // while the legacy ATK GPU-eco endpoint continues to read zero. Trust
+            // Armoury Crate's effective mode and use the endpoint only as a fallback.
+            if (!string.Equals(ArmouryCrateGpuModeService.TryGetMode(), expectedGpuMode, StringComparison.OrdinalIgnoreCase)
+                && !asus.TrySetAndVerify(AsusHardwareService.GpuEcoEndpoint, gpuEco, out var gpuError))
             {
                 errors.Add($"ASUS GPU mode: {gpuError}");
             }
 
+            var expectedOperatingMode = highPower ? "Performance" : "Silent";
             var asusMode = highPower ? AsusHardwareService.PerformanceMode : AsusHardwareService.SilentMode;
-            if (!asus.TrySet(AsusHardwareService.PerformanceEndpoint, asusMode, out var modeError))
+            if (!string.Equals(ArmouryCrateGpuModeService.TryGetOperatingMode(), expectedOperatingMode, StringComparison.OrdinalIgnoreCase)
+                && !asus.TrySetAndVerify(AsusHardwareService.PerformanceEndpoint, asusMode, out var modeError))
             {
                 errors.Add($"ASUS fan/performance mode: {modeError}");
             }
@@ -124,7 +140,32 @@ internal static class LaptopPowerProfileBackend
             errors.Add($"Verification: the laptop did not remain fully in {mode} ({state.ToSummary()}).");
         }
 
-        return new PowerProfileApplyResult(mode, PowerProfileState.FromLaptop(state), errors);
+        return new PowerProfileApplyResult(mode, PowerProfileState.FromLaptop(state), errors, []);
+    }
+
+    public static void ApplySetting(string settingId, LaptopPowerMode mode)
+    {
+        var highPower = mode == LaptopPowerMode.HighPower;
+        switch (settingId)
+        {
+            case PowerSettingIds.AsusGpuMode:
+                ArmouryCrateGpuModeService.SetGpuModeAndReload(highPower, !highPower);
+                return;
+            case PowerSettingIds.AsusOperatingMode:
+                ArmouryCrateGpuModeService.SetOperatingModeAndReload(highPower);
+                return;
+            case PowerSettingIds.WindowsPowerPlan:
+                WindowsPowerService.SetPlan(highPower);
+                return;
+            case PowerSettingIds.WindowsPowerMode:
+                WindowsPowerService.SetPowerMode(highPower);
+                return;
+            case PowerSettingIds.DisplayRefreshRate:
+                DisplayRefreshRateService.SetPrimaryDisplayRefreshRate(highPower ? 120 : 60);
+                return;
+            default:
+                throw new InvalidOperationException($"Setting '{settingId}' is not managed by the ASUS profile.");
+        }
     }
 
     public static LaptopPowerProfileState ReadState()
@@ -230,6 +271,35 @@ internal static class ArmouryCrateGpuModeService
             atkStatus.Flush();
         }
 
+        RestartService();
+    }
+
+    public static void SetGpuModeAndReload(bool optimized, bool gpuEco)
+    {
+        CloseStaleArmouryApp();
+        using var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+        using var key = machine.OpenSubKey(GpuRegistryPath, writable: true)
+                        ?? throw new InvalidOperationException("The Armoury Crate GPU-mode registry key was not found.");
+        key.SetValue("IsOptimized", optimized ? 1 : 0, RegistryValueKind.DWord);
+        key.SetValue("IsEcoMode", gpuEco ? 1 : 0, RegistryValueKind.DWord);
+        key.SetValue("KeepStatus", optimized ? 0 : 1, RegistryValueKind.DWord);
+        key.Flush();
+        RestartService();
+    }
+
+    public static void SetOperatingModeAndReload(bool highPower)
+    {
+        CloseStaleArmouryApp();
+        using var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+        using var externalMode = machine.OpenSubKey(ExternalModeRegistryPath, writable: true)
+                                 ?? throw new InvalidOperationException("The Armoury Crate operating-mode registry key was not found.");
+        using var atkStatus = machine.OpenSubKey(AtkStatusRegistryPath, writable: true)
+                              ?? throw new InvalidOperationException("The Armoury Crate ATK operating-mode registry key was not found.");
+        externalMode.SetValue("SelectedMode", highPower ? 0 : 2, RegistryValueKind.DWord);
+        atkStatus.SetValue("ThrottleModeOnAC", highPower ? 2 : 1, RegistryValueKind.DWord);
+        atkStatus.SetValue("ThrottleModeOnDC", highPower ? 2 : 1, RegistryValueKind.DWord);
+        externalMode.Flush();
+        atkStatus.Flush();
         RestartService();
     }
 
@@ -529,10 +599,16 @@ internal sealed class AsusHardwareService : IDisposable
 
 internal static class WindowsPowerService
 {
-    private static readonly Guid BestPowerEfficiency = new("961cc777-2547-4f9d-8174-7d86181b8a7a");
-    private static readonly Guid BestPerformance = new("ded574b5-45a0-4f42-8737-46345c09c238");
+    internal static readonly Guid BestPowerEfficiency = new("961cc777-2547-4f9d-8174-7d86181b8a7a");
+    internal static readonly Guid BestPerformance = new("ded574b5-45a0-4f42-8737-46345c09c238");
 
     public static void SetProfile(bool highPower)
+    {
+        SetPlan(highPower);
+        SetPowerMode(highPower);
+    }
+
+    public static void SetPlan(bool highPower)
     {
         var planName = highPower ? "Performance" : "Silent";
         var plan = ReadPowerPlans().FirstOrDefault(candidate =>
@@ -548,12 +624,6 @@ internal static class WindowsPowerService
             throw new Win32Exception((int)planResult, $"Could not activate the {planName} power plan.");
         }
 
-        var powerMode = highPower ? BestPerformance : BestPowerEfficiency;
-        var modeResult = PowerSetActiveOverlayScheme(powerMode);
-        if (modeResult != 0)
-        {
-            throw new Win32Exception((int)modeResult, "Could not change the Windows power mode.");
-        }
     }
 
     public static void SetPowerMode(bool highPower)

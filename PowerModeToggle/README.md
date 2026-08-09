@@ -29,7 +29,11 @@ The desktop profiles are:
 | Primary display | 60 Hz | 165 Hz |
 | Monitor brightness | 35% | 100% |
 
-Left-click the tray icon to toggle. The right-click menu contains status, **Auto Switch When Plugged In**, **Start With Windows**, and **Exit**. The orange lightning icon means High power; the green leaf means Low power.
+Left-click the tray icon to toggle. The right-click menu contains status, **Managed power settings**, **Auto Switch When Plugged In**, **Start With Windows**, and **Exit**. The orange lightning icon means High power; the green leaf means Low power.
+
+**Managed power settings** always lists every setting in the active machine profile, its current value, and the value a click will apply. After a full or individual switch, a check mark records success and an X records failure (with the detailed error in the item tooltip). A mismatched/failed item retries the last requested profile; an item already matching Low or High toggles to the opposite value. This makes partial profile changes visible and repairable without rerunning settings that already succeeded.
+
+On newer ASUS models such as the GA403, Armoury Crate can place the discrete GPU in Eco correctly even though the legacy ATK GPU-eco endpoint still reads zero. The app verifies Armoury Crate's effective mode on these systems and only uses that legacy firmware endpoint as a fallback, avoiding the false partial-failure report.
 
 The menu also shows estimated High- and Low-mode watt usage, the current estimated saving rate, and cumulative watt-hours saved while Low/Eco mode is active. On the supported desktop, the estimate uses the Windows Intel RAPL CPU-package energy counter plus the RTX GPU's cumulative NVIDIA NVML energy counter. On the laptop while discharging, it uses the whole-system battery discharge rate. Measurements from different source sets are never compared.
 
@@ -44,6 +48,7 @@ Run `start.bat` to publish a self-contained, single-file x64 .NET 10 Release bui
 ```text
 PowerModeToggle.exe --probe-machine-profile <output.json>
 PowerModeToggle.exe --probe-power-state <output.json>
+PowerModeToggle.exe --probe-power-settings <output.json>
 PowerModeToggle.exe --apply-power-profile LowPower|HighPower <output.json>
 PowerModeToggle.exe --probe-power-telemetry <output.json>
 PowerModeToggle.exe --self-test-power-savings <output.json>

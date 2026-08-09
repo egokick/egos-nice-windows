@@ -622,10 +622,10 @@ internal static class ContinuousTranscriberDashboardLauncher
         {
             try
             {
-                var recorderFolder = Path.Combine(
+                var dashboardFolder = Path.Combine(
                     NiceWindowsRepositoryLocator.GetRepositoryRoot(),
-                    "Continuous-transcriber");
-                var launcherPath = Path.Combine(recorderFolder, "start-dashboard.bat");
+                    "continuous-transcriber-dashboard");
+                var launcherPath = Path.Combine(dashboardFolder, "start.bat");
                 if (!File.Exists(launcherPath))
                 {
                     return new LaunchResult(false, $"Dashboard launcher not found: {launcherPath}");
@@ -643,7 +643,7 @@ internal static class ContinuousTranscriberDashboardLauncher
                 {
                     FileName = commandProcessor,
                     Arguments = $"/d /c call \"{launcherPath}\"",
-                    WorkingDirectory = recorderFolder,
+                    WorkingDirectory = dashboardFolder,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardError = true,

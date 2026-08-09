@@ -7,40 +7,29 @@ namespace Taildesk.Shared;
 public sealed class PathGuard
 {
     private readonly Dictionary<string, string> _roots;
-    private readonly bool _includeLocalVolumes;
 
     public PathGuard(IReadOnlyDictionary<string, string> roots, bool includeLocalVolumes = false)
     {
+        if (includeLocalVolumes)
+            throw new InvalidOperationException(
+                "Whole local volumes cannot be exposed through the SYSTEM Agent file API.");
         _roots = roots.ToDictionary(
             pair => pair.Key,
-            pair => NormalizeRootPath(Environment.ExpandEnvironmentVariables(pair.Value)),
+            pair => ValidateRemoteFileRoot(pair.Value),
             StringComparer.OrdinalIgnoreCase);
-        _includeLocalVolumes = includeLocalVolumes;
     }
 
     public IReadOnlyList<RootDto> GetRoots()
     {
-        var roots = new List<RootDto>();
-        if (_includeLocalVolumes)
-        {
-            roots.AddRange(GetLocalVolumes().Select(pair => new RootDto
-            {
-                Id = pair.Key,
-                DisplayName = GetVolumeDisplayName(pair.Value),
-                PathHint = pair.Value
-            }));
-        }
-        roots.AddRange(_roots.Select(pair => new RootDto
+        return _roots.Select(pair => new RootDto
         {
             Id = pair.Key,
             DisplayName = pair.Key,
             PathHint = pair.Value
-        }));
-        return roots
+        })
             .GroupBy(root => root.PathHint, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
-            .OrderByDescending(root => root.Id.StartsWith("drive-", StringComparison.OrdinalIgnoreCase))
-            .ThenBy(root => root.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(root => root.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
@@ -122,46 +111,40 @@ public sealed class PathGuard
     }
 
     private IReadOnlyDictionary<string, string> GetAvailableRoots()
+        => _roots;
+
+    public static string ValidateRemoteFileRoot(string path)
     {
-        if (!_includeLocalVolumes) return _roots;
-        var roots = new Dictionary<string, string>(_roots, StringComparer.OrdinalIgnoreCase);
-        foreach (var volume in GetLocalVolumes()) roots[volume.Key] = volume.Value;
-        return roots;
+        if (string.IsNullOrWhiteSpace(path))
+            throw new InvalidDataException("A configured shared root is empty.");
+        var full = NormalizeRootPath(Environment.ExpandEnvironmentVariables(path));
+        var volumeRoot = Path.GetPathRoot(full);
+        if (!string.IsNullOrWhiteSpace(volumeRoot)
+            && full.Equals(NormalizeRootPath(volumeRoot), StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("A whole local volume cannot be a shared file root.");
+
+        var protectedRoots = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData)
+        };
+        foreach (var protectedRoot in protectedRoots.Where(value => !string.IsNullOrWhiteSpace(value)))
+        {
+            var normalizedProtected = NormalizeRootPath(protectedRoot);
+            if (IsWithin(full, normalizedProtected) || IsWithin(normalizedProtected, full))
+                throw new UnauthorizedAccessException(
+                    "Shared file roots cannot overlap Windows, Program Files, or ProgramData.");
+        }
+        return full;
     }
 
-    private static Dictionary<string, string> GetLocalVolumes()
+    private static bool IsWithin(string candidate, string root)
     {
-        var volumes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var drive in DriveInfo.GetDrives())
-        {
-            try
-            {
-                if (!drive.IsReady || drive.DriveType is DriveType.Network or DriveType.NoRootDirectory)
-                    continue;
-                var root = NormalizeRootPath(drive.RootDirectory.FullName);
-                var letter = root.Length >= 2 && root[1] == ':'
-                    ? char.ToUpperInvariant(root[0]).ToString()
-                    : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(root)))[..12];
-                volumes[$"drive-{letter}"] = root;
-            }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-        }
-        return volumes;
-    }
-
-    private static string GetVolumeDisplayName(string root)
-    {
-        try
-        {
-            var drive = new DriveInfo(root);
-            var label = drive.VolumeLabel.Trim();
-            return string.IsNullOrWhiteSpace(label) ? $"Local Disk ({root})" : $"{label} ({root})";
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
-        {
-            return $"Local Disk ({root})";
-        }
+        var prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+        return candidate.Equals(root, StringComparison.OrdinalIgnoreCase)
+               || candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string NormalizeRootPath(string path) =>
@@ -207,11 +190,11 @@ public sealed class PathLease : IDisposable
     public string FullPath { get; }
     public bool IsDirectory { get; }
 
-    public Stream OpenReadStream()
+    public Stream OpenReadStream(bool keepLeaseOpen = false)
     {
         if (IsDirectory) throw new FileNotFoundException("The requested file was not found.");
         var duplicate = NativePath.Duplicate(Handle);
-        Dispose();
+        if (!keepLeaseOpen) Dispose();
         return new FileStream(duplicate, FileAccess.Read, 1024 * 1024, isAsync: false);
     }
 
@@ -415,8 +398,19 @@ internal static class NativePath
             handle?.Dispose();
             throw FromNtStatus(status, "Windows could not safely open the guarded relative path.");
         }
-        RequireNotReparse(handle);
-        if (requireDirectory && !IsDirectory(handle))
+        bool isDirectory;
+        try
+        {
+            RequireNotReparse(handle);
+            isDirectory = IsDirectory(handle);
+            if (!isDirectory) RequireSingleLink(handle);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+        if (requireDirectory && !isDirectory)
         {
             handle.Dispose();
             throw new DirectoryNotFoundException("The guarded child is not a directory.");
@@ -549,6 +543,17 @@ internal static class NativePath
         {
             handle.Dispose();
             throw new UnauthorizedAccessException("Links and junctions are not followed in shared roots.");
+        }
+    }
+
+    private static void RequireSingleLink(SafeFileHandle handle)
+    {
+        if (!GetFileInformationByHandle(handle, out var information))
+            throw FromWin32(Marshal.GetLastWin32Error(), "Windows could not inspect the guarded file link count.");
+        if (information.NumberOfLinks != 1)
+        {
+            throw new UnauthorizedAccessException(
+                "Hard-linked files are not exposed through the SYSTEM Agent file API.");
         }
     }
 

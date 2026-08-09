@@ -14,10 +14,18 @@ public partial class FileManagerWindow : Window
 {
     private const int MaximumBatchDownloadFiles = 10_000;
     private const int MaximumBatchDownloadDepth = 256;
+    private const int MaximumThumbnailBytes = 8 * 1024 * 1024;
 
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"
+    };
+
+    private static readonly HashSet<string> PreviewExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff",
+        ".mp3", ".wav", ".m4a", ".flac", ".mp4", ".m4v", ".mov", ".webm", ".avi",
+        ".pdf", ".txt", ".log", ".csv", ".json", ".xml"
     };
 
     private readonly DeviceRecord _device;
@@ -221,12 +229,14 @@ public partial class FileManagerWindow : Window
                 }
 
                 foreach (var localDirectory in batch.LocalDirectories.OrderBy(path => path.Length))
-                    Directory.CreateDirectory(localDirectory);
+                    GuardedLocalTransferPath.EnsureDirectory(
+                        destinationRoot, Path.GetRelativePath(destinationRoot, localDirectory));
                 foreach (var download in batch.Downloads)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     _transfers.StartDownload(
-                        _client, _device, _token, download.RootId, download.RemotePath, download.LocalPath);
+                        _client, _device, _token, download.RootId, download.RemotePath,
+                        destinationRoot, Path.GetRelativePath(destinationRoot, download.LocalPath));
                 }
 
                 StatusText.Text = batch.FileCount == 0
@@ -309,9 +319,20 @@ public partial class FileManagerWindow : Window
     {
         await RunAsync(async () =>
         {
-            var uri = await _client.CreateMediaUriAsync(_device, _token, CurrentRoot.Id, entry.RelativePath, _operationCancellation!.Token);
-            Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
-        }, $"Opened a five-minute stream for {entry.Name}.");
+            var extension = Path.GetExtension(entry.Name);
+            if (!PreviewExtensions.Contains(extension))
+                throw new InvalidOperationException(
+                    "This file type is not opened directly from a managed device. Download it and inspect it explicitly instead.");
+            var previewRoot = Path.Combine(AppPaths.AdminDataDirectory, "Previews");
+            Directory.CreateDirectory(previewRoot);
+            var previewName = Guid.NewGuid().ToString("N") + extension.ToLowerInvariant();
+            await _client.DownloadToRootAsync(
+                _device, _token, CurrentRoot.Id, entry.RelativePath,
+                previewRoot, previewName, progress: null, _operationCancellation!.Token, overwrite: false);
+            var previewPath = Path.Combine(previewRoot, previewName);
+            Process.Start(new ProcessStartInfo(previewPath) { UseShellExecute = true });
+            DeletePreviewLater(previewRoot, previewName);
+        }, $"Opened a protected local preview for {entry.Name}.");
     }
 
     private async void NewFolder_Click(object sender, RoutedEventArgs e)
@@ -379,12 +400,17 @@ public partial class FileManagerWindow : Window
             {
                 cancellation.Token.ThrowIfCancellationRequested();
                 if (!links.TryGetValue(item.RelativePath, out var uri)) continue;
+                var bytes = await _client.GetMediaBytesAsync(
+                    _device, uri, MaximumThumbnailBytes, cancellation.Token);
+                using var stream = new MemoryStream(bytes, writable: false);
                 var thumbnail = new BitmapImage();
                 thumbnail.BeginInit();
                 thumbnail.DecodePixelWidth = 240;
                 thumbnail.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-                thumbnail.UriSource = uri;
+                thumbnail.CacheOption = BitmapCacheOption.OnLoad;
+                thumbnail.StreamSource = stream;
                 thumbnail.EndInit();
+                thumbnail.Freeze();
                 item.Thumbnail = thumbnail;
             }
         }
@@ -465,6 +491,24 @@ public partial class FileManagerWindow : Window
     private static string Combine(string left, string right) => string.IsNullOrWhiteSpace(left) ? right : $"{left.TrimEnd('/')}/{right}";
     private static string Normalize(string path) => path.Replace('\\', '/').TrimStart('/');
     private static void ShowError(Exception exception) => MessageBox.Show(exception.Message, "Opticon Files", MessageBoxButton.OK, MessageBoxImage.Error);
+
+    private static async void DeletePreviewLater(string previewRoot, string previewName)
+    {
+        await Task.Delay(TimeSpan.FromMinutes(15));
+        try
+        {
+            var (directory, fileName) = GuardedLocalTransferPath.OpenParent(
+                previewRoot, previewName, createDirectories: false);
+            using (directory)
+            {
+                if (directory.TryOpenChild(fileName, delete: true, out var preview))
+                {
+                    using (preview) preview!.Delete();
+                }
+            }
+        }
+        catch { }
+    }
 
     private sealed class FileBrowserItem : INotifyPropertyChanged
     {

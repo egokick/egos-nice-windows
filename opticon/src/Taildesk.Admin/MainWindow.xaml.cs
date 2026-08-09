@@ -40,7 +40,7 @@ public partial class MainWindow : Window
         LoadSettingsControls();
         if (!_viewModel.Config.SetupComplete)
         {
-            WorkspaceTabs.SelectedIndex = 6;
+            WorkspaceTabs.SelectedIndex = 7;
             _viewModel.Status = "Complete command-center setup";
         }
         await _viewModel.InitializeAsync();
@@ -52,12 +52,82 @@ public partial class MainWindow : Window
     {
         if (sender is not Button { Tag: string value } || !int.TryParse(value, out var index)) return;
         WorkspaceTabs.SelectedIndex = index;
-        if (index == 5) await _viewModel.RunSystemChecksAsync();
+        if (index == 1) await _viewModel.ScheduledTransferManager.RefreshAsync();
+        if (index == 6) await _viewModel.RunSystemChecksAsync();
     }
 
-    private void GoToInvites_Click(object sender, RoutedEventArgs e) => WorkspaceTabs.SelectedIndex = 3;
+    private void GoToInvites_Click(object sender, RoutedEventArgs e) => WorkspaceTabs.SelectedIndex = 4;
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await RunAsync(() => _viewModel.RefreshAsync());
     private async void RunSystemChecks_Click(object sender, RoutedEventArgs e) => await _viewModel.RunSystemChecksAsync();
+
+    private async void NewScheduledTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        var app = (App)System.Windows.Application.Current;
+        var editor = new ScheduledTransferEditorWindow(app.State, app.Agents) { Owner = this };
+        if (editor.ShowDialog() == true && editor.Result is not null)
+            await RunAsync(async () =>
+            {
+                await _viewModel.ScheduledTransferManager.SaveAsync(editor.Result);
+                _viewModel.Status = $"Scheduled {editor.Result.Name}";
+            });
+    }
+
+    private async void EditScheduledTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ScheduledTransferGrid.SelectedItem is not ScheduledTransferRow row) return;
+        var app = (App)System.Windows.Application.Current;
+        var editor = new ScheduledTransferEditorWindow(app.State, app.Agents, row.Definition) { Owner = this };
+        if (editor.ShowDialog() == true && editor.Result is not null)
+            await RunAsync(async () =>
+            {
+                await _viewModel.ScheduledTransferManager.SaveAsync(editor.Result);
+                _viewModel.Status = $"Updated {editor.Result.Name}";
+            });
+    }
+
+    private async void RunScheduledTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ScheduledTransferGrid.SelectedItem is not ScheduledTransferRow row) return;
+        var progress = new Progress<string>(message => _viewModel.Status = message);
+        await RunAsync(async () =>
+        {
+            var result = await _viewModel.ScheduledTransferManager.RunNowAsync(row.Definition.Id, progress);
+            _viewModel.Status = $"{row.Name}: {result.Message}";
+        });
+    }
+
+    private async void ToggleScheduledTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ScheduledTransferGrid.SelectedItem is not ScheduledTransferRow row) return;
+        await RunAsync(async () =>
+        {
+            await _viewModel.ScheduledTransferManager.SetEnabledAsync(row.Definition.Id, !row.Definition.Enabled);
+            _viewModel.Status = $"{row.Name} is now {(!row.Definition.Enabled ? "enabled" : "paused")}";
+        });
+    }
+
+    private async void DeleteScheduledTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ScheduledTransferGrid.SelectedItem is not ScheduledTransferRow row) return;
+        if (MessageBox.Show($"Delete the schedule '{row.Name}'? Its run history will be kept.", "Delete scheduled transfer",
+                MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        await RunAsync(async () =>
+        {
+            await _viewModel.ScheduledTransferManager.DeleteAsync(row.Definition.Id);
+            _viewModel.Status = $"Deleted schedule {row.Name}";
+        });
+    }
+
+    private async void RetryScheduledTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ScheduledHistoryGrid.SelectedItem is not ScheduledTransferHistoryRow { CanRetry: true } row) return;
+        var progress = new Progress<string>(message => _viewModel.Status = message);
+        await RunAsync(async () =>
+        {
+            var result = await _viewModel.ScheduledTransferManager.RetryAsync(row.Id, progress);
+            _viewModel.Status = $"{row.Name}: {result.Message}";
+        });
+    }
 
     private void TransferGrid_PreviewMouseRightButtonDown(
         object sender,
@@ -488,28 +558,15 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) == true) RustDeskPathText.Text = dialog.FileName;
     }
 
-    private async void Firewall_Click(object sender, RoutedEventArgs e)
+    private void Firewall_Click(object sender, RoutedEventArgs e)
     {
-        if (!AgentClient.IsTailscaleIp(CoordinatorIpText.Text))
-        {
-            ShowError(new InvalidOperationException("Detect or enter this laptop's Tailscale IPv4 address first."));
-            return;
-        }
-        try
-        {
-            foreach (var ruleName in new[] { "Opticon Coordinator (Tailscale only)", "Taildesk Coordinator (Tailscale only)" })
-            {
-                using var deletion = Process.Start(new ProcessStartInfo("netsh.exe", $"advfirewall firewall delete rule name=\"{ruleName}\"") { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden });
-                if (deletion is not null) await deletion.WaitForExitAsync();
-            }
-            var arguments = $"advfirewall firewall add rule name=\"Opticon Coordinator (Tailscale only)\" dir=in action=allow protocol=TCP localport=45830 localip={CoordinatorIpText.Text} remoteip=100.64.0.0/10 profile=any enable=yes";
-            using var process = Process.Start(new ProcessStartInfo("netsh.exe", arguments) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden });
-            if (process is null) throw new InvalidOperationException("Could not start the Windows firewall helper.");
-            await process.WaitForExitAsync();
-            if (process.ExitCode != 0) throw new InvalidOperationException("Windows did not create the coordinator firewall rule.");
-            _viewModel.Log("Coordinator firewall rule created for the Tailscale interface.");
-        }
-        catch (Exception exception) { ShowError(exception); }
+        MessageBox.Show(
+            "Direct firewall elevation from the Opticon UI has been retired. " +
+            "Use the signed Opticon installer or its controller repair mode so the fixed System32 tool, " +
+            "publisher identity, task state, and rollback are verified together.",
+            "Signed repair required",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
     }
 
     private void LoadSettingsControls()
@@ -523,118 +580,22 @@ public partial class MainWindow : Window
         TailnetText.IsEnabled = OAuthIdText.IsEnabled = OAuthSecretText.IsEnabled = CoordinatorIpText.IsEnabled = editable;
     }
 
-    private static string BuildMaintenanceBootstrapCommand(
-        OpticonUpdateRelease release,
-        DeviceRecord device,
-        Guid operationId)
-    {
-        if (operationId == Guid.Empty)
-            throw new InvalidOperationException("Maintenance requires a non-empty operation ID.");
-        if (string.IsNullOrWhiteSpace(device.TailnetDeviceId)
-            || device.TailnetDeviceId.Length > 256
-            || device.TailnetDeviceId.Any(character => char.IsWhiteSpace(character) || char.IsControl(character)))
-            throw new InvalidOperationException(
-                "The selected registry record has no valid Tailscale device identity. Refresh devices before copying maintenance.");
-        if (!AgentClient.IsTailscaleIp(device.TailscaleIp))
-            throw new InvalidOperationException("The selected device has no canonical Tailscale IPv4 address.");
-        var suffix = Guid.NewGuid().ToString("N")[..12];
-        var url = release.DownloadUri.AbsoluteUri.Replace("'", "''", StringComparison.Ordinal);
-        var size = release.Size.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var certificateBase64 = Convert.ToBase64String(InvitationSigning.PinnedCertificate.RawData);
-        return "$ErrorActionPreference='Stop';"
-               + "$d=Join-Path $env:TEMP 'Opticon-Maintenance-" + suffix + "';"
-               + "$z=$d+'.zip';"
-               + "New-Item -ItemType Directory -Path $d -ErrorAction Stop|Out-Null;"
-               + "Add-Type -AssemblyName System.Net.Http;"
-               + "$ph=[Net.Http.HttpClientHandler]::new();$ph.UseProxy=$false;$ph.AllowAutoRedirect=$false;$ph.CheckCertificateRevocationList=$true;"
-               + "$hc=[Net.Http.HttpClient]::new($ph);try{$hc.Timeout=[TimeSpan]::FromMinutes(20);$rs=$hc.GetStreamAsync('" + url + "').GetAwaiter().GetResult();"
-               + "try{$fs=[IO.File]::Open($z,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{$rs.CopyTo($fs)}finally{$fs.Dispose()}}finally{$rs.Dispose()}}finally{$hc.Dispose();$ph.Dispose()};"
-               + "if((Get-Item -LiteralPath $z).Length -ne " + size + "){throw 'Downloaded Opticon bundle size mismatch.'};"
-               + "$h=(Get-FileHash -LiteralPath $z -Algorithm SHA256).Hash.ToLowerInvariant();"
-               + "if($h -ne '" + release.Sha256 + "'){throw 'Downloaded Opticon bundle SHA-256 mismatch.'};"
-               + "Expand-Archive -LiteralPath $z -DestinationPath $d -Force;"
-               + "$m=Join-Path $d 'release-manifest.json';$q=Join-Path $d 'release-manifest.sig';"
-               + "if(!(Test-Path -LiteralPath $m) -or !(Test-Path -LiteralPath $q)){throw 'Signed release metadata is missing.'};"
-               + "$mb=[IO.File]::ReadAllBytes($m);"
-               + "$sb=[Convert]::FromBase64String([IO.File]::ReadAllText($q).Trim());"
-               + "$cert=New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,[Convert]::FromBase64String('"
-               + certificateBase64
-               + "'));"
-               + "try{$rsa=[Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert);"
-               + "if(!$rsa){throw 'Pinned release certificate has no RSA key.'};"
-               + "try{if(!$rsa.VerifyData($mb,$sb,[Security.Cryptography.HashAlgorithmName]::SHA256,[Security.Cryptography.RSASignaturePadding]::Pss)){throw 'Release manifest signature is invalid.'}}finally{$rsa.Dispose()}}finally{$cert.Dispose()};"
-               + "$j=[Text.Encoding]::UTF8.GetString($mb)|ConvertFrom-Json;"
-               + "$f=@($j.files|Where-Object {$_.path -ceq 'Taildesk.Setup.exe'});"
-               + "if($j.schemaVersion -ne 1 -or $j.updateProtocolVersion -ne 1 -or $f.Count -ne 1){throw 'Signed Setup declaration is missing or ambiguous.'};"
-               + "if(([string]$f[0].signerThumbprint) -ne '"
-               + InvitationSigning.CertificateThumbprint
-               + "'){throw 'Signed Setup publisher pin is invalid.'};"
-               + "$s=Join-Path $d 'Taildesk.Setup.exe';"
-               + "if(!(Test-Path -LiteralPath $s)){throw 'Taildesk.Setup.exe is missing from the signed bundle.'};"
-               + "if((Get-Item -LiteralPath $s).Length -ne [long]$f[0].size){throw 'Signed Setup size mismatch.'};"
-               + "$sh=(Get-FileHash -LiteralPath $s -Algorithm SHA256).Hash.ToLowerInvariant();"
-               + "if($sh -ne ([string]$f[0].sha256).ToLowerInvariant()){throw 'Signed Setup SHA-256 mismatch.'};"
-               + "$a=@('--maintenance','--expected-tailnet-device-id="
-               + device.TailnetDeviceId.Replace("'", "''", StringComparison.Ordinal)
-               + "','--expected-tailscale-ip=" + device.TailscaleIp
-               + "','--operation-id=" + operationId.ToString("N") + "');"
-               + "Start-Process -FilePath $s -ArgumentList $a -Verb RunAs -Wait";
-    }
-
-    private async Task RunMaintenanceBootstrapAsync(
+    private Task RunMaintenanceBootstrapAsync(
         DeviceRecord device,
         OpticonUpdateRelease release,
         string reason)
     {
-        var operationId = Guid.NewGuid();
-        var command = BuildMaintenanceBootstrapCommand(release, device, operationId);
-        var instructions =
-            reason + " Opticon will not send arbitrary commands to it.\n\n" +
-            "Opticon selected this immutable role-specific bundle:\n" +
-            $"{release.DownloadUri.AbsoluteUri}\nSHA-256: {release.Sha256}\n" +
-            $"Operation: {operationId:N}\n\n" +
-            "Choose Yes to copy a size-, SHA-256-, publisher-, Tailnet-device-, Tailscale-address-, and operation-pinned PowerShell command, snapshot recovery, open Remote into, and let this command center watch for the exact candidate for up to 30 minutes. The command bypasses ambient Windows proxies and verifies the extracted Setup signature before requesting elevation. Then, in the remote Windows session:\n" +
-            "1. Open PowerShell.\n" +
-            "2. Paste the copied command and press Enter.\n" +
-            "3. Approve the one UAC prompt for Taildesk.Setup.exe.\n" +
-            "4. Keep RustDesk, Setup, and this Opticon window open through the terminal result.\n\n" +
-            "Setup must pass three protected local samples but cannot commit. This command center alone requires three authenticated external samples for the exact operation, release, architecture, IP, Tailnet identity, RustDesk, and any snapshotted SSH listener. If confirmation is lost or late, no commit is sent and the Guardian rolls back.\n\n" +
-            "The one-time bootstrap keeps enrollment, Tailscale, RustDesk, routes, credentials, and Admin unchanged. Later Agent releases use the guarded update path.";
-        if (MessageBox.Show(
-                instructions,
-                "One-time signed Agent bootstrap",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning) != MessageBoxResult.Yes)
-            return;
-
-        await SetClipboardTextAsync(command);
-        var sshWasListening = await _viewModel.SnapshotMaintenanceSshAsync(device);
-        await _viewModel.LaunchRemoteControlAsync(device);
-        var progressWindow = new UpdateProgressWindow(device.Name, device.AgentVersion, release.Version)
-        {
-            Owner = this,
-            DataContext = _viewModel
-        };
-        progressWindow.Show();
-        UpdateStatusDto maintenanceResult;
-        try
-        {
-            maintenanceResult = await _viewModel.ObserveMaintenanceBootstrapAsync(
-                device, release, operationId, sshWasListening);
-        }
-        finally
-        {
-            progressWindow.FinishAndClose();
-            Activate();
-        }
-        var maintenanceMessage = maintenanceResult.Phase == UpdatePhase.Committed
-            ? $"Opticon Agent {maintenanceResult.TargetVersion} is externally verified and committed on {device.Name}."
-            : $"The maintenance candidate was not committed. {device.Name} reported {maintenanceResult.Phase}.\n\n{maintenanceResult.Message}";
+        _viewModel.Log(
+            $"Copied PowerShell/UAC maintenance bootstraps are retired for {device.Name}; release {release.Version} was not launched.");
         MessageBox.Show(
-            maintenanceMessage,
-            "One-time signed Agent bootstrap",
+            reason + "\n\n" +
+            "The legacy copied PowerShell/UAC maintenance bootstrap has been retired because a same-user process could race its verified files before elevation. " +
+            "No command was copied or started. Create a fresh hosted source-build invitation for this device instead; " +
+            "the invitation pins the source and bootstrap hashes, builds under the exact .NET SDK, and installs through protected machine storage.",
+            "Use a signed source-build invitation",
             MessageBoxButton.OK,
-            maintenanceResult.Phase == UpdatePhase.Committed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            MessageBoxImage.Warning);
+        return Task.CompletedTask;
     }
 
     private DeviceRecord RequireDevice() => _viewModel.SelectedDevice ?? throw new InvalidOperationException("Select a device first.");

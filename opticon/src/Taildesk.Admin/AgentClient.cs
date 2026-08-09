@@ -40,61 +40,113 @@ public sealed class AgentClient
         await GetAsync<FileListingDto>(device, token,
             $"api/v1/files?root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(path)}", cancellationToken);
 
-    public async Task DownloadAsync(DeviceRecord device, string token, string root, string remotePath, string localPath,
-        IProgress<(long Current, long Total)>? progress, CancellationToken cancellationToken = default)
+    public Task<FileTransferDigest> DownloadAsync(
+        DeviceRecord device,
+        string token,
+        string root,
+        string remotePath,
+        string localPath,
+        IProgress<(long Current, long Total)>? progress,
+        CancellationToken cancellationToken = default,
+        bool overwrite = true)
     {
-        var temporary = localPath + ".taildesk-partial";
-        var offset = File.Exists(temporary) ? new FileInfo(temporary).Length : 0;
+        var fullPath = Path.GetFullPath(localPath);
+        return DownloadToRootAsync(
+            device, token, root, remotePath,
+            Path.GetDirectoryName(fullPath) ?? throw new InvalidOperationException("The download destination has no parent directory."),
+            Path.GetFileName(fullPath), progress, cancellationToken, overwrite);
+    }
+
+    public async Task<FileTransferDigest> DownloadToRootAsync(
+        DeviceRecord device,
+        string token,
+        string root,
+        string remotePath,
+        string localRoot,
+        string localRelativePath,
+        IProgress<(long Current, long Total)>? progress,
+        CancellationToken cancellationToken = default,
+        bool overwrite = true)
+    {
+        // The current Agent download contract has no ETag or other strong content
+        // validator. Restart into a fresh, handle-created temporary file instead of
+        // combining an unauthenticated stale prefix with a new response.
+        using var target = GuardedLocalTransferTarget.Create(localRoot, localRelativePath);
         using var request = CreateRequest(device, token, HttpMethod.Get,
             $"api/v1/files/download?root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(remotePath)}");
-        if (offset > 0) request.Headers.Range = new RangeHeaderValue(offset, null);
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable
-            && offset > 0
-            && response.Content.Headers.ContentRange?.Length == offset)
-        {
-            File.Move(temporary, localPath, true);
-            progress?.Report((offset, offset));
-            return;
-        }
         await EnsureSuccessAsync(response, cancellationToken);
-        if (offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
-            offset = 0;
-        if (response.StatusCode == HttpStatusCode.PartialContent
-            && response.Content.Headers.ContentRange?.From != offset)
-            throw new InvalidDataException("The Agent returned a different download resume offset.");
-        var total = response.Content.Headers.ContentRange?.Length
-                    ?? (response.Content.Headers.ContentLength is long remaining ? offset + remaining : 0);
+        if (response.StatusCode != HttpStatusCode.OK || response.Content.Headers.ContentRange is not null)
+            throw new InvalidDataException("The Agent returned an unexpected partial response to a full-file download.");
+
+        var expectedLength = response.Content.Headers.ContentLength;
+        progress?.Report((0, expectedLength ?? 0));
         await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using (var output = new FileStream(
-                         temporary,
-                         offset == 0 ? FileMode.Create : FileMode.Open,
-                         FileAccess.Write,
-                         FileShare.None,
-                         1024 * 1024,
-                         true))
+        FileTransferDigest digest;
+        await using (var output = target.OpenWriteStream())
         {
-            output.Position = offset;
-            await CopyWithProgressAsync(input, output, offset, total, progress, cancellationToken);
+            digest = await CopyWithDigestAsync(input, output, expectedLength ?? 0, progress, cancellationToken);
             await output.FlushAsync(cancellationToken);
         }
-        if (total > 0 && new FileInfo(temporary).Length != total)
+        if (expectedLength.HasValue && digest.Length != expectedLength.Value)
             throw new IOException("The download ended before the complete remote file was received.");
-        File.Move(temporary, localPath, true);
+        target.Promote(overwrite);
+        return digest;
+    }
+
+    public async Task<FileTransferDigest> GetRemoteFileDigestAsync(
+        DeviceRecord device,
+        string token,
+        string root,
+        string remotePath,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = CreateRequest(device, token, HttpMethod.Get,
+            $"api/v1/files/download?root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(remotePath)}");
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        await EnsureSuccessAsync(response, cancellationToken);
+        if (response.StatusCode != HttpStatusCode.OK || response.Content.Headers.ContentRange is not null)
+            throw new InvalidDataException("The Agent returned an unexpected partial response while verifying a file.");
+        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var digest = await ReadDigestAsync(input, cancellationToken);
+        if (response.Content.Headers.ContentLength is long expectedLength && digest.Length != expectedLength)
+            throw new IOException("The remote file changed or ended while it was being verified.");
+        return digest;
     }
 
     public async Task UploadAsync(DeviceRecord device, string token, Guid transferId, string localPath, string root, string destinationDirectory,
         bool overwrite, IProgress<(long Current, long Total)>? progress, CancellationToken cancellationToken = default)
     {
         await using var file = new FileStream(localPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, true);
-        var fileName = Path.GetFileName(localPath);
-        var common = $"root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(destinationDirectory)}&fileName={Uri.EscapeDataString(fileName)}&transferId={transferId:D}&totalLength={file.Length}&overwrite={overwrite.ToString().ToLowerInvariant()}";
+        await UploadStreamAsync(device, token, transferId, file, Path.GetFileName(localPath), file.Length,
+            root, destinationDirectory, overwrite, progress, cancellationToken);
+    }
+
+    public async Task UploadStreamAsync(
+        DeviceRecord device,
+        string token,
+        Guid transferId,
+        Stream file,
+        string fileName,
+        long totalLength,
+        string root,
+        string destinationDirectory,
+        bool overwrite,
+        IProgress<(long Current, long Total)>? progress,
+        CancellationToken cancellationToken = default)
+    {
+        if (!file.CanRead || !file.CanSeek || totalLength < 0 || file.Length != totalLength)
+            throw new InvalidDataException("The guarded upload source has an invalid length or stream type.");
+        if (string.IsNullOrWhiteSpace(fileName) || !Path.GetFileName(fileName).Equals(fileName, StringComparison.Ordinal))
+            throw new InvalidDataException("The guarded upload source has an invalid file name.");
+        var common = $"root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(destinationDirectory)}&fileName={Uri.EscapeDataString(fileName)}&transferId={transferId:D}&totalLength={totalLength}&overwrite={overwrite.ToString().ToLowerInvariant()}";
         var status = await TryGetUploadStatusAsync(
             device, token, $"api/v1/files/upload-status?{common}", cancellationToken);
         if (status is null)
         {
-            progress?.Report((0, file.Length));
-            using var legacyContent = new ProgressStreamContent(file, 0, file.Length, progress, cancellationToken);
+            file.Position = 0;
+            progress?.Report((0, totalLength));
+            using var legacyContent = new ProgressStreamContent(file, 0, totalLength, progress, cancellationToken);
             var legacyUrl = $"api/v1/files/upload?root={Uri.EscapeDataString(root)}&path={Uri.EscapeDataString(destinationDirectory)}&fileName={Uri.EscapeDataString(fileName)}&overwrite={overwrite.ToString().ToLowerInvariant()}";
             using var legacyRequest = CreateRequest(device, token, HttpMethod.Post, legacyUrl);
             legacyRequest.Content = legacyContent;
@@ -103,11 +155,11 @@ public sealed class AgentClient
             await EnsureSuccessAsync(legacyResponse, cancellationToken);
             return;
         }
-        if (status.TotalBytes != file.Length || status.BytesReceived < 0 || status.BytesReceived > file.Length)
+        if (status.TotalBytes != totalLength || status.BytesReceived < 0 || status.BytesReceived > totalLength)
             throw new InvalidDataException("The Agent returned an invalid resumable upload position.");
         file.Position = status.BytesReceived;
-        progress?.Report((status.BytesReceived, file.Length));
-        using var content = new ProgressStreamContent(file, status.BytesReceived, file.Length, progress, cancellationToken);
+        progress?.Report((status.BytesReceived, totalLength));
+        using var content = new ProgressStreamContent(file, status.BytesReceived, totalLength, progress, cancellationToken);
         var url = $"api/v1/files/upload?{common}&offset={status.BytesReceived}";
         using var request = CreateRequest(device, token, HttpMethod.Post, url);
         request.Content = content;
@@ -142,6 +194,21 @@ public sealed class AgentClient
         await EnsureSuccessAsync(response, cancellationToken);
     }
 
+    public async Task DeleteIfMatchAsync(
+        DeviceRecord device,
+        string token,
+        string root,
+        string path,
+        FileTransferDigest expected,
+        CancellationToken cancellationToken = default) =>
+        await SendJsonAsync(device, token, HttpMethod.Post, "api/v1/files/delete-if-match",
+            new ConditionalDeleteRequest
+            {
+                Root = root,
+                RelativePath = path,
+                ExpectedLength = expected.Length,
+                ExpectedSha256 = expected.Sha256
+            }, cancellationToken);
     public async Task<Uri> CreateMediaUriAsync(DeviceRecord device, string token, string root, string path, CancellationToken cancellationToken = default)
     {
         using var request = CreateRequest(device, token, HttpMethod.Post, "api/v1/media-link");
@@ -150,7 +217,7 @@ public sealed class AgentClient
         await EnsureSuccessAsync(response, cancellationToken);
         var link = await response.Content.ReadFromJsonAsync<MediaLinkResponse>(JsonDefaults.Options, cancellationToken)
                    ?? throw new InvalidDataException("The agent returned an empty media link.");
-        return new Uri(BaseUri(device), link.RelativeUrl);
+        return ValidateMediaUri(device, link.RelativeUrl, link.ExpiresAt);
     }
 
     public async Task<IReadOnlyDictionary<string, Uri>> CreateMediaUrisAsync(
@@ -171,10 +238,74 @@ public sealed class AgentClient
         await EnsureSuccessAsync(response, cancellationToken);
         var links = await response.Content.ReadFromJsonAsync<MediaLinksResponse>(JsonDefaults.Options, cancellationToken)
                     ?? throw new InvalidDataException("The agent returned an empty media-link batch.");
+        if (links.Items.Count > paths.Count
+            || links.Items.Any(item => !paths.Contains(item.RelativePath, StringComparer.OrdinalIgnoreCase)))
+            throw new InvalidDataException("The Agent returned an unexpected media link.");
         return links.Items.ToDictionary(
             item => item.RelativePath,
-            item => new Uri(BaseUri(device), item.RelativeUrl),
+            item => ValidateMediaUri(device, item.RelativeUrl, links.ExpiresAt),
             StringComparer.OrdinalIgnoreCase);
+    }
+
+    internal static Uri ValidateMediaUri(DeviceRecord device, string relativeUrl, DateTimeOffset expiresAt)
+    {
+        if (string.IsNullOrWhiteSpace(relativeUrl)
+            || !relativeUrl.StartsWith("/api/v1/media?", StringComparison.Ordinal)
+            || !Uri.TryCreate(relativeUrl, UriKind.Relative, out var relative))
+            throw new InvalidDataException("The Agent returned an unsafe media link.");
+
+        var now = DateTimeOffset.UtcNow;
+        if (expiresAt < now.AddMinutes(-1) || expiresAt > now.AddMinutes(10))
+            throw new InvalidDataException("The Agent returned a media link with an invalid lifetime.");
+
+        var expected = BaseUri(device);
+        var resolved = new Uri(expected, relative);
+        RequireMediaOrigin(device, resolved);
+        return resolved;
+    }
+
+    public async Task<byte[]> GetMediaBytesAsync(
+        DeviceRecord device,
+        Uri mediaUri,
+        int maximumBytes,
+        CancellationToken cancellationToken = default)
+    {
+        if (maximumBytes is < 1 or > 32 * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        RequireMediaOrigin(device, mediaUri);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        using var request = new HttpRequestMessage(HttpMethod.Get, mediaUri);
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        await EnsureSuccessAsync(response, timeout.Token);
+        if (response.StatusCode != HttpStatusCode.OK
+            || response.Content.Headers.ContentRange is not null
+            || response.Content.Headers.ContentLength is long contentLength && contentLength > maximumBytes)
+            throw new InvalidDataException("The Agent returned an invalid or oversized media response.");
+        await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
+        using var output = new MemoryStream(Math.Min(maximumBytes, (int)(response.Content.Headers.ContentLength ?? 0)));
+        var buffer = new byte[64 * 1024];
+        int read;
+        while ((read = await input.ReadAsync(buffer, timeout.Token)) > 0)
+        {
+            if (output.Length + read > maximumBytes)
+                throw new InvalidDataException("The Agent media response exceeded its allowed size.");
+            await output.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
+        }
+        return output.ToArray();
+    }
+
+    private static void RequireMediaOrigin(DeviceRecord device, Uri resolved)
+    {
+        var expected = BaseUri(device);
+        if (!resolved.IsAbsoluteUri
+            || !resolved.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            || !resolved.Host.Equals(expected.Host, StringComparison.OrdinalIgnoreCase)
+            || resolved.Port != expected.Port
+            || !resolved.AbsolutePath.Equals("/api/v1/media", StringComparison.Ordinal)
+            || !string.IsNullOrEmpty(resolved.UserInfo)
+            || !string.IsNullOrEmpty(resolved.Fragment))
+            throw new InvalidDataException("The Agent returned a media link outside its authenticated Tailscale origin.");
     }
 
     public async Task SetExitNodeAsync(DeviceRecord device, string token, bool enabled, CancellationToken cancellationToken = default) =>
@@ -377,6 +508,47 @@ public sealed class AgentClient
             current += read;
             progress?.Report((current, total));
         }
+    }
+
+    private static async Task<FileTransferDigest> CopyWithDigestAsync(
+        Stream source,
+        Stream destination,
+        long total,
+        IProgress<(long Current, long Total)>? progress,
+        CancellationToken cancellationToken)
+    {
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(
+            System.Security.Cryptography.HashAlgorithmName.SHA256);
+        var buffer = new byte[1024 * 1024];
+        long current = 0;
+        int read;
+        while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+        {
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            hash.AppendData(buffer, 0, read);
+            current += read;
+            progress?.Report((current, total));
+        }
+        return new FileTransferDigest(
+            current,
+            Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant());
+    }
+
+    private static async Task<FileTransferDigest> ReadDigestAsync(Stream source, CancellationToken cancellationToken)
+    {
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(
+            System.Security.Cryptography.HashAlgorithmName.SHA256);
+        var buffer = new byte[1024 * 1024];
+        long current = 0;
+        int read;
+        while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+        {
+            hash.AppendData(buffer, 0, read);
+            current += read;
+        }
+        return new FileTransferDigest(
+            current,
+            Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant());
     }
 
     private sealed class ProgressStreamContent : HttpContent

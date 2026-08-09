@@ -52,7 +52,8 @@ internal sealed record DownloadTransferOperation(
     string Token,
     string Root,
     string RemotePath,
-    string LocalPath) : TransferOperation(Client, Device, Token);
+    string LocalRoot,
+    string LocalRelativePath) : TransferOperation(Client, Device, Token);
 
 internal sealed record UploadTransferOperation(
     AgentClient Client,
@@ -78,14 +79,15 @@ public sealed class TransferManager
         string token,
         string root,
         string remotePath,
-        string localPath)
+        string localRoot,
+        string localRelativePath)
     {
         var row = new TransferRow
         {
             Device = device.Name,
             File = Path.GetFileName(remotePath),
             Direction = TransferDirection.Download,
-            Operation = new DownloadTransferOperation(client, device, token, root, remotePath, localPath)
+            Operation = new DownloadTransferOperation(client, device, token, root, remotePath, localRoot, localRelativePath)
         };
         Items.Insert(0, row);
         Start(row);
@@ -158,9 +160,9 @@ public sealed class TransferManager
             switch (row.Operation)
             {
                 case DownloadTransferOperation download:
-                    await download.Client.DownloadAsync(
+                    await download.Client.DownloadToRootAsync(
                         download.Device, download.Token, download.Root, download.RemotePath,
-                        download.LocalPath, progress, cancellation.Token);
+                        download.LocalRoot, download.LocalRelativePath, progress, cancellation.Token);
                     break;
                 case UploadTransferOperation upload:
                     var source = new FileInfo(upload.LocalPath);

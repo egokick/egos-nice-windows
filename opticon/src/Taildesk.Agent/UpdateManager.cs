@@ -98,7 +98,7 @@ public sealed class UpdateManager
                 throw new InvalidOperationException("The RustDesk recovery channel is not healthy on TCP 21118. Opticon refuses to stage a remote update without remote-control fallback.");
 
             var guardian = GuardianExecutable();
-            await InvitationSigning.VerifyAuthenticodeAsync(guardian, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(guardian, cancellationToken);
             EnsureFreeSpace(request.PackageSize);
             await EnsurePrivateUpdateDirectoryAsync(cancellationToken);
 
@@ -116,7 +116,8 @@ public sealed class UpdateManager
                 throw new InvalidOperationException($"Update {existing.OperationId:N} is already {existing.Phase}.");
 
             var operationDirectory = Path.Combine(AppPaths.UpdateDataDirectory, request.OperationId.ToString("N"));
-            Directory.CreateDirectory(operationDirectory);
+            MachineStorageSecurity.EnsureRestrictedDirectoryTree(
+                AppPaths.MachineDataDirectory, operationDirectory);
             var packagePath = Path.Combine(operationDirectory, "package.zip");
             var stageAgent = Path.Combine(operationDirectory, "staged-agent");
             journal = new UpdateJournal
@@ -196,7 +197,7 @@ public sealed class UpdateManager
                 throw new InvalidOperationException("Close the active Opticon SSH lease before updating the stable Guardian.");
 
             var installedGuardian = GuardianExecutable();
-            await InvitationSigning.VerifyAuthenticodeAsync(installedGuardian, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(installedGuardian, cancellationToken);
             var previousVersion = ReadExecutableVersion(installedGuardian);
             await EnsurePrivateUpdateDirectoryAsync(cancellationToken);
             EnsureFreeSpace(request.PackageSize);
@@ -204,7 +205,8 @@ public sealed class UpdateManager
             var operationDirectory = Path.Combine(
                 AppPaths.UpdateDataDirectory,
                 "guardian-" + request.OperationId.ToString("N"));
-            Directory.CreateDirectory(operationDirectory);
+            MachineStorageSecurity.EnsureRestrictedDirectoryTree(
+                AppPaths.MachineDataDirectory, operationDirectory);
             var packagePath = ReusableCommittedPackage(request) ?? Path.Combine(operationDirectory, "package.zip");
             var downloadedForGuardian = !File.Exists(packagePath);
             if (downloadedForGuardian)
@@ -222,7 +224,7 @@ public sealed class UpdateManager
                 AppPaths.UpdateGuardianInstallDirectory,
                 cancellationToken);
 
-            await InvitationSigning.VerifyAuthenticodeAsync(installedGuardian, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(installedGuardian, cancellationToken);
             var installedVersion = ReadExecutableVersion(installedGuardian);
             var expectedVersion = UpdatePackageVerifier.NormalizeVersion(request.TargetVersion);
             if (UpdatePackageVerifier.ParseVersion(installedVersion)
@@ -234,7 +236,9 @@ public sealed class UpdateManager
                 installedGuardian,
                 [RemoteAdministrationProtocol.GuardianWatchdogArgument],
                 TimeSpan.FromSeconds(30),
-                cancellationToken);
+                cancellationToken,
+                environment: BuildPrivilegedEnvironment(),
+                clearEnvironment: true);
             if (!watchdog.Succeeded)
                 throw new InvalidOperationException(
                     "The promoted signed Guardian did not pass its SYSTEM watchdog startup probe: " +
@@ -277,7 +281,7 @@ public sealed class UpdateManager
 
                 if (journal.Phase == UpdatePhase.Ready)
                 {
-                    TryDelete(AppPaths.UpdateCommitRequestFile);
+                    MachineStorageSecurity.DeleteRestrictedFileIfExists(AppPaths.UpdateCommitRequestFile);
                     journal.Phase = UpdatePhase.ActivationScheduled;
                     journal.GuardianClaimedAt = null;
                     journal.SshWasListening = false;
@@ -412,7 +416,11 @@ public sealed class UpdateManager
     private async Task DownloadWithResumeAsync(Uri uri, string destination, long expectedSize, CancellationToken cancellationToken)
     {
         var partial = destination + ".partial";
-        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        var destinationDirectory = Path.GetDirectoryName(destination)
+                                   ?? throw new InvalidOperationException("The update package has no parent directory.");
+        MachineStorageSecurity.RequireRestrictedDirectory(destinationDirectory);
+        MachineStorageSecurity.RequireRestrictedFileIfExists(destination);
+        MachineStorageSecurity.RequireRestrictedFileIfExists(partial);
         Exception? last = null;
         for (var attempt = 1; attempt <= MaximumDownloadAttempts; attempt++)
         {
@@ -424,6 +432,7 @@ public sealed class UpdateManager
                 if (offset == expectedSize)
                 {
                     File.Move(partial, destination, true);
+                    MachineStorageSecurity.RequireRestrictedFile(destination);
                     return;
                 }
                 using var request = new HttpRequestMessage(HttpMethod.Get, uri);
@@ -448,6 +457,12 @@ public sealed class UpdateManager
                         throw new InvalidDataException("The release server returned mismatched resumable range metadata.");
                 }
                 response.EnsureSuccessStatusCode();
+                if (response.Content.Headers.ContentEncoding.Count != 0)
+                    throw new InvalidDataException("The release server returned an encoded package body.");
+                var expectedResponseBytes = expectedSize - offset;
+                if (response.Content.Headers.ContentLength is { } declared
+                    && declared != expectedResponseBytes)
+                    throw new InvalidDataException("The release server returned a mismatched package length.");
                 await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
                 long total = offset;
                 await using (var output = new FileStream(
@@ -467,14 +482,18 @@ public sealed class UpdateManager
                         await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                     }
                     await output.FlushAsync(cancellationToken);
+                    output.Flush(flushToDisk: true);
                 }
+                MachineStorageSecurity.SealRestrictedFile(partial);
                 if (total != expectedSize) throw new IOException($"The release download stopped at {total} of {expectedSize} bytes.");
                 File.Move(partial, destination, true);
+                MachineStorageSecurity.RequireRestrictedFile(destination);
                 return;
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 last = exception;
+                if (File.Exists(partial)) MachineStorageSecurity.SealRestrictedFile(partial);
                 if (attempt < MaximumDownloadAttempts) await Task.Delay(TimeSpan.FromSeconds(attempt * 2), cancellationToken);
             }
         }
@@ -486,13 +505,12 @@ public sealed class UpdateManager
             last);
     }
 
-    private static async Task EnsurePrivateUpdateDirectoryAsync(CancellationToken cancellationToken)
+    private static Task EnsurePrivateUpdateDirectoryAsync(CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(AppPaths.UpdateDataDirectory);
-        var result = await ProcessRunner.RunAsync("icacls.exe",
-            [AppPaths.UpdateDataDirectory, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
-            TimeSpan.FromSeconds(30), cancellationToken);
-        if (!result.Succeeded) throw new InvalidOperationException("Windows could not protect the update staging and rollback directory.");
+        cancellationToken.ThrowIfCancellationRequested();
+        MachineStorageSecurity.EnsureOpticonMachineState();
+        MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.UpdateDataDirectory);
+        return Task.CompletedTask;
     }
 
     private static void EnsureFreeSpace(long packageSize)
@@ -531,8 +549,9 @@ public sealed class UpdateManager
         do
         {
             var result = await ProcessRunner.RunAsync(
-                "schtasks.exe", ["/Run", "/TN", RemoteAdministrationProtocol.GuardianTaskName],
-                TimeSpan.FromSeconds(15), cancellationToken);
+                RequireSystemTool("schtasks.exe"), ["/Run", "/TN", RemoteAdministrationProtocol.GuardianTaskName],
+                TimeSpan.FromSeconds(15), cancellationToken,
+                environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
             if (await WaitForGuardianPickupAsync(
                     scheduledOperationId, TimeSpan.FromSeconds(3), cancellationToken))
                 return;
@@ -557,8 +576,9 @@ public sealed class UpdateManager
         do
         {
             var result = await ProcessRunner.RunAsync(
-                "schtasks.exe", ["/Run", "/TN", RemoteAdministrationProtocol.GuardianTaskName],
-                TimeSpan.FromSeconds(15), cancellationToken);
+                RequireSystemTool("schtasks.exe"), ["/Run", "/TN", RemoteAdministrationProtocol.GuardianTaskName],
+                TimeSpan.FromSeconds(15), cancellationToken,
+                environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
             var observationDeadline = DateTimeOffset.UtcNow.AddSeconds(3);
             if (observationDeadline > deadline) observationDeadline = deadline;
             do
@@ -631,8 +651,40 @@ public sealed class UpdateManager
         await UpdateJournalPersistence.SaveAsync(durable, cancellationToken: cancellationToken);
     }
 
-    private static void TryDelete(string path)
+    private static string RequireSystemTool(string fileName)
     {
-        try { if (File.Exists(path)) File.Delete(path); } catch { }
+        if (string.IsNullOrWhiteSpace(fileName) || Path.GetFileName(fileName) != fileName)
+            throw new InvalidDataException("A fixed Windows system tool name is invalid.");
+        var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        if (string.IsNullOrWhiteSpace(systemDirectory))
+            throw new DirectoryNotFoundException("The Windows System32 directory is unavailable.");
+        var path = Path.GetFullPath(Path.Combine(systemDirectory, fileName));
+        if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new FileNotFoundException("A required fixed Windows system tool is missing or unsafe.", path);
+        return path;
+    }
+
+    private static IReadOnlyDictionary<string, string?> BuildPrivilegedEnvironment()
+    {
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var system = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        if (string.IsNullOrWhiteSpace(windows) || string.IsNullOrWhiteSpace(system))
+            throw new DirectoryNotFoundException("The fixed Windows directories are unavailable.");
+        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SystemRoot"] = windows,
+            ["WINDIR"] = windows,
+            ["SystemDrive"] = Path.GetPathRoot(windows),
+            ["ProgramData"] = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            ["ProgramFiles"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            ["ProgramW6432"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            ["ComSpec"] = Path.Combine(system, "cmd.exe"),
+            ["PATH"] = string.Join(Path.PathSeparator, system, windows),
+            ["TEMP"] = Path.Combine(windows, "Temp"),
+            ["TMP"] = Path.Combine(windows, "Temp")
+        };
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        if (!string.IsNullOrWhiteSpace(programFilesX86)) result["ProgramFiles(x86)"] = programFilesX86;
+        return result;
     }
 }

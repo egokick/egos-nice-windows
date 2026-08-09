@@ -67,6 +67,30 @@ public sealed class DeviceRecord
 
     [JsonIgnore]
     public bool PrivacyMode2Enabled { get; set; }
+
+    [JsonIgnore]
+    public DateTimeOffset? OnlineSince { get; set; }
+
+    [JsonIgnore]
+    public int? BatteryPercentage { get; set; }
+
+    [JsonIgnore]
+    public string OnlineTime => State != DeviceConnectionState.Online || !OnlineSince.HasValue
+        ? "—"
+        : FormatOnlineTime(DateTimeOffset.UtcNow - OnlineSince.Value);
+
+    [JsonIgnore]
+    public string BatteryLife => State == DeviceConnectionState.Online && BatteryPercentage is >= 0 and <= 100
+        ? $"{BatteryPercentage.Value}%"
+        : "—";
+
+    internal static string FormatOnlineTime(TimeSpan duration)
+    {
+        if (duration < TimeSpan.Zero) duration = TimeSpan.Zero;
+        if (duration.TotalDays >= 1) return $"{(int)duration.TotalDays}d {duration.Hours}h";
+        if (duration.TotalHours >= 1) return $"{(int)duration.TotalHours}h {duration.Minutes}m";
+        return $"{Math.Max(0, (int)duration.TotalMinutes)}m";
+    }
 }
 
 public sealed class InviteRecord
@@ -85,8 +109,26 @@ public sealed class InviteRecord
     public string BundlePath { get; set; } = string.Empty;
     public bool AdvertiseExitNode { get; set; }
     public string TailscaleKeyId { get; set; } = string.Empty;
+    public List<string> PendingTailscaleKeyRevocations { get; set; } = [];
     public string HostedInviteIdHash { get; set; } = string.Empty;
     public string HostedUrlProtected { get; set; } = string.Empty;
+    public string ReleaseVersion { get; set; } = string.Empty;
+    public string SourceSha256 { get; set; } = string.Empty;
+    public string SourceFile { get; set; } = string.Empty;
+    public long SourceSize { get; set; }
+    public string SourceManifestSha256 { get; set; } = string.Empty;
+    public string SourceManifestKeyId { get; set; } = string.Empty;
+    public string SigningProfile { get; set; } = string.Empty;
+    public string ProductSignerThumbprint { get; set; } = string.Empty;
+    public string SdkVersion { get; set; } = string.Empty;
+    public string RuntimeVersion { get; set; } = string.Empty;
+    public string TargetRuntime { get; set; } = string.Empty;
+    public string[] TargetRuntimes { get; set; } = [];
+    public string BootstrapVersion { get; set; } = string.Empty;
+    public string BootstrapFile { get; set; } = string.Empty;
+    public long BootstrapSize { get; set; }
+    public string BootstrapSha256 { get; set; } = string.Empty;
+    public string BootstrapSignerThumbprint { get; set; } = string.Empty;
 
     [JsonIgnore]
     public string HostedUrl => string.IsNullOrWhiteSpace(HostedUrlProtected)
@@ -97,12 +139,14 @@ public sealed class InviteRecord
     public bool IsExpired => DateTimeOffset.UtcNow >= ExpiresAt;
 
     [JsonIgnore]
-    public string Status => RedeemedAt.HasValue ? "Redeemed" : IsExpired ? "Expired" : "Ready";
+    public string Status => (PendingTailscaleKeyRevocations?.Count ?? 0) > 0
+        ? "Key cleanup pending"
+        : RedeemedAt.HasValue ? "Redeemed" : IsExpired ? "Expired" : "Ready";
 }
 
 public sealed class InvitePayload
 {
-    public int SchemaVersion { get; set; } = 2;
+    public int SchemaVersion { get; set; } = InvitationPolicy.HostedLinkSchemaVersion;
     public Guid InviteId { get; set; }
     public string DeviceName { get; set; } = string.Empty;
     public DeviceRole Role { get; set; }
@@ -115,12 +159,30 @@ public sealed class InvitePayload
     public string ControllerToken { get; set; } = string.Empty;
     public string CoordinatorUrl { get; set; } = string.Empty;
     public string ExpectedTailnet { get; set; } = string.Empty;
+    public string ReleaseVersion { get; set; } = string.Empty;
+    public string SourceSha256 { get; set; } = string.Empty;
+    public string SourceFile { get; set; } = string.Empty;
+    public long SourceSize { get; set; }
+    public string SourceManifestSha256 { get; set; } = string.Empty;
+    public string SourceManifestKeyId { get; set; } = string.Empty;
+    public string SigningProfile { get; set; } = string.Empty;
+    public string ProductSignerThumbprint { get; set; } = string.Empty;
+    public string SdkVersion { get; set; } = string.Empty;
+    public string RuntimeVersion { get; set; } = string.Empty;
+    public string TargetRuntime { get; set; } = string.Empty;
+    public string[] TargetRuntimes { get; set; } = [];
+    public string BootstrapVersion { get; set; } = string.Empty;
+    public string BootstrapFile { get; set; } = string.Empty;
+    public long BootstrapSize { get; set; }
+    public string BootstrapSha256 { get; set; } = string.Empty;
+    public string BootstrapSignerThumbprint { get; set; } = string.Empty;
     public bool AdvertiseExitNode { get; set; }
     public string[] AllowedRoots { get; set; } = ["Desktop", "Documents", "Downloads", "Pictures", "Videos"];
 }
 
 public sealed class AdminBootstrap
 {
+    public int SchemaVersion { get; set; } = 1;
     public string CoordinatorUrl { get; set; } = string.Empty;
     public string ControllerTokenProtected { get; set; } = string.Empty;
     public string DeviceName { get; set; } = string.Empty;
@@ -163,6 +225,8 @@ public sealed class DeviceStatusDto
     public long FreeDiskBytes { get; set; }
     public long TotalDiskBytes { get; set; }
     public DateTimeOffset StartedAt { get; set; }
+    public long? OnlineDurationSeconds { get; set; }
+    public int? BatteryPercentage { get; set; }
     public DateTimeOffset ServerTime { get; set; }
     public UpdateStatusDto? UpdateStatus { get; set; }
 }
@@ -198,6 +262,13 @@ public sealed class CreateDirectoryRequest
     public string RelativePath { get; set; } = string.Empty;
 }
 
+public sealed class ConditionalDeleteRequest
+{
+    public string Root { get; set; } = string.Empty;
+    public string RelativePath { get; set; } = string.Empty;
+    public long ExpectedLength { get; set; }
+    public string ExpectedSha256 { get; set; } = string.Empty;
+}
 public sealed class MediaLinkRequest
 {
     public string Root { get; set; } = string.Empty;

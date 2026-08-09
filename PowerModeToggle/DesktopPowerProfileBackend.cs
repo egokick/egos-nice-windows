@@ -103,7 +103,29 @@ internal static class DesktopPowerProfileBackend
             errors.Add($"Verification: the desktop did not remain fully in {mode} ({state.ToSummary()}).");
         }
 
-        return new PowerProfileApplyResult(mode, PowerProfileState.FromDesktop(state), errors);
+        return new PowerProfileApplyResult(mode, PowerProfileState.FromDesktop(state), errors, []);
+    }
+
+    public static void ApplySetting(string settingId, LaptopPowerMode mode)
+    {
+        var highPower = mode == LaptopPowerMode.HighPower;
+        switch (settingId)
+        {
+            case PowerSettingIds.DesktopCpuPlan:
+                DesktopWindowsPowerService.SetProfile(highPower);
+                return;
+            case PowerSettingIds.NvidiaPowerLimit:
+                NvidiaPowerService.SetAndVerify(highPower);
+                return;
+            case PowerSettingIds.MonitorBrightness:
+                MonitorBrightnessService.SetPrimaryMonitorBrightnessPercent(highPower ? 100 : 35);
+                return;
+            case PowerSettingIds.DisplayRefreshRate:
+                DesktopDisplayRefreshRateService.SetPrimaryDisplayRefreshRate(highPower ? 165 : 60);
+                return;
+            default:
+                throw new InvalidOperationException($"Setting '{settingId}' is not managed by the desktop profile.");
+        }
     }
 
     public static DesktopPowerProfileState ReadState()

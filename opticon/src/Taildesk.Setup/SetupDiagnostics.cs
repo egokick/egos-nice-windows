@@ -1,4 +1,5 @@
 using System.Text;
+using Taildesk.Shared;
 
 namespace Taildesk.Setup;
 
@@ -7,9 +8,7 @@ internal static class SetupDiagnostics
     private const int MaximumDetailLength = 16 * 1024;
 
     internal static string LogPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "Taildesk",
-        "SetupLogs",
+        AppPaths.BootstrapHandoffDirectory,
         "setup.log");
 
     internal static async Task WriteAsync(
@@ -19,8 +18,7 @@ internal static class SetupDiagnostics
     {
         try
         {
-            var directory = Path.GetDirectoryName(LogPath)!;
-            Directory.CreateDirectory(directory);
+            var directory = HostedBootstrapper.CreateOrRequireProtectedHandoffRoot();
             var entry = new StringBuilder()
                 .Append('[').Append(DateTimeOffset.UtcNow.ToString("O")).Append("] ")
                 .Append(eventName).AppendLine();

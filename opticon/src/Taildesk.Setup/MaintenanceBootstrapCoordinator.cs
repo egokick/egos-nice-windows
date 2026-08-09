@@ -86,13 +86,14 @@ internal sealed class MaintenanceBootstrapCoordinator
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
         EnsureElevatedAdministrator();
+        MachineStorageSecurity.EnsureOpticonMachineState();
         var setupExecutable = Environment.ProcessPath
                               ?? throw new InvalidOperationException("Windows did not identify the running Setup executable.");
         if (!Path.GetFileName(setupExecutable).Equals("Taildesk.Setup.exe", StringComparison.OrdinalIgnoreCase)
             || !Path.GetDirectoryName(Path.GetFullPath(setupExecutable))!
                 .Equals(_bundleDirectory.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Maintenance must run from Taildesk.Setup.exe at the root of the extracted signed release bundle.");
-        await InvitationSigning.VerifyAuthenticodeAsync(setupExecutable, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(setupExecutable, cancellationToken);
 
         _progress.Report(new InstallProgress(3, "Loading the existing enrolled Agent without changing its identity…"));
         var config = await LoadEnrolledConfigAsync(cancellationToken);
@@ -100,7 +101,7 @@ internal sealed class MaintenanceBootstrapCoordinator
         var installedAgent = InstalledAgentExecutable();
         if (!File.Exists(installedAgent))
             throw new FileNotFoundException("The enrolled Opticon Agent is missing from its stable installation path.", installedAgent);
-        await InvitationSigning.VerifyAuthenticodeAsync(installedAgent, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(installedAgent, cancellationToken);
         var currentVersion = ReadVersion(installedAgent, "installed Agent");
 
         _progress.Report(new InstallProgress(8, "Verifying the signed maintenance release identity…"));
@@ -119,7 +120,7 @@ internal sealed class MaintenanceBootstrapCoordinator
         var sourceGuardian = Path.Combine(sourceGuardianDirectory, "Taildesk.UpdateGuardian.exe");
         await ValidateDeclaredPayloadAsync(
             manifest, "Payload/UpdateGuardian/", sourceGuardianDirectory, cancellationToken);
-        await InvitationSigning.VerifyAuthenticodeAsync(sourceGuardian, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(sourceGuardian, cancellationToken);
         ValidateGuardianVersion(sourceGuardian, manifest.MinimumGuardianVersion);
 
         _progress.Report(new InstallProgress(14, "Checking Tailscale and RustDesk recovery lifelines…"));
@@ -147,12 +148,15 @@ internal sealed class MaintenanceBootstrapCoordinator
 
         var operationId = _expectedTarget.OperationId;
         var operationDirectory = Path.Combine(AppPaths.UpdateDataDirectory, operationId.ToString("N"));
-        Directory.CreateDirectory(operationDirectory);
+        MachineStorageSecurity.EnsureRestrictedDirectoryTree(
+            AppPaths.MachineDataDirectory, operationDirectory);
+        MachineStorageSecurity.RequireRestrictedDirectory(operationDirectory);
         var packagePath = Path.Combine(operationDirectory, "package.zip");
         var stagedAgent = Path.Combine(operationDirectory, "staged-agent");
 
         _progress.Report(new InstallProgress(43, "Repacking only signed release metadata and Agent files for protected staging…"));
         await BuildAgentPackageAsync(manifest, signedRelease, packagePath, cancellationToken);
+        MachineStorageSecurity.SealRestrictedFile(packagePath);
         var packageSize = new FileInfo(packagePath).Length;
         string packageSha256;
         await using (var package = File.OpenRead(packagePath))
@@ -208,7 +212,7 @@ internal sealed class MaintenanceBootstrapCoordinator
             await ValidateExpectedTargetAsync(_expectedTarget, durableConfig, cancellationToken);
             healthToken = UpdateHealthTokenStore.Load(
                 durableConfig.UpdateHealthTokenProtected, durableConfig.DeviceId);
-            await InvitationSigning.VerifyAuthenticodeAsync(installedAgent, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(installedAgent, cancellationToken);
             var durableVersion = ReadVersion(installedAgent, "installed Agent");
             if (!durableVersion.Equals(currentVersion, StringComparison.Ordinal))
                 throw new InvalidOperationException(
@@ -222,7 +226,7 @@ internal sealed class MaintenanceBootstrapCoordinator
             journal.SshWasListening = false;
             journal.ActivateAfter = scheduledAt.AddSeconds(12);
             journal.CommitDeadline = journal.ActivateAfter.Value.Add(RemoteAdministrationProtocol.UpdateCommitWindow);
-            TryDelete(AppPaths.UpdateCommitRequestFile);
+            MachineStorageSecurity.DeleteRestrictedFileIfExists(AppPaths.UpdateCommitRequestFile);
             await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: cancellationToken);
         }
 
@@ -263,14 +267,16 @@ internal sealed class MaintenanceBootstrapCoordinator
 
     private static async Task<AgentConfig> LoadEnrolledConfigAsync(CancellationToken cancellationToken)
     {
+        MachineStorageSecurity.EnsureOpticonMachineState();
         if (!File.Exists(AppPaths.AgentConfigFile))
             throw new FileNotFoundException("Maintenance mode requires an existing enrolled Opticon Agent.", AppPaths.AgentConfigFile);
-        var config = await new JsonFileStore<AgentConfig>(AppPaths.AgentConfigFile).LoadAsync(cancellationToken);
+        var config = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
+            .LoadAsync(cancellationToken);
         if (config.DeviceId == Guid.Empty
             || config.CompletedInviteId is null
             || config.PendingInviteId is not null
             || string.IsNullOrWhiteSpace(config.AgentTokenHash)
-            || (!config.ExposeAllLocalVolumes && config.SharedRoots.Count == 0)
+            || config.SharedRoots.Count == 0
             || config.ApiPort != AgentPort
             || !RemoteAdministrationProtocol.IsTailscaleIpv4(config.BindAddress)
             || !Uri.TryCreate(config.CoordinatorUrl, UriKind.Absolute, out var coordinator)
@@ -298,7 +304,7 @@ internal sealed class MaintenanceBootstrapCoordinator
         byte[] signature;
         try { signature = Convert.FromBase64String(signatureText); }
         catch (FormatException exception) { throw new InvalidDataException("The release signature is malformed.", exception); }
-        if (!InvitationSigning.Verify(manifestBytes, signature))
+        if (!SourceReleaseSigning.Verify(manifestBytes, signature))
             throw new InvalidDataException("The release manifest signature is invalid.");
         var manifest = JsonSerializer.Deserialize<OpticonReleaseManifest>(manifestBytes, JsonDefaults.Options)
                        ?? throw new InvalidDataException("The signed release manifest is empty.");
@@ -359,7 +365,7 @@ internal sealed class MaintenanceBootstrapCoordinator
         if (!hash.Equals(declaration.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"The extracted bundle file hash changed: {expectedPath}");
         if (!declaration.SignerThumbprint.Equals(
-                InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
+                ProductSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"The signed publisher pin is invalid: {expectedPath}");
     }
 
@@ -387,7 +393,7 @@ internal sealed class MaintenanceBootstrapCoordinator
             if (!hash.Equals(file.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"The extracted bundle file hash changed: {normalized}");
             if (normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                await InvitationSigning.VerifyAuthenticodeAsync(source, cancellationToken);
+                await ProductSigning.VerifyAuthenticodeAsync(source, cancellationToken);
         }
     }
 
@@ -402,9 +408,9 @@ internal sealed class MaintenanceBootstrapCoordinator
         {
             if (!File.Exists(installedExecutable))
                 throw new InvalidDataException("An incomplete existing Guardian installation blocks maintenance; it was not overwritten.");
-            await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
             await StableGuardianMaintenance.ReconcileSignedReleaseAsync(sourceDirectory, destination, cancellationToken);
-            await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
             ValidateGuardianVersion(installedExecutable, manifest.MinimumGuardianVersion);
             return;
         }
@@ -428,7 +434,7 @@ internal sealed class MaintenanceBootstrapCoordinator
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Copy(source, target, overwrite: false);
             }
-            await InvitationSigning.VerifyAuthenticodeAsync(Path.Combine(temporary, "Taildesk.UpdateGuardian.exe"), cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(Path.Combine(temporary, "Taildesk.UpdateGuardian.exe"), cancellationToken);
             // The temporary directory is on the same volume and outside the
             // fixed path. A crash can leave only a disposable temp tree; the
             // stable Guardian path appears in one atomic directory promotion.
@@ -439,7 +445,7 @@ internal sealed class MaintenanceBootstrapCoordinator
             try { if (Directory.Exists(temporary)) Directory.Delete(temporary, true); } catch { }
             throw;
         }
-        await InvitationSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(installedExecutable, cancellationToken);
         ValidateGuardianVersion(installedExecutable, manifest.MinimumGuardianVersion);
     }
 
@@ -601,8 +607,11 @@ internal sealed class MaintenanceBootstrapCoordinator
         if (!File.Exists(tailscale))
             throw new FileNotFoundException(
                 "The fixed Program Files Tailscale CLI is unavailable; selected-device identity cannot be verified.", tailscale);
+        tailscale = RequireFixedExecutable(
+            tailscale, Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
         var status = await ProcessRunner.RunAsync(
-            tailscale, ["status", "--json"], TimeSpan.FromSeconds(30), cancellationToken);
+            tailscale, ["status", "--json"], TimeSpan.FromSeconds(30), cancellationToken,
+            environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
         if (!status.Succeeded || string.IsNullOrWhiteSpace(status.StandardOutput))
             throw new InvalidOperationException("Tailscale could not verify the selected device identity.");
         if (status.StandardOutput.Length > 1024 * 1024)
@@ -698,52 +707,21 @@ internal sealed class MaintenanceBootstrapCoordinator
         }
     }
 
-    private static async Task ProtectAgentConfigurationAsync(CancellationToken cancellationToken)
+    private static Task ProtectAgentConfigurationAsync(CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(AppPaths.AgentDataDirectory);
-        var directoryAcl = await ProcessRunner.RunAsync(
-            "icacls.exe",
-            [
-                AppPaths.AgentDataDirectory,
-                "/inheritance:r",
-                "/grant:r",
-                "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F"
-            ],
-            TimeSpan.FromSeconds(30), cancellationToken);
-        if (!directoryAcl.Succeeded)
-            throw new InvalidOperationException("Windows could not protect the existing Agent configuration directory.");
-
-        if (!File.Exists(AppPaths.AgentConfigFile)) return;
-        var fileAcl = await ProcessRunner.RunAsync(
-            "icacls.exe",
-            [
-                AppPaths.AgentConfigFile,
-                "/inheritance:r",
-                "/grant:r",
-                "*S-1-5-18:F",
-                "*S-1-5-32-544:F"
-            ],
-            TimeSpan.FromSeconds(30), cancellationToken);
-        if (!fileAcl.Succeeded)
-            throw new InvalidOperationException("Windows could not protect the existing Agent configuration file.");
+        cancellationToken.ThrowIfCancellationRequested();
+        MachineStorageSecurity.EnsureOpticonMachineState();
+        MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.AgentDataDirectory);
+        MachineStorageSecurity.RequireRestrictedFileIfExists(AppPaths.AgentConfigFile);
+        return Task.CompletedTask;
     }
 
-    private static async Task EnsurePrivateUpdateDirectoryAsync(CancellationToken cancellationToken)
+    private static Task EnsurePrivateUpdateDirectoryAsync(CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(AppPaths.UpdateDataDirectory);
-        var result = await ProcessRunner.RunAsync(
-            "icacls.exe",
-            [
-                AppPaths.UpdateDataDirectory,
-                "/inheritance:r",
-                "/grant:r",
-                "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F"
-            ],
-            TimeSpan.FromSeconds(30), cancellationToken);
-        if (!result.Succeeded)
-            throw new InvalidOperationException("Windows could not protect the maintenance staging and rollback directory.");
+        cancellationToken.ThrowIfCancellationRequested();
+        MachineStorageSecurity.EnsureOpticonMachineState();
+        MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.UpdateDataDirectory);
+        return Task.CompletedTask;
     }
 
     private static async Task StartGuardianAndWaitForPickupAsync(
@@ -759,8 +737,9 @@ internal sealed class MaintenanceBootstrapCoordinator
         {
             cancellationToken.ThrowIfCancellationRequested();
             var started = await ProcessRunner.RunAsync(
-                "schtasks.exe", ["/Run", "/TN", RemoteAdministrationProtocol.GuardianTaskName],
-                TimeSpan.FromSeconds(10), cancellationToken);
+                RequireSystemExecutable("schtasks.exe"), ["/Run", "/TN", RemoteAdministrationProtocol.GuardianTaskName],
+                TimeSpan.FromSeconds(10), cancellationToken,
+                environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
             if (!started.Succeeded)
                 lastError = string.Join(" ", started.StandardOutput.Trim(), started.StandardError.Trim()).Trim();
 
@@ -788,9 +767,10 @@ internal sealed class MaintenanceBootstrapCoordinator
         }
 
         var taskState = await ProcessRunner.RunAsync(
-            "schtasks.exe",
+            RequireSystemExecutable("schtasks.exe"),
             ["/Query", "/TN", RemoteAdministrationProtocol.GuardianTaskName, "/V", "/FO", "LIST"],
-            TimeSpan.FromSeconds(15), cancellationToken);
+            TimeSpan.FromSeconds(15), cancellationToken,
+            environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
         var taskDetail = BoundedDiagnostic(
             string.Join(" ", taskState.StandardOutput.Trim(), taskState.StandardError.Trim()).Trim());
 
@@ -811,25 +791,27 @@ internal sealed class MaintenanceBootstrapCoordinator
     {
         var executable = Path.Combine(AppPaths.UpdateGuardianInstallDirectory, "Taildesk.UpdateGuardian.exe");
         var bootTask = await ProcessRunner.RunAsync(
-            "schtasks.exe",
+            RequireSystemExecutable("schtasks.exe"),
             [
                 "/Create", "/TN", RemoteAdministrationProtocol.GuardianTaskName,
                 "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST",
                 "/TR", $"\"{executable}\"", "/F"
             ],
-            TimeSpan.FromSeconds(30), cancellationToken);
+            TimeSpan.FromSeconds(30), cancellationToken,
+            environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
         if (!bootTask.Succeeded)
             throw new InvalidOperationException("Windows could not create the fail-safe maintenance Guardian task: " + bootTask.StandardError.Trim());
 
         var watchdogCommand = $"\"{executable}\" {RemoteAdministrationProtocol.GuardianWatchdogArgument}";
         var watchdogTask = await ProcessRunner.RunAsync(
-            "schtasks.exe",
+            RequireSystemExecutable("schtasks.exe"),
             [
                 "/Create", "/TN", RemoteAdministrationProtocol.GuardianWatchdogTaskName,
                 "/SC", "MINUTE", "/MO", "1", "/RU", "SYSTEM", "/RL", "HIGHEST",
                 "/TR", watchdogCommand, "/F"
             ],
-            TimeSpan.FromSeconds(30), cancellationToken);
+            TimeSpan.FromSeconds(30), cancellationToken,
+            environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
         if (!watchdogTask.Succeeded)
             throw new InvalidOperationException(
                 "Windows could not create the fail-safe maintenance Guardian watchdog task: " +
@@ -846,8 +828,10 @@ internal sealed class MaintenanceBootstrapCoordinator
             $"Set-ScheduledTask -TaskName '{RemoteAdministrationProtocol.GuardianWatchdogTaskName}' -Settings $watchdog | Out-Null";
         var settingsCommand = bootSettings + "; " + watchdogSettings;
         var configured = await ProcessRunner.RunAsync(
-            "powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", settingsCommand],
-            TimeSpan.FromSeconds(30), cancellationToken);
+            RequireSystemExecutable(@"WindowsPowerShell\v1.0\powershell.exe"),
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted", "-Command", settingsCommand],
+            TimeSpan.FromSeconds(30), cancellationToken,
+            environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
         if (!configured.Succeeded)
             throw new InvalidOperationException(
                 "Windows could not apply fail-safe maintenance Guardian recovery/watchdog task settings.");
@@ -902,7 +886,7 @@ internal sealed class MaintenanceBootstrapCoordinator
             || file.Sha256.Any(character => !Uri.IsHexDigit(character)))
             throw new InvalidDataException("The signed release contains unsafe file metadata.");
         if (normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-            && !file.SignerThumbprint.Equals(InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
+            && !file.SignerThumbprint.Equals(ProductSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"The signed release executable publisher pin is invalid: {normalized}");
     }
 
@@ -980,9 +964,63 @@ internal sealed class MaintenanceBootstrapCoordinator
             throw new InvalidDataException("A signed maintenance payload path escapes the extracted bundle.");
     }
 
-    private static void TryDelete(string path)
+    private static string RequireSystemExecutable(string relativePath)
     {
-        try { if (File.Exists(path)) File.Delete(path); } catch { }
+        if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathFullyQualified(relativePath))
+            throw new InvalidDataException("A fixed Windows system executable path is invalid.");
+        var system = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.System));
+        return RequireFixedExecutable(Path.Combine(system, relativePath), system);
+    }
+
+    private static string RequireFixedExecutable(string path, string allowedRoot)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(allowedRoot));
+        var full = Path.GetFullPath(path);
+        if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(full))
+            throw new FileNotFoundException("A fixed privileged executable is missing or outside its trusted root.", full);
+
+        var current = full;
+        while (true)
+        {
+            var attributes = File.GetAttributes(current);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("A fixed privileged executable path contains a reparse point.");
+            if (current.Equals(root, StringComparison.OrdinalIgnoreCase)) break;
+            current = Path.GetDirectoryName(current)
+                      ?? throw new InvalidDataException("A fixed privileged executable escaped its trusted root.");
+        }
+        if ((File.GetAttributes(full) & FileAttributes.Directory) != 0)
+            throw new FileNotFoundException("The fixed privileged executable path is a directory.", full);
+        return full;
+    }
+
+    private static IReadOnlyDictionary<string, string?> BuildPrivilegedEnvironment()
+    {
+        var windows = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        var system = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.System));
+        var programFiles = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
+        var environment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SystemRoot"] = windows,
+            ["WINDIR"] = windows,
+            ["SystemDrive"] = Path.GetPathRoot(windows),
+            ["ProgramData"] = Path.GetFullPath(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData)),
+            ["ProgramFiles"] = programFiles,
+            ["ProgramW6432"] = programFiles,
+            ["CommonProgramFiles"] = Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles),
+            ["ComSpec"] = RequireSystemExecutable("cmd.exe"),
+            ["PATH"] = string.Join(Path.PathSeparator, system, windows, Path.Combine(system, "Wbem")),
+            ["PATHEXT"] = ".COM;.EXE",
+            ["PSModulePath"] = Path.Combine(system, "WindowsPowerShell", "v1.0", "Modules"),
+            ["TEMP"] = AppPaths.UpdateDataDirectory,
+            ["TMP"] = AppPaths.UpdateDataDirectory
+        };
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        if (!string.IsNullOrWhiteSpace(programFilesX86))
+            environment["ProgramFiles(x86)"] = Path.GetFullPath(programFilesX86);
+        return environment;
     }
 
     private sealed record SignedRelease(

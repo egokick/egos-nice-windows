@@ -26,6 +26,7 @@ public sealed class InviteBundleService
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        BuildSigningTrust.RequirePublishable();
         if (_state.Config.Mode != AdminMode.Primary)
         {
             throw new InvalidOperationException("Only the primary command center can issue invitations.");
@@ -54,6 +55,8 @@ public sealed class InviteBundleService
 
         progress?.Report("Checking the private network...");
         var expectedTailnet = await ReadCurrentTailnetAsync(cancellationToken);
+        progress?.Report("Pinning this invitation to the exact authenticated source release...");
+        var sourceRelease = await new OpticonSourceReleaseClient().GetCurrentAsync(_state.Config, cancellationToken);
         var expires = InvitationPolicy.CreateDefaultExpiry();
         progress?.Report("Creating the one-use network key...");
         var authKey = await _headscale.CreateInviteKeyAsync(role, advertiseExitNode, $"Opticon invite for {deviceName}", expires, cancellationToken);
@@ -62,7 +65,7 @@ public sealed class InviteBundleService
         var rustDeskPassword = SecurityHelpers.CreateHumanPassword();
         var controllerToken = SecurityHelpers.CreateToken();
         var payload = new InvitePayload
-        // Hosted invitation schema 3 binds enrollment to this exact self-hosted server.
+        // Current hosted invitations pin both source and bootstrap bytes.
         {
             SchemaVersion = InvitationPolicy.HostedLinkSchemaVersion,
             InviteId = Guid.NewGuid(),
@@ -77,6 +80,22 @@ public sealed class InviteBundleService
             ControllerToken = controllerToken,
             CoordinatorUrl = _state.Config.CoordinatorUrl,
             ExpectedTailnet = expectedTailnet,
+            ReleaseVersion = sourceRelease.Version,
+            SourceSha256 = sourceRelease.Sha256,
+            SourceFile = sourceRelease.File,
+            SourceSize = sourceRelease.Size,
+            SourceManifestSha256 = sourceRelease.SourceManifestSha256,
+            SourceManifestKeyId = sourceRelease.SourceManifestKeyId,
+            SigningProfile = sourceRelease.SigningProfile,
+            ProductSignerThumbprint = sourceRelease.ProductSignerThumbprint,
+            SdkVersion = sourceRelease.SdkVersion,
+            RuntimeVersion = sourceRelease.RuntimeVersion,
+            TargetRuntimes = sourceRelease.TargetRuntimes.ToArray(),
+            BootstrapVersion = sourceRelease.BootstrapVersion,
+            BootstrapFile = sourceRelease.BootstrapFile,
+            BootstrapSize = sourceRelease.BootstrapSize,
+            BootstrapSha256 = sourceRelease.BootstrapSha256,
+            BootstrapSignerThumbprint = sourceRelease.BootstrapSignerThumbprint,
             AdvertiseExitNode = advertiseExitNode,
             AllowedRoots = selectedRoots
         };
@@ -93,7 +112,23 @@ public sealed class InviteBundleService
             CreatedAt = DateTimeOffset.UtcNow,
             ExpiresAt = expires,
             AdvertiseExitNode = advertiseExitNode,
-            TailscaleKeyId = authKey.Id
+            TailscaleKeyId = authKey.Id,
+            ReleaseVersion = sourceRelease.Version,
+            SourceSha256 = sourceRelease.Sha256,
+            SourceFile = sourceRelease.File,
+            SourceSize = sourceRelease.Size,
+            SourceManifestSha256 = sourceRelease.SourceManifestSha256,
+            SourceManifestKeyId = sourceRelease.SourceManifestKeyId,
+            SigningProfile = sourceRelease.SigningProfile,
+            ProductSignerThumbprint = sourceRelease.ProductSignerThumbprint,
+            SdkVersion = sourceRelease.SdkVersion,
+            RuntimeVersion = sourceRelease.RuntimeVersion,
+            TargetRuntimes = sourceRelease.TargetRuntimes.ToArray(),
+            BootstrapVersion = sourceRelease.BootstrapVersion,
+            BootstrapFile = sourceRelease.BootstrapFile,
+            BootstrapSize = sourceRelease.BootstrapSize,
+            BootstrapSha256 = sourceRelease.BootstrapSha256,
+            BootstrapSignerThumbprint = sourceRelease.BootstrapSignerThumbprint
         };
 
         HostedInvitePublication? publication = null;
@@ -144,10 +179,15 @@ public sealed class InviteBundleService
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        BuildSigningTrust.RequirePublishable();
         ArgumentNullException.ThrowIfNull(record);
         if (_state.Config.Mode != AdminMode.Primary) throw new InvalidOperationException("Only the primary command center can extend invitations.");
         if (record.RedeemedAt.HasValue) throw new InvalidOperationException("This invitation has already been used and cannot be extended.");
         if (record.IsExpired) throw new InvalidOperationException("This invitation has already expired. Create a new invitation instead.");
+        record.PendingTailscaleKeyRevocations ??= [];
+        if (!await RevokePendingKeysAsync(record, cancellationToken))
+            throw new InvalidOperationException(
+                "A superseded Headscale key is still awaiting revocation. Retry after Headscale is reachable before extending this invitation again.");
         if (additionalDays is < 1 or > InvitationPolicy.MaximumLifetimeDays)
             throw new ArgumentOutOfRangeException(nameof(additionalDays), $"Enter between 1 and {InvitationPolicy.MaximumLifetimeDays} days.");
         var newExpiry = record.ExpiresAt.AddDays(additionalDays);
@@ -177,6 +217,7 @@ public sealed class InviteBundleService
         var oldExpiry = payload.ExpiresAt;
         var oldAuthKey = payload.TailscaleAuthKey;
         var oldKeyId = record.TailscaleKeyId;
+        var oldPendingRevocations = record.PendingTailscaleKeyRevocations.ToList();
         CreatedPreAuthKey? replacementKey = null;
         var replacementPublished = false;
         var recordCommitted = false;
@@ -200,6 +241,9 @@ public sealed class InviteBundleService
 
             record.ExpiresAt = newExpiry;
             record.TailscaleKeyId = replacementKey.Id;
+            if (!string.IsNullOrWhiteSpace(oldKeyId)
+                && !record.PendingTailscaleKeyRevocations.Contains(oldKeyId, StringComparer.Ordinal))
+                record.PendingTailscaleKeyRevocations.Add(oldKeyId);
             await _state.SaveAsync(cancellationToken);
             recordCommitted = true;
         }
@@ -212,6 +256,7 @@ public sealed class InviteBundleService
                 try { await hosted.PublishAsync(payload, originalEncrypted, publicId, fragmentKey, CancellationToken.None); } catch { }
                 record.ExpiresAt = oldExpiry;
                 record.TailscaleKeyId = oldKeyId;
+                record.PendingTailscaleKeyRevocations = oldPendingRevocations;
             }
             if (replacementKey is not null && !recordCommitted)
             {
@@ -221,13 +266,49 @@ public sealed class InviteBundleService
         }
         finally { CryptographicOperations.ZeroMemory(originalEncrypted); }
 
-        for (var attempt = 0; attempt < 3; attempt++)
+        return await RevokePendingKeysAsync(record, cancellationToken);
+    }
+
+    public async Task<bool> RevokePendingKeysAsync(
+        InviteRecord record,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        record.PendingTailscaleKeyRevocations ??= [];
+        var original = record.PendingTailscaleKeyRevocations.ToList();
+        if (original.Count == 0) return true;
+
+        var remaining = new List<string>();
+        foreach (var keyId in original.Where(key => !string.IsNullOrWhiteSpace(key)).Distinct(StringComparer.Ordinal))
         {
-            try { await _headscale.RevokeKeyAsync(oldKeyId, cancellationToken); return true; }
-            catch when (attempt < 2) { await Task.Delay(TimeSpan.FromMilliseconds(250 * (attempt + 1)), cancellationToken); }
-            catch { return false; }
+            var revoked = false;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    await _headscale.RevokeKeyAsync(keyId, cancellationToken);
+                    revoked = true;
+                    break;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch when (attempt < 2)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(250 * (attempt + 1)), cancellationToken);
+                }
+                catch { }
+            }
+            if (!revoked) remaining.Add(keyId);
         }
-        return false;
+
+        if (remaining.SequenceEqual(original, StringComparer.Ordinal)) return remaining.Count == 0;
+        record.PendingTailscaleKeyRevocations = remaining;
+        try { await _state.SaveAsync(cancellationToken); }
+        catch
+        {
+            record.PendingTailscaleKeyRevocations = original;
+            throw;
+        }
+        return remaining.Count == 0;
     }
     private static async Task<string> ReadCurrentTailnetAsync(CancellationToken cancellationToken)
     {

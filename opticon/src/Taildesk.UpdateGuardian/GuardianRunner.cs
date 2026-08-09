@@ -18,8 +18,8 @@ internal sealed class GuardianRunner
     public async Task<int> RunAsync(bool watchdogOnly, CancellationToken cancellationToken)
     {
         _paths.ValidateRunningGuardian();
-        await InvitationSigning.VerifyAuthenticodeAsync(_paths.GuardianExecutable, cancellationToken);
-        await ProtectUpdateDirectoryAsync(cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(_paths.GuardianExecutable, cancellationToken);
+        ProtectUpdateDirectory(cancellationToken);
         using var coordinationLease = await AcquireCoordinationAsync(watchdogOnly, cancellationToken);
         if (coordinationLease is null)
             // A producer/full Guardian owns the durable state. A later minute
@@ -551,7 +551,7 @@ internal sealed class GuardianRunner
         _paths.EnsureSafeTree(directory, _paths.ProgramFilesRoot);
         var executable = Path.Combine(directory, "Taildesk.Agent.exe");
         if (!File.Exists(executable)) throw new FileNotFoundException("The Agent executable is missing.", executable);
-        await InvitationSigning.VerifyAuthenticodeAsync(executable, cancellationToken);
+        await ProductSigning.VerifyAuthenticodeAsync(executable, cancellationToken);
         var version = UpdatePackageVerifier.NormalizeVersion(
             FileVersionInfo.GetVersionInfo(executable).ProductVersion ?? string.Empty);
         _ = UpdatePackageVerifier.ParseVersion(version);
@@ -731,23 +731,12 @@ internal sealed class GuardianRunner
         _paths.EnsureProtectedPath(_paths.JournalPath, _paths.UpdateRoot, "update journal");
     }
 
-    private async Task ProtectUpdateDirectoryAsync(CancellationToken cancellationToken)
+    private void ProtectUpdateDirectory(CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(_paths.UpdateRoot);
+        cancellationToken.ThrowIfCancellationRequested();
+        MachineStorageSecurity.EnsureOpticonMachineState();
+        MachineStorageSecurity.RequireRestrictedDirectory(_paths.UpdateRoot);
         _paths.EnsureSafeTree(_paths.UpdateRoot, _paths.ProgramDataRoot);
-        var result = await WindowsCommand.RunAsync(
-            "icacls.exe",
-            [
-                _paths.UpdateRoot,
-                "/inheritance:r",
-                "/grant:r",
-                "*S-1-5-18:(OI)(CI)F",
-                "*S-1-5-32-544:(OI)(CI)F"
-            ],
-            TimeSpan.FromSeconds(30),
-            cancellationToken);
-        if (!result.Succeeded)
-            throw new InvalidOperationException("Windows could not protect the update journal directory: " + result.ErrorDetail);
     }
 
     private async Task TryStartStableAgentAsync(CancellationToken cancellationToken)

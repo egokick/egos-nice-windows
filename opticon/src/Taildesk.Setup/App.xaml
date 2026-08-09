@@ -7,6 +7,7 @@
         <SolidColorBrush x:Key="PanelBrush" Color="#1B1F24" />
         <SolidColorBrush x:Key="BorderBrush" Color="#343B43" />
         <SolidColorBrush x:Key="AccentBrush" Color="#52D39A" />
+        <SolidColorBrush x:Key="AccentDimBrush" Color="#17392D" />
         <SolidColorBrush x:Key="TextBrush" Color="#EDF1F5" />
         <SolidColorBrush x:Key="MutedBrush" Color="#9AA5AF" />
         <SolidColorBrush x:Key="AccentHoverBrush" Color="#6BE0AD" />
@@ -53,7 +54,8 @@
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
                     <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-                    <Setter Property="Opacity" Value="0.58" />
+                    <Setter Property="Background" Value="{StaticResource AccentDimBrush}" />
+                    <Setter Property="Opacity" Value="1" />
                 </Trigger>
             </Style.Triggers>
         </Style>

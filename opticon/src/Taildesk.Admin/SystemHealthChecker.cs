@@ -171,7 +171,7 @@ public sealed class SystemHealthChecker
             locationValid ? $"Running the installed copy at {path}." : $"Running outside the normal installed directory: {path}.");
         try
         {
-            await InvitationSigning.VerifyAuthenticodeAsync(path, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(path, cancellationToken);
             add("Security", "Opticon executable signature", SystemCheckSeverity.Pass, "The running executable has the pinned Opticon signer.");
         }
         catch (Exception exception)

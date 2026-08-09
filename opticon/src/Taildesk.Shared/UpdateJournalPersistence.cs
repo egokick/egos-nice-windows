@@ -4,48 +4,54 @@ namespace Taildesk.Shared;
 
 public static class UpdateJournalPersistence
 {
+    private const int MaximumJournalBytes = 4 * 1024 * 1024;
+
     public static UpdateJournal? Load(string? path = null)
     {
-        path ??= AppPaths.UpdateJournalFile;
+        path = RequireUpdatePath(path ?? AppPaths.UpdateJournalFile);
+        MachineStorageSecurity.RequireRestrictedDirectory(Path.GetDirectoryName(path)!);
         if (!File.Exists(path)) return null;
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        return JsonSerializer.Deserialize<UpdateJournal>(stream, JsonDefaults.Options);
+        var content = MachineStorageSecurity.ReadRestrictedFile(path, MaximumJournalBytes);
+        return JsonSerializer.Deserialize<UpdateJournal>(content, JsonDefaults.Options)
+               ?? throw new InvalidDataException("The protected update journal is empty.");
     }
 
     public static async Task SaveAsync(UpdateJournal journal, string? path = null, CancellationToken cancellationToken = default)
     {
-        path ??= AppPaths.UpdateJournalFile;
+        path = RequireUpdatePath(path ?? AppPaths.UpdateJournalFile);
         journal.UpdatedAt = DateTimeOffset.UtcNow;
         var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("The update journal has no parent directory.");
-        Directory.CreateDirectory(directory);
-        var temporary = path + ".new";
-        await using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true))
-        {
-            await JsonSerializer.SerializeAsync(stream, journal, JsonDefaults.Options, cancellationToken);
-            await stream.FlushAsync(cancellationToken);
-            stream.Flush(flushToDisk: true);
-        }
-        File.Move(temporary, path, true);
+        MachineStorageSecurity.RequireRestrictedDirectory(directory);
+        var content = JsonSerializer.SerializeToUtf8Bytes(journal, JsonDefaults.Options);
+        if (content.Length is <= 0 or > MaximumJournalBytes)
+            throw new InvalidDataException("The protected update journal has an invalid size.");
+        await MachineStorageSecurity.WriteRestrictedFileAtomicAsync(path, content, cancellationToken);
     }
 
     public static async Task RequestCommitAsync(Guid operationId, CancellationToken cancellationToken = default)
     {
         var request = new UpdateCommitRequest { OperationId = operationId, RequestedAt = DateTimeOffset.UtcNow };
-        Directory.CreateDirectory(AppPaths.UpdateDataDirectory);
-        var temporary = AppPaths.UpdateCommitRequestFile + ".new";
-        await using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 16 * 1024, true))
-        {
-            await JsonSerializer.SerializeAsync(stream, request, JsonDefaults.Options, cancellationToken);
-            await stream.FlushAsync(cancellationToken);
-            stream.Flush(flushToDisk: true);
-        }
-        File.Move(temporary, AppPaths.UpdateCommitRequestFile, true);
+        MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.UpdateDataDirectory);
+        var content = JsonSerializer.SerializeToUtf8Bytes(request, JsonDefaults.Options);
+        await MachineStorageSecurity.WriteRestrictedFileAtomicAsync(
+            AppPaths.UpdateCommitRequestFile, content, cancellationToken);
     }
 
     public static UpdateCommitRequest? LoadCommitRequest()
     {
         if (!File.Exists(AppPaths.UpdateCommitRequestFile)) return null;
-        using var stream = new FileStream(AppPaths.UpdateCommitRequestFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        return JsonSerializer.Deserialize<UpdateCommitRequest>(stream, JsonDefaults.Options);
+        var content = MachineStorageSecurity.ReadRestrictedFile(
+            AppPaths.UpdateCommitRequestFile, 64 * 1024);
+        return JsonSerializer.Deserialize<UpdateCommitRequest>(content, JsonDefaults.Options)
+               ?? throw new InvalidDataException("The protected update commit request is empty.");
+    }
+
+    private static string RequireUpdatePath(string path)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppPaths.UpdateDataDirectory));
+        var full = Path.GetFullPath(path);
+        if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The update state path escaped the protected update directory.");
+        return full;
     }
 }

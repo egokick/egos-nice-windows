@@ -152,6 +152,82 @@ function Publish-ManifestAtomically([byte[]]$Body) {
     } finally { [Array]::Clear($secret, 0, $secret.Length) }
 }
 
+function Assert-OpticonSourceArchive {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Record
+    )
+    if ([string]$Record.sdkVersion -ne '8.0.423' -or [string]$Record.runtimeVersion -ne '8.0.29' -or
+        [string]$Record.sourceManifestKeyId -ne 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
+        @($Record.targetRuntimes).Count -ne 2 -or [string]$Record.targetRuntimes[0] -ne 'win-x64' -or
+        [string]$Record.targetRuntimes[1] -ne 'win-arm64' -or [string]$Record.sourceManifestSha256 -notmatch '^[a-f0-9]{64}$') {
+        throw 'The source artifact does not carry the exact supported build pins.'
+    }
+    Add-Type -AssemblyName System.IO.Compression
+    $zip = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entries = @{}
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName.Replace('\', '/')
+            if ([string]::IsNullOrWhiteSpace($name) -or $name.StartsWith('/') -or $name.Contains(':') -or
+                $name.EndsWith('/') -or $name.Split('/') -contains '..' -or $entries.ContainsKey($name.ToLowerInvariant())) {
+                throw "The source archive contains an unsafe, directory, or duplicate entry: $name"
+            }
+            $entries[$name.ToLowerInvariant()] = $entry
+        }
+        if (-not $entries.ContainsKey('source-manifest.json') -or -not $entries.ContainsKey('source-manifest.sig')) {
+            throw 'The source archive lacks its signed inner manifest.'
+        }
+        $manifestEntry = $entries['source-manifest.json']
+        if ($manifestEntry.Length -le 0 -or $manifestEntry.Length -gt 1MB) { throw 'The source inner manifest has an invalid size.' }
+        $manifestStream = $manifestEntry.Open()
+        try {
+            $memory = [IO.MemoryStream]::new()
+            try { $manifestStream.CopyTo($memory); $manifestBytes = $memory.ToArray() } finally { $memory.Dispose() }
+        } finally { $manifestStream.Dispose() }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $manifestHash = ([BitConverter]::ToString($sha.ComputeHash($manifestBytes))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        if ($manifestHash -ne [string]$Record.sourceManifestSha256) { throw 'The source inner-manifest hash does not match the outer artifact record.' }
+        $signatureEntry = $entries['source-manifest.sig']
+        if ($signatureEntry.Length -le 0 -or $signatureEntry.Length -gt 16KB) { throw 'The source inner-manifest signature has an invalid size.' }
+        $signatureReader = [IO.StreamReader]::new($signatureEntry.Open(), [Text.Encoding]::UTF8, $false)
+        try { $signature = [Convert]::FromBase64String($signatureReader.ReadToEnd().Trim()) } finally { $signatureReader.Dispose() }
+        $certificate = Get-ChildItem Cert:\CurrentUser\My |
+            Where-Object { $_.Thumbprint -eq [string]$Record.sourceManifestKeyId } | Select-Object -First 1
+        if (-not $certificate) { throw 'The pinned Opticon source-manifest public certificate is unavailable.' }
+        $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($certificate)
+        try {
+            if (-not $rsa.VerifyData($manifestBytes, $signature, [Security.Cryptography.HashAlgorithmName]::SHA256,
+                    [Security.Cryptography.RSASignaturePadding]::Pss)) { throw 'The source inner-manifest RSA-PSS signature is invalid.' }
+        } finally { $rsa.Dispose(); $certificate.Dispose() }
+        $inner = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
+        if ([int]$inner.schemaVersion -ne 1 -or [string]$inner.version -ne [string]$Record.version -or
+            [string]$inner.sdkVersion -ne [string]$Record.sdkVersion -or [string]$inner.runtimeVersion -ne [string]$Record.runtimeVersion -or
+            @($inner.targetRuntimes).Count -ne 2 -or [string]$inner.targetRuntimes[0] -ne [string]$Record.targetRuntimes[0] -or
+            [string]$inner.targetRuntimes[1] -ne [string]$Record.targetRuntimes[1]) {
+            throw 'The source inner-manifest release metadata does not match the outer record.'
+        }
+        $declared = @{'source-manifest.json' = $true; 'source-manifest.sig' = $true}
+        foreach ($file in @($inner.files)) {
+            $name = ([string]$file.path).Replace('\', '/')
+            $key = $name.ToLowerInvariant()
+            if ($name.StartsWith('/') -or $name.Contains(':') -or $name.Split('/') -contains '..' -or
+                $declared.ContainsKey($key) -or -not $entries.ContainsKey($key) -or
+                [long]$file.size -ne [long]$entries[$key].Length -or [string]$file.sha256 -notmatch '^[a-f0-9]{64}$') {
+                throw "The source inner manifest has an invalid declaration for $name."
+            }
+            $declared[$key] = $true
+            $input = $entries[$key].Open()
+            $fileSha = [Security.Cryptography.SHA256]::Create()
+            try { $actual = ([BitConverter]::ToString($fileSha.ComputeHash($input))).Replace('-', '').ToLowerInvariant() }
+            finally { $fileSha.Dispose(); $input.Dispose() }
+            if ($actual -ne [string]$file.sha256) { throw "The source file hash is invalid for $name." }
+        }
+        if ($declared.Count -ne $entries.Count) { throw 'The source archive contains undeclared extra files.' }
+    } finally { $zip.Dispose() }
+}
+
 $identity = aws sts get-caller-identity --output json | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $identity.Account -ne $expectedAccount) { throw "Refusing to publish outside AWS account $expectedAccount." }
 $outputs = aws cloudformation describe-stacks --region $Region --stack-name $StackName --query "Stacks[0].Outputs" --output json | ConvertFrom-Json
@@ -167,10 +243,19 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "Opticon bundle build failed." }
 }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-$releaseArtifacts = @($manifest.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap") })
+$releaseArtifacts = @($manifest.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap", "OpticonSource") })
 $bundles = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBundle" })
 $bootstraps = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBootstrap" })
-if ($bundles.Count -ne 2 -or $bootstraps.Count -ne 1) { throw "Build did not produce two bundles and one bootstrap for $version." }
+$sources = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonSource" })
+if ($bundles.Count -ne 2 -or $bootstraps.Count -ne 1 -or $sources.Count -ne 1) { throw "Build did not produce two bundles, one bootstrap, and one source archive for $version." }
+$bootstrapPath = Join-Path $ArtifactDirectory ([string]$bootstraps[0].file)
+$bootstrapSignature = Get-AuthenticodeSignature -LiteralPath $bootstrapPath
+if (-not $bootstrapSignature.SignerCertificate -or
+    $bootstrapSignature.SignerCertificate.Thumbprint -ne [string]$bootstraps[0].signerThumbprint -or
+    $bootstrapSignature.Status -in @('NotSigned', 'HashMismatch')) {
+    throw 'The source bootstrap is unsigned, altered, or signed by an unexpected certificate.'
+}
+Assert-OpticonSourceArchive -Path (Join-Path $ArtifactDirectory ([string]$sources[0].file)) -Record $sources[0]
 $fullStreamFile = [string]($bundles | Sort-Object { [long]$_.size } | Select-Object -First 1).file
 
 $temporaryConfig = Join-Path ([IO.Path]::GetTempPath()) ("opticon-aws-" + [Guid]::NewGuid().ToString("N") + ".config")
@@ -209,7 +294,7 @@ try {
         $deadline = [DateTime]::UtcNow.AddMinutes(12)
         do {
             try {
-                Invoke-CloudFrontVerification -Url $url -ExpectedHash $hash -ExpectedSize $info.Length -FullStream:($artifact.file -eq $fullStreamFile)
+                Invoke-CloudFrontVerification -Url $url -ExpectedHash $hash -ExpectedSize $info.Length -FullStream:($artifact.file -eq $fullStreamFile -or $artifact.product -eq 'OpticonSource')
                 break
             } catch {
                 if ([DateTime]::UtcNow -ge $deadline) { throw }
@@ -230,8 +315,8 @@ try {
 if (-not $SkipManifestPublish) {
     Publish-ManifestAtomically ([IO.File]::ReadAllBytes($manifestPath))
     $live = Invoke-RestMethod -Uri "$($ControlOrigin.TrimEnd('/'))/opticon/artifacts/v1/manifest.json" -Method Get
-    $liveRelease = @($live.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap") })
-    if ($liveRelease.Count -ne 3 -or @($liveRelease | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.downloadUrl) }).Count -ne 0) {
+    $liveRelease = @($live.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap", "OpticonSource") })
+    if ($liveRelease.Count -ne 4 -or @($liveRelease | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.downloadUrl) }).Count -ne 0) {
         throw "Fly accepted the manifest but did not serve the complete CloudFront release."
     }
 }

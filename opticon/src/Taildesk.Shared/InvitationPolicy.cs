@@ -3,12 +3,17 @@ namespace Taildesk.Shared;
 public static class InvitationPolicy
 {
     public const int LegacyBundleSchemaVersion = 2;
-    public const int HostedLinkSchemaVersion = 3;
+    public const int PreviousHostedLinkSchemaVersion = 3;
+    public const int PreviousSourceBuildSchemaVersion = 4;
+    public const int HostedLinkSchemaVersion = 5;
     public const int DefaultLifetimeDays = 14;
     public const int MaximumLifetimeDays = 365;
 
     public static bool IsSupportedPayloadSchema(int schemaVersion) =>
-        schemaVersion is LegacyBundleSchemaVersion or HostedLinkSchemaVersion;
+        schemaVersion is LegacyBundleSchemaVersion or PreviousHostedLinkSchemaVersion
+            or PreviousSourceBuildSchemaVersion or HostedLinkSchemaVersion;
+
+    public static bool IsInstallablePayloadSchema(int schemaVersion) => schemaVersion == HostedLinkSchemaVersion;
 
     public static DateTimeOffset CreateDefaultExpiry() =>
         DateTimeOffset.UtcNow.AddDays(DefaultLifetimeDays);

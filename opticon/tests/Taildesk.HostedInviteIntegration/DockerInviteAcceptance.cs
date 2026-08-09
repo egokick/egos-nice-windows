@@ -67,8 +67,8 @@ internal static class DockerInviteAcceptance
                 throw new InvalidDataException("The container returned an incomplete or mismatched acceptance result.");
 
             Console.WriteLine("Verifying Authenticode on the exact files downloaded from Fly...");
-            await InvitationSigning.VerifyAuthenticodeAsync(Path.Combine(outputDirectory, "Taildesk.Setup.exe"));
-            await InvitationSigning.VerifyAuthenticodeAsync(Path.Combine(outputDirectory, "Taildesk.Agent.exe"));
+            await ProductSigning.VerifyAuthenticodeAsync(Path.Combine(outputDirectory, "Taildesk.Setup.exe"));
+            await ProductSigning.VerifyAuthenticodeAsync(Path.Combine(outputDirectory, "Taildesk.Agent.exe"));
             foreach (var dependency in dependencies.Where(item => item.Architecture == "x64"))
                 await VerifyPublisherAsync(Path.Combine(outputDirectory, dependency.File), dependency.SignerThumbprint);
             Console.WriteLine("PASS exact live Opticon executables and dependency MSIs have their pinned publisher signatures.");

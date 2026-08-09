@@ -6,7 +6,7 @@ using Taildesk.Shared;
 
 if (args.Length == 2 && args[0].Equals("--verify-authenticode", StringComparison.Ordinal))
 {
-    await InvitationSigning.VerifyAuthenticodeAsync(args[1]);
+    await ProductSigning.VerifyAuthenticodeAsync(args[1]);
     Console.WriteLine("PASS  pinned Authenticode signature and file digest");
     return;
 }
@@ -34,11 +34,17 @@ var tests = new (string Name, Action Body)[]
     ("release distribution keeps signed bundles private and CloudFront-addressed", TestReleaseDistributionDesign),
     ("OpenSSH recovery is fixed-path, Windows-compatible, and independently supervised", TestOpenSshRecoveryDesign),
     ("runtime tailnet policy keeps administrative SSH hub-only", TestTailnetSshPolicy),
-    ("update journal writes round-trip through atomic persistence", TestUpdateJournalPersistence),
+    ("update journal contracts round-trip through protected atomic persistence", TestUpdateJournalPersistence),
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
     ("cancelled uploads retain an authenticated byte offset and resume", TestResumableUpload),
+    ("scheduled transfers parse standard cron and calculate the next local occurrence", TestScheduledTransferCron),
+    ("scheduled transfer file filters are bounded and predictable", TestScheduledTransferFilters),
+    ("scheduled transfers expose UI history/retry and a complete CLI surface", TestScheduledTransferSurface),
+    ("scheduled transfer retention and destructive operations fail closed", TestScheduledTransferSecurityPolicy),
+    ("Admin media, local-file, and invitation trust boundaries are enforced", TestAdminTrustBoundarySource),
     ("path guard permits a child and blocks traversal", TestPathGuard),
-    ("path guard exposes every ready local device volume", TestLocalVolumeRoots),
+    ("path guard limits SYSTEM file access to configured non-system roots", TestLocalVolumeRoots),
+    ("Agent endpoint capabilities are case-insensitive and segment-exact", TestAgentEndpointPolicy),
     ("exit-node approval contains both internet default routes", TestExitNodeApprovalRoutes),
     ("private HTTP transport bypasses proxies and redirects", TestDirectHttpTransport),
     ("enrollment retries accept only the exact committed identity", TestEnrollmentReplayPolicy),
@@ -46,9 +52,10 @@ var tests = new (string Name, Action Body)[]
     ("failed durable collection mutations roll back in memory", TestDurableCollectionMutation),
     ("guarded path leases prevent component replacement", TestPathLease),
     ("WPF style templates match their control target types", TestWpfStyleTemplateTargets),
-    ("WPF controls keep explicit accessible foreground/background pairs", TestWpfContrastContract),
+    ("WPF contrast audit covers every text surface and control state", TestWpfContrastContract),
     ("file browser offers direct paths and list or thumbnail views", TestFileBrowserContract),
     ("device rows expose a persisted rename action", TestDeviceRenameContract),
+    ("device rows expose online duration and five-minute cached battery telemetry", TestDeviceTelemetryContract),
     ("DPAPI current-user and machine scopes round-trip", TestDpapi)
 };
 
@@ -83,14 +90,198 @@ static void TestTokens()
     Assert(!SecurityHelpers.FixedTimeEquals(SecurityHelpers.HashToken(first), SecurityHelpers.HashToken(second)), "different hashes matched");
 }
 
+static void TestScheduledTransferCron()
+{
+    var utc = TimeZoneInfo.Utc;
+    var start = new DateTimeOffset(2026, 8, 9, 14, 37, 42, TimeSpan.Zero);
+    Assert(CronSchedule.Parse("* * * * *").GetNextOccurrence(start, utc)
+           == new DateTimeOffset(2026, 8, 9, 14, 38, 0, TimeSpan.Zero), "every-minute cron skipped a minute");
+    Assert(CronSchedule.Parse("0 * * * *").GetNextOccurrence(start, utc)
+           == new DateTimeOffset(2026, 8, 9, 15, 0, 0, TimeSpan.Zero), "hourly cron chose the wrong hour");
+    Assert(CronSchedule.Parse("30 9 * * MON").GetNextOccurrence(start, utc)
+           == new DateTimeOffset(2026, 8, 10, 9, 30, 0, TimeSpan.Zero), "named weekly cron chose the wrong day");
+    Assert(CronSchedule.Parse("*/15 8-10 * JAN,MAR 1-5").IsMatch(new DateTime(2026, 3, 2, 9, 45, 0)),
+        "cron lists, steps, ranges, or names did not match");
+    AssertThrows<InvalidDataException>(() => CronSchedule.Parse("0 12 * *"));
+    AssertThrows<InvalidDataException>(() => CronSchedule.Parse("61 12 * * *"));
+}
+
+static void TestScheduledTransferFilters()
+{
+    var definition = new ScheduledTransferDefinition
+    {
+        Name = "Invoices", DeviceId = Guid.NewGuid(), LocalFolder = Path.GetTempPath(), RemoteRoot = "Documents",
+        Filter = ScheduledTransferFilter.Extension, FilterPattern = "pdf", CronExpression = "0 9 * * *", TimeZoneId = TimeZoneInfo.Utc.Id
+    };
+    ScheduledTransferRules.Validate(definition);
+    Assert(definition.FilterPattern == ".pdf", "extension filter was not normalized");
+    Assert(ScheduledTransferRules.Matches(definition, "2026/invoice.PDF"), "extension filter should ignore case");
+    Assert(!ScheduledTransferRules.Matches(definition, "2026/invoice.pdf.exe"), "extension filter matched a suffix instead of an extension");
+    definition.Filter = ScheduledTransferFilter.Regex;
+    definition.FilterPattern = @"^2026/invoice-[0-9]+\.csv$";
+    ScheduledTransferRules.Validate(definition);
+    Assert(ScheduledTransferRules.Matches(definition, "2026/invoice-42.csv"), "regex did not match the relative path");
+    Assert(!ScheduledTransferRules.Matches(definition, "archive/invoice-42.csv"), "regex ignored its relative-path anchor");
+    definition.FilterPattern = "[";
+    AssertThrows<InvalidDataException>(() => ScheduledTransferRules.Validate(definition));
+}
+
+static void TestScheduledTransferSurface()
+{
+    var main = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml");
+    var editor = ReadSource("src", "Taildesk.Admin", "ScheduledTransferEditorWindow.xaml");
+    var cli = ReadSource("src", "Taildesk.Cli", "ScheduledTransferCli.cs");
+    var engine = ReadSource("src", "Taildesk.Admin", "ScheduledTransferEngine.cs");
+    Assert(main.Contains("Scheduled transfers", StringComparison.Ordinal) && main.Contains("RUN HISTORY", StringComparison.Ordinal)
+           && main.Contains("Retry selected failure", StringComparison.Ordinal), "scheduled transfer UI or retry history is missing");
+    Assert(editor.Contains("Every minute", StringComparison.Ordinal) && editor.Contains("Every hour", StringComparison.Ordinal)
+           && editor.Contains("Every day", StringComparison.Ordinal) && editor.Contains("Every week", StringComparison.Ordinal)
+           && editor.Contains("Custom cron", StringComparison.Ordinal), "friendly cron choices are incomplete");
+    foreach (var command in new[] { "list", "add", "edit", "run", "enable", "disable", "remove", "history", "retry" })
+        Assert(cli.Contains($"\"{command}\"", StringComparison.Ordinal), $"schedule CLI is missing {command}");
+    var proof = engine.IndexOf("RequireSameDigest(sourceBefore, remoteDestinationDigest", StringComparison.Ordinal);
+    var confirmation = engine.IndexOf("result.TransferConfirmed = true", proof, StringComparison.Ordinal);
+    var handleDelete = engine.IndexOf("source.Delete()", confirmation, StringComparison.Ordinal);
+    Assert(proof >= 0 && confirmation > proof && handleDelete > confirmation
+           && !engine.Contains("File.Delete(localSource)", StringComparison.Ordinal)
+           && !engine.Contains("_agents.DeleteAsync", StringComparison.Ordinal),
+        "Move must prove identical bytes and delete the open local source handle; pathname remote deletion must remain disabled");
+}
+
+static void TestScheduledTransferSecurityPolicy()
+{
+    var source = new ScheduledTransferRun
+    {
+        Id = Guid.NewGuid(),
+        State = ScheduledTransferRunState.Failed,
+        Files =
+        [
+            new ScheduledTransferFileResult
+            {
+                RelativePath = "report.bin", State = ScheduledTransferFileState.Failed,
+                TransferConfirmed = true, SourceSha256 = "source-proof", DestinationSha256 = "destination-proof"
+            }
+        ]
+    };
+    var running = new ScheduledTransferRun
+    {
+        Id = Guid.NewGuid(), State = ScheduledTransferRunState.Running, RetryOfRunId = source.Id
+    };
+    var document = new ScheduledTransferDocument
+    {
+        Schedules = [new ScheduledTransferDefinition { ActiveRunId = running.Id }],
+        History = Enumerable.Range(0, ScheduledTransferHistoryPolicy.MaximumRuns + 25)
+            .Select(_ => new ScheduledTransferRun { Id = Guid.NewGuid(), State = ScheduledTransferRunState.Succeeded })
+            .Concat([running, source])
+            .ToList()
+    };
+    ScheduledTransferHistoryPolicy.Trim(document);
+    Assert(document.History.Any(item => item.Id == running.Id), "active scheduled run was evicted by history trimming");
+    Assert(document.History.Any(item => item.Id == source.Id), "an active retry's source record was evicted by history trimming");
+
+    var copied = source.Files[0].Copy();
+    source.Files[0].SourceSha256 = "changed";
+    Assert(copied.SourceSha256 == "source-proof" && copied.DestinationSha256 == "destination-proof",
+        "retry proof was not copied into an immutable candidate snapshot");
+
+    var unsafeMove = new ScheduledTransferDefinition
+    {
+        Name = "Unsafe download Move", DeviceId = Guid.NewGuid(), Direction = ScheduledTransferDirection.Download,
+        Mode = ScheduledTransferMode.Move, LocalFolder = Path.GetTempPath(), RemoteRoot = "Documents",
+        CronExpression = "0 * * * *", TimeZoneId = TimeZoneInfo.Utc.Id
+    };
+    AssertThrows<InvalidDataException>(() => ScheduledTransferRules.Validate(unsafeMove));
+}
+
+static void TestAdminTrustBoundarySource()
+{
+    var agent = ReadSource("src", "Taildesk.Admin", "AgentClient.cs");
+    var browser = ReadSource("src", "Taildesk.Admin", "FileManagerWindow.xaml.cs");
+    var guarded = ReadSource("src", "Taildesk.Admin", "GuardedLocalTransferFile.cs");
+    var engine = ReadSource("src", "Taildesk.Admin", "ScheduledTransferEngine.cs");
+    var store = ReadSource("src", "Taildesk.Admin", "ScheduledTransferStore.cs");
+    var invites = ReadSource("src", "Taildesk.Admin", "InviteBundleService.cs");
+
+    Assert(agent.Contains("UriKind.Relative", StringComparison.Ordinal)
+           && agent.Contains("resolved.Host.Equals(expected.Host", StringComparison.Ordinal)
+           && agent.Contains("resolved.AbsolutePath.Equals(\"/api/v1/media\"", StringComparison.Ordinal),
+        "Agent media links are not restricted to the authenticated Agent origin and endpoint");
+    Assert(browser.Contains("GetMediaBytesAsync", StringComparison.Ordinal)
+           && browser.Contains("thumbnail.StreamSource = stream", StringComparison.Ordinal)
+           && browser.Contains("PreviewExtensions", StringComparison.Ordinal)
+           && browser.Contains("DownloadToRootAsync", StringComparison.Ordinal)
+           && !browser.Contains("Process.Start(new ProcessStartInfo(uri.AbsoluteUri)", StringComparison.Ordinal),
+        "media still reaches WPF or the shell through an Agent-controlled network URI or handler");
+    Assert(agent.Contains("GuardedLocalTransferTarget.Create", StringComparison.Ordinal)
+           && agent.Contains("unexpected partial response to a full-file download", StringComparison.Ordinal)
+           && !agent.Contains("taildesk-partial", StringComparison.Ordinal)
+           && !agent.Contains("RangeHeaderValue(offset", StringComparison.Ordinal),
+        "downloads still combine unverifiable retained bytes with a new remote response");
+    Assert(guarded.Contains("PathGuard", StringComparison.Ordinal)
+           && guarded.Contains("CreateFile(temporaryName)", StringComparison.Ordinal)
+           && guarded.Contains("RenameTo(_directory", StringComparison.Ordinal)
+           && guarded.Contains("SetFileInformationByHandle", StringComparison.Ordinal),
+        "local transfers are not created, promoted, and deleted through guarded handles");
+    Assert(engine.Contains("run.RetryCandidates", StringComparison.Ordinal)
+           && engine.Contains("RequireRecordedProof", StringComparison.Ordinal)
+           && store.Contains("ScheduledTransferHistoryPolicy.Trim", StringComparison.Ordinal),
+        "scheduled retries do not carry durable candidates/proofs through bounded history");
+
+    var pendingWrite = invites.IndexOf("record.PendingTailscaleKeyRevocations.Add(oldKeyId)", StringComparison.Ordinal);
+    var durableSave = invites.IndexOf("await _state.SaveAsync(cancellationToken)", pendingWrite, StringComparison.Ordinal);
+    var revoke = invites.IndexOf("return await RevokePendingKeysAsync(record", durableSave, StringComparison.Ordinal);
+    Assert(pendingWrite >= 0 && durableSave > pendingWrite && revoke > durableSave,
+        "the superseded invitation key ID is not persisted before revocation is attempted");
+
+    var record = new InviteRecord { PendingTailscaleKeyRevocations = ["key-old"] };
+    var roundTrip = JsonSerializer.Deserialize<InviteRecord>(
+        JsonSerializer.Serialize(record, JsonDefaults.Options), JsonDefaults.Options);
+    Assert(roundTrip?.PendingTailscaleKeyRevocations.SequenceEqual(["key-old"]) == true,
+        "pending invitation-key revocations do not survive durable serialization");
+}
+
+static void TestDeviceTelemetryContract()
+{
+    var device = new DeviceRecord
+    {
+        State = DeviceConnectionState.Online,
+        OnlineSince = DateTimeOffset.UtcNow.AddDays(-2).AddHours(-3),
+        BatteryPercentage = 74
+    };
+    Assert(device.OnlineTime.StartsWith("2d 3h", StringComparison.Ordinal), "online duration is not formatted as days and hours");
+    Assert(device.BatteryLife == "74%", "battery percentage is not formatted for the device grid");
+    device.State = DeviceConnectionState.Offline;
+    Assert(device.OnlineTime == "—" && device.BatteryLife == "—", "offline telemetry should not look current");
+    device.State = DeviceConnectionState.Online;
+    device.BatteryPercentage = null;
+    Assert(device.BatteryLife == "—", "machines without batteries should show an em dash");
+
+    var battery = ReadSource("src", "Taildesk.Agent", "BatteryStatusProvider.cs");
+    var runtime = ReadSource("src", "Taildesk.Agent", "AgentRuntime.cs");
+    var window = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml");
+    Assert(battery.Contains("TimeSpan.FromMinutes(5)", StringComparison.Ordinal)
+           && battery.Contains("GetSystemPowerStatus", StringComparison.Ordinal)
+           && battery.Contains("now < _nextPollAt", StringComparison.Ordinal),
+        "battery telemetry is not cached behind a five-minute Windows probe");
+    Assert(runtime.Contains("Environment.TickCount64", StringComparison.Ordinal)
+           && runtime.Contains("BatteryPercentage = _battery.GetBatteryPercentage()", StringComparison.Ordinal),
+        "Agent status does not expose OS uptime and battery telemetry");
+    Assert(window.Contains("Header=\"ONLINE TIME\"", StringComparison.Ordinal)
+           && window.Contains("Header=\"BATTERY LIFE\"", StringComparison.Ordinal),
+        "the Devices grid is missing its online-time or battery-life column");
+}
+
 static void TestInvitationPolicy()
 {
     var lifetime = InvitationPolicy.CreateDefaultExpiry() - DateTimeOffset.UtcNow;
     Assert(lifetime > TimeSpan.FromDays(13.99) && lifetime <= TimeSpan.FromDays(14), "default invitation lifetime is not fourteen days");
     Assert(InvitationPolicy.MaximumLifetimeDays == 365, "maximum invitation lifetime changed unexpectedly");
-    Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.LegacyBundleSchemaVersion), "legacy invitation schema must remain installable");
-    Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.HostedLinkSchemaVersion), "hosted invitation schema must be installable");
-    Assert(!InvitationPolicy.IsSupportedPayloadSchema(1) && !InvitationPolicy.IsSupportedPayloadSchema(4), "unknown invitation schemas must be rejected");
+    Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.LegacyBundleSchemaVersion), "legacy invitation schema must remain parseable for history");
+    Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.PreviousHostedLinkSchemaVersion), "previous hosted schema must remain parseable for history");
+    Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.PreviousSourceBuildSchemaVersion), "previous source schema must remain parseable for history");
+    Assert(InvitationPolicy.IsInstallablePayloadSchema(InvitationPolicy.HostedLinkSchemaVersion), "current schema must be installable");
+    Assert(!InvitationPolicy.IsInstallablePayloadSchema(InvitationPolicy.PreviousSourceBuildSchemaVersion), "schema 4 must be historical-only after bootstrap pinning");
+    Assert(!InvitationPolicy.IsSupportedPayloadSchema(1) && !InvitationPolicy.IsSupportedPayloadSchema(6), "unknown invitation schemas must be rejected");
 }
 static void TestInviteRoundTrip()
 {
@@ -171,6 +362,15 @@ static void TestHostedInvite()
     var decrypted = HostedInviteFile.Decrypt(key, encrypted);
     var copy = HostedInviteFile.ReadSigned(decrypted, (data, signature) => rsa.VerifyData(data, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pss));
     Assert(copy.InviteId == invite.InviteId, "hosted invitation changed during encryption");
+    var plaintext = JsonSerializer.SerializeToUtf8Bytes(invite, JsonDefaults.Options);
+    AssertThrows<InvalidDataException>(() => HostedInviteFile.ReadSigned(
+        plaintext, (data, signature) => rsa.VerifyData(data, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pss)));
+    Assert(string.Equals(
+            Path.GetDirectoryName(Path.GetFullPath(AppPaths.BootstrapHandoffDirectory)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData))),
+            StringComparison.OrdinalIgnoreCase),
+        "the elevated invitation handoff root must be a direct child of ProgramData");
     AssertThrows<InvalidDataException>(() => HostedInviteFile.Decrypt(SecurityHelpers.CreateToken(32), encrypted));
     encrypted[^1] ^= 0xff;
     AssertThrows<InvalidDataException>(() => HostedInviteFile.Decrypt(key, encrypted));
@@ -309,10 +509,15 @@ static void TestRustDeskInstallerProfiles()
     }
     if (sourcePath is null) throw new InvalidOperationException("Taildesk.Setup InstallerServices.cs was not found.");
     var source = File.ReadAllText(sourcePath);
-    Assert(source.Contains("ServiceProfiles\", \"LocalService", StringComparison.Ordinal), "LocalService RustDesk profile is not hardened");
-    Assert(source.Contains("ServiceProfiles\", \"NetworkService", StringComparison.Ordinal), "NetworkService RustDesk profile is not hardened");
-    Assert(source.Contains("System32\", \"config\", \"systemprofile", StringComparison.Ordinal), "SYSTEM RustDesk profile is not hardened");
-    Assert(source.Contains("taskkill.exe", StringComparison.Ordinal), "stale RustDesk child processes are not cleared");
+    var profileStore = ReadSource("src", "Taildesk.Shared", "RustDeskServiceProfileStore.cs");
+    Assert(profileStore.Contains("ServiceProfiles\", \"LocalService", StringComparison.Ordinal), "LocalService RustDesk profile is not hardened");
+    Assert(profileStore.Contains("ServiceProfiles\", \"NetworkService", StringComparison.Ordinal), "NetworkService RustDesk profile is not hardened");
+    Assert(profileStore.Contains("System32\", \"config\", \"systemprofile", StringComparison.Ordinal), "SYSTEM RustDesk profile is not hardened");
+    Assert(profileStore.Contains("NativePath.OpenRelative", StringComparison.Ordinal)
+           && profileStore.Contains("exclusive: true", StringComparison.Ordinal)
+           && source.Contains("RustDeskServiceProfileStore.HardenAll()", StringComparison.Ordinal)
+           && !source.Contains("taskkill.exe", StringComparison.Ordinal),
+        "RustDesk profiles are not hardened through held no-follow handles or still use a name-wide process kill");
     var configureIndex = source.IndexOf("await ConfigureRustDeskAsync(rustDesk", StringComparison.Ordinal);
     var listenerIndex = source.IndexOf("WaitForListeningPortAsync(21118", StringComparison.Ordinal);
     Assert(configureIndex >= 0 && listenerIndex > configureIndex, "RustDesk listener is checked before configuration");
@@ -419,16 +624,26 @@ static void TestReleaseDistributionDesign()
     Assert(root is not null, "could not find the Opticon source root for release-distribution checks");
     string Read(params string[] parts) => File.ReadAllText(Path.Combine([root!.FullName, .. parts]));
     var template = Read("infrastructure", "aws", "opticon-release-distribution.yaml");
+    var provision = Read("infrastructure", "aws", "Provision-OpticonReleaseDistribution.ps1");
     var publisher = Read("fly-headscale", "scripts", "Publish-OpticonBundles.ps1");
+    var builder = Read("fly-headscale", "scripts", "Build-OpticonBundles.ps1");
     var gateway = Read("fly-headscale", "gateway", "main.go");
     var client = Read("src", "Taildesk.Admin", "OpticonReleaseClient.cs");
     var agent = Read("src", "Taildesk.Agent", "UpdateManager.cs");
     var hostedBootstrap = Read("src", "Taildesk.Setup", "HostedBootstrap.cs");
+    var sourceBootstrap = Read("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
+    var sourceInstaller = Read("source-package", "Install-OpticonFromSource.ps1");
+    var sourceProvenance = Read("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
+    var agentInstallJournal = Read("src", "Taildesk.Shared", "AgentInstallTransactionPersistence.cs");
+    var setupInstaller = Read("src", "Taildesk.Setup", "InstallerServices.cs");
     var setupWindow = Read("src", "Taildesk.Setup", "MainWindow.xaml.cs");
     Assert(template.Contains("BucketOwnerEnforced", StringComparison.Ordinal)
            && template.Contains("BlockPublicPolicy: true", StringComparison.Ordinal)
            && template.Contains("DenyInsecureTransport", StringComparison.Ordinal)
            && template.Contains("OriginAccessControl", StringComparison.Ordinal)
+           && template.Contains("VersioningConfiguration:", StringComparison.Ordinal)
+           && template.Contains("Status: Enabled", StringComparison.Ordinal)
+           && provision.Contains("versioning is not enabled", StringComparison.Ordinal)
            && template.Contains("ResponseHeadersPolicyId: 60669652-455b-4ae9-85a4-c4c02393f86c", StringComparison.Ordinal)
            && template.Contains("TLSv1.2_2021", StringComparison.Ordinal),
         "CloudFront infrastructure no longer enforces the private TLS-only S3 boundary");
@@ -441,11 +656,14 @@ static void TestReleaseDistributionDesign()
            && publisher.Contains("Invoke-CloudFrontVerification", StringComparison.Ordinal)
            && publisher.Contains("FullStreamVerified", StringComparison.Ordinal)
            && publisher.Contains("Publish-ManifestAtomically", StringComparison.Ordinal)
+           && publisher.Contains("Assert-OpticonSourceArchive", StringComparison.Ordinal)
+           && publisher.Contains("artifact.product -eq 'OpticonSource'", StringComparison.Ordinal)
            && !publisher.Contains("flyctl deploy", StringComparison.Ordinal)
            && publisher.Contains("Refusing to overwrite immutable", StringComparison.Ordinal),
         "publisher no longer enforces immutable S3 upload, bounded CloudFront readback, and atomic manifest publication");
     Assert(gateway.Contains("validCloudFrontDownloadURL", StringComparison.Ordinal)
-           && gateway.Contains("bundleDownloadURL", StringComparison.Ordinal)
+           && gateway.Contains("sourceForInvite", StringComparison.Ordinal)
+           && gateway.Contains("validSourceArtifact", StringComparison.Ordinal)
            && gateway.Contains("releaseManifestAdmin", StringComparison.Ordinal)
            && gateway.Contains("writeFileAtomically", StringComparison.Ordinal)
            && client.Contains(".cloudfront.net", StringComparison.Ordinal),
@@ -459,22 +677,86 @@ static void TestReleaseDistributionDesign()
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
         "Agent release downloader does not retain the required direct HTTPS behavior");
-    Assert(hostedBootstrap.Contains("start.Environment[InvitePathEnvironmentVariable]", StringComparison.Ordinal)
-           && hostedBootstrap.Contains("start.Environment[InviteKeyEnvironmentVariable]", StringComparison.Ordinal)
+    Assert(hostedBootstrap.Contains("SourceBootstrapInstaller.RunAsync", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("BootstrapSha256", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("VerifyFileHashAsync", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("BootstrapHandoffDirectory", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("CreateRestrictedDirectorySecurity", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("RequireRestrictedAcl", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("RequireProtectedHandoff", StringComparison.Ordinal)
            && hostedBootstrap.Contains("IsPublishedBootstrap", StringComparison.Ordinal)
            && setupWindow.Contains("GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)", StringComparison.Ordinal)
            && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal)
+           && setupWindow.Contains("Plaintext and legacy local invitation files are no longer accepted", StringComparison.Ordinal)
+           && !setupWindow.Contains("DeserializeAsync<InvitePayload>", StringComparison.Ordinal)
            && setupWindow.Contains("new InstallCoordinator(_invite!, AppContext.BaseDirectory", StringComparison.Ordinal)
            && !setupWindow.Contains("new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)", StringComparison.Ordinal)
+           && setupWindow.Contains("Environment.ExitCode = 1", StringComparison.Ordinal)
+           && setupWindow.Contains("MarkAutomaticInstallSucceeded", StringComparison.Ordinal)
+           && setupWindow.Contains("FileMode.CreateNew", StringComparison.Ordinal)
+           && !setupWindow.Contains("SpecialFolder.LocalApplicationData", StringComparison.Ordinal)
            && setupWindow.Contains("private-key-redacted", StringComparison.Ordinal)
            && setupWindow.Contains("DetailsExpander.IsExpanded = true", StringComparison.Ordinal),
         "hosted bootstrap handoff, executable-relative payload lookup, or redacted persistent Setup diagnostics regressed");
     Assert(gateway.Contains("await fetch(", StringComparison.Ordinal)
            && gateway.Contains("URL.createObjectURL(blob)", StringComparison.Ordinal)
-           && gateway.Contains("buildBootstrapStarterCommand", StringComparison.Ordinal)
-           && gateway.Contains("Get-AuthenticodeSignature", StringComparison.Ordinal)
+           && gateway.Contains("crypto.subtle.digest", StringComparison.Ordinal)
+           && !gateway.Contains("buildBootstrapStarterCommand", StringComparison.Ordinal)
+           && !gateway.Contains("ExecutionPolicy", StringComparison.Ordinal)
            && gateway.Contains("connect-src ", StringComparison.Ordinal),
-        "invitation download no longer creates a direct or hash/signature-verified compatibility bootstrap handoff");
+        "source invitation download no longer hashes both authenticated artifacts or retained an unsigned compatibility handoff");
+    Assert(sourceBootstrap.Contains("clearEnvironment: true", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("DirectHttp.CreateClient", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("ReadBoundedResponseAsync", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("maximumSize: 64 * 1024", StringComparison.Ordinal)
+           && !sourceBootstrap.Contains("UseShellExecute = true", StringComparison.Ordinal)
+           && !sourceBootstrap.Contains("Process.Start(new ProcessStartInfo", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("MSBuildUserExtensionsPath", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("PSModulePath", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("RequireNoReparseTraversal(programFiles, dotnet)", StringComparison.Ordinal)
+           && !sourceBootstrap.Contains("ExecutionPolicy\", \"Bypass", StringComparison.Ordinal)
+           && sourceInstaller.Contains("ImportUserLocationsByWildcardBeforeMicrosoftCommonProps=false", StringComparison.Ordinal)
+           && sourceInstaller.Contains("ImportUserLocationsByWildcardBeforeMicrosoftCSharpTargets=false", StringComparison.Ordinal)
+           && sourceInstaller.Contains("DirectoryBuildTargetsPath=", StringComparison.Ordinal)
+           && sourceInstaller.Contains("UseSharedCompilation=false", StringComparison.Ordinal)
+           && sourceInstaller.Contains("nodeReuse:false", StringComparison.Ordinal)
+           && sourceInstaller.Contains("ValidateSet('win-x64', 'win-arm64')", StringComparison.Ordinal)
+            && sourceBootstrap.Contains("Architecture.Arm64 => \"win-arm64\"", StringComparison.Ordinal)
+            && sourceBootstrap.Contains("SdkHostMatchesTarget", StringComparison.Ordinal)
+            && sourceInstaller.Contains("$DotnetPath --info", StringComparison.Ordinal)
+            && sourceInstaller.Contains("RID:\\s*", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("MSBUILDDISABLENODEREUSE", StringComparison.Ordinal)
+           && sourceInstaller.Contains("--no-restore", StringComparison.Ordinal)
+           && sourceInstaller.Contains("--self-contained', 'false", StringComparison.Ordinal)
+           && sourceInstaller.Contains("Microsoft.WindowsDesktop.App", StringComparison.Ordinal)
+           && sourceInstaller.Contains("$setupExitCode -ne 0", StringComparison.Ordinal),
+        "the elevated source build does not isolate MSBuild/PowerShell or propagate Setup failure");
+    Assert(sourceProvenance.Contains("public int SchemaVersion { get; set; } = 5", StringComparison.Ordinal)
+            && sourceProvenance.Contains("List<InstalledSourceGeneration> Installed", StringComparison.Ordinal)
+            && sourceProvenance.Contains("InstalledSourceGeneration? Pending", StringComparison.Ordinal)
+            && sourceProvenance.Contains("PendingTransactionId", StringComparison.Ordinal)
+            && sourceProvenance.Contains("PendingInviteCiphertextSha256", StringComparison.Ordinal)
+            && sourceProvenance.Contains("AcquireStoreLease", StringComparison.Ordinal)
+            && sourceProvenance.Contains("_activeStoreLease", StringComparison.Ordinal)
+            && sourceProvenance.Contains("Admin.previous", StringComparison.Ordinal)
+            && sourceProvenance.Contains(".rollback-", StringComparison.Ordinal)
+            && sourceProvenance.Contains("CommitActiveComponent", StringComparison.Ordinal)
+            && sourceProvenance.Contains("store.Pending = null", StringComparison.Ordinal)
+            && agentInstallJournal.Contains("PreviousConfig", StringComparison.Ordinal)
+            && agentInstallJournal.Contains("PreviousReceipt", StringComparison.Ordinal)
+            && setupInstaller.Contains("Directory.Move(destination, rollback)", StringComparison.Ordinal)
+            && setupInstaller.Contains("Directory.Move(candidate, destination)", StringComparison.Ordinal)
+            && setupInstaller.Contains("RollbackAgentInstallTransactionAsync", StringComparison.Ordinal)
+            && setupInstaller.Contains("AgentInstallOperationId", StringComparison.Ordinal)
+            && setupWindow.Contains("TryRollbackSourceProvenance", StringComparison.Ordinal),
+        "failed source reinstalls can replace current provenance or cannot validate exact rollback generations");
+    Assert(!builder.Contains("reuseCommandCenterPublish", StringComparison.Ordinal)
+           && !builder.Contains("commandCenterPublish", StringComparison.Ordinal)
+           && builder.Contains("targetRuntimes = @('win-x64', 'win-arm64')", StringComparison.Ordinal)
+           && builder.Contains("$retainedBootstraps", StringComparison.Ordinal)
+           && builder.Contains("$retainedSources", StringComparison.Ordinal)
+           && builder.Contains("The clean $component publish must contain only", StringComparison.Ordinal),
+        "release signing can still reuse ignored publish caches or accept undeclared output files");
 }
 static void TestTailnetSshPolicy()
 {
@@ -507,7 +789,6 @@ static void TestTailnetSshPolicy()
 static void TestUpdateJournalPersistence()
 {
     var directory = Path.Combine(Path.GetTempPath(), "opticon-update-journal-test-" + Guid.NewGuid().ToString("N"));
-    var path = Path.Combine(directory, "state.json");
     try
     {
         var journal = new UpdateJournal
@@ -523,8 +804,19 @@ static void TestUpdateJournalPersistence()
             RollbackDirectory = Path.Combine(directory, "agent.rollback"),
             Message = "verified"
         };
-        UpdateJournalPersistence.SaveAsync(journal, path).GetAwaiter().GetResult();
-        var loaded = UpdateJournalPersistence.Load(path);
+        var persistence = ReadSource("src", "Taildesk.Shared", "UpdateJournalPersistence.cs");
+        var coordination = ReadSource("src", "Taildesk.Shared", "UpdateJournalCoordination.cs");
+        Assert(persistence.Contains("RequireUpdatePath", StringComparison.Ordinal)
+               && persistence.Contains("MachineStorageSecurity.RequireRestrictedDirectory", StringComparison.Ordinal)
+               && persistence.Contains("MachineStorageSecurity.WriteRestrictedFileAtomicAsync", StringComparison.Ordinal)
+               && persistence.Contains("journal.UpdatedAt = DateTimeOffset.UtcNow", StringComparison.Ordinal)
+               && coordination.Contains("WriteRestrictedFileCreateNewAsync", StringComparison.Ordinal)
+               && coordination.Contains("MachineStorageSecurity.RequireRestrictedFile(path)", StringComparison.Ordinal),
+            "update persistence is not bound to the protected machine root, atomic writer, and sealed coordination lock");
+
+        journal.UpdatedAt = DateTimeOffset.UtcNow;
+        var content = JsonSerializer.SerializeToUtf8Bytes(journal, JsonDefaults.Options);
+        var loaded = JsonSerializer.Deserialize<UpdateJournal>(content, JsonDefaults.Options);
         Assert(loaded?.OperationId == journal.OperationId && loaded.Phase == UpdatePhase.Ready, "atomic update journal did not round-trip");
         Assert(loaded!.MaintenanceBootstrap, "maintenance-only Guardian state was not durable");
         Assert(loaded.ToStatus().MaintenanceBootstrap,
@@ -575,12 +867,14 @@ static void TestUploadPolicy()
            && !browser.Contains("_transfers.DownloadAsync", StringComparison.Ordinal)
            && !browser.Contains("_transfers.UploadAsync", StringComparison.Ordinal),
         "the file browser must start application-owned transfers instead of awaiting window-owned transfers");
-    Assert(agentClient.Contains("RangeHeaderValue(offset, null)", StringComparison.Ordinal)
+    Assert(agentClient.Contains("GuardedLocalTransferTarget.Create", StringComparison.Ordinal)
+           && agentClient.Contains("unexpected partial response to a full-file download", StringComparison.Ordinal)
+           && !agentClient.Contains("RangeHeaderValue(offset", StringComparison.Ordinal)
            && agentClient.Contains("files/upload-status", StringComparison.Ordinal)
            && agentClient.Contains("HttpStatusCode.NotFound", StringComparison.Ordinal)
            && agentProgram.Contains("GetUploadStatus", StringComparison.Ordinal)
            && agentProgram.Contains("UploadLegacyAsync", StringComparison.Ordinal),
-        "downloads and uploads must negotiate retained byte offsets when resumed");
+        "downloads must restart without unverifiable prefixes while uploads retain authenticated receiver offsets");
     Assert(transferView.Contains("Header=\"Resume\"", StringComparison.Ordinal)
            && transferView.Contains("PreviewMouseRightButtonDown", StringComparison.Ordinal),
         "the Transfers page must expose row-targeted right-click resume");
@@ -641,6 +935,23 @@ static void TestPathGuard()
         AssertThrows<UnauthorizedAccessException>(() => guard.Resolve("test", "file.txt:stream", mustExist: false));
         AssertThrows<UnauthorizedAccessException>(() => guard.Resolve("test", "C:\\Windows", mustExist: false));
         AssertThrows<UnauthorizedAccessException>(() => guard.Resolve("test", "\\\\server\\share", mustExist: false));
+
+        if (OperatingSystem.IsWindows())
+        {
+            var outside = Path.Combine(temporary, "outside.txt");
+            var linked = Path.Combine(child, "hard-linked.txt");
+            File.WriteAllText(outside, "outside-root");
+            if (!SelfTestNative.CreateHardLink(linked, outside, IntPtr.Zero))
+                throw new InvalidOperationException(
+                    "The hard-link security fixture could not be created. Windows error "
+                    + System.Runtime.InteropServices.Marshal.GetLastWin32Error() + ".");
+            AssertThrows<UnauthorizedAccessException>(() =>
+            {
+                using var _ = guard.Acquire("test", "child/hard-linked.txt", readFile: true, delete: true);
+            });
+            Assert(File.ReadAllText(outside) == "outside-root",
+                "the guarded hard-link rejection changed the out-of-root file");
+        }
     }
     finally
     {
@@ -651,31 +962,34 @@ static void TestPathGuard()
 static void TestLocalVolumeRoots()
 {
     if (!OperatingSystem.IsWindows()) return;
-    var guard = new PathGuard(new Dictionary<string, string>(), includeLocalVolumes: true);
-    var roots = guard.GetRoots();
-    foreach (var drive in DriveInfo.GetDrives())
-    {
-        try
-        {
-            if (!drive.IsReady || drive.DriveType is DriveType.Network or DriveType.NoRootDirectory) continue;
-            var expected = Path.TrimEndingDirectorySeparator(Path.GetFullPath(drive.RootDirectory.FullName));
-            Assert(roots.Any(candidate =>
-                    Path.TrimEndingDirectorySeparator(candidate.PathHint).Equals(expected, StringComparison.OrdinalIgnoreCase)),
-                $"ready local volume {expected} was not exposed");
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
-    }
+    var userRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Documents");
+    var guard = new PathGuard(new Dictionary<string, string> { ["Documents"] = userRoot });
+    Assert(guard.GetRoots().Count == 1
+           && guard.GetRoots()[0].PathHint.Equals(Path.GetFullPath(userRoot), StringComparison.OrdinalIgnoreCase),
+        "the explicitly configured user root was not retained");
+    AssertThrows<InvalidOperationException>(() =>
+        new PathGuard(new Dictionary<string, string>(), includeLocalVolumes: true));
+    AssertThrows<UnauthorizedAccessException>(() =>
+        PathGuard.ValidateRemoteFileRoot(Path.GetPathRoot(Environment.SystemDirectory)!));
+    AssertThrows<UnauthorizedAccessException>(() =>
+        PathGuard.ValidateRemoteFileRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Taildesk")));
+}
 
-    var systemRoot = Path.TrimEndingDirectorySeparator(Path.GetPathRoot(Environment.SystemDirectory)!);
-    var systemVolume = roots.SingleOrDefault(candidate =>
-        Path.TrimEndingDirectorySeparator(candidate.PathHint).Equals(systemRoot, StringComparison.OrdinalIgnoreCase));
-    Assert(systemVolume is not null, "the Windows system volume was not exposed");
-    if (systemVolume is null) return;
-    Assert(systemVolume.Id.StartsWith("drive-", StringComparison.OrdinalIgnoreCase), "the local volume has no stable drive root id");
-    var relativeSystemDirectory = Path.GetRelativePath(systemVolume.PathHint, Environment.SystemDirectory);
-    Assert(guard.Resolve(systemVolume.Id, relativeSystemDirectory).Equals(
-            Path.GetFullPath(Environment.SystemDirectory), StringComparison.OrdinalIgnoreCase),
-        "a directory outside the legacy profile roots could not be resolved");
+static void TestAgentEndpointPolicy()
+{
+    foreach (var path in new[]
+             {
+                 "/api/v1/security/rotate", "/API/V1/SECURITY/ROTATE",
+                 "/api/v1/ssh/access", "/Api/V1/Update/Guardian",
+                 "/API/V1/ACTIONS/EXIT-NODE"
+             })
+        Assert(AgentEndpointPolicy.RequiresPrimaryCommandCenter(path), $"primary capability missed {path}");
+    Assert(!AgentEndpointPolicy.RequiresPrimaryCommandCenter("/api/v1/security-adjacent"),
+        "a near-prefix was treated as a primary-only segment");
+    Assert(AgentEndpointPolicy.IsInternalUpdateHealth("/INTERNAL/UPDATE-HEALTH"),
+        "internal health classification is case-sensitive");
+    Assert(AgentEndpointPolicy.IsSignedMediaDownload("/API/V1/MEDIA"),
+        "signed media classification is case-sensitive");
 }
 
 static void TestFileBrowserContract()
@@ -701,10 +1015,12 @@ static void TestFileBrowserContract()
     Assert(browser.Contains("SelectedItems", StringComparison.Ordinal)
            && browser.Contains("PlanFolderDownloadsAsync", StringComparison.Ordinal)
            && browser.Contains("_transfers.StartDownload", StringComparison.Ordinal)
-           && browser.Contains("Directory.CreateDirectory(localDirectory)", StringComparison.Ordinal)
+           && browser.Contains("GuardedLocalTransferPath.EnsureDirectory", StringComparison.Ordinal)
+           && browser.Contains("Path.GetRelativePath(destinationRoot, download.LocalPath)", StringComparison.Ordinal)
+           && !browser.Contains("Directory.CreateDirectory(localDirectory)", StringComparison.Ordinal)
            && browser.IndexOf("foreach (var download in batch.Downloads)", StringComparison.Ordinal)
               > browser.IndexOf("PlanFolderDownloadsAsync", StringComparison.Ordinal),
-        "multi-download must queue selected files and recursively preserve selected folder trees");
+        "multi-download must queue root-relative files and defer directory creation to the guarded transfer path");
 
     var transfers = ReadSource("src", "Taildesk.Admin", "TransferManager.cs");
     Assert(transfers.Contains("MaximumConcurrentTransfers", StringComparison.Ordinal)
@@ -713,9 +1029,17 @@ static void TestFileBrowserContract()
 
     var agentConfig = ReadSource("src", "Taildesk.Shared", "AgentConfiguration.cs");
     var agentProgram = ReadSource("src", "Taildesk.Agent", "Program.cs");
+    var legacyExposureMigration = agentProgram.IndexOf("if (config.ExposeAllLocalVolumes)", StringComparison.Ordinal);
+    var legacyExposureSave = agentProgram.IndexOf("await configStore.SaveAsync(config)", StringComparison.Ordinal);
+    var configuredRootsCheck = agentProgram.IndexOf("config.SharedRoots.Count == 0", StringComparison.Ordinal);
     Assert(agentConfig.Contains("ExposeAllLocalVolumes", StringComparison.Ordinal)
-           && agentProgram.Contains("new PathGuard(config.SharedRoots, config.ExposeAllLocalVolumes)", StringComparison.Ordinal),
-        "the Agent must expose every ready local volume to the location dropdown");
+           && agentProgram.Contains("config.ExposeAllLocalVolumes = false", StringComparison.Ordinal)
+           && agentProgram.Contains("new PathGuard(config.SharedRoots)", StringComparison.Ordinal)
+           && !agentProgram.Contains("new PathGuard(config.SharedRoots, config.ExposeAllLocalVolumes)", StringComparison.Ordinal)
+           && legacyExposureMigration >= 0
+           && legacyExposureSave > legacyExposureMigration
+           && configuredRootsCheck > legacyExposureSave,
+        "the Agent must durably retire legacy all-volume access before fail-closed configuration validation");
 }
 
 static void TestDeviceRenameContract()
@@ -961,6 +1285,7 @@ static void TestWpfStyleTemplateTargets()
 static void TestWpfContrastContract()
 {
     var adminPath = FindSourceFile("src", "Taildesk.Admin", "App.xaml");
+    var opticonRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(adminPath)!, "..", ".."));
     var setupPath = FindSourceFile("src", "Taildesk.Setup", "App.xaml");
     var admin = XDocument.Load(adminPath);
     var setup = XDocument.Load(setupPath);
@@ -1055,34 +1380,9 @@ static void TestWpfContrastContract()
     RequireTriggerColorPair(setupButton, "IsMouseOver", "True", "Setup button hover");
     RequireTriggerColorPair(setupButton, "IsPressed", "True", "Setup button pressed");
 
-    var brushes = admin.Descendants()
-        .Where(element => element.Name.LocalName == "SolidColorBrush" && element.Attribute(x + "Key") is not null)
-        .ToDictionary(element => element.Attribute(x + "Key")!.Value,
-            element => element.Attribute("Color")?.Value ?? string.Empty, StringComparer.Ordinal);
-    foreach (var pair in new[]
-             {
-                 (Foreground: "TextBrush", Background: "WindowBrush"),
-                 (Foreground: "TextBrush", Background: "RailBrush"),
-                 (Foreground: "TextBrush", Background: "PanelBrush"),
-                 (Foreground: "TextBrush", Background: "PanelAltBrush"),
-                 (Foreground: "TextBrush", Background: "ControlBrush"),
-                 (Foreground: "TextBrush", Background: "ControlHoverBrush"),
-                 (Foreground: "TextBrush", Background: "ControlPressedBrush"),
-                 (Foreground: "TextBrush", Background: "InputBrush"),
-                 (Foreground: "TextBrush", Background: "SelectionBrush"),
-                 (Foreground: "MutedBrush", Background: "WindowBrush"),
-                 (Foreground: "MutedBrush", Background: "PanelBrush"),
-                 (Foreground: "OnAccentBrush", Background: "AccentBrush"),
-                 (Foreground: "OnAccentBrush", Background: "AccentHoverBrush"),
-                 (Foreground: "OnAccentBrush", Background: "AccentPressedBrush"),
-                 (Foreground: "OnLightSurfaceBrush", Background: "LightSurfaceBrush"),
-                 (Foreground: "OnLightSurfaceBrush", Background: "LightSurfaceHoverBrush")
-             })
-    {
-        var ratio = ContrastRatio(brushes[pair.Foreground], brushes[pair.Background]);
-        Assert(ratio >= 4.5,
-            $"{pair.Foreground} on {pair.Background} has only {ratio:F2}:1 contrast");
-    }
+    var audit = Taildesk.SelfTest.WpfContrastAudit.Verify(opticonRoot);
+    Console.WriteLine($"      audited {audit.TextSurfaceCount} text surfaces and "
+                      + $"{audit.ControlStateCount} control states across {audit.ViewCount} WPF views");
 }
 
 static string FindSourceFile(params string[] parts)
@@ -1098,27 +1398,6 @@ static string FindSourceFile(params string[] parts)
         }
     }
     throw new InvalidOperationException($"Source file was not found: {Path.Combine(parts)}");
-}
-
-static double ContrastRatio(string foreground, string background)
-{
-    static double Luminance(string color)
-    {
-        var hex = color.TrimStart('#');
-        if (hex.Length == 8) hex = hex[2..];
-        Assert(hex.Length == 6, $"unsupported color value: {color}");
-        static double Channel(string value)
-        {
-            var component = Convert.ToInt32(value, 16) / 255d;
-            return component <= 0.04045 ? component / 12.92 : Math.Pow((component + 0.055) / 1.055, 2.4);
-        }
-        return 0.2126 * Channel(hex[..2]) + 0.7152 * Channel(hex[2..4]) + 0.0722 * Channel(hex[4..6]);
-    }
-
-    var foregroundLuminance = Luminance(foreground);
-    var backgroundLuminance = Luminance(background);
-    return (Math.Max(foregroundLuminance, backgroundLuminance) + 0.05)
-           / (Math.Min(foregroundLuminance, backgroundLuminance) + 0.05);
 }
 
 static void TestOpenSshRecoveryDesign()
@@ -1148,10 +1427,12 @@ static void TestOpenSshRecoveryDesign()
         "guarded updates must surface the remote journal while preparation is running and after a safe failure");
     var mainWindow = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml.cs");
     Assert(mainWindow.Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal)
-           && mainWindow.Contains("$ph.UseProxy=$false", StringComparison.Ordinal)
+           && mainWindow.Contains("Copied PowerShell/UAC maintenance bootstraps are retired", StringComparison.Ordinal)
+           && mainWindow.Contains("fresh hosted source-build invitation", StringComparison.Ordinal)
+           && !mainWindow.Contains("$ph.UseProxy=$false", StringComparison.Ordinal)
            && mainWindow.Contains("requiresAttendedMaintenance", StringComparison.Ordinal)
            && mainWindow.Contains("requires update guardian", StringComparison.Ordinal),
-        "legacy download and Guardian-contract failures must offer a direct, pinned, externally observed maintenance recovery path");
+        "legacy download and Guardian-contract failures must fail closed into the signed source-invitation recovery path");
     var adminApp = ReadSource("src", "Taildesk.Admin", "App.xaml.cs");
     var incrementalRebuild = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "rebuild-if-source-changed.ps1"));
     Assert(adminApp.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal)
@@ -1193,10 +1474,17 @@ static void TestOpenSshRecoveryDesign()
            && agentClient.Contains("AllowAutoRedirect = false", StringComparison.Ordinal),
         "authenticated Agent requests must bypass proxies and refuse redirects");
     var downloadFlush = agentClient.IndexOf("await output.FlushAsync", StringComparison.Ordinal);
-    var downloadMove = agentClient.LastIndexOf("File.Move(temporary, localPath", StringComparison.Ordinal);
-    var downloadStreamScopeEnd = agentClient.LastIndexOf('}', downloadMove);
-    Assert(downloadFlush >= 0 && downloadStreamScopeEnd > downloadFlush && downloadMove > downloadStreamScopeEnd,
-        "downloads must flush and dispose the exclusive partial-file stream before atomically promoting it");
+    var downloadStreamScopeEnd = agentClient.IndexOf("if (expectedLength.HasValue", StringComparison.Ordinal);
+    var downloadPromote = agentClient.IndexOf("target.Promote(overwrite)", StringComparison.Ordinal);
+    var guardedTransfer = ReadSource("src", "Taildesk.Admin", "GuardedLocalTransferFile.cs");
+    var guardedCreate = guardedTransfer.IndexOf("directory.CreateFile(temporaryName)", StringComparison.Ordinal);
+    var guardedRename = guardedTransfer.IndexOf("_temporary.RenameTo(_directory, _fileName)", StringComparison.Ordinal);
+    Assert(downloadFlush >= 0
+           && downloadStreamScopeEnd > downloadFlush
+           && downloadPromote > downloadStreamScopeEnd
+           && guardedCreate >= 0
+           && guardedRename > guardedCreate,
+        "downloads must flush and dispose their guarded temporary handle before handle-relative promotion");
 
     var cli = ReadSource("src", "Taildesk.Cli", "Program.cs");
     Assert(cli.Contains("Volatile.Read(ref interactiveSshAttached)", StringComparison.Ordinal)
@@ -1289,7 +1577,7 @@ static void TestOpenSshRecoveryDesign()
         "fresh Setup must verify the installed Guardian against the watchdog contract after attended maintenance");
     var stableGuardianMaintenance = ReadSource("src", "Taildesk.Shared", "StableGuardianMaintenance.cs");
     Assert(stableGuardianMaintenance.Contains("UpdateJournalCoordination.AcquireAsync", StringComparison.Ordinal)
-           && stableGuardianMaintenance.Contains("InvitationSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
+           && stableGuardianMaintenance.Contains("ProductSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("File.Replace(staged, installed, backup", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("File.Replace(backup, installedExecutable, failed", StringComparison.Ordinal)
            && stableGuardianMaintenance.Contains("GuardianWatchdogArgument", StringComparison.Ordinal)
@@ -1360,41 +1648,28 @@ static void TestOpenSshRecoveryDesign()
            && updateCoordinator.Contains("ReconcileGuardianAsync", StringComparison.Ordinal)
            && updateCoordinator.Contains("post-maintenance Agent sample", StringComparison.Ordinal),
         "watchdog-capable Agents must reconcile only the production-signed Guardian and externally attest the result without UAC");
-    Assert(adminWindow.Contains("BuildMaintenanceBootstrapCommand(release, device, operationId)", StringComparison.Ordinal)
-           && adminWindow.Contains("release-manifest.json", StringComparison.Ordinal)
-           && adminWindow.Contains("RSASignaturePadding]::Pss", StringComparison.Ordinal)
-           && adminWindow.Contains("Signed Setup SHA-256 mismatch", StringComparison.Ordinal)
-           && adminWindow.Contains("InvitationSigning.CertificateThumbprint", StringComparison.Ordinal)
-           && adminWindow.Contains("--expected-tailnet-device-id=", StringComparison.Ordinal)
-           && adminWindow.Contains("--expected-tailscale-ip=", StringComparison.Ordinal)
-           && adminWindow.Contains("--operation-id=", StringComparison.Ordinal),
-        "copied maintenance must verify a pinned signed Setup declaration, selected Tailnet identity, and exact operation before UAC");
-    var signing = ReadSource("src", "Taildesk.Shared", "InvitationSigning.cs");
-    var authenticode = ReadSource("src", "Taildesk.Shared", "AuthenticodeFileVerifier.cs");
-    Assert(signing.Contains("AuthenticodeFileVerifier.VerifyPinned", StringComparison.Ordinal)
-           && authenticode.Contains("trustResult is not Success and not CertificateUntrustedRoot", StringComparison.Ordinal)
-           && authenticode.Contains("FixedTimeEquals(embedded.RawData, expectedSigner.RawData)", StringComparison.Ordinal),
-        "runtime Authenticode checks must accept only valid or exact pinned self-signed signatures and reject all other indeterminate results");
+    Assert(adminWindow.Contains("Copied PowerShell/UAC maintenance bootstraps are retired", StringComparison.Ordinal)
+           && adminWindow.Contains("No command was copied or started", StringComparison.Ordinal)
+           && !adminWindow.Contains("Expand-Archive", StringComparison.Ordinal)
+           && !adminWindow.Contains("$env:TEMP", StringComparison.Ordinal)
+           && !adminWindow.Contains("-Verb RunAs", StringComparison.Ordinal)
+           && !adminWindow.Contains("InvitationSigning.PinnedCertificate", StringComparison.Ordinal),
+        "the replace-after-verify maintenance bootstrap is still reachable through copied PowerShell or ordinary TEMP");
+    var productSigning = ReadSource("src", "Taildesk.Shared", "ProductSigning.cs");
+    var authenticode = ReadSource("src", "Taildesk.Shared", "BoundWindowsProductSignatureVerifier.cs");
+    Assert(productSigning.Contains("BoundWindowsProductSignatureVerifier.VerifyPinnedAsync", StringComparison.Ordinal)
+           && authenticode.Contains("GetSecondarySignatureCount", StringComparison.Ordinal)
+           && authenticode.Contains("WTHelperGetProvCertFromChain", StringComparison.Ordinal)
+           && authenticode.Contains("CryptVerifyTimeStampSignature", StringComparison.Ordinal)
+           && authenticode.Contains("does not cover the primary Authenticode signature value", StringComparison.Ordinal),
+        "runtime Authenticode checks are not bound to the exact Windows-validated signer and RFC 3161 token");
     Assert(adminWindow.Contains("if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal)
            && adminWindow.Contains("await RunMaintenanceBootstrapAsync(", StringComparison.Ordinal),
-        "legacy update selection must delegate to the guarded maintenance flow");
-    var flowStart = adminWindow.IndexOf("private async Task RunMaintenanceBootstrapAsync", StringComparison.Ordinal);
-    var flowEnd = adminWindow.IndexOf("private DeviceRecord RequireDevice", flowStart, StringComparison.Ordinal);
-    Assert(flowStart >= 0 && flowEnd > flowStart, "maintenance command-center flow was not found");
-    var maintenanceFlow = adminWindow[flowStart..flowEnd];
-    var clipboardIndex = maintenanceFlow.IndexOf("await SetClipboardTextAsync(command)", StringComparison.Ordinal);
-    var confirmationIndex = maintenanceFlow.IndexOf("MessageBoxResult.Yes", StringComparison.Ordinal);
-    var snapshotIndex = maintenanceFlow.IndexOf("SnapshotMaintenanceSshAsync", StringComparison.Ordinal);
-    var remoteIndex = maintenanceFlow.IndexOf("LaunchRemoteControlAsync", StringComparison.Ordinal);
-    var observerIndex = maintenanceFlow.IndexOf("ObserveMaintenanceBootstrapAsync", StringComparison.Ordinal);
-    Assert(confirmationIndex >= 0 && confirmationIndex < clipboardIndex
-           && clipboardIndex < snapshotIndex && snapshotIndex < remoteIndex && remoteIndex < observerIndex,
-        "maintenance must confirm before copying, then snapshot SSH, launch RustDesk, and observe the exact operation");
+        "legacy update selection must fail closed through the retired maintenance flow");
     Assert(adminWindow.Contains("clipboardBusy = unchecked((int)0x800401D0)", StringComparison.Ordinal)
            && adminWindow.Contains("attempt <= 20", StringComparison.Ordinal)
-           && adminWindow.Contains("Clipboard.SetDataObject(value, copy: true)", StringComparison.Ordinal)
-           && adminWindow.Contains("no maintenance command was started", StringComparison.Ordinal),
-        "security-sensitive clipboard handoffs must tolerate transient Windows clipboard ownership and fail clearly before maintenance");
+           && adminWindow.Contains("Clipboard.SetDataObject(value, copy: true)", StringComparison.Ordinal),
+        "security-sensitive invitation and credential clipboard handoffs must tolerate transient ownership");
 
     var remoteUpdates = ReadSource("src", "Taildesk.Admin", "RemoteDeviceUpdateCoordinator.cs");
     Assert(remoteUpdates.Contains("ObserveMaintenanceBootstrapAsync", StringComparison.Ordinal)
@@ -1413,7 +1688,9 @@ static void TestOpenSshRecoveryDesign()
 
     var updateHealthStore = ReadSource("src", "Taildesk.Shared", "UpdateHealthTokenStore.cs");
     Assert(updateHealthStore.Contains("SecretScope.LocalMachine", StringComparison.Ordinal)
-           && updateHealthStore.Contains("File.Move(temporary, path, false)", StringComparison.Ordinal)
+           && updateHealthStore.Contains("MachineStorageSecurity.WriteRestrictedFileCreateNewAsync", StringComparison.Ordinal)
+           && updateHealthStore.Contains("MachineStorageSecurity.ReadRestrictedFile", StringComparison.Ordinal)
+           && updateHealthStore.Contains("RequireUpdateSidecarPath", StringComparison.Ordinal)
            && updateHealthStore.IndexOf("configuredProtectedToken", StringComparison.Ordinal)
               < updateHealthStore.IndexOf("LoadSidecar", StringComparison.Ordinal),
         "update health resolution must prefer config and create a DPAPI LocalMachine write-once sidecar");
@@ -1555,39 +1832,68 @@ static void TestOpenSshRecoveryDesign()
 
     var buildScript = ReadSource("build.ps1");
     var targetReleaseCheck = ReadSource("scripts", "Ensure-OpticonTargetRelease.ps1");
-    var buildWorkflow = ReadSource(".github", "workflows", "build-windows.yml");
+    var repositoryRoot = root.Parent
+        ?? throw new InvalidOperationException("Repository root was not found above Opticon.");
+    var buildWorkflow = File.ReadAllText(Path.Combine(
+        repositoryRoot.FullName, ".github", "workflows", "opticon-security.yml"));
     var hostedBuild = ReadSource("fly-headscale", "scripts", "Build-OpticonBundles.ps1");
     var installer = ReadSource("installer", "Install-CommandCenter.ps1");
+    var commandCenterInstaller = ReadSource("src", "Taildesk.CommandCenterInstaller", "Program.cs");
+    var solution = ReadSource("Taildesk.sln");
     Assert(buildScript.Contains("The Opticon solution build failed", StringComparison.Ordinal)
            && buildScript.Contains("The Opticon self-tests failed", StringComparison.Ordinal)
            && buildScript.Contains("must contain only the signed opticon.exe", StringComparison.Ordinal)
            && buildScript.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal)
-           && hostedBuild.Contains("hosted CLI directory must contain only", StringComparison.Ordinal)
+           && hostedBuild.Contains("The clean $component publish must contain only", StringComparison.Ordinal)
            && hostedBuild.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal),
         "release packaging must fail on native build/test errors and ship a single signed CLI app");
+    Assert(buildScript.Contains("8.0.423", StringComparison.Ordinal)
+           && buildScript.Contains("RuntimeFrameworkVersion", StringComparison.Ordinal)
+           && buildScript.Contains("OpticonSigningProfile", StringComparison.Ordinal)
+           && buildScript.Contains("SourceReleaseSigningCertificateThumbprint", StringComparison.Ordinal)
+           && buildScript.Contains("CodeSigningCertificateThumbprint", StringComparison.Ordinal)
+           && buildScript.Contains("/tr", StringComparison.Ordinal)
+           && buildScript.Contains("/td", StringComparison.Ordinal)
+           && buildScript.Contains("TimeStamperCertificate", StringComparison.Ordinal)
+           && buildScript.Contains("$signature.Status -ne 'Valid'", StringComparison.Ordinal)
+           && buildScript.Contains("RSASignaturePadding]::Pss", StringComparison.Ordinal)
+           && buildScript.Contains("DEV-UNTRUSTED", StringComparison.Ordinal)
+           && !buildScript.Contains("Taildesk.InviteLauncher", StringComparison.Ordinal)
+           && !buildScript.Contains("Install-Opticon.ps1", StringComparison.Ordinal)
+           && solution.Contains("Taildesk.CommandCenterInstaller", StringComparison.Ordinal)
+           && solution.Contains("Taildesk.RouteKeeper", StringComparison.Ordinal)
+           && !solution.Contains("Taildesk.InviteLauncher", StringComparison.Ordinal),
+        "command-center packaging must use exact SDK/runtime pins, separated timestamped signers, and the signed wrapper only");
+    Assert(commandCenterInstaller.Contains("SourceReleaseSigning.Verify", StringComparison.Ordinal)
+           && commandCenterInstaller.Contains("AllowedPayloadPaths", StringComparison.Ordinal)
+           && commandCenterInstaller.Contains("ProductSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
+           && commandCenterInstaller.Contains("CreateProtectedStagingDirectory", StringComparison.Ordinal)
+           && commandCenterInstaller.Contains("-ExecutionPolicy", StringComparison.Ordinal)
+           && commandCenterInstaller.Contains("RemoteSigned", StringComparison.Ordinal)
+           && !commandCenterInstaller.Contains("Bypass", StringComparison.Ordinal),
+        "the only command-center entry point must bind manifest verification to protected staging and fixed PowerShell policy");
     Assert(buildScript.Contains("SkipTargetReleaseDeployment", StringComparison.Ordinal)
            && buildScript.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
-           && buildWorkflow.Contains("-SkipTargetReleaseDeployment", StringComparison.Ordinal)
+           && buildWorkflow.Contains("contents: read", StringComparison.Ordinal)
+           && buildWorkflow.Contains("8.0.423", StringComparison.Ordinal)
+           && buildWorkflow.Contains("go test -race", StringComparison.Ordinal)
+           && buildWorkflow.Contains("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("Test-CompleteRelease", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("Publish-OpticonBundles.ps1", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("status --porcelain", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("refs/remotes/origin/main", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("DeploymentRequired", StringComparison.Ordinal),
         "operator builds must deploy missing target releases only from clean synchronized main while CI opts out explicitly");
-    var sourceControllerUpdater = ReadSource("scripts", "Update-InstalledOpticon.ps1");
-    Assert(sourceControllerUpdater.Contains("Install-Opticon.ps1", StringComparison.Ordinal)
-           && sourceControllerUpdater.Contains("exclusive lock", StringComparison.Ordinal)
-           && !sourceControllerUpdater.Contains("Copy-Item (Join-Path $SourceDirectory '*')", StringComparison.Ordinal),
-        "source-triggered controller updates must use the transactional release installer instead of copying over the live UI");
     const string packageBuildLock = ".opticon-package-build.lock";
     const string acquirePackageBuildLock = "$packageBuildLock = Enter-OpticonPackageBuildLock";
+    const string firstStandaloneBuildInvocation = "Invoke-DotNet -Arguments @('--version')";
     Assert(buildScript.Contains(packageBuildLock, StringComparison.Ordinal)
            && hostedBuild.Contains(packageBuildLock, StringComparison.Ordinal)
            && buildScript.Contains("[IO.FileShare]::None", StringComparison.Ordinal)
            && hostedBuild.Contains("[IO.FileShare]::None", StringComparison.Ordinal)
-           && buildScript.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < buildScript.IndexOf("dotnet build", StringComparison.Ordinal)
+           && buildScript.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < buildScript.IndexOf(firstStandaloneBuildInvocation, StringComparison.Ordinal)
            && hostedBuild.IndexOf(acquirePackageBuildLock, StringComparison.Ordinal) < hostedBuild.IndexOf("dotnet publish", StringComparison.Ordinal)
-           && buildScript.LastIndexOf("$packageBuildLock.Dispose()", StringComparison.Ordinal) > buildScript.LastIndexOf("Compress-Archive", StringComparison.Ordinal)
+           && buildScript.LastIndexOf("$packageBuildLock.Dispose()", StringComparison.Ordinal) > buildScript.LastIndexOf("New-ReproducibleZip", StringComparison.Ordinal)
            && hostedBuild.LastIndexOf("$packageBuildLock.Dispose()", StringComparison.Ordinal) > hostedBuild.LastIndexOf("Compress-Archive", StringComparison.Ordinal),
         "standalone and hosted packaging must share one exclusive lock across every build and publication mutation");
     var cliPathIntegration = ReadSource("src", "Taildesk.Admin", "CliPathIntegration.cs");
@@ -1623,8 +1929,10 @@ static void TestOpenSshRecoveryDesign()
            && installer.LastIndexOf("$installLock.Dispose()", StringComparison.Ordinal)
                > installer.IndexOf("Install-OpticonPayloadTransaction", StringComparison.Ordinal)
            && setup.IndexOf("AcquireControllerInstallLockAsync", StringComparison.Ordinal)
-               < setup.IndexOf("CaptureControllerConfiguration", StringComparison.Ordinal),
-        "exclusive installation locking must cover prerequisite mutation, snapshot, swap, and post-commit configuration");
+               < setup.IndexOf("await RecoverControllerDirectoryTransactionAsync(destination", StringComparison.Ordinal)
+           && setup.IndexOf("AcquireControllerInstallLockAsync", StringComparison.Ordinal)
+               < setup.IndexOf("await InstallControllerDirectoryTransactionalAsync", StringComparison.Ordinal),
+        "exclusive installation locking must cover recovery, swap, protected handoff, and post-commit configuration");
 
     Assert(installer.Contains("Assert-InstallDestinationPreflight", StringComparison.Ordinal)
            && installer.Contains("restricted to the canonical directory", StringComparison.Ordinal)
@@ -1645,8 +1953,10 @@ static void TestOpenSshRecoveryDesign()
            && setup.IndexOf("await configureActivatedPayload()", StringComparison.Ordinal)
                < setup.IndexOf("WriteControllerReadyMarker(destination)", StringComparison.Ordinal)
            && installer.Contains("Restore-ControllerConfigurationSnapshot", StringComparison.Ordinal)
-           && setup.Contains("RestoreControllerConfigurationAsync", StringComparison.Ordinal),
-        "ready is written last and a post-swap configuration failure must roll back payload and restorable configuration");
+           && setup.IndexOf("await MachineStorageSecurity.WriteUserBootstrapAsync", StringComparison.Ordinal)
+               < setup.IndexOf("WriteControllerReadyMarker(destination)", StringComparison.Ordinal)
+           && setup.Contains("MachineStorageSecurity.DeleteUserBootstrap", StringComparison.Ordinal),
+        "ready must be written after protected handoff, and handoff failure must delete it while payload rollback restores the prior directory");
 
     Assert(installer.Contains("@($destination, $backup)", StringComparison.Ordinal)
            && setup.Contains("RequireInstalledControllerProcessesClosed(destination, backup)", StringComparison.Ordinal)
@@ -1658,7 +1968,8 @@ static void TestOpenSshRecoveryDesign()
 
     Assert(cliPathIntegration.Contains("recordedDirectory.Equals(defaultInstalledDirectory", StringComparison.Ordinal)
            && cliPathIntegration.Contains("previous = null; // Never remove an unverified", StringComparison.Ordinal)
-           && setup.Contains("previous = null; // Never remove an unverified", StringComparison.Ordinal)
+           && setup.Contains("full.Equals(canonical + \".previous\"", StringComparison.Ordinal)
+           && setup.Contains("await VerifyControllerDirectoryAsync(directory", StringComparison.Ordinal)
            && installer.Contains("Test-TrustedRecordedOpticonCliPath", StringComparison.Ordinal)
            && installer.Contains("CanonicalControllerInstallDirectory", StringComparison.Ordinal)
            && cliPathIntegration.Contains("if (uiVersion != cliVersion)", StringComparison.Ordinal)
@@ -1679,4 +1990,16 @@ static void AssertThrows<TException>(Action action) where TException : Exception
     try { action(); }
     catch (TException) { return; }
     throw new InvalidOperationException($"expected {typeof(TException).Name}");
+}
+
+internal static class SelfTestNative
+{
+    [System.Runtime.InteropServices.DllImport(
+        "kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode,
+        SetLastError = true, EntryPoint = "CreateHardLinkW")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    internal static extern bool CreateHardLink(
+        string newFileName,
+        string existingFileName,
+        IntPtr securityAttributes);
 }
