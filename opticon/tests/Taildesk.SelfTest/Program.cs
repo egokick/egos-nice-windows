@@ -761,6 +761,7 @@ static void TestReleaseDistributionDesign()
            && publisher.Contains("$total -gt $ExpectedSize", StringComparison.Ordinal)
            && publisher.Contains("Read-PublicManifestBounded", StringComparison.Ordinal)
            && publisher.Contains("[IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($path), $security)", StringComparison.Ordinal)
+           && publisher.Contains("exact Microsoft-documented DigiCert RFC3161 endpoint", StringComparison.Ordinal)
            && !publisher.Contains("flyctl deploy", StringComparison.Ordinal)
            && publisher.Contains("Refusing to overwrite immutable", StringComparison.Ordinal),
         "publisher no longer enforces immutable S3 upload, bounded CloudFront readback, and atomic manifest publication");

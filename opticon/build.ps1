@@ -6,8 +6,8 @@ param(
     [string]$BuildProfile = 'Production',
     [string]$CodeSigningCertificateThumbprint,
     [string]$SourceReleaseSigningCertificateThumbprint,
-    [ValidatePattern('^https://')]
-    [string]$TimestampServer = 'https://timestamp.digicert.com',
+    [ValidateSet('http://timestamp.digicert.com')]
+    [string]$TimestampServer = 'http://timestamp.digicert.com',
     [switch]$SkipTargetReleaseDeployment
 )
 

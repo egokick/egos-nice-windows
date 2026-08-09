@@ -32,8 +32,15 @@ if ($SourceReleaseCertificateThumbprint -eq $invitationSigningThumbprint -or
 }
 $timestampUri = $null
 if (-not [Uri]::TryCreate($Rfc3161TimestampUrl, [UriKind]::Absolute, [ref]$timestampUri) -or
-    $timestampUri.Scheme -ne [Uri]::UriSchemeHttps -or -not [string]::IsNullOrEmpty($timestampUri.UserInfo)) {
-    throw 'Rfc3161TimestampUrl must be an absolute HTTPS URL without user information.'
+    -not [string]::IsNullOrEmpty($timestampUri.UserInfo)) {
+    throw 'Rfc3161TimestampUrl is invalid.'
+}
+$officialDigiCertRfc3161 = $timestampUri.Scheme -eq [Uri]::UriSchemeHttp -and
+    $timestampUri.IsDefaultPort -and $timestampUri.Host.Equals('timestamp.digicert.com', [StringComparison]::OrdinalIgnoreCase) -and
+    $timestampUri.AbsolutePath -eq '/' -and [string]::IsNullOrEmpty($timestampUri.Query) -and
+    [string]::IsNullOrEmpty($timestampUri.Fragment)
+if ($timestampUri.Scheme -ne [Uri]::UriSchemeHttps -and -not $officialDigiCertRfc3161) {
+    throw 'Rfc3161TimestampUrl must use HTTPS or the exact Microsoft-documented DigiCert RFC3161 endpoint.'
 }
 $controlOriginUri = $null
 if (-not [Uri]::TryCreate($ControlOrigin, [UriKind]::Absolute, [ref]$controlOriginUri) -or
