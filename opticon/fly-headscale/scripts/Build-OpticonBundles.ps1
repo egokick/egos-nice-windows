@@ -63,6 +63,12 @@ function Invoke-FixedGit {
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    # Codex's workspace may be owned by its sandbox SID while this explicit
+    # production publish runs as the interactive signing user. Scope Git's
+    # ownership exception to this one validated repository and process; never
+    # mutate the user's global safe.directory configuration.
+    $null = $start.ArgumentList.Add('-c')
+    $null = $start.ArgumentList.Add("safe.directory=$($repo.Replace('\', '/'))")
     foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
     $start.Environment.Clear()
     $start.Environment['SystemRoot'] = $windows

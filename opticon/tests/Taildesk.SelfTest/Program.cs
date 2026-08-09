@@ -871,6 +871,7 @@ static void TestReleaseDistributionDesign()
     Assert(!builder.Contains("reuseCommandCenterPublish", StringComparison.Ordinal)
            && !builder.Contains("commandCenterPublish", StringComparison.Ordinal)
            && builder.Contains("targetRuntimes = @('win-x64', 'win-arm64')", StringComparison.Ordinal)
+           && builder.Contains("safe.directory=$($repo.Replace('\\', '/'))", StringComparison.Ordinal)
            && builder.Contains("$retainedBootstraps", StringComparison.Ordinal)
            && builder.Contains("$retainedSources", StringComparison.Ordinal)
            && builder.Contains("The clean $component publish must contain only", StringComparison.Ordinal),
