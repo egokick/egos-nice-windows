@@ -218,6 +218,8 @@ function Invoke-SignTool {
     $start.WorkingDirectory = $system32
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
     foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
     $start.Environment.Clear()
     $start.Environment['SystemRoot'] = $windows
@@ -232,8 +234,17 @@ function Invoke-SignTool {
     $process = [Diagnostics.Process]::Start($start)
     if (-not $process) { throw 'Windows could not start the fixed Windows SDK signer.' }
     try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
-        if ($process.ExitCode -ne 0) { throw "signtool failed with exit code $($process.ExitCode)." }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            $diagnosticParts = @($stderr.Trim(), $stdout.Trim()) | Where-Object { $_ }
+            $diagnostic = [string]::Join([Environment]::NewLine, $diagnosticParts)
+            if ($diagnostic.Length -gt 8192) { $diagnostic = $diagnostic.Substring(0, 8192) + ' [truncated]' }
+            throw "signtool failed with exit code $($process.ExitCode): $diagnostic"
+        }
     } finally { $process.Dispose() }
 }
 
