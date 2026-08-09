@@ -178,7 +178,10 @@ function New-PrivatePublisherDirectory {
             [Security.AccessControl.FileSystemRights]::FullControl, $inheritance,
             [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
         $security.AddAccessRule($rule)
-        [IO.DirectoryInfo]::new($path).Create($security)
+        # DirectoryInfo.Create(DirectorySecurity) is exposed as a static
+        # FileSystemAclExtensions method on modern .NET/PowerShell, not as an
+        # instance overload. This preserves atomic create-with-ACL semantics.
+        [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($path), $security)
     } finally { $identity.Dispose() }
     if (-not (Test-Path -LiteralPath $path -PathType Container) -or
         ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
