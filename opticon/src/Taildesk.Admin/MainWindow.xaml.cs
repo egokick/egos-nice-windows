@@ -104,6 +104,53 @@ public partial class MainWindow : Window
         RoleCombo.SelectedIndex = _viewModel.SelectedDevice?.Role == DeviceRole.ControllerAndManaged ? 1 : 0;
     }
 
+    private void DeviceGrid_PreviewMouseRightButtonDown(
+        object sender,
+        System.Windows.Input.MouseButtonEventArgs e)
+    {
+        DependencyObject? current = e.OriginalSource as DependencyObject;
+        while (current is not null && current is not DataGridRow)
+            current = System.Windows.Media.VisualTreeHelper.GetParent(current);
+        if (current is DataGridRow row)
+        {
+            DeviceGrid.SelectedItem = row.Item;
+            row.Focus();
+        }
+    }
+
+    private void DeviceGrid_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        RenameDeviceMenuItem.IsEnabled = _viewModel.IsPrimary
+                                         && !_viewModel.Busy
+                                         && DeviceGrid.SelectedItem is DeviceRecord;
+    }
+
+    private async void RenameDevice_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_viewModel.IsPrimary)
+        {
+            ShowError(new InvalidOperationException("Only the primary command center can rename an enrolled device."));
+            return;
+        }
+        if (DeviceGrid.SelectedItem is not DeviceRecord device)
+        {
+            ShowError(new InvalidOperationException("Right-click a device row to rename it."));
+            return;
+        }
+
+        var currentName = string.IsNullOrWhiteSpace(device.Name) ? device.HostName : device.Name;
+        var prompt = new PromptWindow(
+            "Rename device",
+            $"Enter a new display name for '{currentName}'.",
+            currentName)
+        {
+            Owner = this
+        };
+        if (prompt.ShowDialog() != true) return;
+
+        await RunAsync(() => _viewModel.RenameDeviceAsync(device, prompt.Value));
+    }
+
     private async void RemoteControl_Click(object sender, RoutedEventArgs e)
     {
         DeviceRecord device;
@@ -295,14 +342,9 @@ public partial class MainWindow : Window
         if (!CreateInviteButton.IsEnabled) return;
         var role = (InviteRoleCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() == nameof(DeviceRole.ControllerAndManaged)
             ? DeviceRole.ControllerAndManaged : DeviceRole.ManagedOnly;
-        var allowedRoots = new[]
-        {
-            (Name: "Desktop", Selected: InviteRootDesktopCheck.IsChecked == true),
-            (Name: "Documents", Selected: InviteRootDocumentsCheck.IsChecked == true),
-            (Name: "Downloads", Selected: InviteRootDownloadsCheck.IsChecked == true),
-            (Name: "Pictures", Selected: InviteRootPicturesCheck.IsChecked == true),
-            (Name: "Videos", Selected: InviteRootVideosCheck.IsChecked == true)
-        }.Where(root => root.Selected).Select(root => root.Name).ToArray();
+        // These legacy profile roots keep invitations compatible with older
+        // agents. Current agents expose all accessible local volumes.
+        string[] allowedRoots = ["Desktop", "Documents", "Downloads", "Pictures", "Videos"];
         CreateInviteButton.IsEnabled = false;
         CreateInviteButton.Content = "Creating...";
         try

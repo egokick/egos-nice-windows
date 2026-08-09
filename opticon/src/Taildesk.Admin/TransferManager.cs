@@ -67,6 +67,9 @@ internal sealed record UploadTransferOperation(
 
 public sealed class TransferManager
 {
+    private const int MaximumConcurrentTransfers = 4;
+    private readonly SemaphoreSlim _transferSlots = new(MaximumConcurrentTransfers, MaximumConcurrentTransfers);
+
     public ObservableCollection<TransferRow> Items { get; } = [];
 
     public TransferRow StartDownload(
@@ -127,7 +130,7 @@ public sealed class TransferManager
         Start(row);
     }
 
-    private static void Start(TransferRow row)
+    private void Start(TransferRow row)
     {
         if (row.Operation is null) throw new InvalidOperationException("The transfer no longer has resumable operation details.");
         if (Interlocked.CompareExchange(ref row.Executing, 1, 0) != 0)
@@ -135,12 +138,13 @@ public sealed class TransferManager
         _ = RunAsync(row);
     }
 
-    private static async Task RunAsync(TransferRow row)
+    private async Task RunAsync(TransferRow row)
     {
         using var cancellation = new CancellationTokenSource();
         row.Cancellation = cancellation;
         row.Error = string.Empty;
-        row.State = TransferState.Running;
+        row.State = TransferState.Queued;
+        var slotAcquired = false;
         var progress = new Progress<(long Current, long Total)>(value =>
         {
             row.Current = value.Current;
@@ -148,6 +152,9 @@ public sealed class TransferManager
         });
         try
         {
+            await _transferSlots.WaitAsync(cancellation.Token);
+            slotAcquired = true;
+            row.State = TransferState.Running;
             switch (row.Operation)
             {
                 case DownloadTransferOperation download:
@@ -182,6 +189,7 @@ public sealed class TransferManager
         }
         finally
         {
+            if (slotAcquired) _transferSlots.Release();
             row.Cancellation = null;
             Interlocked.Exchange(ref row.Executing, 0);
         }

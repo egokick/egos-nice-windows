@@ -153,6 +153,30 @@ public sealed class AgentClient
         return new Uri(BaseUri(device), link.RelativeUrl);
     }
 
+    public async Task<IReadOnlyDictionary<string, Uri>> CreateMediaUrisAsync(
+        DeviceRecord device,
+        string token,
+        string root,
+        IReadOnlyCollection<string> paths,
+        CancellationToken cancellationToken = default)
+    {
+        if (paths.Count == 0) return new Dictionary<string, Uri>(StringComparer.OrdinalIgnoreCase);
+        using var request = CreateRequest(device, token, HttpMethod.Post, "api/v1/media-links");
+        request.Content = JsonContent.Create(new MediaLinksRequest
+        {
+            Root = root,
+            RelativePaths = paths.ToList()
+        }, options: JsonDefaults.Options);
+        using var response = await _http.SendAsync(request, cancellationToken);
+        await EnsureSuccessAsync(response, cancellationToken);
+        var links = await response.Content.ReadFromJsonAsync<MediaLinksResponse>(JsonDefaults.Options, cancellationToken)
+                    ?? throw new InvalidDataException("The agent returned an empty media-link batch.");
+        return links.Items.ToDictionary(
+            item => item.RelativePath,
+            item => new Uri(BaseUri(device), item.RelativeUrl),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     public async Task SetExitNodeAsync(DeviceRecord device, string token, bool enabled, CancellationToken cancellationToken = default) =>
         await SendJsonAsync(device, token, HttpMethod.Post, "api/v1/actions/exit-node", new ExitNodeRequest { Enabled = enabled }, cancellationToken);
 

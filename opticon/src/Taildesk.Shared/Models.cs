@@ -172,6 +172,8 @@ public sealed class RootDto
     public string Id { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string PathHint { get; set; } = string.Empty;
+
+    public override string ToString() => DisplayName;
 }
 
 public sealed class FileEntryDto
@@ -206,6 +208,24 @@ public sealed class MediaLinkResponse
 {
     public string RelativeUrl { get; set; } = string.Empty;
     public DateTimeOffset ExpiresAt { get; set; }
+}
+
+public sealed class MediaLinksRequest
+{
+    public string Root { get; set; } = string.Empty;
+    public List<string> RelativePaths { get; set; } = [];
+}
+
+public sealed class MediaLinkItemDto
+{
+    public string RelativePath { get; set; } = string.Empty;
+    public string RelativeUrl { get; set; } = string.Empty;
+}
+
+public sealed class MediaLinksResponse
+{
+    public DateTimeOffset ExpiresAt { get; set; }
+    public List<MediaLinkItemDto> Items { get; set; } = [];
 }
 
 public sealed class UploadStatusDto

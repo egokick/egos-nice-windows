@@ -18,7 +18,8 @@ var configPath = args.FirstOrDefault(argument => argument.StartsWith("--config="
                  ?? AppPaths.AgentConfigFile;
 var configStore = new JsonFileStore<AgentConfig>(configPath);
 var config = await configStore.LoadAsync();
-if (string.IsNullOrWhiteSpace(config.AgentTokenHash) || config.SharedRoots.Count == 0)
+if (string.IsNullOrWhiteSpace(config.AgentTokenHash)
+    || (!config.ExposeAllLocalVolumes && config.SharedRoots.Count == 0))
 {
     Console.Error.WriteLine($"Taildesk Agent is not configured. Expected {configPath}.");
     return;
@@ -54,7 +55,7 @@ builder.Services.AddSingleton(config);
 builder.Services.AddSingleton<AgentState>();
 builder.Services.AddSingleton<TailscaleCli>();
 builder.Services.AddSingleton<AgentRuntime>();
-builder.Services.AddSingleton(new PathGuard(config.SharedRoots));
+builder.Services.AddSingleton(new PathGuard(config.SharedRoots, config.ExposeAllLocalVolumes));
 builder.Services.AddSingleton<FileOperations>();
 builder.Services.AddSingleton<UpdateManager>();
 builder.Services.AddSingleton<SshAccessManager>();
@@ -293,6 +294,37 @@ app.MapPost("/api/v1/media-link", (MediaLinkRequest request, AgentState state, F
         nonce);
     var relative = $"/api/v1/media?root={Uri.EscapeDataString(request.Root)}&path={Uri.EscapeDataString(request.RelativePath)}&expires={expires.ToUnixTimeSeconds()}&nonce={Uri.EscapeDataString(nonce)}&signature={signature}";
     return Results.Ok(new MediaLinkResponse { RelativeUrl = relative, ExpiresAt = expires });
+});
+app.MapPost("/api/v1/media-links", (MediaLinksRequest request, AgentState state, FileOperations files) =>
+{
+    var paths = request.RelativePaths
+        .Where(path => !string.IsNullOrWhiteSpace(path))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Take(100)
+        .ToList();
+    if (paths.Count != request.RelativePaths.Count)
+        return Results.BadRequest(new { error = "Thumbnail requests must contain 1 to 100 unique file paths." });
+
+    var expires = DateTimeOffset.UtcNow.AddMinutes(5);
+    var items = new List<MediaLinkItemDto>(paths.Count);
+    foreach (var path in paths)
+    {
+        _ = files.ResolveFile(request.Root, path);
+        var nonce = SecurityHelpers.CreateToken(16);
+        var signature = SecurityHelpers.CreateMediaSignature(
+            state.Config.MediaSigningKey,
+            "GET",
+            request.Root,
+            path,
+            expires.ToUnixTimeSeconds(),
+            nonce);
+        items.Add(new MediaLinkItemDto
+        {
+            RelativePath = path,
+            RelativeUrl = $"/api/v1/media?root={Uri.EscapeDataString(request.Root)}&path={Uri.EscapeDataString(path)}&expires={expires.ToUnixTimeSeconds()}&nonce={Uri.EscapeDataString(nonce)}&signature={signature}"
+        });
+    }
+    return Results.Ok(new MediaLinksResponse { ExpiresAt = expires, Items = items });
 });
 app.MapGet("/api/v1/media", (string root, string path, long expires, string nonce, string signature, AgentState state, FileOperations files) =>
 {

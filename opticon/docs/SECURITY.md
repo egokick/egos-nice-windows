@@ -11,7 +11,7 @@
 
 - Requests name a configured root ID and relative path; arbitrary absolute paths are unsupported.
 - Rooted, UNC, device, alternate-data-stream, and escaping paths are rejected.
-- Shared roots are opened as verified Windows directory handles. Listings, reads, creates, promotions, and deletions resolve relative to those handles with reparse traversal disabled, so renaming or replacing a checked pathname cannot redirect a later SYSTEM operation.
+- Ready local volumes are opened as verified Windows directory handles. Listings, reads, creates, promotions, and deletions resolve relative to those handles with reparse traversal disabled, so renaming or replacing a checked pathname cannot redirect a later SYSTEM operation. The authenticated controller can browse any directory permitted by the Agent's Windows account; mapped network drives are not exposed as device volumes.
 - Uploads stream into a random partial file created relative to the verified destination handle, flush, then promote that same handle without overwriting an unexpected destination. Canceled uploads delete the partial through its verified handle.
 - Two concurrent uploads are allowed per Agent. Declared length is mandatory; the default ceiling is 256 GiB, a 5 GiB disk reserve is enforced, bytes cannot exceed the declaration, and each upload has a 24-hour cancellation deadline. This permits files larger than 20 GiB without permitting unbounded requests.
 - Media URLs carry an HMAC over HTTP method, root, relative path, expiry, and nonce, expire after five minutes, and revalidate the path when opened.

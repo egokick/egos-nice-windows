@@ -158,4 +158,6 @@ Set-Location 'C:\source\egos-nice-windows\opticon'
 
 The build runs the solution and self-tests, publishes self-contained Windows binaries, and writes `dist\Opticon-CommandCenter-win-x64.zip`. Extract it and run `Install-Opticon.ps1` as Administrator. The installer preserves the compatibility data paths, creates Opticon desktop/startup/Start Menu shortcuts with the Opticon icon, installs the narrowly scoped roaming-route maintenance task, and removes legacy Taildesk shortcuts.
 
+This command-center build does not publish a managed-device Agent update. After incrementing `Directory.Build.props`, publish the signed Agent/Guardian bundles with `fly-headscale\scripts\Publish-OpticonBundles.ps1`; only then will **Update Opticon** on a target discover the new version in the hosted manifest.
+
 For deeper implementation details, continue with `docs\ARCHITECTURE.md` and `docs\SECURITY.md`, then read the code under `src\Taildesk.Admin`, `src\Taildesk.Agent`, `src\Taildesk.Setup`, and `src\Taildesk.Shared`.

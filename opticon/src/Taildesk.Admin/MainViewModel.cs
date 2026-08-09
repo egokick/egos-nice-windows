@@ -168,6 +168,61 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string GetAgentToken(DeviceRecord device) => SecretProtector.Unprotect(device.AgentTokenProtected);
     public string GetRustDeskPassword(DeviceRecord device) => SecretProtector.Unprotect(device.RustDeskPasswordProtected);
 
+    public async Task RenameDeviceAsync(
+        DeviceRecord device,
+        string newName,
+        CancellationToken cancellationToken = default)
+    {
+        RequirePrimary();
+        ArgumentNullException.ThrowIfNull(device);
+        ArgumentNullException.ThrowIfNull(newName);
+        if (Busy) throw new InvalidOperationException("Wait for the current device refresh or operation to finish.");
+
+        var normalized = newName.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            throw new ArgumentException("Enter a name for the device.", nameof(newName));
+        if (normalized.Length > 100)
+            throw new ArgumentException("Device names can contain at most 100 characters.", nameof(newName));
+        if (normalized.Any(char.IsControl))
+            throw new ArgumentException("Device names must be a single line and cannot contain control characters.", nameof(newName));
+
+        await _state.InviteGate.WaitAsync(cancellationToken);
+        try
+        {
+            var registered = Config.Devices.FirstOrDefault(item => item.Id == device.Id)
+                             ?? throw new InvalidOperationException("That device is no longer enrolled.");
+            if (Config.Devices.Any(item => item.Id != registered.Id
+                                           && new[] { item.Name, item.HostName, item.DnsName, item.TailscaleIp, item.TailnetDeviceId }
+                                               .Any(selector => string.Equals(selector, normalized, StringComparison.OrdinalIgnoreCase))))
+            {
+                throw new InvalidOperationException("Another enrolled device already uses that name or device identifier.");
+            }
+
+            var oldStoredName = registered.Name;
+            var oldDisplayName = string.IsNullOrWhiteSpace(oldStoredName) ? registered.HostName : oldStoredName;
+            if (string.Equals(oldStoredName, normalized, StringComparison.Ordinal)) return;
+
+            registered.Name = normalized;
+            try
+            {
+                await _state.SaveAsync(cancellationToken);
+            }
+            catch
+            {
+                registered.Name = oldStoredName;
+                throw;
+            }
+
+            ReplaceDevices(Config.Devices);
+            Status = $"Renamed {oldDisplayName} to {normalized}";
+            Log($"Renamed enrolled device {oldDisplayName} to {normalized}. Its Windows hostname and Tailscale identity were not changed.");
+        }
+        finally
+        {
+            _state.InviteGate.Release();
+        }
+    }
+
     public async Task ChangeRoleAsync(DeviceRecord device, DeviceRole newRole, CancellationToken cancellationToken = default)
     {
         RequirePrimary();

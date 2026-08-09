@@ -38,6 +38,7 @@ var tests = new (string Name, Action Body)[]
     ("uploads permit huge files but retain bounded resource controls", TestUploadPolicy),
     ("cancelled uploads retain an authenticated byte offset and resume", TestResumableUpload),
     ("path guard permits a child and blocks traversal", TestPathGuard),
+    ("path guard exposes every ready local device volume", TestLocalVolumeRoots),
     ("exit-node approval contains both internet default routes", TestExitNodeApprovalRoutes),
     ("private HTTP transport bypasses proxies and redirects", TestDirectHttpTransport),
     ("enrollment retries accept only the exact committed identity", TestEnrollmentReplayPolicy),
@@ -46,6 +47,8 @@ var tests = new (string Name, Action Body)[]
     ("guarded path leases prevent component replacement", TestPathLease),
     ("WPF style templates match their control target types", TestWpfStyleTemplateTargets),
     ("WPF controls keep explicit accessible foreground/background pairs", TestWpfContrastContract),
+    ("file browser offers direct paths and list or thumbnail views", TestFileBrowserContract),
+    ("device rows expose a persisted rename action", TestDeviceRenameContract),
     ("DPAPI current-user and machine scopes round-trip", TestDpapi)
 };
 
@@ -643,6 +646,99 @@ static void TestPathGuard()
     {
         Directory.Delete(temporary, true);
     }
+}
+
+static void TestLocalVolumeRoots()
+{
+    if (!OperatingSystem.IsWindows()) return;
+    var guard = new PathGuard(new Dictionary<string, string>(), includeLocalVolumes: true);
+    var roots = guard.GetRoots();
+    foreach (var drive in DriveInfo.GetDrives())
+    {
+        try
+        {
+            if (!drive.IsReady || drive.DriveType is DriveType.Network or DriveType.NoRootDirectory) continue;
+            var expected = Path.TrimEndingDirectorySeparator(Path.GetFullPath(drive.RootDirectory.FullName));
+            Assert(roots.Any(candidate =>
+                    Path.TrimEndingDirectorySeparator(candidate.PathHint).Equals(expected, StringComparison.OrdinalIgnoreCase)),
+                $"ready local volume {expected} was not exposed");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+    }
+
+    var systemRoot = Path.TrimEndingDirectorySeparator(Path.GetPathRoot(Environment.SystemDirectory)!);
+    var systemVolume = roots.SingleOrDefault(candidate =>
+        Path.TrimEndingDirectorySeparator(candidate.PathHint).Equals(systemRoot, StringComparison.OrdinalIgnoreCase));
+    Assert(systemVolume is not null, "the Windows system volume was not exposed");
+    if (systemVolume is null) return;
+    Assert(systemVolume.Id.StartsWith("drive-", StringComparison.OrdinalIgnoreCase), "the local volume has no stable drive root id");
+    var relativeSystemDirectory = Path.GetRelativePath(systemVolume.PathHint, Environment.SystemDirectory);
+    Assert(guard.Resolve(systemVolume.Id, relativeSystemDirectory).Equals(
+            Path.GetFullPath(Environment.SystemDirectory), StringComparison.OrdinalIgnoreCase),
+        "a directory outside the legacy profile roots could not be resolved");
+}
+
+static void TestFileBrowserContract()
+{
+    var xamlPath = FindSourceFile("src", "Taildesk.Admin", "FileManagerWindow.xaml");
+    var document = XDocument.Load(xamlPath);
+    XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+    var names = document.Descendants()
+        .Select(element => element.Attribute(x + "Name")?.Value)
+        .Where(name => name is not null)
+        .ToHashSet(StringComparer.Ordinal);
+    Assert(names.Contains("PathText"), "the remote directory address bar is missing");
+    Assert(names.Contains("ShowThumbnailsCheck"), "the list/thumbnail toggle is missing");
+    Assert(names.Contains("FileGrid") && names.Contains("ThumbnailList"), "both file browser views must be present");
+
+    var fileGrid = document.Descendants().Single(element => element.Attribute(x + "Name")?.Value == "FileGrid");
+    var thumbnailList = document.Descendants().Single(element => element.Attribute(x + "Name")?.Value == "ThumbnailList");
+    Assert(fileGrid.Attribute("SelectionMode")?.Value == "Extended"
+           && thumbnailList.Attribute("SelectionMode")?.Value == "Extended",
+        "list and thumbnail views must both support Ctrl/Shift multi-selection");
+
+    var browser = ReadSource("src", "Taildesk.Admin", "FileManagerWindow.xaml.cs");
+    Assert(browser.Contains("SelectedItems", StringComparison.Ordinal)
+           && browser.Contains("PlanFolderDownloadsAsync", StringComparison.Ordinal)
+           && browser.Contains("_transfers.StartDownload", StringComparison.Ordinal)
+           && browser.Contains("Directory.CreateDirectory(localDirectory)", StringComparison.Ordinal)
+           && browser.IndexOf("foreach (var download in batch.Downloads)", StringComparison.Ordinal)
+              > browser.IndexOf("PlanFolderDownloadsAsync", StringComparison.Ordinal),
+        "multi-download must queue selected files and recursively preserve selected folder trees");
+
+    var transfers = ReadSource("src", "Taildesk.Admin", "TransferManager.cs");
+    Assert(transfers.Contains("MaximumConcurrentTransfers", StringComparison.Ordinal)
+           && transfers.Contains("_transferSlots.WaitAsync", StringComparison.Ordinal),
+        "large multi-download batches must use bounded transfer concurrency");
+
+    var agentConfig = ReadSource("src", "Taildesk.Shared", "AgentConfiguration.cs");
+    var agentProgram = ReadSource("src", "Taildesk.Agent", "Program.cs");
+    Assert(agentConfig.Contains("ExposeAllLocalVolumes", StringComparison.Ordinal)
+           && agentProgram.Contains("new PathGuard(config.SharedRoots, config.ExposeAllLocalVolumes)", StringComparison.Ordinal),
+        "the Agent must expose every ready local volume to the location dropdown");
+}
+
+static void TestDeviceRenameContract()
+{
+    var xaml = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml");
+    Assert(xaml.Contains("Header=\"Rename device\"", StringComparison.Ordinal)
+           && xaml.Contains("PreviewMouseRightButtonDown=\"DeviceGrid_PreviewMouseRightButtonDown\"", StringComparison.Ordinal)
+           && xaml.Contains("Click=\"RenameDevice_Click\"", StringComparison.Ordinal),
+        "the device grid must select a right-clicked row and expose Rename device");
+
+    var window = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml.cs");
+    Assert(window.Contains("_viewModel.RenameDeviceAsync(device, prompt.Value)", StringComparison.Ordinal),
+        "the Rename device menu action must submit the selected device and entered name");
+
+    var viewModel = ReadSource("src", "Taildesk.Admin", "MainViewModel.cs");
+    var renameStart = viewModel.IndexOf("public async Task RenameDeviceAsync", StringComparison.Ordinal);
+    var renameEnd = viewModel.IndexOf("public async Task ChangeRoleAsync", renameStart, StringComparison.Ordinal);
+    Assert(renameStart >= 0 && renameEnd > renameStart, "the persisted device rename operation is missing");
+    var rename = viewModel[renameStart..renameEnd];
+    Assert(rename.Contains("registered.Name = normalized", StringComparison.Ordinal)
+           && rename.Contains("await _state.SaveAsync(cancellationToken)", StringComparison.Ordinal)
+           && rename.Contains("ReplaceDevices(Config.Devices)", StringComparison.Ordinal),
+        "device rename must update, persist, and refresh the primary registry");
 }
 
 static void TestExitNodeApprovalRoutes()

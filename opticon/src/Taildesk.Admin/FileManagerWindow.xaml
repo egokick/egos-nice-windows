@@ -1,37 +1,99 @@
 <Window x:Class="Taildesk.Admin.FileManagerWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Opticon Files" Icon="pack://application:,,,/opticon.ico" Width="980" Height="650" MinWidth="760" MinHeight="500"
+        Title="Opticon Files" Icon="pack://application:,,,/opticon.ico" Width="1080" Height="700" MinWidth="780" MinHeight="520"
         WindowStartupLocation="CenterOwner">
     <Grid Margin="16">
-        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
         <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="210" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-            <TextBlock Text="ROOT" Style="{StaticResource LabelText}" VerticalAlignment="Center" Margin="0,0,9,0" />
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="230" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="LOCATION" Style="{StaticResource LabelText}" VerticalAlignment="Center" Margin="0,0,9,0" />
             <ComboBox x:Name="RootCombo" Grid.Column="1" DisplayMemberPath="DisplayName" SelectionChanged="RootCombo_SelectionChanged" />
             <Button Grid.Column="2" Margin="9,0,0,0" Content="Up" Click="Up_Click" />
-            <TextBox x:Name="PathText" Grid.Column="3" Margin="9,0,9,0" IsReadOnly="True" FontFamily="Cascadia Mono,Consolas" />
-            <Button Grid.Column="4" Content="Refresh" Click="Refresh_Click" />
+            <TextBox x:Name="PathText" Grid.Column="3" Margin="9,0,7,0" FontFamily="Cascadia Mono,Consolas"
+                     ToolTip="Enter any directory on the selected device and press Enter" KeyDown="PathText_KeyDown" />
+            <Button Grid.Column="4" Content="Go" Click="Go_Click" />
+            <Button Grid.Column="5" Margin="7,0,0,0" Content="Refresh" Click="Refresh_Click" />
         </Grid>
 
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,12,0,10">
-            <Button Content="Download" Style="{StaticResource PrimaryButton}" Click="Download_Click" />
-            <Button Content="Upload" Margin="7,0,0,0" Click="Upload_Click" />
-            <Button Content="Open / stream" Margin="7,0,0,0" Click="Open_Click" />
-            <Button Content="New folder" Margin="7,0,0,0" Click="NewFolder_Click" />
-            <Button Content="Delete" Margin="7,0,0,0" Style="{StaticResource DangerButton}" Click="Delete_Click" />
-            <Button Content="Cancel operation" Margin="16,0,0,0" Click="Cancel_Click" />
-        </StackPanel>
+        <Grid Grid.Row="1" Margin="0,12,0,10">
+            <StackPanel Orientation="Horizontal">
+                <Button Content="Download" Style="{StaticResource PrimaryButton}" Click="Download_Click"
+                        ToolTip="Download every selected file and folder" />
+                <Button Content="Upload" Margin="7,0,0,0" Click="Upload_Click" />
+                <Button Content="Open / stream" Margin="7,0,0,0" Click="Open_Click" />
+                <Button Content="New folder" Margin="7,0,0,0" Click="NewFolder_Click" />
+                <Button Content="Delete" Margin="7,0,0,0" Style="{StaticResource DangerButton}" Click="Delete_Click" />
+                <Button Content="Cancel operation" Margin="16,0,0,0" Click="Cancel_Click" />
+            </StackPanel>
+            <Border HorizontalAlignment="Right" VerticalAlignment="Center" Background="{StaticResource PanelBrush}"
+                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="9,6">
+                <CheckBox x:Name="ShowThumbnailsCheck" Content="Show thumbnails"
+                          Checked="ShowThumbnailsCheck_Changed" Unchecked="ShowThumbnailsCheck_Changed"
+                          ToolTip="Switch between a compact list and image tiles" />
+            </Border>
+        </Grid>
 
-        <DataGrid x:Name="FileGrid" Grid.Row="2" IsReadOnly="True" MouseDoubleClick="FileGrid_DoubleClick">
-            <DataGrid.Columns>
-                <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="3*" />
-                <DataGridCheckBoxColumn Header="FOLDER" Binding="{Binding IsDirectory}" Width="75" />
-                <DataGridTextColumn Header="SIZE" Binding="{Binding Size, StringFormat={}{0:N0}}" Width="110" />
-                <DataGridTextColumn Header="MODIFIED" Binding="{Binding LastWriteTime, StringFormat={}{0:g}}" Width="170" />
-                <DataGridTextColumn Header="PATH" Binding="{Binding RelativePath}" Width="2*" />
-            </DataGrid.Columns>
-        </DataGrid>
+        <Grid Grid.Row="2">
+            <DataGrid x:Name="FileGrid" IsReadOnly="True" SelectionMode="Extended"
+                      MouseDoubleClick="FileGrid_DoubleClick"
+                      ToolTip="Use Ctrl or Shift to select multiple files and folders">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="3*" />
+                    <DataGridTextColumn Header="TYPE" Binding="{Binding Kind}" Width="105" />
+                    <DataGridTextColumn Header="SIZE" Binding="{Binding DisplaySize}" Width="110" />
+                    <DataGridTextColumn Header="MODIFIED" Binding="{Binding LastWriteTime, StringFormat={}{0:g}}" Width="170" />
+                    <DataGridTextColumn Header="PATH" Binding="{Binding RelativePath}" Width="2*" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <ListBox x:Name="ThumbnailList" Visibility="Collapsed" SelectionMode="Extended"
+                     MouseDoubleClick="ThumbnailList_DoubleClick"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled" Padding="8"
+                     ToolTip="Use Ctrl or Shift to select multiple files and folders">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel IsItemsHost="True" />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Width="148" Height="154" Margin="3">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="100" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border Background="{StaticResource ControlBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                                <Grid>
+                                    <TextBlock Text="{Binding IconGlyph}" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                                               FontSize="46" Foreground="{StaticResource MutedBrush}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    <Image Source="{Binding Thumbnail}" Stretch="UniformToFill" />
+                                </Grid>
+                            </Border>
+                            <TextBlock Grid.Row="1" Text="{Binding Name}" Margin="2,6,2,0" TextWrapping="Wrap"
+                                       TextTrimming="CharacterEllipsis" MaxHeight="38" HorizontalAlignment="Center" />
+                            <TextBlock Grid.Row="2" Text="{Binding TileDetail}" Style="{StaticResource LabelText}"
+                                       Margin="2,3,2,0" HorizontalAlignment="Center" />
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Grid>
 
         <Grid Grid.Row="3" Margin="0,10,0,0">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>

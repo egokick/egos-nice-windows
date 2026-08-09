@@ -80,7 +80,14 @@
                     <Grid Grid.Row="2">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="320" /></Grid.ColumnDefinitions>
                         <DataGrid x:Name="DeviceGrid" ItemsSource="{Binding Devices}" SelectedItem="{Binding SelectedDevice}"
-                                  IsReadOnly="True" AlternationCount="2" SelectionChanged="DeviceGrid_SelectionChanged">
+                                  IsReadOnly="True" AlternationCount="2" SelectionChanged="DeviceGrid_SelectionChanged"
+                                  PreviewMouseRightButtonDown="DeviceGrid_PreviewMouseRightButtonDown"
+                                  ContextMenuOpening="DeviceGrid_ContextMenuOpening">
+                            <DataGrid.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem x:Name="RenameDeviceMenuItem" Header="Rename device" Click="RenameDevice_Click" />
+                                </ContextMenu>
+                            </DataGrid.ContextMenu>
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="2*" />
                                 <DataGridTextColumn Header="STATE" Binding="{Binding State}" Width="110" />
@@ -235,23 +242,9 @@
                             <Button Grid.Column="4" VerticalAlignment="Bottom" Margin="0,0,8,0" Content="Expire selected" Style="{StaticResource DangerButton}" Click="CancelInvite_Click" />
                             <Button x:Name="CreateInviteButton" Grid.Column="5" VerticalAlignment="Bottom" Content="Create one-click link" Style="{StaticResource PrimaryButton}" Click="CreateInvite_Click" />
                             <StackPanel Grid.Row="1" Grid.ColumnSpan="6" Margin="0,15,0,0">
-                                <TextBlock Text="SHARED FOLDERS" Style="{StaticResource LabelText}" />
-                                <WrapPanel Margin="0,7,0,0">
-                                    <WrapPanel.Resources>
-                                        <Style TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
-                                            <Setter Property="Background" Value="#272C32" />
-                                            <Setter Property="BorderBrush" Value="{StaticResource BorderStrongBrush}" />
-                                            <Setter Property="BorderThickness" Value="1" />
-                                            <Setter Property="Padding" Value="8,4" />
-                                            <Setter Property="HorizontalContentAlignment" Value="Center" />
-                                        </Style>
-                                    </WrapPanel.Resources>
-                                    <CheckBox x:Name="InviteRootDesktopCheck" Content="Desktop" IsChecked="True" Margin="0,0,22,0" />
-                                    <CheckBox x:Name="InviteRootDocumentsCheck" Content="Documents" IsChecked="True" Margin="0,0,22,0" />
-                                    <CheckBox x:Name="InviteRootDownloadsCheck" Content="Downloads" IsChecked="True" Margin="0,0,22,0" />
-                                    <CheckBox x:Name="InviteRootPicturesCheck" Content="Pictures" IsChecked="True" Margin="0,0,22,0" />
-                                    <CheckBox x:Name="InviteRootVideosCheck" Content="Videos" IsChecked="True" />
-                                </WrapPanel>
+                                <TextBlock Text="FILE ACCESS" Style="{StaticResource LabelText}" />
+                                <TextBlock Margin="0,7,0,0" Text="Opticon can browse and transfer files from any accessible folder on each local disk. Access still requires the private device credential and Tailscale connection."
+                                           Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
                             </StackPanel>
                         </Grid>
                     </Border>

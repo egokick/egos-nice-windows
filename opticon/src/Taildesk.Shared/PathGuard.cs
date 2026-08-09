@@ -7,19 +7,42 @@ namespace Taildesk.Shared;
 public sealed class PathGuard
 {
     private readonly Dictionary<string, string> _roots;
+    private readonly bool _includeLocalVolumes;
 
-    public PathGuard(IReadOnlyDictionary<string, string> roots)
+    public PathGuard(IReadOnlyDictionary<string, string> roots, bool includeLocalVolumes = false)
     {
         _roots = roots.ToDictionary(
             pair => pair.Key,
-            pair => Path.GetFullPath(Environment.ExpandEnvironmentVariables(pair.Value)).TrimEnd(Path.DirectorySeparatorChar),
+            pair => NormalizeRootPath(Environment.ExpandEnvironmentVariables(pair.Value)),
             StringComparer.OrdinalIgnoreCase);
+        _includeLocalVolumes = includeLocalVolumes;
     }
 
-    public IReadOnlyList<RootDto> GetRoots() => _roots
-        .Select(pair => new RootDto { Id = pair.Key, DisplayName = pair.Key, PathHint = pair.Value })
-        .OrderBy(root => root.DisplayName)
-        .ToList();
+    public IReadOnlyList<RootDto> GetRoots()
+    {
+        var roots = new List<RootDto>();
+        if (_includeLocalVolumes)
+        {
+            roots.AddRange(GetLocalVolumes().Select(pair => new RootDto
+            {
+                Id = pair.Key,
+                DisplayName = GetVolumeDisplayName(pair.Value),
+                PathHint = pair.Value
+            }));
+        }
+        roots.AddRange(_roots.Select(pair => new RootDto
+        {
+            Id = pair.Key,
+            DisplayName = pair.Key,
+            PathHint = pair.Value
+        }));
+        return roots
+            .GroupBy(root => root.PathHint, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderByDescending(root => root.Id.StartsWith("drive-", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(root => root.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
 
     public string Resolve(string rootId, string? relativePath, bool mustExist = true)
     {
@@ -42,7 +65,7 @@ public sealed class PathGuard
         var rootHandle = NativePath.OpenAbsoluteRoot(root);
         try
         {
-            var finalRoot = NativePath.GetFinalPath(rootHandle).TrimEnd(Path.DirectorySeparatorChar);
+            var finalRoot = NormalizeRootPath(NativePath.GetFinalPath(rootHandle));
             if (!finalRoot.Equals(root, StringComparison.OrdinalIgnoreCase))
                 throw new UnauthorizedAccessException("The configured shared root resolves through another filesystem location.");
             if (safeRelative.Length == 0)
@@ -76,7 +99,8 @@ public sealed class PathGuard
         string rootId,
         string? relativePath)
     {
-        if (!_roots.TryGetValue(rootId, out var root))
+        var availableRoots = GetAvailableRoots();
+        if (!availableRoots.TryGetValue(rootId, out var root))
             throw new UnauthorizedAccessException("That shared root is not available.");
         var suppliedPath = relativePath ?? string.Empty;
         if (Path.IsPathRooted(suppliedPath)
@@ -90,12 +114,58 @@ public sealed class PathGuard
             .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
             .TrimStart(Path.DirectorySeparatorChar);
         var candidate = Path.GetFullPath(Path.Combine(root, safeRelative));
-        var prefix = root + Path.DirectorySeparatorChar;
+        var prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
         if (!candidate.Equals(root, StringComparison.OrdinalIgnoreCase)
             && !candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("The requested path leaves the shared root.");
         return (root, candidate, safeRelative);
     }
+
+    private IReadOnlyDictionary<string, string> GetAvailableRoots()
+    {
+        if (!_includeLocalVolumes) return _roots;
+        var roots = new Dictionary<string, string>(_roots, StringComparer.OrdinalIgnoreCase);
+        foreach (var volume in GetLocalVolumes()) roots[volume.Key] = volume.Value;
+        return roots;
+    }
+
+    private static Dictionary<string, string> GetLocalVolumes()
+    {
+        var volumes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var drive in DriveInfo.GetDrives())
+        {
+            try
+            {
+                if (!drive.IsReady || drive.DriveType is DriveType.Network or DriveType.NoRootDirectory)
+                    continue;
+                var root = NormalizeRootPath(drive.RootDirectory.FullName);
+                var letter = root.Length >= 2 && root[1] == ':'
+                    ? char.ToUpperInvariant(root[0]).ToString()
+                    : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(root)))[..12];
+                volumes[$"drive-{letter}"] = root;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return volumes;
+    }
+
+    private static string GetVolumeDisplayName(string root)
+    {
+        try
+        {
+            var drive = new DriveInfo(root);
+            var label = drive.VolumeLabel.Trim();
+            return string.IsNullOrWhiteSpace(label) ? $"Local Disk ({root})" : $"{label} ({root})";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return $"Local Disk ({root})";
+        }
+    }
+
+    private static string NormalizeRootPath(string path) =>
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
     private static void RejectReparseTraversal(string root, string candidate)
     {

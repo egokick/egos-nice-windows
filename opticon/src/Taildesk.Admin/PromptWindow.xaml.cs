@@ -4,12 +4,17 @@ namespace Taildesk.Admin;
 
 public partial class PromptWindow : Window
 {
-    public PromptWindow(string title, string prompt)
+    public PromptWindow(string title, string prompt, string initialValue = "")
     {
         InitializeComponent();
         Title = title;
         PromptText.Text = prompt;
-        Loaded += (_, _) => ValueText.Focus();
+        ValueText.Text = initialValue;
+        Loaded += (_, _) =>
+        {
+            ValueText.Focus();
+            ValueText.SelectAll();
+        };
     }
 
     public string Value => ValueText.Text;

@@ -34,7 +34,7 @@ public sealed class FileOperations
             {
                 continue;
             }
-            if (item.IsHiddenOrSystem || item.IsReparsePoint)
+            if (item.IsReparsePoint)
             {
                 continue;
             }

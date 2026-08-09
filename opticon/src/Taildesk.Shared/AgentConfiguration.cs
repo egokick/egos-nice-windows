@@ -27,6 +27,7 @@ public sealed class AgentConfig
     public bool AdvertiseExitNode { get; set; }
     public DateTimeOffset InstalledAt { get; set; } = DateTimeOffset.UtcNow;
     public Dictionary<string, string> SharedRoots { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public bool ExposeAllLocalVolumes { get; set; } = true;
     public List<string> ControllerShortcutPaths { get; set; } = [];
     public long MaxUploadBytes { get; set; } = 256L * 1024 * 1024 * 1024;
     public long MinimumFreeSpaceBytes { get; set; } = 5L * 1024 * 1024 * 1024;
