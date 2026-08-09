@@ -687,7 +687,6 @@ if (-not $SkipBuild) {
         -ProductCertificateThumbprint $ProductCertificateThumbprint `
         -Rfc3161TimestampUrl $Rfc3161TimestampUrl `
         -SignToolPath $SignToolPath
-    if ($LASTEXITCODE -ne 0) { throw "Opticon bundle build failed." }
 }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $allOpticonArtifacts = @($manifest.artifacts | Where-Object { $_.product -in @('OpticonBundle', 'OpticonBootstrap', 'OpticonSource') })
