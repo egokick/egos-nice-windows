@@ -1776,6 +1776,10 @@ static void TestOpenSshRecoveryDesign()
         "the maintenance watchdog must not queue missed StartWhenAvailable runs");
 
     var bundleBuilder = ReadSource("fly-headscale", "scripts", "Build-OpticonBundles.ps1");
+    var releaseVersion = System.Text.RegularExpressions.Regex.Match(
+        ReadSource("Directory.Build.props"), @"<Version>([^<]+)</Version>").Groups[1].Value;
+    Assert(bundleBuilder.Contains($"[string]$Version = \"{releaseVersion}\"", StringComparison.Ordinal),
+        "the checked-in hosted release default must match the product version");
     Assert(bundleBuilder.Contains("$setupPath", StringComparison.Ordinal)
            && bundleBuilder.Contains("Get-Item -LiteralPath $setupPath", StringComparison.Ordinal),
         "the signed inner release manifest must include the root Setup executable");
