@@ -531,7 +531,9 @@ function Invoke-ExactDotNet {
         $process.WaitForExit()
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
-        if ($process.ExitCode -ne 0) { throw "The exact .NET SDK command failed ($($process.ExitCode)): $($stderr.Trim())" }
+        if ($process.ExitCode -ne 0) {
+            throw "The exact .NET SDK command '$([string]::Join(' ', $Arguments))' failed ($($process.ExitCode)): $($stderr.Trim())"
+        }
         if ($CaptureOutput) { return $stdout }
         if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host $stdout.TrimEnd() }
     } finally { $process.Dispose() }
