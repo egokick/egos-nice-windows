@@ -2054,6 +2054,10 @@ static void TestOpenSshRecoveryDesign()
            && installer.Contains("sanitized environment", StringComparison.Ordinal)
            && !installer.Contains("$start.ArgumentList.Add", StringComparison.Ordinal),
         "the protected installer must run task and vendor commands through Windows PowerShell 5.1-compatible process APIs");
+    Assert(installer.Contains("if ($ControllerOnlyRepair)", StringComparison.Ordinal)
+           && installer.Contains("without changing persistent tasks", StringComparison.Ordinal)
+           && installer.Contains("must not query, replace, or run machine tasks", StringComparison.Ordinal),
+        "a source-triggered command-center repair must not touch persistent scheduled tasks");
     Assert(buildScript.Contains("SkipTargetReleaseDeployment", StringComparison.Ordinal)
            && buildScript.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
            && buildWorkflow.Contains("contents: read", StringComparison.Ordinal)

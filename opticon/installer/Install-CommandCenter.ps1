@@ -1604,29 +1604,38 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows could not create the Tailscale-only co
 }
 
 $admin = Join-Path $InstallDirectory 'Opticon.exe'
-$routeTaskSnapshot = Get-RouteTaskXml
-$uiTaskSnapshot = Get-UiTaskXml
-try {
+if ($ControllerOnlyRepair) {
+    # A source-triggered repair is deliberately payload-only. In particular it
+    # must not query, replace, or run machine tasks owned by a prior install:
+    # those tasks can be SYSTEM-protected and the launcher starts the repaired
+    # command center directly once this signed transaction succeeds.
+    Install-OpticonPayloadTransaction -Source $source -Destination $InstallDirectory -ConfigureActivatedPayload { }
+    Write-Host 'Repaired the signed Opticon command-center payload without changing persistent tasks.' -ForegroundColor Green
+} else {
+    $routeTaskSnapshot = Get-RouteTaskXml
+    $uiTaskSnapshot = Get-UiTaskXml
+    try {
     Install-OpticonPayloadTransaction -Source $source -Destination $InstallDirectory -ConfigureActivatedPayload {
         Register-ExactRouteKeeperTask
         Register-ExactUiTask -Executable $admin -Sid $interactiveProfile.Sid
     }
-} catch {
-    $installFailure = $_
-    try {
-        Restore-RouteTaskSnapshot -Snapshot $routeTaskSnapshot
-        Restore-UiTaskSnapshot -Snapshot $uiTaskSnapshot
     } catch {
-        throw "Opticon installation failed and its scheduled-task rollback also failed. Install error: $($installFailure.Exception.Message). Task rollback error: $($_.Exception.Message)"
+        $installFailure = $_
+        try {
+            Restore-RouteTaskSnapshot -Snapshot $routeTaskSnapshot
+            Restore-UiTaskSnapshot -Snapshot $uiTaskSnapshot
+        } catch {
+            throw "Opticon installation failed and its scheduled-task rollback also failed. Install error: $($installFailure.Exception.Message). Task rollback error: $($_.Exception.Message)"
+        }
+        throw $installFailure
     }
-    throw $installFailure
-}
 
-Start-ExactRouteKeeperTask
-Start-ExactUiTask -Executable $admin -Sid $interactiveProfile.Sid
-Write-Host "Installed for $($interactiveProfile.AccountName)." -ForegroundColor Green
-Write-Host 'The signed command center has been started through its least-privilege interactive task.' -ForegroundColor Green
-Write-Host 'It starts again at sign-in and remains available while that user stays signed in; locking the screen is fine.' -ForegroundColor Yellow
+    Start-ExactRouteKeeperTask
+    Start-ExactUiTask -Executable $admin -Sid $interactiveProfile.Sid
+    Write-Host "Installed for $($interactiveProfile.AccountName)." -ForegroundColor Green
+    Write-Host 'The signed command center has been started through its least-privilege interactive task.' -ForegroundColor Green
+    Write-Host 'It starts again at sign-in and remains available while that user stays signed in; locking the screen is fine.' -ForegroundColor Yellow
+}
 } finally {
     $installLock.Dispose()
 }
