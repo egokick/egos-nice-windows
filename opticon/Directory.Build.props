@@ -4,7 +4,7 @@
     <WindowsSdkPackageVersion>10.0.19041.57</WindowsSdkPackageVersion>
     <OpticonRuntimeVersion>10.0.10</OpticonRuntimeVersion>
     <TargetLatestRuntimePatch>true</TargetLatestRuntimePatch>
-    <Version>1.1.39</Version>
+    <Version>1.1.40</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
@@ -16,10 +16,15 @@
     <OpticonSourceReleaseCertificateBase64 Condition="'$(OpticonSourceReleaseCertificateBase64)' == ''"></OpticonSourceReleaseCertificateBase64>
     <OpticonProductSignerThumbprint Condition="'$(OpticonProductSignerThumbprint)' == '' and '$(OpticonSigningProfile)' == 'Developer'">$(OpticonInvitationSigningThumbprint)</OpticonProductSignerThumbprint>
     <OpticonProductSigningCertificateBase64 Condition="'$(OpticonProductSigningCertificateBase64)' == ''"></OpticonProductSigningCertificateBase64>
+    <!-- A one-release escape hatch for devices that predate the split release
+         trust roots. Empty for every ordinary build. -->
+    <OpticonLegacyMigrationVersion Condition="'$(OpticonLegacyMigrationVersion)' == ''"></OpticonLegacyMigrationVersion>
+    <OpticonLegacyMigrationSignerThumbprint Condition="'$(OpticonLegacyMigrationSignerThumbprint)' == ''"></OpticonLegacyMigrationSignerThumbprint>
     <_OpticonPublishableProfile Condition="'$(OpticonSigningProfile)' == 'Production' or '$(OpticonSigningProfile)' == 'OwnerManaged'">true</_OpticonPublishableProfile>
     <_OpticonInvitationSigningThumbprintNormalized>$([System.String]::Concat('$(OpticonInvitationSigningThumbprint)').ToUpperInvariant())</_OpticonInvitationSigningThumbprintNormalized>
     <_OpticonSourceReleaseKeyIdNormalized>$([System.String]::Concat('$(OpticonSourceReleaseKeyId)').ToUpperInvariant())</_OpticonSourceReleaseKeyIdNormalized>
     <_OpticonProductSignerThumbprintNormalized>$([System.String]::Concat('$(OpticonProductSignerThumbprint)').ToUpperInvariant())</_OpticonProductSignerThumbprintNormalized>
+    <_OpticonLegacyMigrationSignerThumbprintNormalized>$([System.String]::Concat('$(OpticonLegacyMigrationSignerThumbprint)').ToUpperInvariant())</_OpticonLegacyMigrationSignerThumbprintNormalized>
     <_OpticonInvitationSigningThumbprintValid>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_OpticonInvitationSigningThumbprintNormalized)', '^[0-9A-F]{40}$'))</_OpticonInvitationSigningThumbprintValid>
     <_OpticonSourceReleaseKeyIdValid>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_OpticonSourceReleaseKeyIdNormalized)', '^[0-9A-F]{40}$'))</_OpticonSourceReleaseKeyIdValid>
     <_OpticonProductSignerThumbprintValid>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_OpticonProductSignerThumbprintNormalized)', '^[0-9A-F]{40}$'))</_OpticonProductSignerThumbprintValid>
@@ -31,6 +36,8 @@
     <AssemblyMetadata Include="OpticonSourceReleaseCertificateBase64" Value="$(OpticonSourceReleaseCertificateBase64)" />
     <AssemblyMetadata Include="OpticonProductSignerThumbprint" Value="$(_OpticonProductSignerThumbprintNormalized)" />
     <AssemblyMetadata Include="OpticonProductSigningCertificateBase64" Value="$(OpticonProductSigningCertificateBase64)" />
+    <AssemblyMetadata Include="OpticonLegacyMigrationVersion" Value="$(OpticonLegacyMigrationVersion)" />
+    <AssemblyMetadata Include="OpticonLegacyMigrationSignerThumbprint" Value="$(OpticonLegacyMigrationSignerThumbprint)" />
   </ItemGroup>
 
   <Target Name="ValidateOpticonSigningConfiguration" BeforeTargets="CoreCompile">
@@ -56,5 +63,9 @@
            Text="The publishable product signer must be separate from the online invitation key." />
     <Error Condition="'$(_OpticonPublishableProfile)' == 'true' and '$(_OpticonProductSignerThumbprintNormalized)' == '$(_OpticonSourceReleaseKeyIdNormalized)'"
            Text="The publishable product signer must be separate from the offline source-release key." />
+    <Error Condition="('$(OpticonLegacyMigrationVersion)' == '') != ('$(OpticonLegacyMigrationSignerThumbprint)' == '')"
+           Text="Legacy migration builds require both OpticonLegacyMigrationVersion and OpticonLegacyMigrationSignerThumbprint." />
+    <Error Condition="'$(OpticonLegacyMigrationVersion)' != '' and ('$(_OpticonPublishableProfile)' != 'true' or '$(OpticonLegacyMigrationVersion)' != '$(Version)' or '$(_OpticonLegacyMigrationSignerThumbprintNormalized)' != '$(_OpticonInvitationSigningThumbprintNormalized)')"
+           Text="A legacy migration build must be publishable, match its exact Version, and use only the retired invitation signer." />
   </Target>
 </Project>

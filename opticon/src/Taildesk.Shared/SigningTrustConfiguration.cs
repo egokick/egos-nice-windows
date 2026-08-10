@@ -31,6 +31,12 @@ public static class BuildSigningTrust
     internal static string SourceReleaseCertificateBase64 => Get("OpticonSourceReleaseCertificateBase64").Trim();
     internal static string ProductSignerThumbprint => Get("OpticonProductSignerThumbprint").Trim().ToUpperInvariant();
     internal static string ProductSigningCertificateBase64 => Get("OpticonProductSigningCertificateBase64").Trim();
+    internal static string LegacyMigrationVersion => Get("OpticonLegacyMigrationVersion").Trim();
+    internal static string LegacyMigrationSignerThumbprint => Get("OpticonLegacyMigrationSignerThumbprint").Trim().ToUpperInvariant();
+
+    internal static bool IsLegacyMigrationBuild => !string.IsNullOrEmpty(LegacyMigrationVersion)
+                                                   && LegacyMigrationVersion == CurrentVersion
+                                                   && LegacyMigrationSignerThumbprint == InvitationSigning.CertificateThumbprint;
 
     public static void RequirePublishable()
     {
@@ -42,6 +48,16 @@ public static class BuildSigningTrust
     }
 
     private static string Get(string key) => Metadata.TryGetValue(key, out var value) ? value : string.Empty;
+
+    private static string CurrentVersion
+    {
+        get
+        {
+            var version = typeof(BuildSigningTrust).Assembly.GetName().Version
+                          ?? throw new InvalidOperationException("The Opticon build version is unavailable.");
+            return $"{version.Major}.{version.Minor}.{version.Build}";
+        }
+    }
 
     private static OpticonSigningProfile ParseProfile(string value) => value switch
     {

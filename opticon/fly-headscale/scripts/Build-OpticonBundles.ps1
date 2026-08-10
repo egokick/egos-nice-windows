@@ -4,10 +4,11 @@ param(
     [string]$Runtime = "win-x64",
     [ValidateSet("Production", "OwnerManaged")]
     [string]$SigningProfile = "Production",
-    [string]$Version = "1.1.39",
+    [string]$Version = "1.1.40",
     [string]$MinimumGuardianVersion = "1.1.2",
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
+    [ValidatePattern('^$|^[A-Fa-f0-9]{40}$')][string]$LegacyMigrationSignerThumbprint = '',
     [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
     [Parameter(Mandatory)][string]$SignToolPath
 )
@@ -17,6 +18,12 @@ Set-StrictMode -Version Latest
 $invitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
 $SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint.ToUpperInvariant()
 $ProductCertificateThumbprint = $ProductCertificateThumbprint.ToUpperInvariant()
+$LegacyMigrationSignerThumbprint = $LegacyMigrationSignerThumbprint.ToUpperInvariant()
+$isLegacyMigration = -not [string]::IsNullOrWhiteSpace($LegacyMigrationSignerThumbprint)
+if ($isLegacyMigration -and ($SigningProfile -ne 'OwnerManaged' -or
+        $LegacyMigrationSignerThumbprint -ne $invitationSigningThumbprint)) {
+    throw 'A legacy Agent migration must be an OwnerManaged release signed only with the exact retired invitation certificate.'
+}
 $script:git = $null
 $script:trustedGitRoot = $null
 
@@ -166,7 +173,7 @@ function Assert-ProductSignature {
     }
     if ($signature.Status -notin $allowedStatus -or
         $null -eq $signature.SignerCertificate -or
-        -not $signature.SignerCertificate.Thumbprint.Equals($ProductCertificateThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $signature.SignerCertificate.Thumbprint.Equals($script:payloadSignerThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
         $null -eq $signature.TimeStamperCertificate) {
         throw "$SigningProfile Authenticode verification, publisher pinning, or RFC3161 timestamp validation failed for $Path."
     }
@@ -250,7 +257,7 @@ function Invoke-SignTool {
 
 function Invoke-ProductSigning {
     param([Parameter(Mandatory)][string]$Path)
-    Invoke-SignTool -Arguments @('sign', '/fd', 'SHA256', '/sha1', $ProductCertificateThumbprint,
+    Invoke-SignTool -Arguments @('sign', '/fd', 'SHA256', '/sha1', $script:payloadSignerThumbprint,
         '/tr', $Rfc3161TimestampUrl, '/td', 'SHA256', $Path)
     Assert-ProductSignature -Path $Path
 }
@@ -579,6 +586,19 @@ $packageBuildLock = Enter-OpticonPackageBuildLock (Join-Path $repo "artifacts\.o
 try {
 $sourceReleaseCertificate = Get-ReleaseCertificate -Thumbprint $SourceReleaseCertificateThumbprint -Purpose 'Offline source-release signing'
 $productCertificate = Get-ReleaseCertificate -Thumbprint $ProductCertificateThumbprint -Purpose "$SigningProfile Authenticode signing"
+$script:payloadSignerThumbprint = $ProductCertificateThumbprint
+$payloadCertificate = $productCertificate
+$releaseManifestCertificate = $sourceReleaseCertificate
+if ($isLegacyMigration) {
+    $legacyMigrationCertificate = Get-ReleaseCertificate -Thumbprint $LegacyMigrationSignerThumbprint -Purpose 'One-time legacy Agent migration signing'
+    Assert-ProductSigningCertificate -Certificate $legacyMigrationCertificate -RequirePublicTrust $false
+    $script:payloadSignerThumbprint = $LegacyMigrationSignerThumbprint
+    $payloadCertificate = $legacyMigrationCertificate
+    # Only pre-trust-split Agents process this manifest. Their embedded verifier
+    # pins the retired invitation certificate, and this exact bridge is the
+    # final release allowed to use it.
+    $releaseManifestCertificate = $legacyMigrationCertificate
+}
 $sourceRsaProbe = Get-OpticonManifestSigningKey -Certificate $sourceReleaseCertificate
 try {
     if ($sourceRsaProbe.KeySize -lt 3072) { throw 'The production source-release RSA key must be at least 3072 bits.' }
@@ -671,6 +691,12 @@ $publishArguments = @(
     "-p:ImportByWildcardAfterMicrosoftCommonCrossTargetingTargets=false",
     "-p:UseSharedCompilation=false", "-p:MSBuildEnableWorkloadResolver=false", "-nodeReuse:false"
 )
+if ($isLegacyMigration) {
+    $publishArguments += @(
+        "-p:OpticonLegacyMigrationVersion=$Version",
+        "-p:OpticonLegacyMigrationSignerThumbprint=$LegacyMigrationSignerThumbprint"
+    )
+}
 $executables = [ordered]@{
     Setup = "Taildesk.Setup.exe"
     Agent = "Taildesk.Agent.exe"
@@ -785,7 +811,7 @@ function Write-SignedReleaseManifest {
             $signerThumbprint = ""
             if ($file.Extension.Equals('.exe', [StringComparison]::OrdinalIgnoreCase)) {
                 Assert-ProductSignature -Path $file.FullName
-                $signerThumbprint = $ProductCertificateThumbprint
+                $signerThumbprint = $script:payloadSignerThumbprint
             }
             $files += [pscustomobject][ordered]@{
                 path = $relativePath
@@ -800,7 +826,9 @@ function Write-SignedReleaseManifest {
         version = $Version
         signingProfile = $SigningProfile
         sourceReleaseKeyId = $SourceReleaseCertificateThumbprint
-        productSignerThumbprint = $ProductCertificateThumbprint
+        productSignerThumbprint = $script:payloadSignerThumbprint
+        legacyMigration = $isLegacyMigration
+        legacyMigrationSignerThumbprint = if ($isLegacyMigration) { $LegacyMigrationSignerThumbprint } else { '' }
         role = $Role
         architecture = $Architecture
         updateProtocolVersion = 1
@@ -810,7 +838,7 @@ function Write-SignedReleaseManifest {
     $utf8 = New-Object Text.UTF8Encoding($false)
     $manifestBytes = $utf8.GetBytes(($releaseManifest | ConvertTo-Json -Depth 8))
     [IO.File]::WriteAllBytes((Join-Path $Stage "release-manifest.json"), $manifestBytes)
-    $rsa = Get-OpticonManifestSigningKey -Certificate $sourceReleaseCertificate
+    $rsa = Get-OpticonManifestSigningKey -Certificate $releaseManifestCertificate
     if ($null -eq $rsa) { throw "The offline source-release signing certificate has no RSA private key." }
     try {
         $signatureBytes = $rsa.SignData(
@@ -856,9 +884,10 @@ foreach ($definition in $definitions) {
     $record = [pscustomobject]@{
         product = "OpticonBundle"; version = $Version; role = $definition.Role
         architecture = "x64"; file = $fileName; size = $file.Length
-        sha256 = (Get-FileHash -LiteralPath $temporaryDestination -Algorithm SHA256).Hash.ToLowerInvariant()
-        signingProfile = $SigningProfile; sourceManifestKeyId = $SourceReleaseCertificateThumbprint
-        productSignerThumbprint = $ProductCertificateThumbprint
+         sha256 = (Get-FileHash -LiteralPath $temporaryDestination -Algorithm SHA256).Hash.ToLowerInvariant()
+         signingProfile = $SigningProfile; sourceManifestKeyId = $SourceReleaseCertificateThumbprint
+         productSignerThumbprint = $ProductCertificateThumbprint
+         legacyMigrationSignerThumbprint = if ($isLegacyMigration) { $LegacyMigrationSignerThumbprint } else { '' }
     }
     $sameRelease = @($existingBundles | Where-Object {
         $_.role -eq $record.role -and $_.architecture -eq $record.architecture -and $_.version -eq $record.version
@@ -1102,6 +1131,7 @@ Write-Host "Run .\scripts\Publish-OpticonBundles.ps1 after deploying the gateway
 } finally {
     if (Get-Variable -Name sourceReleaseCertificate -ErrorAction SilentlyContinue) { $sourceReleaseCertificate.Dispose() }
     if (Get-Variable -Name productCertificate -ErrorAction SilentlyContinue) { $productCertificate.Dispose() }
+    if (Get-Variable -Name legacyMigrationCertificate -ErrorAction SilentlyContinue) { $legacyMigrationCertificate.Dispose() }
     $packageBuildLock.Dispose()
     if (Test-Path -LiteralPath $sdkAnchor) { Remove-Item -LiteralPath $sdkAnchor -Recurse -Force -ErrorAction SilentlyContinue }
 }

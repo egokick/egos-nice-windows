@@ -198,7 +198,10 @@ function New-PrivatePublisherDirectory {
 }
 
 function Assert-ProductSignature {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$ExpectedThumbprint = $ProductCertificateThumbprint
+    )
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     $allowedStatus = if ($SigningProfile -eq 'Production') {
         @([Management.Automation.SignatureStatus]::Valid)
@@ -207,7 +210,7 @@ function Assert-ProductSignature {
     }
     if ($signature.Status -notin $allowedStatus -or
         $null -eq $signature.SignerCertificate -or
-        -not $signature.SignerCertificate.Thumbprint.Equals($ProductCertificateThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $signature.SignerCertificate.Thumbprint.Equals($ExpectedThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
         $null -eq $signature.TimeStamperCertificate) {
         throw "$SigningProfile Authenticode verification, publisher pinning, or RFC3161 timestamp validation failed for $Path."
     }
@@ -603,8 +606,20 @@ function Assert-OpticonBundleArchive {
         try { $signature = [Convert]::FromBase64String([Text.Encoding]::UTF8.GetString(
                     (Read-ZipEntryBounded -Entry $entries['release-manifest.sig'] -MaximumBytes 16KB)).Trim()) }
         catch { throw 'The bundle release-manifest signature is malformed.' }
-        $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            [byte[]]$script:VerifiedSourceReleaseCertificateRawData)
+        $legacyMigrationSigner = Get-ArtifactString $Record 'legacyMigrationSignerThumbprint'
+        $isLegacyMigration = -not [string]::IsNullOrWhiteSpace($legacyMigrationSigner)
+        if ($isLegacyMigration -and $legacyMigrationSigner -cne $invitationSigningThumbprint) {
+            throw 'A legacy migration bundle must use only the exact retired invitation signer.'
+        }
+        $certificate = if ($isLegacyMigration) {
+            Get-ChildItem Cert:\CurrentUser\My | Where-Object {
+                $_.Thumbprint -eq $invitationSigningThumbprint
+            } | Select-Object -First 1
+        } else {
+            [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                [byte[]]$script:VerifiedSourceReleaseCertificateRawData)
+        }
+        if ($null -eq $certificate) { throw 'The exact retired invitation public certificate is unavailable for migration verification.' }
         $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($certificate)
         try {
             if (-not $rsa.VerifyData($manifestBytes, $signature, [Security.Cryptography.HashAlgorithmName]::SHA256,
@@ -613,11 +628,14 @@ function Assert-OpticonBundleArchive {
             }
         } finally { $rsa.Dispose(); $certificate.Dispose() }
         $inner = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
+        $expectedPayloadSigner = if ($isLegacyMigration) { $invitationSigningThumbprint } else { $ProductCertificateThumbprint }
         if ([int]$inner.schemaVersion -ne 1 -or [string]$inner.version -ne [string]$Record.version -or
             [string]$inner.role -ne [string]$Record.role -or [string]$inner.architecture -ne [string]$Record.architecture -or
             [string]$inner.signingProfile -cne $SigningProfile -or
             [string]$inner.sourceReleaseKeyId -ne $SourceReleaseCertificateThumbprint -or
-            [string]$inner.productSignerThumbprint -ne $ProductCertificateThumbprint) {
+            [string]$inner.productSignerThumbprint -ne $expectedPayloadSigner -or
+            [bool]$inner.legacyMigration -ne $isLegacyMigration -or
+            [string]$inner.legacyMigrationSignerThumbprint -ne $legacyMigrationSigner) {
             throw 'The signed bundle release identity does not match its outer production record.'
         }
         $files = @($inner.files)
@@ -657,10 +675,10 @@ function Assert-OpticonBundleArchive {
                 if ($actualHash -ne [string]$file.sha256) { throw "Bundle entry $name failed its signed SHA-256." }
             } finally { $hasher.Dispose(); $output.Dispose(); $input.Dispose() }
             if ([IO.Path]::GetExtension($name).Equals('.exe', [StringComparison]::OrdinalIgnoreCase)) {
-                if ([string]$file.signerThumbprint -ne $ProductCertificateThumbprint) {
+                if ([string]$file.signerThumbprint -ne $expectedPayloadSigner) {
                     throw "Bundle executable $name has the wrong signed publisher declaration."
                 }
-                Assert-ProductSignature -Path $destination
+                Assert-ProductSignature -Path $destination -ExpectedThumbprint $expectedPayloadSigner
             } elseif (-not [string]::IsNullOrEmpty([string]$file.signerThumbprint)) {
                 throw "Non-executable bundle entry $name declares a code signer."
             }

@@ -27,11 +27,41 @@ public static class ProductSigning
                 requireRfc3161Timestamp: BuildSigningTrust.IsPublishable,
                 cancellationToken);
         }
-        catch (InvalidDataException) when (SourceBuildProvenance.TryVerify(path))
+        catch (InvalidDataException)
         {
-            // The protected provenance store is the sole exception for locally
-            // source-built binaries. It binds this exact path, size, and hash to
-            // a verified source archive and signed hosted invitation.
+            if (BuildSigningTrust.IsLegacyMigrationBuild)
+            {
+                try
+                {
+                    // Devices on the retired 1.1.38 trust root can accept only
+                    // this exact, one-version migration package. The binary
+                    // immediately changes their update-manifest trust to the
+                    // independent offline source-release key.
+                    await BoundWindowsProductSignatureVerifier.VerifyPinnedAsync(
+                        path,
+                        InvitationSigning.PinnedCertificate,
+                        requireWindowsTrustedChain: false,
+                        requireRfc3161Timestamp: true,
+                        cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return;
+                }
+                catch (InvalidDataException) when (SourceBuildProvenance.TryVerify(path))
+                {
+                    return;
+                }
+            }
+
+            if (SourceBuildProvenance.TryVerify(path))
+            {
+                // The protected provenance store is the sole exception for
+                // locally source-built binaries. It binds this exact path,
+                // size, and hash to a verified source archive and invitation.
+                cancellationToken.ThrowIfCancellationRequested();
+                return;
+            }
+
+            throw;
         }
         cancellationToken.ThrowIfCancellationRequested();
     }
