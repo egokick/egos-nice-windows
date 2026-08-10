@@ -789,9 +789,6 @@ function Invoke-FixedVendorExecutable {
         [Parameter(Mandatory)][string[]]$Arguments,
         [TimeSpan]$Timeout = [TimeSpan]::FromSeconds(30)
     )
-    $windows = [IO.Path]::GetFullPath(
-        [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
-    $system32 = Join-Path $windows 'System32'
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $Path
     $start.WorkingDirectory = Split-Path $Path -Parent
@@ -799,23 +796,30 @@ function Invoke-FixedVendorExecutable {
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
-    $start.Environment.Clear()
-    $start.Environment['SystemRoot'] = $windows
-    $start.Environment['WINDIR'] = $windows
-    $start.Environment['ProgramFiles'] =
-        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-    $start.Environment['ProgramData'] =
-        [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-    $start.Environment['PATH'] = $system32
-    $start.Environment['PATHEXT'] = '.COM;.EXE'
+    foreach ($argument in $Arguments) {
+        if ($null -eq $argument -or $argument.IndexOf([char]0) -ge 0 -or $argument.Contains('"')) {
+            throw 'A fixed executable argument contains an unsupported character.'
+        }
+    }
+    # Windows PowerShell 5.1 uses the .NET Framework ProcessStartInfo APIs.
+    # Quote each trusted argument for CreateProcess and double a trailing slash.
+    $start.Arguments = ((@($Arguments | ForEach-Object {
+        '"' + [regex]::Replace($_, '(\\+)$', '$1$1') + '"'
+    }) -join ' '))
+    # The verified wrapper starts this script with a sanitized environment.  Do
+    # not touch EnvironmentVariables here: on Windows PowerShell 5.1 its getter
+    # can be null, which made every vendor invocation fail before it started.
+    # FileName is an already-validated, absolute Program Files executable, so
+    # no command or PATH lookup is involved in this child process.
     $process = [Diagnostics.Process]::Start($start)
     if (-not $process) { throw "Windows could not start $([IO.Path]::GetFileName($Path))." }
     try {
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit([int]$Timeout.TotalMilliseconds)) {
-            try { $process.Kill($true) } catch { }
+            # Process.Kill(bool) is a .NET Core-only overload; the protected
+            # installer is deliberately compatible with Windows PowerShell 5.1.
+            try { $process.Kill() } catch { }
             throw "$([IO.Path]::GetFileName($Path)) did not exit within $([int]$Timeout.TotalSeconds) seconds."
         }
         $standardOutput = $outputTask.GetAwaiter().GetResult()
@@ -827,6 +831,26 @@ function Invoke-FixedVendorExecutable {
         }
     } finally {
         $process.Dispose()
+    }
+}
+
+function Invoke-ExactSchtasks {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
+    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf) -or
+        ((Get-Item -LiteralPath $schtasks -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The exact System32 schtasks.exe is unavailable or is a reparse point.'
+    }
+    $previousPreference = $ErrorActionPreference
+    try {
+        # A missing optional task writes to stderr and exits 1. That is data for
+        # the caller, not a PowerShell exception.
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $schtasks @Arguments 2>$null)
+        return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    } finally {
+        $ErrorActionPreference = $previousPreference
     }
 }
 
@@ -1256,10 +1280,9 @@ function Write-ProtectedTaskXml {
 function Get-RouteTaskXml {
     $task = Get-ScheduledTask -TaskName $script:RouteTaskName -ErrorAction SilentlyContinue
     if ($null -eq $task) { return $null }
-    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
-    $output = @(& $schtasks /Query /TN $script:RouteTaskName /XML 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw 'The existing route task could not be snapshotted.' }
-    $xml = $output -join "`r`n"
+    $result = Invoke-ExactSchtasks -Arguments @('/Query','/TN',$script:RouteTaskName,'/XML')
+    if ($result.ExitCode -ne 0) { throw 'The existing route task could not be snapshotted.' }
+    $xml = @($result.Output) -join "`r`n"
     if ($xml.Length -le 0 -or $xml.Length -gt 1048576) {
         throw 'The existing route task XML has an invalid size.'
     }
@@ -1268,11 +1291,10 @@ function Get-RouteTaskXml {
 
 function Invoke-RegisterTaskXml {
     param([Parameter(Mandatory)][string]$Xml)
-    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
     $path = Write-ProtectedTaskXml $Xml
     try {
-        & $schtasks /Create /TN $script:RouteTaskName /XML $path /F | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Windows refused the protected RouteKeeper task XML.' }
+        $result = Invoke-ExactSchtasks -Arguments @('/Create','/TN',$script:RouteTaskName,'/XML',$path,'/F')
+        if ($result.ExitCode -ne 0) { throw 'Windows refused the protected RouteKeeper task XML.' }
     } finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
 }
 
@@ -1350,9 +1372,8 @@ function Register-ExactRouteKeeperTask {
 
 function Restore-RouteTaskSnapshot {
     param([AllowNull()][string]$Snapshot)
-    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
     if ([string]::IsNullOrWhiteSpace($Snapshot)) {
-        & $schtasks /Delete /TN $script:RouteTaskName /F 2>$null | Out-Null
+        $null = Invoke-ExactSchtasks -Arguments @('/Delete','/TN',$script:RouteTaskName,'/F')
         return
     }
     Invoke-RegisterTaskXml $Snapshot
@@ -1361,27 +1382,26 @@ function Restore-RouteTaskSnapshot {
 function Start-ExactRouteKeeperTask {
     $helper = Join-Path $script:CanonicalControllerInstallDirectory 'Tools\Taildesk.RouteKeeper.exe'
     Assert-ExactRouteKeeperTask $helper
-    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
-    & $schtasks /Run /TN $script:RouteTaskName | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Windows could not start the exact RouteKeeper task.' }
+    $result = Invoke-ExactSchtasks -Arguments @('/Run','/TN',$script:RouteTaskName)
+    if ($result.ExitCode -ne 0) { throw 'Windows could not start the exact RouteKeeper task.' }
 }
 
 function Get-UiTaskXml {
-    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
-    $output = @(& $schtasks /Query /TN $script:UiTaskName /XML 2>$null)
-    if ($LASTEXITCODE -ne 0) { return $null }
-    $xml = $output -join "`r`n"
+    $task = Get-ScheduledTask -TaskName $script:UiTaskName -ErrorAction SilentlyContinue
+    if ($null -eq $task) { return $null }
+    $result = Invoke-ExactSchtasks -Arguments @('/Query','/TN',$script:UiTaskName,'/XML')
+    if ($result.ExitCode -ne 0) { throw 'The existing command-center task could not be snapshotted.' }
+    $xml = @($result.Output) -join "`r`n"
     if ($xml.Length -le 0 -or $xml.Length -gt 1048576) { throw 'The command-center task XML has an invalid size.' }
     return $xml
 }
 
 function Invoke-RegisterUiTaskXml {
     param([Parameter(Mandatory)][string]$Xml)
-    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
     $path = Write-ProtectedTaskXml $Xml
     try {
-        & $schtasks /Create /TN $script:UiTaskName /XML $path /F | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Windows refused the protected command-center task XML.' }
+        $result = Invoke-ExactSchtasks -Arguments @('/Create','/TN',$script:UiTaskName,'/XML',$path,'/F')
+        if ($result.ExitCode -ne 0) { throw 'Windows refused the protected command-center task XML.' }
     } finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
 }
 
@@ -1437,18 +1457,16 @@ function Register-ExactUiTask {
 
 function Restore-UiTaskSnapshot {
     param([AllowNull()][string]$Snapshot)
-    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
     if([string]::IsNullOrWhiteSpace($Snapshot)){
-        & $schtasks /Delete /TN $script:UiTaskName /F 2>$null | Out-Null
+        $null = Invoke-ExactSchtasks -Arguments @('/Delete','/TN',$script:UiTaskName,'/F')
     } else { Invoke-RegisterUiTaskXml $Snapshot }
 }
 
 function Start-ExactUiTask {
     param([Parameter(Mandatory)][string]$Executable,[Parameter(Mandatory)][string]$Sid)
     Assert-ExactUiTask -Executable $Executable -Sid $Sid
-    $schtasks = Join-Path ([Environment]::SystemDirectory) 'schtasks.exe'
-    & $schtasks /Run /TN $script:UiTaskName | Out-Null
-    if($LASTEXITCODE -ne 0){throw 'Windows could not start the least-privilege command-center task.'}
+    $result = Invoke-ExactSchtasks -Arguments @('/Run','/TN',$script:UiTaskName)
+    if($result.ExitCode -ne 0){throw 'Windows could not start the least-privilege command-center task.'}
 }
 
 function Test-ExactOpenSshClient {

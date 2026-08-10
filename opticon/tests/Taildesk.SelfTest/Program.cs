@@ -2049,6 +2049,11 @@ static void TestOpenSshRecoveryDesign()
            && installer.Contains("The legacy Opticon executable is not signed by the exact retired Opticon signer", StringComparison.Ordinal)
            && installer.Contains("-AllowLegacyCanonical", StringComparison.Ordinal),
         "only exact legacy signer payloads at the canonical controller path may migrate to the OwnerManaged signer");
+    Assert(installer.Contains("Invoke-ExactSchtasks", StringComparison.Ordinal)
+           && installer.Contains("$start.Arguments", StringComparison.Ordinal)
+           && installer.Contains("sanitized environment", StringComparison.Ordinal)
+           && !installer.Contains("$start.ArgumentList.Add", StringComparison.Ordinal),
+        "the protected installer must run task and vendor commands through Windows PowerShell 5.1-compatible process APIs");
     Assert(buildScript.Contains("SkipTargetReleaseDeployment", StringComparison.Ordinal)
            && buildScript.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
            && buildWorkflow.Contains("contents: read", StringComparison.Ordinal)
