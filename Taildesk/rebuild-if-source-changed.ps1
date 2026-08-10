@@ -11,12 +11,28 @@ $OwnerManagedSourceSigner = 'EF6907F6706FB68CB4743F0781AFF631391FCDD2'
 $Rfc3161TimestampUrl = 'http://timestamp.digicert.com'
 
 function Get-PowerShell7Path {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'PowerShell\7\pwsh.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Opticon\Tools\PowerShell-7.6.4\pwsh.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe')
+    )
     $command = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
-    if ($null -eq $command -or [string]::IsNullOrWhiteSpace($command.Source)) {
-        throw 'PowerShell 7 or newer is required to rebuild Opticon. Install Microsoft.PowerShell, then try again.'
+    if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace($command.Source)) {
+        $candidates += $command.Source
     }
-    return [IO.Path]::GetFullPath($command.Source)
+    foreach ($candidate in @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        try {
+            $major = (& $candidate -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.Major' 2>$null |
+                Select-Object -First 1).ToString().Trim()
+            if ($major -match '^[0-9]+$' -and [int]$major -ge 7) {
+                return [IO.Path]::GetFullPath($candidate)
+            }
+        } catch { }
+    }
+    throw 'A working PowerShell 7 or newer installation is required to rebuild Opticon. Install Microsoft.PowerShell, then try again.'
 }
 
 function Assert-OwnerManagedInstaller {

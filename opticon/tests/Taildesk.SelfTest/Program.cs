@@ -1571,6 +1571,9 @@ static void TestOpenSshRecoveryDesign()
            && incrementalRebuild.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal),
         "source-triggered controller rebuilds must request a graceful Command Center shutdown before swapping the installed payload");
     Assert(incrementalRebuild.Contains("Get-PowerShell7Path", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("PowerShell\\7\\pwsh.exe", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("Opticon\\Tools\\PowerShell-7.6.4\\pwsh.exe", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("$PSVersionTable.PSVersion.Major", StringComparison.Ordinal)
            && incrementalRebuild.Contains("-BuildProfile OwnerManaged", StringComparison.Ordinal)
            && incrementalRebuild.Contains("Opticon-CommandCenter-OWNER-MANAGED-win-x64.zip", StringComparison.Ordinal)
            && incrementalRebuild.Contains("Assert-OwnerManagedInstaller", StringComparison.Ordinal)
