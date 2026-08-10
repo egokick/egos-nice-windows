@@ -16,12 +16,14 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $invitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
+$legacyMigrationBridgeVersion = '1.1.41'
+$obsoleteLegacyMigrationBridgeVersion = '1.1.40'
 $SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint.ToUpperInvariant()
 $ProductCertificateThumbprint = $ProductCertificateThumbprint.ToUpperInvariant()
 $LegacyMigrationSignerThumbprint = $LegacyMigrationSignerThumbprint.ToUpperInvariant()
 $isLegacyMigration = -not [string]::IsNullOrWhiteSpace($LegacyMigrationSignerThumbprint)
 if ($isLegacyMigration -and ($SigningProfile -ne 'OwnerManaged' -or
-        $Version -cne '1.1.41' -or
+        $Version -cne $legacyMigrationBridgeVersion -or
         $LegacyMigrationSignerThumbprint -ne $invitationSigningThumbprint)) {
     throw 'A legacy Agent migration must be the exact OwnerManaged 1.1.41 release signed only with the exact retired invitation certificate.'
 }
@@ -121,19 +123,43 @@ function Test-ProductionArtifactTrust {
         (Get-ArtifactString $Artifact 'productSignerThumbprint') -eq $ProductCertificateThumbprint
 }
 
+function Get-LegacyMigrationBundleFileName {
+    param([Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][string]$Role)
+    switch ($Role) {
+        'ManagedOnly' { return "opticon-bundle-$Version-managed-win-x64.zip" }
+        'ControllerAndManaged' { return "opticon-bundle-$Version-controller-win-x64.zip" }
+        default { return '' }
+    }
+}
+
+function Test-ExactLegacyMigrationArtifact {
+    param([Parameter(Mandatory)]$Artifact, [Parameter(Mandatory)][string]$ExpectedVersion)
+
+    $marker = Get-ArtifactString $Artifact 'legacyMigrationSignerThumbprint'
+    $role = Get-ArtifactString $Artifact 'role'
+    $expectedFile = Get-LegacyMigrationBundleFileName -Version $ExpectedVersion -Role $role
+    $size = 0L
+    try { $size = [long]$Artifact.size } catch { return $false }
+    return $marker -ceq $invitationSigningThumbprint -and
+        (Get-ArtifactString $Artifact 'product') -ceq 'OpticonBundle' -and
+        (Get-ArtifactString $Artifact 'version') -ceq $ExpectedVersion -and
+        (Get-ArtifactString $Artifact 'signingProfile') -ceq 'OwnerManaged' -and
+        (Get-ArtifactString $Artifact 'sourceManifestKeyId') -ceq $SourceReleaseCertificateThumbprint -and
+        (Get-ArtifactString $Artifact 'productSignerThumbprint') -ceq $ProductCertificateThumbprint -and
+        (Get-ArtifactString $Artifact 'architecture') -ceq 'x64' -and
+        -not [string]::IsNullOrWhiteSpace($expectedFile) -and
+        (Get-ArtifactString $Artifact 'file') -ceq $expectedFile -and
+        $size -ge 1024 -and $size -le 2GB -and
+        (Get-ArtifactString $Artifact 'sha256') -match '^[A-Fa-f0-9]{64}$'
+}
+
 function Test-LegacyMigrationArtifact {
     param([Parameter(Mandatory)]$Artifact)
 
     $marker = Get-ArtifactString $Artifact 'legacyMigrationSignerThumbprint'
     if ([string]::IsNullOrWhiteSpace($marker)) { return $false }
-    if ($marker -cne $invitationSigningThumbprint) {
-        throw "A retained legacy migration bundle must use only the exact retired invitation signer: $($Artifact.file)."
-    }
-    if ((Get-ArtifactString $Artifact 'signingProfile') -cne 'OwnerManaged') {
-        throw "A retained legacy migration bundle must be OwnerManaged: $($Artifact.file)."
-    }
-    if ([string]$Artifact.version -cne '1.1.41') {
-        throw "A retained legacy migration bundle must be the exact 1.1.41 bridge: $($Artifact.file)."
+    if (-not (Test-ExactLegacyMigrationArtifact -Artifact $Artifact -ExpectedVersion $legacyMigrationBridgeVersion)) {
+        throw "A retained legacy migration bundle must be the exact OwnerManaged $legacyMigrationBridgeVersion bridge with the canonical retired signer: $($Artifact.file)."
     }
     return $true
 }
@@ -636,6 +662,26 @@ $sourceReleaseCertificateBase64 = [Convert]::ToBase64String($sourceReleaseCertif
 $productSigningCertificateBase64 = [Convert]::ToBase64String($productCertificate.RawData)
 $manifestPath = Join-Path $artifactDirectory "manifest.json"
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+$retiredObsoleteLegacyMigrationArtifacts = @()
+$normalizedArtifacts = [Collections.Generic.List[object]]::new()
+foreach ($artifact in @($manifest.artifacts)) {
+    $marker = Get-ArtifactString $artifact 'legacyMigrationSignerThumbprint'
+    if ([string]::IsNullOrWhiteSpace($marker)) {
+        $normalizedArtifacts.Add($artifact)
+        continue
+    }
+    if (Test-ExactLegacyMigrationArtifact -Artifact $artifact -ExpectedVersion $obsoleteLegacyMigrationBridgeVersion) {
+        $retiredObsoleteLegacyMigrationArtifacts += $artifact
+        continue
+    }
+    # A marker is never ignored.  Only the known local 1.1.40 predecessor is
+    # retired; malformed markers and the current bridge must remain fail-closed.
+    $null = Test-LegacyMigrationArtifact -Artifact $artifact
+    $normalizedArtifacts.Add($artifact)
+}
+if ($retiredObsoleteLegacyMigrationArtifacts.Count -gt 0) {
+    $manifest.artifacts = @($normalizedArtifacts)
+}
 $dependencies = @($manifest.artifacts | Where-Object { $_.product -in @("Tailscale", "RustDesk") })
 if ($dependencies.Count -ne 4) { throw "The release manifest must declare four pinned dependency installers." }
 $expectedDependencies = @{
@@ -1165,6 +1211,9 @@ foreach ($artifact in @($retainedBootstraps) + @($retainedSources)) {
 $manifest.artifacts = @($manifest.artifacts | Where-Object { $_.product -notin @("OpticonBundle", "OpticonBootstrap", "OpticonSource") }) + @($retained) + @($retainedBootstraps) + @($bootstrapRecord) + @($retainedSources) + @($sourceRecord)
 $json = $manifest | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($manifestPath, $json, (New-Object Text.UTF8Encoding($false)))
+if ($retiredObsoleteLegacyMigrationArtifacts.Count -gt 0) {
+    Write-Host "Retired $($retiredObsoleteLegacyMigrationArtifacts.Count) obsolete local 1.1.40 legacy migration artifact record(s); they were not retained or published." -ForegroundColor Yellow
+}
 $retained | Format-Table role, version, file, size, sha256 -AutoSize
 Write-Host "Run .\scripts\Publish-OpticonBundles.ps1 after deploying the gateway manifest." -ForegroundColor Green
 } finally {

@@ -24,6 +24,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.Net.Http
 $invitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
+$legacyMigrationBridgeVersion = '1.1.41'
 $SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint.ToUpperInvariant()
 $ProductCertificateThumbprint = $ProductCertificateThumbprint.ToUpperInvariant()
 $LegacyMigrationSignerThumbprint = $LegacyMigrationSignerThumbprint.ToUpperInvariant()
@@ -34,7 +35,7 @@ if ($SourceReleaseCertificateThumbprint -eq $invitationSigningThumbprint -or
     throw 'Production invitation, source-release, and Authenticode trust domains must be pairwise distinct.'
 }
 if ($isLegacyMigration -and ($SigningProfile -ne 'OwnerManaged' -or
-        $Version -cne '1.1.41' -or
+        $Version -cne $legacyMigrationBridgeVersion -or
         $LegacyMigrationSignerThumbprint -ne $invitationSigningThumbprint)) {
     throw 'A legacy Agent migration must be the exact OwnerManaged 1.1.41 release signed only with the exact retired invitation certificate.'
 }
@@ -151,6 +152,46 @@ function Get-ArtifactString {
     $property = $Artifact.PSObject.Properties[$Name]
     if ($null -eq $property -or $null -eq $property.Value) { return '' }
     return [string]$property.Value
+}
+
+function Get-LegacyMigrationBundleFileName {
+    param([Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][string]$Role)
+    switch ($Role) {
+        'ManagedOnly' { return "opticon-bundle-$Version-managed-win-x64.zip" }
+        'ControllerAndManaged' { return "opticon-bundle-$Version-controller-win-x64.zip" }
+        default { return '' }
+    }
+}
+
+function Test-ExactLegacyMigrationArtifact {
+    param([Parameter(Mandatory)]$Artifact)
+
+    $role = Get-ArtifactString $Artifact 'role'
+    $expectedFile = Get-LegacyMigrationBundleFileName -Version $legacyMigrationBridgeVersion -Role $role
+    $size = 0L
+    try { $size = [long]$Artifact.size } catch { return $false }
+    return (Get-ArtifactString $Artifact 'legacyMigrationSignerThumbprint') -ceq $invitationSigningThumbprint -and
+        (Get-ArtifactString $Artifact 'product') -ceq 'OpticonBundle' -and
+        (Get-ArtifactString $Artifact 'version') -ceq $legacyMigrationBridgeVersion -and
+        (Get-ArtifactString $Artifact 'signingProfile') -ceq 'OwnerManaged' -and
+        (Get-ArtifactString $Artifact 'sourceManifestKeyId') -ceq $SourceReleaseCertificateThumbprint -and
+        (Get-ArtifactString $Artifact 'productSignerThumbprint') -ceq $ProductCertificateThumbprint -and
+        (Get-ArtifactString $Artifact 'architecture') -ceq 'x64' -and
+        -not [string]::IsNullOrWhiteSpace($expectedFile) -and
+        (Get-ArtifactString $Artifact 'file') -ceq $expectedFile -and
+        $size -ge 1024 -and $size -le 2GB -and
+        (Get-ArtifactString $Artifact 'sha256') -match '^[A-Fa-f0-9]{64}$'
+}
+
+function Assert-LegacyMigrationArtifact {
+    param([Parameter(Mandatory)]$Artifact)
+
+    $marker = Get-ArtifactString $Artifact 'legacyMigrationSignerThumbprint'
+    if ([string]::IsNullOrWhiteSpace($marker)) { return $false }
+    if (-not (Test-ExactLegacyMigrationArtifact -Artifact $Artifact)) {
+        throw "A legacy migration artifact must be the exact OwnerManaged $legacyMigrationBridgeVersion bridge with the canonical retired signer: $($Artifact.file)."
+    }
+    return $true
 }
 
 function Get-LocalArtifactPath {
@@ -616,9 +657,7 @@ function Assert-OpticonBundleArchive {
         catch { throw 'The bundle release-manifest signature is malformed.' }
         $legacyMigrationSigner = Get-ArtifactString $Record 'legacyMigrationSignerThumbprint'
         $isLegacyMigration = -not [string]::IsNullOrWhiteSpace($legacyMigrationSigner)
-        if ($isLegacyMigration -and $legacyMigrationSigner -cne $invitationSigningThumbprint) {
-            throw 'A legacy migration bundle must use only the exact retired invitation signer.'
-        }
+        if ($isLegacyMigration) { $null = Assert-LegacyMigrationArtifact -Artifact $Record }
         $certificate = if ($isLegacyMigration) {
             Get-ChildItem Cert:\CurrentUser\My | Where-Object {
                 $_.Thumbprint -eq $invitationSigningThumbprint
@@ -729,6 +768,11 @@ if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "Build-OpticonBundles.ps1") @buildArguments
 }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+foreach ($artifact in @($manifest.artifacts | Where-Object {
+        -not [string]::IsNullOrWhiteSpace((Get-ArtifactString $_ 'legacyMigrationSignerThumbprint'))
+    })) {
+    $null = Assert-LegacyMigrationArtifact -Artifact $artifact
+}
 $allOpticonArtifacts = @($manifest.artifacts | Where-Object { $_.product -in @('OpticonBundle', 'OpticonBootstrap', 'OpticonSource') })
 if ($allOpticonArtifacts.Count -eq 0) { throw 'The release manifest has no Opticon artifacts.' }
 foreach ($artifact in $allOpticonArtifacts) { Assert-ProductionArtifactTrust -Artifact $artifact }
@@ -824,6 +868,11 @@ try {
 if (-not $SkipManifestPublish) {
     Publish-ManifestAtomically ([IO.File]::ReadAllBytes($manifestPath))
     $live = Read-PublicManifestBounded
+    foreach ($artifact in @($live.artifacts | Where-Object {
+            -not [string]::IsNullOrWhiteSpace((Get-ArtifactString $_ 'legacyMigrationSignerThumbprint'))
+        })) {
+        $null = Assert-LegacyMigrationArtifact -Artifact $artifact
+    }
     $liveRelease = @($live.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap", "OpticonSource") })
     if ($liveRelease.Count -ne 4 -or @($liveRelease | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.downloadUrl) }).Count -ne 0) {
         throw "Fly accepted the manifest but did not serve the complete CloudFront release."
