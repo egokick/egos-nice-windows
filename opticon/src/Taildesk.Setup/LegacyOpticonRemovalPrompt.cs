@@ -19,7 +19,7 @@ internal static class LegacyOpticonRemovalPrompt
         };
         var remove = new Button
         {
-            Content = "Remove legacy Opticon",
+            Content = "Remove existing Opticon",
             Width = 170,
             IsEnabled = false,
             Margin = new Thickness(8, 0, 0, 0)
@@ -60,7 +60,7 @@ internal static class LegacyOpticonRemovalPrompt
         panel.Children.Add(buttons);
         var dialog = new Window
         {
-            Title = "Remove legacy Opticon 1.1.38",
+            Title = "Remove existing Opticon",
             Content = panel,
             SizeToContent = SizeToContent.WidthAndHeight,
             MinWidth = 650,
@@ -79,15 +79,15 @@ internal static class LegacyOpticonRemovalPrompt
     {
         var directories = string.Join(Environment.NewLine, plan.DirectoriesToRemove.Select(path => "• " + path));
         var tasks = plan.TaskNames.Count == 0
-            ? "No recognized Opticon scheduled tasks are currently registered."
+            ? "No Opticon scheduled tasks are currently registered at the fixed names."
             : string.Join(Environment.NewLine, plan.TaskNames.Select(name => "• " + name));
-        return "The signed source launcher verified a legacy Opticon 1.1.38 installation. " +
+        return "The signed source launcher found an existing Opticon installation or machine state. " +
                "This is a permanent, local removal so the new protected source build can start cleanly.\n\n" +
-               "It will remove only these verified Opticon directories:\n" + directories + "\n\n" +
-               "It will stop and delete only these verified Opticon scheduled tasks:\n" + tasks + "\n\n" +
-               "Agent 1.1.38 used those tasks rather than an Opticon Windows service; no Windows service is stopped or deleted.\n\n" +
+               "It will recursively remove these fixed Opticon directories, regardless of installed Opticon version:\n" + directories + "\n\n" +
+               "It will stop and delete these fixed Opticon scheduled-task names:\n" + tasks + "\n\n" +
+               "Opticon uses those tasks rather than an Opticon Windows service; no Windows service is stopped or deleted.\n\n" +
                "Tailscale and RustDesk are deliberately preserved: this does not stop, uninstall, reconfigure, " +
                "or delete either product, its services, credentials, sessions, or data.\n\n" +
-               "If any file, link, task, or version does not match the recognized legacy Opticon shape, removal stops before deleting files.";
+               "A link, junction, path swap, or unsafe filesystem object still stops removal before deletion.";
     }
 }
