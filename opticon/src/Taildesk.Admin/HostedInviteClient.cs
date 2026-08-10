@@ -21,11 +21,7 @@ internal sealed record HostedInviteUpload(
     string SdkVersion,
     string RuntimeVersion,
     string[] TargetRuntimes,
-    string BootstrapVersion,
-    string BootstrapFile,
-    long BootstrapSize,
-    string BootstrapSha256,
-    string BootstrapSignerThumbprint,
+    string InstallProtocol,
     byte[] Ciphertext);
 
 public sealed class HostedInviteClient
@@ -53,8 +49,7 @@ public sealed class HostedInviteClient
             payload.ReleaseVersion, payload.SourceSha256, payload.SourceFile, payload.SourceSize,
             payload.SourceManifestSha256, payload.SourceManifestKeyId,
             payload.SigningProfile, payload.ProductSignerThumbprint, payload.SdkVersion,
-            payload.RuntimeVersion, payload.TargetRuntimes, payload.BootstrapVersion, payload.BootstrapFile,
-            payload.BootstrapSize, payload.BootstrapSha256, payload.BootstrapSignerThumbprint, encryptedEnvelope);
+            payload.RuntimeVersion, payload.TargetRuntimes, payload.InstallProtocol, encryptedEnvelope);
         var body = JsonSerializer.SerializeToUtf8Bytes(upload, JsonDefaults.Options);
         var uri = BuildUri(InviteAdminPath + idHash);
         using var response = await SendSignedAsync(HttpMethod.Put, uri, body, cancellationToken);

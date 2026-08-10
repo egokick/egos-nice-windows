@@ -3,13 +3,18 @@ param(
     [string]$Version = '',
     [string]$ControlOrigin = 'https://taildesk-egokick-control.fly.dev',
     [string]$ManifestPath = '',
+    [ValidateSet('Production', 'OwnerManaged')][string]$SigningProfile = 'Production',
+    [string]$SourceReleaseCertificateThumbprint = '',
+    [string]$ProductCertificateThumbprint = '',
+    [string]$Rfc3161TimestampUrl = '',
+    [string]$SignToolPath = '',
     [switch]$CheckOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $opticonRoot = Split-Path $PSScriptRoot -Parent
-$publisher = Join-Path $opticonRoot 'fly-headscale\scripts\Publish-OpticonBundles.ps1'
+$publisher = Join-Path $opticonRoot 'fly-headscale\scripts\Publish-OpticonSourceRelease.ps1'
 
 function Get-SourceVersion {
     $propertiesPath = Join-Path $opticonRoot 'Directory.Build.props'
@@ -66,33 +71,22 @@ function Get-ReleaseManifest {
 }
 
 function Test-CompleteRelease($Manifest, [string]$ReleaseVersion) {
+    if ([int]$Manifest.schemaVersion -ne 2) { return $false }
     $release = @($Manifest.artifacts | Where-Object { $_.version -eq $ReleaseVersion })
-    if ($release.Count -ne 3) { return $false }
-
-    $expected = @(
-        @{ Product = 'OpticonBundle'; Role = 'ControllerAndManaged'; Architecture = 'x64'; File = "opticon-bundle-$ReleaseVersion-controller-win-x64.zip" },
-        @{ Product = 'OpticonBundle'; Role = 'ManagedOnly'; Architecture = 'x64'; File = "opticon-bundle-$ReleaseVersion-managed-win-x64.zip" },
-        @{ Product = 'OpticonBootstrap'; Role = ''; Architecture = 'x64'; File = "opticon-bootstrap-$ReleaseVersion.exe" }
-    )
-    foreach ($item in $expected) {
-        $matches = @($release | Where-Object {
-            $_.product -eq $item.Product -and
-            $_.architecture -eq $item.Architecture -and
-            $_.file -eq $item.File -and
-            (($item.Role -eq '' -and [string]::IsNullOrWhiteSpace([string]$_.role)) -or $_.role -eq $item.Role)
-        })
-        if ($matches.Count -ne 1) { return $false }
-        $artifact = $matches[0]
-        if ([long]$artifact.size -le 0 -or [string]$artifact.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
-            return $false
-        }
-        try { $download = [Uri][string]$artifact.downloadUrl } catch { return $false }
-        if (-not $download.IsAbsoluteUri -or $download.Scheme -ne 'https' -or
-            $download.AbsolutePath -ne "/opticon/releases/$ReleaseVersion/$($item.File)") {
-            return $false
-        }
+    if ($release.Count -ne 1 -or @($Manifest.artifacts | Where-Object { $_.product -ne 'OpticonSource' }).Count -ne 0) { return $false }
+    $artifact = $release[0]
+    if ($artifact.product -ne 'OpticonSource' -or $artifact.architecture -ne 'source' -or
+        $artifact.file -ne "opticon-source-$ReleaseVersion.zip" -or [long]$artifact.size -le 0 -or
+        [string]$artifact.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        [string]$artifact.sourceManifestSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        [string]$artifact.sdkVersion -ne '10.0.302' -or [string]$artifact.runtimeVersion -ne '10.0.10' -or
+        @($artifact.targetRuntimes).Count -ne 2 -or [string]$artifact.targetRuntimes[0] -ne 'win-x64' -or
+        [string]$artifact.targetRuntimes[1] -ne 'win-arm64') {
+        return $false
     }
-    return $true
+    try { $download = [Uri][string]$artifact.downloadUrl } catch { return $false }
+    return $download.IsAbsoluteUri -and $download.Scheme -eq 'https' -and
+        $download.AbsolutePath -eq "/opticon/releases/$ReleaseVersion/$($artifact.file)"
 }
 
 function Assert-ReleaseSourceIsPublishable {
@@ -119,24 +113,27 @@ function Assert-ReleaseSourceIsPublishable {
 
 if ([string]::IsNullOrWhiteSpace($Version)) { $Version = Get-SourceVersion }
 Assert-StableVersion $Version
-$manifest = Get-ReleaseManifest
-if (Test-CompleteRelease $manifest $Version) {
+$manifest = $null
+$manifestReadFailure = $null
+try { $manifest = Get-ReleaseManifest } catch { $manifestReadFailure = $_ }
+if ($null -ne $manifest -and (Test-CompleteRelease $manifest $Version)) {
     Write-Host "Opticon target release $Version is already deployed and complete." -ForegroundColor Green
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $false; Deployed = $false }
     return
 }
 
-$newer = @($manifest.artifacts |
-    Where-Object { $_.product -eq 'OpticonBundle' -and $_.version -match '^\d+\.\d+\.\d+$' } |
+$newer = if ($null -eq $manifest) { @() } else { @($manifest.artifacts |
+    Where-Object { $_.product -eq 'OpticonSource' -and $_.version -match '^\d+\.\d+\.\d+$' } |
     ForEach-Object { [Version]$_.version } |
-    Where-Object { $_ -gt [Version]$Version })
+    Where-Object { $_ -gt [Version]$Version }) }
 if ($newer.Count -ne 0) {
     $highest = $newer | Sort-Object -Descending | Select-Object -First 1
     throw "The live target release $highest is newer than source version $Version. Refusing a downgrade."
 }
 
 if ($CheckOnly) {
-    Write-Host "Opticon target release $Version requires deployment." -ForegroundColor Yellow
+    $reason = if ($null -ne $manifestReadFailure) { " The live manifest is unavailable: $($manifestReadFailure.Exception.Message)" } else { '' }
+    Write-Host "Opticon target release $Version requires source-only deployment.$reason" -ForegroundColor Yellow
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false }
     return
 }
@@ -145,8 +142,17 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
 }
 
 Assert-ReleaseSourceIsPublishable
-Write-Host "Opticon target release $Version is absent or incomplete; publishing it now." -ForegroundColor Yellow
-& $publisher -Version $Version -ControlOrigin $ControlOrigin
+if ([string]::IsNullOrWhiteSpace($SourceReleaseCertificateThumbprint) -or
+    [string]::IsNullOrWhiteSpace($ProductCertificateThumbprint) -or
+    [string]::IsNullOrWhiteSpace($Rfc3161TimestampUrl) -or
+    [string]::IsNullOrWhiteSpace($SignToolPath)) {
+    throw 'Source-only target deployment requires explicit source-release/product certificate thumbprints, RFC3161 URL, and SignToolPath.'
+}
+Write-Host "Opticon target release $Version is absent, incomplete, or unservable; publishing the one source archive now." -ForegroundColor Yellow
+& $publisher -Version $Version -ControlOrigin $ControlOrigin -SigningProfile $SigningProfile `
+    -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
+    -ProductCertificateThumbprint $ProductCertificateThumbprint `
+    -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath
 if ($LASTEXITCODE -ne 0) { throw "Publishing Opticon target release $Version failed." }
 
 $manifest = Get-ReleaseManifest

@@ -1,5 +1,5 @@
 using System.Net.Http.Headers;
-using System.Net.Http.Json;
+using System.Text.Json;
 using Taildesk.Shared;
 
 namespace Taildesk.Admin;
@@ -13,121 +13,146 @@ public sealed record OpticonUpdateRelease(
     string Sha256,
     bool RequiresMaintenanceBootstrap)
 {
-    public bool RequiresGuardianReconciliation { get; init; }
-    public bool RequiresLegacyMachineStateMigration { get; init; }
-    public bool IsLegacyMachineStateMigrationBridge { get; init; }
-    public string LegacyMigrationSignerThumbprint { get; init; } = string.Empty;
+    // A pre-source Agent or Guardian cannot understand the source transaction
+    // journal.  Returning a release with this bit lets the UI give an explicit
+    // attended clean-reinstall instruction without ever attempting a stage.
+    public bool RequiresCleanReinstall { get; init; }
+
+    // The source archive carries the immutable pins used to construct the
+    // authenticated SourceUpdateRequest.  It is deliberately separate from
+    // the outer display fields above so callers cannot confuse it with a
+    // legacy executable bundle.
+    public OpticonSourceRelease? SourceRelease { get; init; }
 }
 
 public sealed class OpticonReleaseClient
 {
-    // Agent and the separately installed stable Guardian share the SSH
-    // supervisor diagnostic contract. Crossing this boundary must use attended
-    // maintenance so both binaries advance together.
-    private static readonly Version GuardianApiBootstrapVersion =
-        UpdatePackageVerifier.ParseVersion(RemoteAdministrationProtocol.MinimumWatchdogGuardianVersion);
+    private static readonly Version SourceUpdateFloor =
+        UpdatePackageVerifier.ParseVersion(SourceUpdateProtocol.MinimumGuardianVersion);
 
-    private readonly HttpClient _http = new(new HttpClientHandler { CheckCertificateRevocationList = true })
-    {
-        Timeout = TimeSpan.FromSeconds(45)
-    };
+    private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(45));
 
     public async Task<OpticonUpdateRelease?> FindUpdateAsync(
         AdminConfig config,
         DeviceRecord device,
         CancellationToken cancellationToken = default)
     {
+        BuildSigningTrust.RequirePublishable();
         if (!Uri.TryCreate(config.HeadscaleControlUrl, UriKind.Absolute, out var controlOrigin)
             || controlOrigin.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException("The Opticon HTTPS control origin is not configured.");
+
         var manifestUri = new Uri(controlOrigin, "/opticon/artifacts/v1/manifest.json");
         using var request = new HttpRequestMessage(HttpMethod.Get, manifestUri);
         request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true, NoStore = true };
-        using var response = await _http.SendAsync(request, cancellationToken);
+        using var response = await _http.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
-        var manifest = await response.Content.ReadFromJsonAsync<ArtifactManifestDto>(JsonDefaults.Options, cancellationToken)
+        var manifestBytes = await ReadBoundedAsync(response, 1024 * 1024, cancellationToken);
+        var manifest = JsonSerializer.Deserialize<ArtifactManifestDto>(manifestBytes, JsonDefaults.Options)
                        ?? throw new InvalidDataException("The Opticon release server returned an empty manifest.");
-        if (manifest.SchemaVersion != 1) throw new InvalidDataException("The Opticon release manifest schema is unsupported.");
+        if (manifest.SchemaVersion != 2)
+            throw new InvalidDataException("The Opticon remote-update manifest must use the source-only schema.");
+        if (manifest.Artifacts.Count != 1)
+            throw new InvalidDataException("The source-only remote-update manifest must contain exactly one OpticonSource archive.");
 
-        var architecture = string.IsNullOrWhiteSpace(device.Architecture) ? "x64" : device.Architecture.ToLowerInvariant();
-        var current = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
+        var source = manifest.Artifacts[0];
+        var sourceVersion = ValidateSourceArtifact(source);
+        var architecture = ResolveArchitecture(device.Architecture);
+        var sourceRelease = new OpticonSourceRelease(
+            UpdatePackageVerifier.NormalizeVersion(source.Version),
+            source.File,
+            source.Size,
+            source.Sha256.ToLowerInvariant(),
+            source.SdkVersion,
+            source.RuntimeVersion,
+            source.SourceManifestSha256.ToLowerInvariant(),
+            source.SourceManifestKeyId,
+            source.SigningProfile,
+            source.ProductSignerThumbprint,
+            source.TargetRuntimes.ToArray(),
+            RequireImmutableCloudFrontDownload(source),
+            OpticonSourceReleaseClient.SourceInstallProtocol);
+
+        var installedAgent = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
         var installedGuardian = ParseInstalledGuardianVersion(device.GuardianVersion);
-        var matchingArtifacts = manifest.Artifacts
-            .Where(artifact => artifact.Product.Equals("OpticonBundle", StringComparison.Ordinal)
-                               && artifact.Role == device.Role
-                               && artifact.Architecture.Equals(architecture, StringComparison.OrdinalIgnoreCase))
-            .Select(artifact => (Artifact: artifact, Version: ParseArtifactVersion(artifact)))
-            .ToArray();
-
-        var requiresLegacyMachineStateMigration = RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(
-            current,
-            UpdatePackageVerifier.ParseVersion(RemoteAdministrationProtocol.MinimumProtectedMachineStateAgentVersion));
-        var isSupportedLegacySource = current == new Version(1, 1, 38);
-        (ArtifactRecordDto Artifact, Version Version) selectedCandidate;
-        var isLegacyMachineStateMigrationBridge = false;
-        if (requiresLegacyMachineStateMigration)
+        var requiresCleanReinstall = installedAgent < SourceUpdateFloor
+                                     || installedGuardian < SourceUpdateFloor;
+        if (requiresCleanReinstall || sourceVersion > installedAgent)
         {
-            if (!isSupportedLegacySource)
-                throw new InvalidOperationException(
-                    $"Opticon Agent {device.AgentVersion} uses an older legacy machine-state layout. " +
-                    "The signed in-place bridge is supported only from Opticon Agent 1.1.38; no candidate was staged.");
-
-            var bridges = matchingArtifacts
-                .Where(candidate => RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
-                    current, candidate.Version, candidate.Artifact.LegacyMigrationSignerThumbprint))
-                .ToArray();
-            if (bridges.Length != 1)
-                throw new InvalidDataException(
-                    "The release manifest must contain exactly one trusted Opticon 1.1.41 legacy machine-state bridge for this device role and architecture.");
-            selectedCandidate = bridges[0];
-            isLegacyMachineStateMigrationBridge = true;
-        }
-        else
-        {
-            var candidates = matchingArtifacts
-                // A migration marker is never a normal release channel. Newer
-                // Agents must ignore it even if the record is otherwise valid.
-                .Where(candidate => string.IsNullOrEmpty(candidate.Artifact.LegacyMigrationSignerThumbprint))
-                .Where(candidate => candidate.Version > current
-                                    || (candidate.Version == current
-                                        && installedGuardian < candidate.Version))
-                .OrderByDescending(candidate => candidate.Version)
-                .ToArray();
-            if (candidates.Length == 0) return null;
-            selectedCandidate = candidates[0];
+            return new OpticonUpdateRelease(
+                sourceRelease.Version,
+                device.Role,
+                architecture,
+                sourceRelease.DownloadUri,
+                sourceRelease.Size,
+                sourceRelease.Sha256,
+                RequiresMaintenanceBootstrap: false)
+            {
+                RequiresCleanReinstall = requiresCleanReinstall,
+                SourceRelease = sourceRelease
+            };
         }
 
-        var selected = selectedCandidate.Artifact;
-        if (selected.Size is < 1024 or > 1024L * 1024 * 1024
-            || selected.Sha256.Length != 64 || selected.Sha256.Any(character => !Uri.IsHexDigit(character))
-            || Path.GetFileName(selected.File) != selected.File || !selected.File.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("The selected Opticon release record has invalid immutable artifact metadata.");
-        if (isLegacyMachineStateMigrationBridge && !HasCanonicalLegacyBridgeOuterTrust(selected))
-            throw new InvalidDataException(
-                "The selected legacy machine-state bridge is missing its required OwnerManaged release trust metadata.");
-        var download = ResolveDownloadUri(controlOrigin, selected);
-        var requiresMaintenanceBootstrap = device.UpdateProtocolVersion < RemoteAdministrationProtocol.UpdateVersion
-                                          || installedGuardian < GuardianApiBootstrapVersion;
-        if (isLegacyMachineStateMigrationBridge && requiresMaintenanceBootstrap)
-            throw new InvalidOperationException(
-                "The signed legacy machine-state bridge requires the guarded Opticon update API and stable Guardian already present on Agent 1.1.38. " +
-                "The retired maintenance bootstrap cannot launch this bridge.");
+        return null;
+    }
 
-        return new OpticonUpdateRelease(
-            selected.Version,
-            device.Role,
-            architecture,
-            download,
-            selected.Size,
-            selected.Sha256.ToLowerInvariant(),
-            requiresMaintenanceBootstrap)
-        {
-            RequiresGuardianReconciliation = installedGuardian < selectedCandidate.Version,
-            RequiresLegacyMachineStateMigration = requiresLegacyMachineStateMigration
-                                                   && !isLegacyMachineStateMigrationBridge,
-            IsLegacyMachineStateMigrationBridge = isLegacyMachineStateMigrationBridge,
-            LegacyMigrationSignerThumbprint = selected.LegacyMigrationSignerThumbprint
-        };
+    private static Version ValidateSourceArtifact(ArtifactRecordDto source)
+    {
+        if (source is null || string.IsNullOrWhiteSpace(source.Version))
+            throw new InvalidDataException("The source-only remote-update manifest has no valid source version.");
+        var normalizedVersion = UpdatePackageVerifier.NormalizeVersion(source.Version);
+        var version = UpdatePackageVerifier.ParseVersion(source.Version);
+        if (!string.Equals(source.Product, "OpticonSource", StringComparison.Ordinal)
+            || source.Role is not null
+            || !string.Equals(source.Architecture, "source", StringComparison.Ordinal)
+            || !string.Equals(source.Version, normalizedVersion, StringComparison.Ordinal)
+            || version < SourceUpdateFloor
+            || !string.Equals(source.File, $"opticon-source-{normalizedVersion}.zip", StringComparison.Ordinal)
+            || source.Size is < 1024 or > 256L * 1024 * 1024
+            || !IsSha256(source.Sha256)
+            || !string.Equals(source.SdkVersion, SourceUpdateProtocol.RequiredSdkVersion, StringComparison.Ordinal)
+            || !string.Equals(source.RuntimeVersion, SourceUpdateProtocol.RequiredRuntimeVersion, StringComparison.Ordinal)
+            || !IsSha256(source.SourceManifestSha256)
+            || !string.Equals(source.SourceManifestKeyId, SourceReleaseSigning.KeyId, StringComparison.Ordinal)
+            || !string.Equals(source.SigningProfile, BuildSigningTrust.ProfileName, StringComparison.Ordinal)
+            || !BuildSigningTrust.IsPublishable
+            || !string.Equals(source.ProductSignerThumbprint, ProductSigning.CertificateThumbprint, StringComparison.Ordinal)
+            || string.Equals(source.SourceManifestKeyId, InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(source.ProductSignerThumbprint, InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(source.SourceManifestKeyId, source.ProductSignerThumbprint, StringComparison.OrdinalIgnoreCase)
+            || source.TargetRuntimes is null
+            || !source.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal)
+            || !string.IsNullOrEmpty(source.SignerThumbprint)
+            || !string.IsNullOrEmpty(source.LegacyMigrationSignerThumbprint)
+            || !string.IsNullOrEmpty(source.TargetRuntime))
+            throw new InvalidDataException("The source-only remote-update manifest has invalid immutable source metadata.");
+        return version;
+    }
+
+    private static Uri RequireImmutableCloudFrontDownload(ArtifactRecordDto source)
+    {
+        if (!Uri.TryCreate(source.DownloadUrl, UriKind.Absolute, out var download)
+            || download.Scheme != Uri.UriSchemeHttps
+            || download.Port != 443
+            || !string.IsNullOrEmpty(download.UserInfo)
+            || !string.IsNullOrEmpty(download.Query)
+            || !string.IsNullOrEmpty(download.Fragment)
+            || !download.Host.EndsWith(".cloudfront.net", StringComparison.OrdinalIgnoreCase)
+            || !download.Host.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-')
+            || !download.AbsolutePath.Equals(
+                $"/opticon/releases/{source.Version}/{Uri.EscapeDataString(source.File)}",
+                StringComparison.Ordinal))
+            throw new InvalidDataException("The source-only remote-update manifest has an unsafe immutable CloudFront URL.");
+        return download;
+    }
+
+    private static string ResolveArchitecture(string value)
+    {
+        var architecture = string.IsNullOrWhiteSpace(value) ? "x64" : value.ToLowerInvariant();
+        return architecture is "x64" or "arm64"
+            ? architecture
+            : throw new InvalidDataException("The selected device has an unsupported source-update architecture.");
     }
 
     private static Version ParseInstalledGuardianVersion(string value)
@@ -136,47 +161,30 @@ public sealed class OpticonReleaseClient
         catch (InvalidDataException) { return new Version(0, 0, 0); }
     }
 
-    private static Version ParseArtifactVersion(ArtifactRecordDto artifact)
+    private static bool IsSha256(string? value) =>
+        value is { Length: 64 } && value.All(Uri.IsHexDigit);
+
+    private static async Task<byte[]> ReadBoundedAsync(
+        HttpResponseMessage response,
+        int maximum,
+        CancellationToken cancellationToken)
     {
-        try { return UpdatePackageVerifier.ParseVersion(artifact.Version); }
-        catch (InvalidDataException exception)
+        if (response.Content.Headers.ContentEncoding.Count != 0)
+            throw new InvalidDataException("Compressed Opticon release metadata is not accepted.");
+        if (response.Content.Headers.ContentLength is long declared && (declared <= 0 || declared > maximum))
+            throw new InvalidDataException("Opticon release metadata exceeds its size limit.");
+        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var output = new MemoryStream();
+        var buffer = new byte[32 * 1024];
+        while (true)
         {
-            throw new InvalidDataException($"The release manifest contains an invalid Opticon version for {artifact.File}.", exception);
+            var read = await input.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            if (output.Length + read > maximum)
+                throw new InvalidDataException("Opticon release metadata exceeds its size limit.");
+            output.Write(buffer, 0, read);
         }
-    }
-
-    private static bool HasCanonicalLegacyBridgeOuterTrust(ArtifactRecordDto artifact) =>
-        artifact.SigningProfile.Equals("OwnerManaged", StringComparison.Ordinal)
-        && IsThumbprint(artifact.SourceManifestKeyId)
-        && IsThumbprint(artifact.ProductSignerThumbprint)
-        && !artifact.SourceManifestKeyId.Equals(
-            InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase)
-        && !artifact.ProductSignerThumbprint.Equals(
-            InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase)
-        && !artifact.SourceManifestKeyId.Equals(
-            artifact.ProductSignerThumbprint, StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsThumbprint(string value) =>
-        value.Length == 40 && value.All(Uri.IsHexDigit);
-
-    private static Uri ResolveDownloadUri(Uri controlOrigin, ArtifactRecordDto artifact)
-    {
-        // Empty remains the deliberately supported Fly-relative migration path.
-        if (string.IsNullOrWhiteSpace(artifact.DownloadUrl))
-            return new Uri(controlOrigin, "/opticon/artifacts/v1/" + Uri.EscapeDataString(artifact.File));
-
-        if (!Uri.TryCreate(artifact.DownloadUrl, UriKind.Absolute, out var uri)
-            || uri.Scheme != Uri.UriSchemeHttps
-            || !string.IsNullOrEmpty(uri.UserInfo)
-            || !string.IsNullOrEmpty(uri.Fragment)
-            || !uri.Host.EndsWith(".cloudfront.net", StringComparison.OrdinalIgnoreCase)
-            || !uri.Host.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-'))
-            throw new InvalidDataException("The Opticon release manifest contains an unsafe CloudFront download URL.");
-
-        var expectedPath = "/opticon/releases/" + artifact.Version + "/" + Uri.EscapeDataString(artifact.File);
-        if (!uri.AbsolutePath.Equals(expectedPath, StringComparison.Ordinal)
-            || !string.IsNullOrEmpty(uri.Query))
-            throw new InvalidDataException("The Opticon release manifest CloudFront URL does not match its immutable artifact record.");
-        return uri;
+        if (output.Length == 0) throw new InvalidDataException("Opticon release metadata is empty.");
+        return output.ToArray();
     }
 }

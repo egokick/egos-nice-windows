@@ -47,14 +47,17 @@ public partial class MainWindow : Window
             AppendLog($"Opticon Setup {typeof(MainWindow).Assembly.GetName().Version} started.");
             AppendLog("Executable: " + (Environment.ProcessPath ?? "unavailable"));
             AppendLog("Launch inputs: " + DescribeLaunchInputs(arguments));
-            if (arguments.Length == 0 && HostedBootstrapper.TryParse(Environment.ProcessPath, out var bootstrap))
+            if (HostedBootstrapper.IsSourceLauncher(Environment.ProcessPath))
             {
-                StatusText.Text = "Starting the signed Opticon installer?";
-                await HostedBootstrapper.LaunchSetupAsync(bootstrap, message =>
+                Environment.ExitCode = 1;
+                var bootstrap = HostedBootstrapper.ParseSourceLaunch(arguments, Environment.ProcessPath);
+                StatusText.Text = "Verifying the pinned Opticon source release...";
+                await HostedBootstrapper.LaunchSourceOnlyAsync(bootstrap, message =>
                 {
                     StatusText.Text = message;
                     AppendLog(message);
                 });
+                Environment.ExitCode = 0;
                 Close();
                 return;
             }

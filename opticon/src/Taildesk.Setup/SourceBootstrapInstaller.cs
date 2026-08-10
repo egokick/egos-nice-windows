@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -38,7 +37,7 @@ internal static class SourceBootstrapInstaller
     private const string Origin = "https://taildesk-egokick-control.fly.dev";
     private static readonly Regex HashPattern = new("^[a-f0-9]{64}$", RegexOptions.CultureInvariant);
 
-    internal static async Task RunAsync(HostedBootstrap bootstrap, string bootstrapPath, Action<string> report)
+    internal static async Task RunAsync(SourceBootstrapRequest bootstrap, string launcherPath, Action<string> report)
     {
         var directory = HostedBootstrapper.CreateProtectedHandoffDirectory();
         var invitePath = Path.Combine(directory, "invite.tdinvite");
@@ -53,34 +52,21 @@ internal static class SourceBootstrapInstaller
         try { invite = HostedInviteFile.ReadSigned(signedEnvelope); }
         finally { CryptographicOperations.ZeroMemory(signedEnvelope); }
         ValidateInvitation(invite);
-        if (!FixedHash(bootstrap.BootstrapSha256, invite.BootstrapSha256))
-            throw new InvalidDataException("The bootstrap filename does not match the signed invitation bootstrap pin.");
-        await VerifyBootstrapIdentityAsync(bootstrapPath, invite);
 
-        report("Finding this invitation's exact authenticated source release...");
-        using var manifestResponse = await client.GetAsync($"{Origin}/opticon/artifacts/v1/manifest.json",
-            HttpCompletionOption.ResponseHeadersRead);
-        manifestResponse.EnsureSuccessStatusCode();
-        var manifestBytes = await ReadBoundedResponseAsync(manifestResponse, 1024 * 1024);
-        var outer = JsonSerializer.Deserialize<ArtifactManifestDto>(manifestBytes, JsonDefaults.Options)
-                    ?? throw new InvalidDataException("The Opticon release manifest is empty.");
-        if (outer.SchemaVersion != 1) throw new InvalidDataException("The Opticon release manifest schema is unsupported.");
-        var sources = outer.Artifacts.Where(item => Matches(item, invite)).ToArray();
-        if (sources.Length != 1) throw new InvalidDataException("The invitation's exact immutable source release is not published.");
-        var source = sources[0];
-        var bootstraps = outer.Artifacts.Where(item => MatchesBootstrap(item, invite)).ToArray();
-        if (bootstraps.Length != 1) throw new InvalidDataException("The invitation's exact immutable bootstrap release is not published.");
-
-        report("Copying or downloading source into a protected elevated stage...");
+        var selectedSourceArchive = ResolveSourceArchive(bootstrap, launcherPath, invite);
+        report("Copying the hash-pinned source archive into a protected elevated stage...");
         var sourceArchive = Path.Combine(directory, invite.SourceFile);
-        var adjacent = Path.Combine(Path.GetDirectoryName(bootstrapPath)!, invite.SourceFile);
-        if (File.Exists(adjacent)) await CopyAndVerifyAsync(adjacent, sourceArchive, invite.SourceSize, invite.SourceSha256);
-        else await HostedBootstrapper.DownloadAsync(client, HostedBootstrapper.ResolveBundleUrl(source),
-            sourceArchive, invite.SourceSize, invite.SourceSize, invite.SourceSha256);
+        await CopyAndVerifyAsync(selectedSourceArchive, sourceArchive, invite.SourceSize, invite.SourceSha256);
 
         report("Verifying the signed source allowlist and every source file...");
         var sourceDirectory = HostedBootstrapper.CreateOrRequireRestrictedChildDirectory(directory, "source");
         var sourceManifest = await ExtractVerifiedAsync(sourceArchive, sourceDirectory, invite);
+        await VerifyLauncherMatchesArchiveAsync(launcherPath, sourceManifest);
+        // The signed launcher/archive pair may deliberately replace only the
+        // pre-protected 1.1.38 installation.  The remover presents a typed
+        // destructive confirmation and proves every target before Setup later
+        // enforces the strict machine-state ACL contract.
+        await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync(report);
         var targetRuntime = RuntimeInformation.OSArchitecture switch
         {
             Architecture.X64 => "win-x64",
@@ -105,10 +91,6 @@ internal static class SourceBootstrapInstaller
                 "-ProductSigningCertificateBase64", sourceManifest.ProductSigningCertificateBase64,
                 "-SdkVersion", invite.SdkVersion, "-RuntimeVersion", invite.RuntimeVersion,
                 "-TargetRuntime", targetRuntime,
-                "-BootstrapVersion", invite.BootstrapVersion, "-BootstrapFile", invite.BootstrapFile,
-                "-BootstrapSize", invite.BootstrapSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "-BootstrapSha256", invite.BootstrapSha256,
-                "-BootstrapSignerThumbprint", invite.BootstrapSignerThumbprint,
                 "-Role", invite.Role.ToString(),
                 "-InvitePath", invitePath, "-InviteKey", bootstrap.PrivateKey, "-DotnetPath", dotnet],
             TimeSpan.FromMinutes(45), environment: BuildSanitizedEnvironment(directory, dotnet), clearEnvironment: true);
@@ -119,7 +101,9 @@ internal static class SourceBootstrapInstaller
 
     private static void ValidateInvitation(InvitePayload invite)
     {
-        if (invite.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion || invite.ExpiresAt <= DateTimeOffset.UtcNow
+        if (invite.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion
+            || !string.Equals(invite.InstallProtocol, InvitationPolicy.SourceInstallProtocol, StringComparison.Ordinal)
+            || invite.ExpiresAt <= DateTimeOffset.UtcNow
             || !Regex.IsMatch(invite.ReleaseVersion, "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$")
             || invite.SourceFile != $"opticon-source-{invite.ReleaseVersion}.zip"
             || invite.SourceSize is < 1024 or > 256L * 1024 * 1024 || !HashPattern.IsMatch(invite.SourceSha256)
@@ -129,63 +113,66 @@ internal static class SourceBootstrapInstaller
             || !BuildSigningTrust.IsPublishable
             || invite.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
             || invite.SdkVersion != "10.0.302" || invite.RuntimeVersion != "10.0.10"
-            || !invite.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal)
-            || invite.BootstrapVersion != invite.ReleaseVersion
-            || invite.BootstrapFile != $"opticon-bootstrap-{invite.ReleaseVersion}.exe"
-            || invite.BootstrapSize is < 1024 or > 128L * 1024 * 1024
-            || !HashPattern.IsMatch(invite.BootstrapSha256)
-            || !invite.BootstrapSignerThumbprint.Equals(
-                ProductSigning.CertificateThumbprint, StringComparison.Ordinal))
+            || !invite.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal))
             throw new InvalidDataException("The signed invitation has invalid or unsupported source-build pins.");
     }
 
-    private static bool Matches(ArtifactRecordDto item, InvitePayload invite) =>
-        item.Product == "OpticonSource" && item.Architecture == "source" && item.Version == invite.ReleaseVersion
-        && item.File == invite.SourceFile && item.Size == invite.SourceSize && item.SdkVersion == invite.SdkVersion
-        && item.RuntimeVersion == invite.RuntimeVersion && item.TargetRuntimes.SequenceEqual(invite.TargetRuntimes, StringComparer.Ordinal) && item.SourceManifestKeyId == invite.SourceManifestKeyId
-        && item.SigningProfile == invite.SigningProfile
-        && item.ProductSignerThumbprint == invite.ProductSignerThumbprint
-        && FixedHash(item.Sha256, invite.SourceSha256)
-        && FixedHash(item.SourceManifestSha256, invite.SourceManifestSha256)
-        && IsSafeDownload(item);
-
-    private static bool MatchesBootstrap(ArtifactRecordDto item, InvitePayload invite) =>
-        item.Product == "OpticonBootstrap" && item.Architecture == "x64"
-        && item.Version == invite.BootstrapVersion && item.File == invite.BootstrapFile
-        && item.Size == invite.BootstrapSize && FixedHash(item.Sha256, invite.BootstrapSha256)
-        && item.SignerThumbprint.Equals(invite.BootstrapSignerThumbprint, StringComparison.OrdinalIgnoreCase)
-        && item.SigningProfile == invite.SigningProfile
-        && item.SourceManifestKeyId == invite.SourceManifestKeyId
-        && item.ProductSignerThumbprint == invite.ProductSignerThumbprint
-        && IsSafeDownload(item);
-
-    private static async Task VerifyBootstrapIdentityAsync(string path, InvitePayload invite)
+    private static async Task VerifyLauncherMatchesArchiveAsync(string launcherPath, SourceReleaseManifest manifest)
     {
-        await using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read,
+        launcherPath = Path.GetFullPath(launcherPath);
+        if (!string.Equals(Path.GetFileName(launcherPath), "OpticonSourceLauncher.exe", StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(launcherPath) || (File.GetAttributes(launcherPath) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException("The source-only launcher path is invalid.");
+        var declared = manifest.Files.Where(file =>
+                string.Equals(Normalize(file.Path), "OpticonSourceLauncher.exe", StringComparison.Ordinal))
+            .ToArray();
+        if (declared.Length != 1 || declared[0].Size <= 0 || !HashPattern.IsMatch(declared[0].Sha256))
+            throw new InvalidDataException("The signed source archive does not declare exactly one fixed source launcher.");
+        var info = new FileInfo(launcherPath);
+        if (info.Length != declared[0].Size)
+            throw new InvalidDataException("The running source launcher does not match the signed source archive size.");
+        await using var stream = new FileStream(launcherPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        if (stream.Length != invite.BootstrapSize)
-            throw new InvalidDataException("The running bootstrap size does not match the signed invitation.");
-        var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(stream)).ToLowerInvariant();
-        if (!FixedHash(actualHash, invite.BootstrapSha256))
-            throw new InvalidDataException("The running bootstrap hash does not match the signed invitation.");
-        var productVersion = FileVersionInfo.GetVersionInfo(path).ProductVersion;
-        if (!string.Equals(productVersion, invite.BootstrapVersion, StringComparison.Ordinal))
-            throw new InvalidDataException("The running bootstrap version does not match the signed invitation.");
-        await ProductSigning.VerifyAuthenticodeAsync(path);
+        var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream)).ToLowerInvariant();
+        if (!FixedHash(actual, declared[0].Sha256))
+            throw new InvalidDataException("The running source launcher does not match the signed source archive.");
     }
 
-    private static bool IsSafeDownload(ArtifactRecordDto item)
+    private static string ResolveSourceArchive(
+        SourceBootstrapRequest bootstrap,
+        string launcherPath,
+        InvitePayload invite)
     {
-        try { return HostedBootstrapper.ResolveBundleUrl(item).Length > 0; }
-        catch (InvalidDataException) { return false; }
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(bootstrap.SourceArchivePath))
+        {
+            candidates.Add(Path.GetFullPath(bootstrap.SourceArchivePath));
+        }
+        else
+        {
+            var launcherDirectory = Path.GetDirectoryName(Path.GetFullPath(launcherPath))
+                                    ?? throw new InvalidDataException("The source launcher has no parent directory.");
+            candidates.Add(Path.Combine(launcherDirectory, invite.SourceFile));
+            var extractionParent = Directory.GetParent(launcherDirectory)?.FullName;
+            if (!string.IsNullOrWhiteSpace(extractionParent))
+                candidates.Add(Path.Combine(extractionParent, invite.SourceFile));
+        }
+        var existing = candidates.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(path => File.Exists(path)
+                           && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0
+                           && string.Equals(Path.GetFileName(path), invite.SourceFile, StringComparison.Ordinal))
+            .ToArray();
+        if (existing.Length != 1)
+            throw new FileNotFoundException(
+                $"Place {invite.SourceFile} beside the extracted OpticonSourceLauncher.exe, or launch it with --source-archive=<path>.");
+        return existing[0];
     }
 
     private static async Task CopyAndVerifyAsync(string source, string destination, long size, string hash)
     {
         try
         {
-            await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read,
+            await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.None,
                 64 * 1024, FileOptions.SequentialScan);
             if (input.Length != size) throw new InvalidDataException("The adjacent source archive size does not match the signed invitation.");
             await using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None,
@@ -342,25 +329,6 @@ internal static class SourceBootstrapInstaller
         {
             return false;
         }
-    }
-
-    private static async Task<byte[]> ReadBoundedResponseAsync(HttpResponseMessage response, int maximum)
-    {
-        if (response.Content.Headers.ContentEncoding.Count != 0)
-            throw new InvalidDataException("Compressed release metadata is not accepted.");
-        if (response.Content.Headers.ContentLength is long length && (length < 0 || length > maximum))
-            throw new InvalidDataException("Release metadata exceeds its size limit.");
-        await using var input = await response.Content.ReadAsStreamAsync();
-        using var output = new MemoryStream();
-        var buffer = new byte[32 * 1024];
-        while (true)
-        {
-            var read = await input.ReadAsync(buffer);
-            if (read == 0) break;
-            if (output.Length + read > maximum) throw new InvalidDataException("Release metadata exceeds its size limit.");
-            output.Write(buffer, 0, read);
-        }
-        return output.ToArray();
     }
 
     private static IReadOnlyDictionary<string, string?> BuildSanitizedEnvironment(string protectedRoot, string dotnet)

@@ -527,6 +527,28 @@ internal sealed class GuardianRunner
         if (Directory.Exists(operation.CandidateDirectory))
             SafeDeleteDirectory(operation.CandidateDirectory, _paths.ProgramFilesRoot);
 
+        if (journal.DeliveryMode == UpdateDeliveryMode.SourceArchive)
+        {
+            // Re-verify the immutable archive and every local build output
+            // here, independently of the Agent which performed the build.
+            // The Guardian then copies only the attested Agent component into
+            // its Program Files candidate directory for the normal atomic swap.
+            MachineStorageSecurity.RequireRestrictedFile(operation.PackagePath);
+            MachineStorageSecurity.RequireRestrictedFile(operation.SourceBuildAttestationPath);
+            var sourceRequest = _paths.CreateSourceVerificationRequest(journal);
+            _ = await SourceUpdatePackageVerifier.VerifyArchiveAsync(
+                operation.PackagePath, sourceRequest, cancellationToken);
+            var attestation = await SourceUpdatePackageVerifier.VerifyBuiltOutputAsync(
+                operation.SourceBuildAttestationPath, operation.SourceBuildOutputDirectory,
+                sourceRequest, cancellationToken);
+            await SourceUpdatePackageVerifier.CopyVerifiedComponentAsync(
+                operation.SourceBuildOutputDirectory, "Payload/Agent", operation.CandidateDirectory,
+                attestation, cancellationToken);
+            _paths.EnsureSafeTree(operation.CandidateDirectory, _paths.ProgramFilesRoot);
+            await ValidateAgentDirectoryAsync(operation.CandidateDirectory, journal.TargetVersion, cancellationToken);
+            return;
+        }
+
         var manifest = await UpdatePackageVerifier.VerifyAndExtractAgentAsync(
             operation.PackagePath,
             operation.CandidateDirectory,

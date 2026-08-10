@@ -16,17 +16,13 @@ public sealed record OpticonSourceRelease(
     string ProductSignerThumbprint,
     IReadOnlyList<string> TargetRuntimes,
     Uri DownloadUri,
-    string BootstrapVersion,
-    string BootstrapFile,
-    long BootstrapSize,
-    string BootstrapSha256,
-    string BootstrapSignerThumbprint,
-    Uri BootstrapDownloadUri);
+    string InstallProtocol);
 
 public sealed class OpticonSourceReleaseClient
 {
     public const string SupportedSdkVersion = "10.0.302";
     public const string SupportedRuntimeVersion = "10.0.10";
+    public const string SourceInstallProtocol = "source-v1";
     private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(45));
 
     public async Task<OpticonSourceRelease> GetCurrentAsync(
@@ -49,7 +45,9 @@ public sealed class OpticonSourceReleaseClient
         var manifestBytes = await ReadBoundedAsync(response, 1024 * 1024, cancellationToken);
         var manifest = System.Text.Json.JsonSerializer.Deserialize<ArtifactManifestDto>(manifestBytes, JsonDefaults.Options)
                        ?? throw new InvalidDataException("The Opticon release server returned an empty manifest.");
-        if (manifest.SchemaVersion != 1) throw new InvalidDataException("The Opticon release manifest schema is unsupported.");
+        if (manifest.SchemaVersion != 2) throw new InvalidDataException("The Opticon source-only release manifest schema is unsupported.");
+        if (manifest.Artifacts.Any(item => !item.Product.Equals("OpticonSource", StringComparison.Ordinal)))
+            throw new InvalidDataException("The source-only release manifest contains a non-source artifact.");
 
         var matches = manifest.Artifacts.Where(item =>
                 item.Product.Equals("OpticonSource", StringComparison.Ordinal)
@@ -60,15 +58,6 @@ public sealed class OpticonSourceReleaseClient
             throw new InvalidOperationException(
                 $"The command center can issue invitations only after exact source release {currentVersion} is published.");
         var source = matches[0];
-        var bootstrapMatches = manifest.Artifacts.Where(item =>
-                item.Product.Equals("OpticonBootstrap", StringComparison.Ordinal)
-                && item.Version.Equals(currentVersion, StringComparison.Ordinal)
-                && item.Architecture.Equals("x64", StringComparison.Ordinal))
-            .ToArray();
-        if (bootstrapMatches.Length != 1)
-            throw new InvalidOperationException(
-                $"The command center can issue invitations only after exact bootstrap release {currentVersion} is published.");
-        var bootstrap = bootstrapMatches[0];
         if (source.Size is < 1024 or > 256L * 1024 * 1024
             || source.Sha256.Length != 64 || source.Sha256.Any(character => !Uri.IsHexDigit(character))
             || !source.File.Equals($"opticon-source-{currentVersion}.zip", StringComparison.Ordinal)
@@ -83,25 +72,14 @@ public sealed class OpticonSourceReleaseClient
             || source.SourceManifestKeyId == source.ProductSignerThumbprint
             || !source.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal))
             throw new InvalidDataException("The exact source release has invalid immutable build metadata.");
-        if (bootstrap.Size is < 1024 or > 128L * 1024 * 1024
-            || bootstrap.Sha256.Length != 64 || bootstrap.Sha256.Any(character => !Uri.IsHexDigit(character))
-            || !bootstrap.SignerThumbprint.Equals(
-                ProductSigning.CertificateThumbprint, StringComparison.Ordinal)
-            || bootstrap.SigningProfile != BuildSigningTrust.ProfileName
-            || bootstrap.SourceManifestKeyId != SourceReleaseSigning.KeyId
-            || bootstrap.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
-            || bootstrap.File != $"opticon-bootstrap-{currentVersion}.exe")
-            throw new InvalidDataException("The exact bootstrap release has invalid immutable publisher metadata.");
 
         var download = RequireCloudFrontDownload(source, currentVersion);
-        var bootstrapDownload = RequireCloudFrontDownload(bootstrap, currentVersion);
 
         return new OpticonSourceRelease(currentVersion, source.File, source.Size,
             source.Sha256.ToLowerInvariant(), source.SdkVersion, source.RuntimeVersion,
             source.SourceManifestSha256.ToLowerInvariant(), source.SourceManifestKeyId,
             source.SigningProfile, source.ProductSignerThumbprint, source.TargetRuntimes,
-            download, currentVersion, bootstrap.File, bootstrap.Size, bootstrap.Sha256.ToLowerInvariant(),
-            bootstrap.SignerThumbprint.ToUpperInvariant(), bootstrapDownload);
+            download, SourceInstallProtocol);
     }
 
     private static Uri RequireCloudFrontDownload(ArtifactRecordDto artifact, string version)

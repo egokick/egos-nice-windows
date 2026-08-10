@@ -361,6 +361,18 @@ public sealed class AgentClient
         SendJsonResultAsync<UpdateStatusDto>(
             device, token, HttpMethod.Post, "api/v1/update/prepare", request, TimeSpan.FromMinutes(30), cancellationToken);
 
+    public Task<UpdateStatusDto> PrepareSourceUpdateAsync(
+        DeviceRecord device,
+        string token,
+        SourceUpdateRequest request,
+        CancellationToken cancellationToken = default) =>
+        // The target verifies the immutable source archive and performs an
+        // isolated local build before it reaches Ready, so its bounded request
+        // window is intentionally longer than an executable-bundle download.
+        SendJsonResultAsync<UpdateStatusDto>(
+            device, token, HttpMethod.Post, "api/v1/update/source/prepare", request,
+            TimeSpan.FromMinutes(60), cancellationToken);
+
     public Task<UpdateStatusDto> ActivateUpdateAsync(
         DeviceRecord device,
         string token,
@@ -390,6 +402,15 @@ public sealed class AgentClient
         CancellationToken cancellationToken = default) =>
         SendJsonResultAsync<GuardianMaintenanceStatusDto>(
             device, token, HttpMethod.Post, "api/v1/update/guardian", request,
+            TimeSpan.FromMinutes(30), cancellationToken);
+
+    public Task<GuardianMaintenanceStatusDto> ReconcileSourceGuardianAsync(
+        DeviceRecord device,
+        string token,
+        SourceUpdateRequest request,
+        CancellationToken cancellationToken = default) =>
+        SendJsonResultAsync<GuardianMaintenanceStatusDto>(
+            device, token, HttpMethod.Post, "api/v1/update/source/guardian", request,
             TimeSpan.FromMinutes(30), cancellationToken);
 
     public static async Task<bool> ProbeTcpAsync(

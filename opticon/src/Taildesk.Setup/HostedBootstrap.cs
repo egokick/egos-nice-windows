@@ -1,59 +1,79 @@
-using System.Diagnostics;
-using System.IO.Compression;
-using System.Security.Cryptography;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using System.Security.Principal;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using Taildesk.Shared;
 
 namespace Taildesk.Setup;
 
-internal sealed record HostedBootstrap(string PublicId, string PrivateKey, string BootstrapSha256);
+internal sealed record SourceBootstrapRequest(string PublicId, string PrivateKey, string? SourceArchivePath);
 
 internal static class HostedBootstrapper
 {
     private const string Origin = "https://taildesk-egokick-control.fly.dev";
     internal const string InvitePathEnvironmentVariable = "OPTICON_HOSTED_INVITE_PATH";
     internal const string InviteKeyEnvironmentVariable = "OPTICON_HOSTED_INVITE_KEY";
-    private static readonly Regex NamePattern = new(
-        "^Install-Opticon-(?<id>[A-Za-z0-9_-]{32})--(?<key>[A-Za-z0-9_-]{43})--(?<sha>[a-f0-9]{64})$",
-        RegexOptions.CultureInvariant);
-    private static readonly Regex PublishedNamePattern = new(
-        "^opticon-bootstrap-[0-9]+\\.[0-9]+\\.[0-9]+$",
-        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex PublicIdPattern = new("^[A-Za-z0-9_-]{32}$", RegexOptions.CultureInvariant);
+    private static readonly Regex PrivateKeyPattern = new("^[A-Za-z0-9_-]{43}$", RegexOptions.CultureInvariant);
 
-    internal static bool TryParse(string? executablePath, out HostedBootstrap bootstrap)
+    /// <summary>
+    /// The source archive contains this small, publisher-signed launcher. It is
+    /// a fixed trust anchor, not a separately published release artifact: the
+    /// launcher verifies the invite and signed archive before it builds source.
+    /// </summary>
+    internal static bool IsSourceLauncher(string? executablePath) =>
+        string.Equals(Path.GetFileName(executablePath), "OpticonSourceLauncher.exe", StringComparison.OrdinalIgnoreCase);
+
+    internal static SourceBootstrapRequest ParseSourceLaunch(
+        IReadOnlyList<string> arguments,
+        string? executablePath)
     {
-        bootstrap = default!;
-        if (!string.Equals(Path.GetExtension(executablePath), ".exe", StringComparison.OrdinalIgnoreCase)) return false;
-        var match = NamePattern.Match(Path.GetFileNameWithoutExtension(executablePath) ?? string.Empty);
-        if (!match.Success) return false;
-        bootstrap = new HostedBootstrap(match.Groups["id"].Value, match.Groups["key"].Value, match.Groups["sha"].Value);
-        return true;
+        if (!IsSourceLauncher(executablePath))
+            throw new InvalidDataException("The source-only installer must be launched from OpticonSourceLauncher.exe.");
+        if (arguments.Any(argument => !argument.StartsWith("--invite-url=", StringComparison.OrdinalIgnoreCase)
+                                      && !argument.StartsWith("--source-archive=", StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException("The source-only launcher accepts only --invite-url and --source-archive.");
+        var invitationUrl = ReadOptionalArgument(arguments, "--invite-url=")
+                            ?? SourceLauncherPrompt.ReadInvitationUrl();
+        var sourceArchive = ReadOptionalArgument(arguments, "--source-archive=");
+        if (!Uri.TryCreate(invitationUrl, UriKind.Absolute, out var invitation)
+            || invitation.Scheme != Uri.UriSchemeHttps || invitation.Port != 443
+            || invitation.UserInfo.Length != 0 || invitation.Query.Length != 0
+            || !string.Equals(invitation.GetLeftPart(UriPartial.Authority), Origin, StringComparison.OrdinalIgnoreCase)
+            || !invitation.AbsolutePath.StartsWith("/opticon/i/", StringComparison.Ordinal)
+            || invitation.AbsolutePath["/opticon/i/".Length..].Contains('/')
+            || invitation.Fragment.Length <= 1)
+            throw new InvalidDataException("The source-only launcher was not given a canonical Opticon invitation URL.");
+        var publicId = invitation.AbsolutePath["/opticon/i/".Length..];
+        var privateKey = invitation.Fragment[1..];
+        if (!PublicIdPattern.IsMatch(publicId) || !PrivateKeyPattern.IsMatch(privateKey))
+            throw new InvalidDataException("The source-only launcher invitation URL is malformed.");
+        if (sourceArchive is not null)
+        {
+            sourceArchive = Path.GetFullPath(sourceArchive);
+            if (!string.Equals(Path.GetExtension(sourceArchive), ".zip", StringComparison.OrdinalIgnoreCase)
+                || !File.Exists(sourceArchive) || (File.GetAttributes(sourceArchive) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("The selected source archive must be a regular local .zip file.");
+        }
+        return new SourceBootstrapRequest(publicId, privateKey, sourceArchive);
     }
 
-    internal static bool IsPublishedBootstrap(string? executablePath) =>
-        string.Equals(Path.GetExtension(executablePath), ".exe", StringComparison.OrdinalIgnoreCase)
-        && PublishedNamePattern.IsMatch(Path.GetFileNameWithoutExtension(executablePath) ?? string.Empty);
-
-    internal static async Task LaunchSetupAsync(HostedBootstrap bootstrap, Action<string> report)
+    internal static async Task LaunchSourceOnlyAsync(SourceBootstrapRequest bootstrap, Action<string> report)
     {
-        var bootstrapPath = Environment.ProcessPath
-                            ?? throw new InvalidOperationException("The signed Opticon bootstrap executable path is unavailable.");
-        await VerifyFileHashAsync(bootstrapPath, bootstrap.BootstrapSha256);
-        await ProductSigning.VerifyAuthenticodeAsync(bootstrapPath);
-        await SourceBootstrapInstaller.RunAsync(bootstrap, bootstrapPath, report);
-        return;
+        var launcherPath = Environment.ProcessPath
+                           ?? throw new InvalidOperationException("The Opticon source launcher path is unavailable.");
+        if (!IsSourceLauncher(launcherPath))
+            throw new InvalidDataException("The source-only installer was not started by the fixed Opticon source launcher.");
+        await ProductSigning.VerifyAuthenticodeAsync(launcherPath);
+        await SourceBootstrapInstaller.RunAsync(bootstrap, launcherPath, report);
     }
 
-    private static async Task VerifyFileHashAsync(string path, string expectedHash)
+    private static string? ReadOptionalArgument(IReadOnlyList<string> arguments, string prefix)
     {
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
-            64 * 1024, FileOptions.SequentialScan);
-        var actual = await SHA256.HashDataAsync(stream);
-        if (!CryptographicOperations.FixedTimeEquals(actual, Convert.FromHexString(expectedHash)))
-            throw new InvalidDataException("The running bootstrap does not match the SHA-256 embedded in its invitation filename.");
+        var matches = arguments.Where(argument => argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (matches.Length > 1 || (matches.Length == 1 && string.IsNullOrWhiteSpace(matches[0][prefix.Length..])))
+            throw new InvalidDataException($"The source-only launcher accepts at most one {prefix[..^1]} argument.");
+        return matches.Length == 0 ? null : matches[0][prefix.Length..].Trim('"');
     }
 
     internal static void RequireProtectedHandoff(string invitePath, string releaseDirectory)
@@ -189,23 +209,6 @@ internal static class HostedBootstrapper
         root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         path = Path.GetFullPath(path);
         return path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-    }
-
-    internal static string ResolveBundleUrl(ArtifactRecordDto bundle)
-    {
-        if (string.IsNullOrWhiteSpace(bundle.DownloadUrl))
-            return $"{Origin}/opticon/artifacts/v1/{Uri.EscapeDataString(bundle.File)}";
-        if (!Uri.TryCreate(bundle.DownloadUrl, UriKind.Absolute, out var uri)
-            || uri.Scheme != Uri.UriSchemeHttps
-            || uri.IsDefaultPort is false
-            || uri.UserInfo.Length != 0
-            || uri.Query.Length != 0
-            || uri.Fragment.Length != 0
-            || !uri.Host.EndsWith(".cloudfront.net", StringComparison.OrdinalIgnoreCase)
-            || uri.Host[..^".cloudfront.net".Length].Length == 0
-            || uri.AbsolutePath != $"/opticon/releases/{Uri.EscapeDataString(bundle.Version)}/{Uri.EscapeDataString(bundle.File)}")
-            throw new InvalidDataException("The Opticon release manifest contains an unsafe CloudFront download URL.");
-        return uri.AbsoluteUri;
     }
 
     internal static async Task DownloadAsync(HttpClient client, string url, string destination, long? expectedSize,

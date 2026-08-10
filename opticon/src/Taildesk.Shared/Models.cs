@@ -124,11 +124,7 @@ public sealed class InviteRecord
     public string RuntimeVersion { get; set; } = string.Empty;
     public string TargetRuntime { get; set; } = string.Empty;
     public string[] TargetRuntimes { get; set; } = [];
-    public string BootstrapVersion { get; set; } = string.Empty;
-    public string BootstrapFile { get; set; } = string.Empty;
-    public long BootstrapSize { get; set; }
-    public string BootstrapSha256 { get; set; } = string.Empty;
-    public string BootstrapSignerThumbprint { get; set; } = string.Empty;
+    public string InstallProtocol { get; set; } = InvitationPolicy.SourceInstallProtocol;
 
     [JsonIgnore]
     public string HostedUrl => string.IsNullOrWhiteSpace(HostedUrlProtected)
@@ -171,11 +167,7 @@ public sealed class InvitePayload
     public string RuntimeVersion { get; set; } = string.Empty;
     public string TargetRuntime { get; set; } = string.Empty;
     public string[] TargetRuntimes { get; set; } = [];
-    public string BootstrapVersion { get; set; } = string.Empty;
-    public string BootstrapFile { get; set; } = string.Empty;
-    public long BootstrapSize { get; set; }
-    public string BootstrapSha256 { get; set; } = string.Empty;
-    public string BootstrapSignerThumbprint { get; set; } = string.Empty;
+    public string InstallProtocol { get; set; } = InvitationPolicy.SourceInstallProtocol;
     public bool AdvertiseExitNode { get; set; }
     public string[] AllowedRoots { get; set; } = ["Desktop", "Documents", "Downloads", "Pictures", "Videos"];
 }

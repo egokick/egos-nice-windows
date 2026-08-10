@@ -57,6 +57,8 @@ public sealed class InviteBundleService
         var expectedTailnet = await ReadCurrentTailnetAsync(cancellationToken);
         progress?.Report("Pinning this invitation to the exact authenticated source release...");
         var sourceRelease = await new OpticonSourceReleaseClient().GetCurrentAsync(_state.Config, cancellationToken);
+        if (!string.Equals(sourceRelease.InstallProtocol, InvitationPolicy.SourceInstallProtocol, StringComparison.Ordinal))
+            throw new InvalidDataException("The published source release does not use the supported source-only install protocol.");
         var expires = InvitationPolicy.CreateDefaultExpiry();
         progress?.Report("Creating the one-use network key...");
         var authKey = await _headscale.CreateInviteKeyAsync(role, advertiseExitNode, $"Opticon invite for {deviceName}", expires, cancellationToken);
@@ -65,7 +67,6 @@ public sealed class InviteBundleService
         var rustDeskPassword = SecurityHelpers.CreateHumanPassword();
         var controllerToken = SecurityHelpers.CreateToken();
         var payload = new InvitePayload
-        // Current hosted invitations pin both source and bootstrap bytes.
         {
             SchemaVersion = InvitationPolicy.HostedLinkSchemaVersion,
             InviteId = Guid.NewGuid(),
@@ -91,11 +92,7 @@ public sealed class InviteBundleService
             SdkVersion = sourceRelease.SdkVersion,
             RuntimeVersion = sourceRelease.RuntimeVersion,
             TargetRuntimes = sourceRelease.TargetRuntimes.ToArray(),
-            BootstrapVersion = sourceRelease.BootstrapVersion,
-            BootstrapFile = sourceRelease.BootstrapFile,
-            BootstrapSize = sourceRelease.BootstrapSize,
-            BootstrapSha256 = sourceRelease.BootstrapSha256,
-            BootstrapSignerThumbprint = sourceRelease.BootstrapSignerThumbprint,
+            InstallProtocol = sourceRelease.InstallProtocol,
             AdvertiseExitNode = advertiseExitNode,
             AllowedRoots = selectedRoots
         };
@@ -124,11 +121,7 @@ public sealed class InviteBundleService
             SdkVersion = sourceRelease.SdkVersion,
             RuntimeVersion = sourceRelease.RuntimeVersion,
             TargetRuntimes = sourceRelease.TargetRuntimes.ToArray(),
-            BootstrapVersion = sourceRelease.BootstrapVersion,
-            BootstrapFile = sourceRelease.BootstrapFile,
-            BootstrapSize = sourceRelease.BootstrapSize,
-            BootstrapSha256 = sourceRelease.BootstrapSha256,
-            BootstrapSignerThumbprint = sourceRelease.BootstrapSignerThumbprint
+            InstallProtocol = sourceRelease.InstallProtocol
         };
 
         HostedInvitePublication? publication = null;
@@ -213,6 +206,10 @@ public sealed class InviteBundleService
         if (payload.InviteId != record.Id || payload.Role != record.Role ||
             !SecurityHelpers.FixedTimeEquals(SecurityHelpers.HashToken(payload.InviteSecret), record.InviteSecretHash))
             throw new InvalidDataException("The hosted invitation does not match its command-center record.");
+        if (payload.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion
+            || !string.Equals(payload.InstallProtocol, InvitationPolicy.SourceInstallProtocol, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "This historical invitation cannot be extended. Create a new source-only invitation instead.");
 
         var oldExpiry = payload.ExpiresAt;
         var oldAuthKey = payload.TailscaleAuthKey;

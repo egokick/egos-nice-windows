@@ -177,6 +177,10 @@ public sealed class GuardianMaintenanceStatusDto
 public sealed class UpdateJournal
 {
     public int SchemaVersion { get; set; } = 1;
+    // Schema 1 is the signed executable bundle transaction. Schema 2 adds the
+    // independently verified source-archive transaction below. Old Guardians
+    // reject schema 2 rather than treating an unsigned local build as a bundle.
+    public UpdateDeliveryMode DeliveryMode { get; set; } = UpdateDeliveryMode.SignedBundle;
     public bool MaintenanceBootstrap { get; set; }
     public bool SshWasListening { get; set; }
     public Guid OperationId { get; set; }
@@ -188,6 +192,17 @@ public sealed class UpdateJournal
     public string PackagePath { get; set; } = string.Empty;
     public string PackageSha256 { get; set; } = string.Empty;
     public long PackageSize { get; set; }
+    public string SourceDownloadUrl { get; set; } = string.Empty;
+    public string SourceFile { get; set; } = string.Empty;
+    public string SourceManifestSha256 { get; set; } = string.Empty;
+    public string SourceManifestKeyId { get; set; } = string.Empty;
+    public string SigningProfile { get; set; } = string.Empty;
+    public string ProductSignerThumbprint { get; set; } = string.Empty;
+    public string SdkVersion { get; set; } = string.Empty;
+    public string RuntimeVersion { get; set; } = string.Empty;
+    public string TargetRuntime { get; set; } = string.Empty;
+    public string SourceBuildOutputDirectory { get; set; } = string.Empty;
+    public string SourceBuildAttestationPath { get; set; } = string.Empty;
     public string StagedAgentDirectory { get; set; } = string.Empty;
     public string CandidateDirectory { get; set; } = string.Empty;
     public string RollbackDirectory { get; set; } = string.Empty;

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Xml.Linq;
@@ -32,6 +33,8 @@ var tests = new (string Name, Action Body)[]
     ("RustDesk installer configures every Windows service profile before validation", TestRustDeskInstallerProfiles),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
     ("remote administration contracts reject unpinned or unsafe updates", TestRemoteAdministrationProtocol),
+    ("source-only updates pin one archive, seal local build output, and retain Guardian rollback", TestSourceUpdateRuntime),
+    ("source-built Agent and Guardian paths remain trusted through atomic promotion", TestSourceUpdateProvenanceMappings),
     ("remote update polling distinguishes Agent restarts from caller cancellation", TestRemoteUpdatePollingRecovery),
     ("legacy machine state cannot cross the protected update boundary unattended", TestLegacyMachineStateUpdateGate),
     ("the signed 1.1.41 bridge is the only legacy ACL and trust exception", TestLegacyMachineStateBridgeSafety),
@@ -365,9 +368,12 @@ static void TestInvitationPolicy()
     Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.LegacyBundleSchemaVersion), "legacy invitation schema must remain parseable for history");
     Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.PreviousHostedLinkSchemaVersion), "previous hosted schema must remain parseable for history");
     Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.PreviousSourceBuildSchemaVersion), "previous source schema must remain parseable for history");
+    Assert(InvitationPolicy.IsSupportedPayloadSchema(InvitationPolicy.PreviousBootstrapPinnedSourceBuildSchemaVersion), "bootstrap-pinned source schema must remain parseable for history");
     Assert(InvitationPolicy.IsInstallablePayloadSchema(InvitationPolicy.HostedLinkSchemaVersion), "current schema must be installable");
     Assert(!InvitationPolicy.IsInstallablePayloadSchema(InvitationPolicy.PreviousSourceBuildSchemaVersion), "schema 4 must be historical-only after bootstrap pinning");
-    Assert(!InvitationPolicy.IsSupportedPayloadSchema(1) && !InvitationPolicy.IsSupportedPayloadSchema(6), "unknown invitation schemas must be rejected");
+    Assert(!InvitationPolicy.IsInstallablePayloadSchema(InvitationPolicy.PreviousBootstrapPinnedSourceBuildSchemaVersion), "schema 5 must be historical-only after source-only migration");
+    Assert(InvitationPolicy.SourceInstallProtocol == "source-v1", "the source-only invitation protocol changed unexpectedly");
+    Assert(!InvitationPolicy.IsSupportedPayloadSchema(1) && !InvitationPolicy.IsSupportedPayloadSchema(7), "unknown invitation schemas must be rejected");
 }
 static void TestInviteRoundTrip()
 {
@@ -395,6 +401,7 @@ static void TestInviteRoundTrip()
     Assert(copy?.HeadscaleLoginUrl == invite.HeadscaleLoginUrl, "Headscale login URL changed");
     Assert(copy?.ExpectedTailnet == invite.ExpectedTailnet, "expected tailnet changed");
     Assert(copy?.AllowedRoots.SequenceEqual(invite.AllowedRoots) == true, "shared roots changed");
+    Assert(copy?.InstallProtocol == InvitationPolicy.SourceInstallProtocol, "source-only install protocol changed");
 }
 
 static void TestInviteContainer()
@@ -727,28 +734,134 @@ static void TestRemoteUpdatePollingRecovery()
         "ambiguous activation, commit, and maintenance responses must recover the exact durable terminal update result");
 }
 
+static void TestSourceUpdateRuntime()
+{
+    Assert(SourceUpdateProtocol.Version == 1
+           && SourceUpdateProtocol.RequiredSdkVersion == "10.0.302"
+           && SourceUpdateProtocol.RequiredRuntimeVersion == "10.0.10"
+           && SourceUpdateProtocol.MinimumGuardianVersion == "1.2.0",
+        "the source update protocol no longer pins its SDK, runtime, and Guardian floor");
+
+    var journal = new UpdateJournal
+    {
+        SchemaVersion = 2,
+        DeliveryMode = UpdateDeliveryMode.SourceArchive,
+        OperationId = Guid.NewGuid(),
+        SourceFile = "opticon-source-1.2.0.zip",
+        SourceBuildOutputDirectory = "C:\\ProgramData\\Opticon\\updates\\source-build",
+        SourceBuildAttestationPath = "C:\\ProgramData\\Opticon\\updates\\source-build-attestation.json"
+    };
+    var journalJson = JsonSerializer.Serialize(journal, JsonDefaults.Options);
+    Assert(journalJson.Contains("\"deliveryMode\": \"sourceArchive\"", StringComparison.Ordinal)
+           && journalJson.Contains("sourceBuildAttestationPath", StringComparison.Ordinal),
+        "the protected source update journal does not persist its delivery mode and build attestation path");
+
+    var verifier = ReadSource("src", "Taildesk.Shared", "SourceUpdatePackageVerifier.cs");
+    var runner = ReadSource("src", "Taildesk.Agent", "SourceUpdateBuildRunner.cs");
+    var manager = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");
+    var agentProgram = ReadSource("src", "Taildesk.Agent", "Program.cs");
+    var guardian = ReadSource("src", "Taildesk.UpdateGuardian", "GuardianRunner.cs");
+    var provenance = ReadSource("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
+    var buildScript = ReadSource("source-package", "Build-OpticonUpdateFromSource.ps1");
+    Assert(verifier.Contains("RequireImmutableCloudFrontUrl", StringComparison.Ordinal)
+           && verifier.Contains("CloudFrontHostPattern", StringComparison.Ordinal)
+           && verifier.Contains("SourceReleaseSigning.Verify", StringComparison.Ordinal)
+           && verifier.Contains("VerifyBuiltOutputAsync", StringComparison.Ordinal)
+           && verifier.Contains("RegisterVerifiedSourceUpdateAsync", StringComparison.Ordinal),
+        "source updates must reject arbitrary URLs and verify both signed source and the sealed local build attestation");
+    Assert(runner.Contains("UseProxy", StringComparison.Ordinal) == false
+           && runner.Contains("clearEnvironment: true", StringComparison.Ordinal)
+           && runner.Contains("DOTNET_MULTILEVEL_LOOKUP", StringComparison.Ordinal)
+           && runner.Contains("NUGET_PACKAGES", StringComparison.Ordinal)
+           && runner.Contains("SourceUpdateProtocol.SourceBuildScriptName", StringComparison.Ordinal),
+        "the source build runner must use a fixed entrypoint with an isolated SDK/NuGet environment");
+    Assert(manager.Contains("PrepareSourceAsync", StringComparison.Ordinal)
+           && manager.Contains("ReconcileSourceGuardianAsync", StringComparison.Ordinal)
+           && manager.Contains("SourceUpdatePackageVerifier.VerifyAndExtractAsync", StringComparison.Ordinal)
+           && manager.Contains("_sourceBuild.BuildAsync", StringComparison.Ordinal)
+           && manager.Contains("RequireCommittedSourceJournal", StringComparison.Ordinal),
+        "the Agent must stage source builds and promote the matching Guardian only after the Agent commits");
+    Assert(agentProgram.Contains("/api/v1/update/source/prepare", StringComparison.Ordinal)
+           && agentProgram.Contains("/api/v1/update/source/guardian", StringComparison.Ordinal),
+        "the Agent does not expose the authenticated source prepare and Guardian reconciliation routes");
+    Assert(guardian.Contains("journal.DeliveryMode == UpdateDeliveryMode.SourceArchive", StringComparison.Ordinal)
+           && guardian.Contains("VerifyArchiveAsync", StringComparison.Ordinal)
+           && guardian.Contains("VerifyBuiltOutputAsync", StringComparison.Ordinal)
+           && guardian.Contains("CopyVerifiedComponentAsync", StringComparison.Ordinal),
+        "the Guardian must independently reverify the source archive and every attested Agent byte before swapping it");
+    Assert(provenance.Contains("RegisterVerifiedSourceUpdateAsync", StringComparison.Ordinal)
+           && provenance.Contains("SourceBuildOutputDirectory", StringComparison.Ordinal)
+           && provenance.Contains("Payload", StringComparison.Ordinal),
+        "source-built Agent and Guardian paths are not protected by persistent machine provenance");
+    Assert(buildScript.Contains("Payload\\Agent", StringComparison.Ordinal)
+           && buildScript.Contains("Payload\\UpdateGuardian", StringComparison.Ordinal)
+           && buildScript.Contains("opticon-offline", StringComparison.Ordinal)
+           && buildScript.Contains("source build attestation", StringComparison.Ordinal),
+        "the fixed source build script must build both rollback-aware components with an offline package feed");
+}
+
+static void TestSourceUpdateProvenanceMappings()
+{
+    var operationId = Guid.NewGuid();
+    var operationDirectory = Path.Combine(AppPaths.UpdateDataDirectory, operationId.ToString("N"));
+    var sourceBuild = Path.Combine(operationDirectory, "source-build");
+    var journal = new UpdateJournal
+    {
+        SchemaVersion = 2,
+        DeliveryMode = UpdateDeliveryMode.SourceArchive,
+        OperationId = operationId,
+        SourceBuildOutputDirectory = sourceBuild
+    };
+    var resolver = typeof(SourceBuildProvenance).GetMethod(
+        "ResolveCanonicalTrustPaths",
+        BindingFlags.Static | BindingFlags.NonPublic,
+        binder: null,
+        types: [typeof(string), typeof(UpdateJournal)],
+        modifiers: null)
+        ?? throw new InvalidOperationException("The source-update provenance resolver is unavailable.");
+    string[] Resolve(string path) => ((IEnumerable<string>)(resolver.Invoke(null, [path, journal])
+        ?? throw new InvalidOperationException("The source-update provenance resolver returned no paths.")))
+        .Select(Path.GetFullPath)
+        .ToArray();
+    var canonicalAgent = Path.Combine(AppPaths.AgentInstallDirectory, "Taildesk.Agent.exe");
+    var canonicalGuardian = Path.Combine(AppPaths.UpdateGuardianInstallDirectory, "Taildesk.UpdateGuardian.exe");
+    var stagedAgent = Path.Combine(sourceBuild, "Payload", "Agent", "Taildesk.Agent.exe");
+    var stagedGuardian = Path.Combine(sourceBuild, "Payload", "UpdateGuardian", "Taildesk.UpdateGuardian.exe");
+    var candidateAgent = AppPaths.AgentInstallDirectory + ".candidate-" + operationId.ToString("N")
+        + Path.DirectorySeparatorChar + "Taildesk.Agent.exe";
+    var guardianUpgrade = canonicalGuardian + ".upgrade-" + operationId.ToString("N");
+    var guardianBackup = canonicalGuardian + ".backup-" + operationId.ToString("N");
+    var guardianFailed = canonicalGuardian + ".failed-" + operationId.ToString("N");
+    var expectedAgent = Path.GetFullPath(canonicalAgent);
+    var expectedGuardian = Path.GetFullPath(canonicalGuardian);
+    Assert(Resolve(stagedAgent).Contains(expectedAgent, StringComparer.OrdinalIgnoreCase)
+           && Resolve(candidateAgent).Contains(expectedAgent, StringComparer.OrdinalIgnoreCase),
+        "the source-built Agent is not trusted while staged or in the Guardian candidate directory");
+    Assert(Resolve(stagedGuardian).Contains(expectedGuardian, StringComparer.OrdinalIgnoreCase)
+           && Resolve(guardianUpgrade).Contains(expectedGuardian, StringComparer.OrdinalIgnoreCase)
+           && Resolve(guardianBackup).Contains(expectedGuardian, StringComparer.OrdinalIgnoreCase)
+           && Resolve(guardianFailed).Contains(expectedGuardian, StringComparer.OrdinalIgnoreCase),
+        "the source-built Guardian is not trusted through its staged, promoted, and rollback paths");
+}
+
 static void TestLegacyMachineStateUpdateGate()
 {
     var firstProtected = new Version(1, 1, 39);
-    var bridgeTarget = new Version(1, 1, 41);
+    var sourceFloor = UpdatePackageVerifier.ParseVersion(SourceUpdateProtocol.MinimumGuardianVersion);
     Assert(RemoteAdministrationProtocol.MinimumProtectedMachineStateAgentVersion == "1.1.39"
-           && RemoteAdministrationProtocol.LegacyMachineStateMigrationBridgeVersion == "1.1.41"
            && RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 1, 38), firstProtected)
            && RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 0, 0), new Version(1, 1, 40))
            && !RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(firstProtected, new Version(1, 1, 40))
            && !RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 1, 38), new Version(1, 1, 38))
-           && RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
-               new Version(1, 1, 38), bridgeTarget, InvitationSigning.CertificateThumbprint)
-           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
-               new Version(1, 1, 37), bridgeTarget, InvitationSigning.CertificateThumbprint)
-           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
-               new Version(1, 1, 38), new Version(1, 1, 40), InvitationSigning.CertificateThumbprint)
-           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
-               new Version(1, 1, 38), bridgeTarget, InvitationSigning.CertificateThumbprint.ToLowerInvariant()),
-        "only the exact 1.1.38-to-1.1.41 release bearing the canonical retired signer may cross the protected machine-state boundary");
+           && SourceUpdateProtocol.MinimumGuardianVersion == "1.2.0"
+           && new Version(1, 1, 38) < sourceFloor
+           && new Version(1, 2, 0) >= sourceFloor,
+        "legacy state remains protected, while the source-only remote-update protocol starts at 1.2.0");
 
     var releaseClient = File.ReadAllText(FindSourceFile(
         "src", "Taildesk.Admin", "OpticonReleaseClient.cs"));
+    var agentClient = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Admin", "AgentClient.cs"));
     var coordinator = File.ReadAllText(FindSourceFile(
         "src", "Taildesk.Admin", "RemoteDeviceUpdateCoordinator.cs"));
     var mainWindow = File.ReadAllText(FindSourceFile(
@@ -756,40 +869,43 @@ static void TestLegacyMachineStateUpdateGate()
     var storage = File.ReadAllText(FindSourceFile(
         "src", "Taildesk.Shared", "MachineStorageSecurity.cs"));
 
-    Assert(releaseClient.Contains("IsLegacyMachineStateMigrationBridge", StringComparison.Ordinal)
-           && releaseClient.Contains("bridges.Length != 1", StringComparison.Ordinal)
-           && releaseClient.Contains("LegacyMigrationSignerThumbprint", StringComparison.Ordinal)
-           && releaseClient.Contains("HasCanonicalLegacyBridgeOuterTrust", StringComparison.Ordinal)
-           && releaseClient.Contains("The retired maintenance bootstrap cannot launch this bridge.", StringComparison.Ordinal)
-           && releaseClient.Contains("string.IsNullOrEmpty(candidate.Artifact.LegacyMigrationSignerThumbprint)", StringComparison.Ordinal),
-        "release selection must select exactly one authenticated bridge for 1.1.38 and exclude every bridge marker from newer normal releases");
-    Assert(coordinator.Contains(
-                "RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(",
-                StringComparison.Ordinal)
-           && coordinator.Contains("RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(", StringComparison.Ordinal)
-           && coordinator.Contains("release.IsLegacyMachineStateMigrationBridge != isLegacyMachineStateMigrationBridge", StringComparison.Ordinal)
-           && coordinator.Contains("A legacy migration marker is not valid", StringComparison.Ordinal)
-           && coordinator.IndexOf("RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge", StringComparison.Ordinal)
-               < coordinator.IndexOf("_agents.PrepareUpdateAsync", StringComparison.Ordinal),
-        "the remote update coordinator must re-derive the exact bridge identity and reject forged markers before it stages a candidate");
+    Assert(releaseClient.Contains("manifest.SchemaVersion != 2", StringComparison.Ordinal)
+           && releaseClient.Contains("manifest.Artifacts.Count != 1", StringComparison.Ordinal)
+           && releaseClient.Contains("ValidateSourceArtifact", StringComparison.Ordinal)
+           && releaseClient.Contains("source.Role is not null", StringComparison.Ordinal)
+           && releaseClient.Contains("RequiresCleanReinstall = requiresCleanReinstall", StringComparison.Ordinal)
+           && releaseClient.Contains("installedAgent < SourceUpdateFloor", StringComparison.Ordinal)
+           && releaseClient.Contains("installedGuardian < SourceUpdateFloor", StringComparison.Ordinal),
+        "release selection must accept exactly one pinned schema-2 source archive and mark sub-1.2.0 devices for clean reinstall");
+    Assert(agentClient.Contains("PrepareSourceUpdateAsync", StringComparison.Ordinal)
+           && agentClient.Contains("api/v1/update/source/prepare", StringComparison.Ordinal)
+           && agentClient.Contains("TimeSpan.FromMinutes(60)", StringComparison.Ordinal)
+           && agentClient.Contains("ReconcileSourceGuardianAsync", StringComparison.Ordinal)
+           && agentClient.Contains("api/v1/update/source/guardian", StringComparison.Ordinal),
+        "the Admin HTTP client must use the authenticated source prepare and Guardian routes with a build-sized timeout");
+    Assert(coordinator.Contains("release.RequiresCleanReinstall", StringComparison.Ordinal)
+           && coordinator.Contains("CreateSourceUpdateRequest", StringComparison.Ordinal)
+           && coordinator.Contains("SourceUpdatePackageVerifier.ValidateRequest(request)", StringComparison.Ordinal)
+           && coordinator.Contains("_agents.PrepareSourceUpdateAsync", StringComparison.Ordinal)
+           && coordinator.Contains("CompleteSourceTransactionAsync", StringComparison.Ordinal)
+           && coordinator.Contains("_agents.ReconcileSourceGuardianAsync", StringComparison.Ordinal)
+           && coordinator.Contains("result.OperationId != sourceRequest.OperationId", StringComparison.Ordinal)
+           && !coordinator.Contains("_agents.PrepareUpdateAsync", StringComparison.Ordinal)
+           && !coordinator.Contains("IsLegacyMachineStateMigrationBridge", StringComparison.Ordinal),
+        "the remote update coordinator must stage only a validated source request and reconcile its Guardian with the same committed operation ID");
 
-    const string legacyGate = "if (release.RequiresLegacyMachineStateMigration)";
-    var gateStart = mainWindow.IndexOf(legacyGate, StringComparison.Ordinal);
-    const string bridgeGate = "if (isLegacyMachineStateMigrationBridge)";
-    var bridgeStart = mainWindow.IndexOf(bridgeGate, StringComparison.Ordinal);
-    var maintenanceStart = mainWindow.IndexOf("else if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal);
+    const string cleanGate = "if (release.RequiresCleanReinstall)";
+    var gateStart = mainWindow.IndexOf(cleanGate, StringComparison.Ordinal);
+    var sourceStart = mainWindow.IndexOf("if (release.SourceRelease is null)", StringComparison.Ordinal);
     Assert(gateStart >= 0
-           && bridgeStart > gateStart
-           && maintenanceStart > bridgeStart
-           && mainWindow[gateStart..bridgeStart].Contains("supported only from Opticon Agent 1.1.38 to 1.1.41", StringComparison.Ordinal)
-           && mainWindow[gateStart..bridgeStart].Contains("No candidate was staged or activated", StringComparison.Ordinal)
-           && !mainWindow[gateStart..bridgeStart].Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal)
-           && mainWindow[bridgeStart..maintenanceStart].Contains("Run signed legacy Opticon bridge", StringComparison.Ordinal)
-           && mainWindow[bridgeStart..maintenanceStart].Contains("seals the existing Opticon ProgramData state", StringComparison.Ordinal)
-           && mainWindow[bridgeStart..maintenanceStart].Contains("automatic rollback by omission", StringComparison.Ordinal)
-           && !mainWindow[bridgeStart..maintenanceStart].Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal)
-           && mainWindow.Contains("!isLegacyMachineStateMigrationBridge", StringComparison.Ordinal),
-        "the Update Opticon UI must block unsupported legacy versions, explicitly confirm the one-time ACL bridge, and never divert it to retired maintenance");
+           && sourceStart > gateStart
+           && mainWindow[gateStart..sourceStart].Contains("No remote candidate was staged or activated", StringComparison.Ordinal)
+           && mainWindow[gateStart..sourceStart].Contains("Opticon 1.1.38 cannot receive a remote source stage", StringComparison.Ordinal)
+           && mainWindow[gateStart..sourceStart].Contains("attended clean uninstall and re-enroll", StringComparison.Ordinal)
+           && !mainWindow[gateStart..sourceStart].Contains("UpdateDeviceAsync", StringComparison.Ordinal)
+           && mainWindow.Contains("Guarded source-built Opticon update", StringComparison.Ordinal)
+           && mainWindow.Contains("locally built output is sealed and attested", StringComparison.Ordinal),
+        "the Update Opticon UI must never remotely stage legacy devices and must clearly describe local source build attestation for supported devices");
 
     var ensureEnd = storage.IndexOf("public static bool IsProtectedMachinePath", StringComparison.Ordinal);
     Assert(ensureEnd > 0
@@ -887,11 +1003,16 @@ static void TestReleaseDistributionDesign()
     var provision = Read("infrastructure", "aws", "Provision-OpticonReleaseDistribution.ps1");
     var publisher = Read("fly-headscale", "scripts", "Publish-OpticonBundles.ps1");
     var builder = Read("fly-headscale", "scripts", "Build-OpticonBundles.ps1");
+    var sourceOnlyPublisher = Read("fly-headscale", "scripts", "Publish-OpticonSourceRelease.ps1");
+    var sourceOnlyBuilder = Read("fly-headscale", "scripts", "Build-OpticonSourceRelease.ps1");
     var gateway = Read("fly-headscale", "gateway", "main.go");
     var client = Read("src", "Taildesk.Admin", "OpticonReleaseClient.cs");
+    var sourceClient = Read("src", "Taildesk.Admin", "OpticonSourceReleaseClient.cs");
     var agent = Read("src", "Taildesk.Agent", "UpdateManager.cs");
     var hostedBootstrap = Read("src", "Taildesk.Setup", "HostedBootstrap.cs");
     var sourceBootstrap = Read("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
+    var legacyRemoval = Read("src", "Taildesk.Setup", "LegacyOpticonRemoval.cs");
+    var legacyRemovalPrompt = Read("src", "Taildesk.Setup", "LegacyOpticonRemovalPrompt.cs");
     var sourceInstaller = Read("source-package", "Install-OpticonFromSource.ps1");
     var sourceNuget = Read("source-package", "NuGet.Config");
     var sourceProvenance = Read("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
@@ -907,7 +1028,17 @@ static void TestReleaseDistributionDesign()
            && provision.Contains("versioning is not enabled", StringComparison.Ordinal)
            && template.Contains("ResponseHeadersPolicyId: 60669652-455b-4ae9-85a4-c4c02393f86c", StringComparison.Ordinal)
            && template.Contains("TLSv1.2_2021", StringComparison.Ordinal),
-        "CloudFront infrastructure no longer enforces the private TLS-only S3 boundary");
+         "CloudFront infrastructure no longer enforces the private TLS-only S3 boundary");
+    Assert(sourceOnlyBuilder.Contains("-SourceOnly", StringComparison.Ordinal)
+           && sourceOnlyBuilder.Contains("no OpticonBundle or OpticonBootstrap artifact", StringComparison.Ordinal)
+           && sourceOnlyPublisher.Contains("SourceOnly = $true", StringComparison.Ordinal)
+           && sourceOnlyPublisher.Contains("one immutable object per version", StringComparison.Ordinal)
+           && sourceOnlyPublisher.Contains("fixed signed local launcher", StringComparison.Ordinal)
+           && sourceClient.Contains("manifest.SchemaVersion != 2", StringComparison.Ordinal)
+           && sourceClient.Contains("source-only release manifest contains a non-source artifact", StringComparison.Ordinal)
+           && gateway.Contains("sourceInstallProtocol", StringComparison.Ordinal)
+           && gateway.Contains("OpticonSourceLauncher.exe", StringComparison.Ordinal),
+        "the source-only release channel must publish one signed archive and an embedded fixed launcher");
     Assert(publisher.Contains("--checksum-algorithm", StringComparison.Ordinal)
            && publisher.Contains("--metadata", StringComparison.Ordinal)
            && publisher.Contains("sha256=$hash", StringComparison.Ordinal)
@@ -942,23 +1073,35 @@ static void TestReleaseDistributionDesign()
            && gateway.Contains("OwnerManaged", StringComparison.Ordinal)
            && client.Contains(".cloudfront.net", StringComparison.Ordinal),
         "manifest clients do not tightly validate CloudFront download URLs");
-    Assert(client.Contains("GuardianApiBootstrapVersion", StringComparison.Ordinal)
-           && client.Contains("candidate.Version == current", StringComparison.Ordinal)
-           && client.Contains("installedGuardian < candidate.Version", StringComparison.Ordinal)
-           && client.Contains("RequiresGuardianReconciliation", StringComparison.Ordinal),
-        "release selection must offer authenticated Guardian reconciliation after a watchdog-capable Agent reaches the same version");
+    Assert(client.Contains("SourceUpdateFloor", StringComparison.Ordinal)
+           && client.Contains("manifest.SchemaVersion != 2", StringComparison.Ordinal)
+           && client.Contains("manifest.Artifacts.Count != 1", StringComparison.Ordinal)
+           && client.Contains("ValidateSourceArtifact", StringComparison.Ordinal)
+           && client.Contains("RequireImmutableCloudFrontDownload", StringComparison.Ordinal)
+           && client.Contains("RequiresCleanReinstall", StringComparison.Ordinal),
+        "release selection must accept only the schema-2 source archive and fail closed to clean reinstall for pre-source devices");
     Assert(agent.Contains("UseProxy = false", StringComparison.Ordinal)
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
         "Agent release downloader does not retain the required direct HTTPS behavior");
     Assert(hostedBootstrap.Contains("SourceBootstrapInstaller.RunAsync", StringComparison.Ordinal)
-           && hostedBootstrap.Contains("BootstrapSha256", StringComparison.Ordinal)
-           && hostedBootstrap.Contains("VerifyFileHashAsync", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("IsSourceLauncher", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("ParseSourceLaunch", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("ProductSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
+           && !hostedBootstrap.Contains("BootstrapSha256", StringComparison.Ordinal)
            && hostedBootstrap.Contains("BootstrapHandoffDirectory", StringComparison.Ordinal)
            && hostedBootstrap.Contains("CreateRestrictedDirectorySecurity", StringComparison.Ordinal)
            && hostedBootstrap.Contains("RequireRestrictedAcl", StringComparison.Ordinal)
            && hostedBootstrap.Contains("RequireProtectedHandoff", StringComparison.Ordinal)
-           && hostedBootstrap.Contains("IsPublishedBootstrap", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("VerifyLauncherMatchesArchiveAsync", StringComparison.Ordinal)
+           && sourceBootstrap.IndexOf("VerifyLauncherMatchesArchiveAsync", StringComparison.Ordinal)
+              < sourceBootstrap.IndexOf("LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("ResolveSourceArchive", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("SourceInstallProtocol", StringComparison.Ordinal)
+           && !sourceBootstrap.Contains("MatchesBootstrap", StringComparison.Ordinal)
+           && !sourceBootstrap.Contains("BootstrapSha256", StringComparison.Ordinal)
+           && setupWindow.Contains("HostedBootstrapper.IsSourceLauncher", StringComparison.Ordinal)
+           && Read("src", "Taildesk.Setup", "SourceLauncherPrompt.cs").Contains("ReadInvitationUrl", StringComparison.Ordinal)
            && setupWindow.Contains("GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)", StringComparison.Ordinal)
            && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal)
            && setupWindow.Contains("Plaintext and legacy local invitation files are no longer accepted", StringComparison.Ordinal)
@@ -971,7 +1114,31 @@ static void TestReleaseDistributionDesign()
            && !setupWindow.Contains("SpecialFolder.LocalApplicationData", StringComparison.Ordinal)
            && setupWindow.Contains("private-key-redacted", StringComparison.Ordinal)
            && setupWindow.Contains("DetailsExpander.IsExpanded = true", StringComparison.Ordinal),
-        "hosted bootstrap handoff, executable-relative payload lookup, or redacted persistent Setup diagnostics regressed");
+         "source-only launcher handoff, archive pinning, or redacted persistent Setup diagnostics regressed");
+    Assert(legacyRemoval.Contains("LegacyAgentVersion = \"1.1.38\"", StringComparison.Ordinal)
+           && legacyRemoval.Contains("ConfirmationPhrase = \"REMOVE LEGACY OPTICON\"", StringComparison.Ordinal)
+           && legacyRemoval.Contains("RequireTaskOwnsExactExecutable", StringComparison.Ordinal)
+           && legacyRemoval.Contains("RequireRegularDirectoryTree", StringComparison.Ordinal)
+           && legacyRemoval.Contains("SealDirectoryTreeForDeletion", StringComparison.Ordinal)
+           && legacyRemoval.Contains("FileFlagOpenReparsePoint", StringComparison.Ordinal)
+           && legacyRemoval.Contains("SetSecurityInfo", StringComparison.Ordinal)
+           && legacyRemoval.Contains("OwnerSecurityInformation", StringComparison.Ordinal)
+           && legacyRemoval.Contains("SetFileInformationByHandle", StringComparison.Ordinal)
+           && legacyRemoval.Contains("PinnedDirectoryTree", StringComparison.Ordinal)
+           && !legacyRemoval.Contains("Directory.Delete(", StringComparison.Ordinal)
+           && !legacyRemoval.Contains("File.Delete(", StringComparison.Ordinal)
+           && legacyRemoval.Contains("FileAttributes.ReparsePoint", StringComparison.Ordinal)
+           && legacyRemoval.Contains("UpdatePackageVerifier.NormalizeVersion", StringComparison.Ordinal)
+           && legacyRemoval.Contains("RemoteAdministrationProtocol.AgentTaskName", StringComparison.Ordinal)
+           && legacyRemoval.Contains("RemoteAdministrationProtocol.SshSupervisorTaskName, \"UpdateGuardian\", \"Taildesk.UpdateGuardian.exe\"", StringComparison.Ordinal)
+           && !legacyRemoval.Contains("TailscaleCli", StringComparison.Ordinal)
+           && !legacyRemoval.Contains("sc.exe", StringComparison.OrdinalIgnoreCase)
+           && !legacyRemoval.Contains("netsh", StringComparison.OrdinalIgnoreCase)
+           && legacyRemovalPrompt.Contains("Remove legacy Opticon", StringComparison.Ordinal)
+           && legacyRemovalPrompt.Contains("IsDefault = true", StringComparison.Ordinal)
+           && legacyRemovalPrompt.Contains("LegacyOpticonRemoval.ConfirmationPhrase", StringComparison.Ordinal)
+           && legacyRemovalPrompt.Contains("Tailscale and RustDesk are deliberately preserved", StringComparison.Ordinal),
+        "legacy removal must be signed-launcher gated, typed-confirmed, exact-task/path bounded, and leave Tailscale/RustDesk untouched");
     Assert(gateway.Contains("await fetch(", StringComparison.Ordinal)
            && gateway.Contains("URL.createObjectURL(blob)", StringComparison.Ordinal)
            && gateway.Contains("crypto.subtle.digest", StringComparison.Ordinal)
@@ -981,8 +1148,8 @@ static void TestReleaseDistributionDesign()
         "source invitation download no longer hashes both authenticated artifacts or retained an unsigned compatibility handoff");
     Assert(sourceBootstrap.Contains("clearEnvironment: true", StringComparison.Ordinal)
            && sourceBootstrap.Contains("DirectHttp.CreateClient", StringComparison.Ordinal)
-           && sourceBootstrap.Contains("ReadBoundedResponseAsync", StringComparison.Ordinal)
            && sourceBootstrap.Contains("maximumSize: 64 * 1024", StringComparison.Ordinal)
+           && !sourceBootstrap.Contains("artifacts/v1/manifest.json", StringComparison.Ordinal)
            && !sourceBootstrap.Contains("UseShellExecute = true", StringComparison.Ordinal)
            && !sourceBootstrap.Contains("Process.Start(new ProcessStartInfo", StringComparison.Ordinal)
            && sourceBootstrap.Contains("MSBuildUserExtensionsPath", StringComparison.Ordinal)
@@ -1720,13 +1887,13 @@ static void TestOpenSshRecoveryDesign()
            && updateCoordinator.Contains("Update failed safely:", StringComparison.Ordinal),
         "guarded updates must surface the remote journal while preparation is running and after a safe failure");
     var mainWindow = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml.cs");
-    Assert(mainWindow.Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal)
-           && mainWindow.Contains("Copied PowerShell/UAC maintenance bootstraps are retired", StringComparison.Ordinal)
-           && mainWindow.Contains("fresh hosted source-build invitation", StringComparison.Ordinal)
-           && !mainWindow.Contains("$ph.UseProxy=$false", StringComparison.Ordinal)
-           && mainWindow.Contains("requiresAttendedMaintenance", StringComparison.Ordinal)
-           && mainWindow.Contains("requires update guardian", StringComparison.Ordinal),
-        "legacy download and Guardian-contract failures must fail closed into the signed source-invitation recovery path");
+    Assert(mainWindow.Contains("if (release.RequiresCleanReinstall)", StringComparison.Ordinal)
+           && mainWindow.Contains("No remote candidate was staged or activated", StringComparison.Ordinal)
+           && mainWindow.Contains("Opticon 1.1.38 cannot receive a remote source stage", StringComparison.Ordinal)
+           && mainWindow.Contains("Guarded source-built Opticon update", StringComparison.Ordinal)
+           && !mainWindow.Contains("requiresAttendedMaintenance", StringComparison.Ordinal)
+           && !mainWindow.Contains("await RunMaintenanceBootstrapAsync(", StringComparison.Ordinal),
+        "legacy devices must fail closed to clean uninstall/re-enrollment while supported devices use only the source-built update path");
     var adminApp = ReadSource("src", "Taildesk.Admin", "App.xaml.cs");
     var incrementalRebuild = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "rebuild-if-source-changed.ps1"));
     var sourceLauncher = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "start.bat"));
@@ -1969,10 +2136,11 @@ static void TestOpenSshRecoveryDesign()
            && guardianUpdateManager.Contains("StableGuardianMaintenance.ReconcileSignedReleaseAsync", StringComparison.Ordinal)
            && guardianUpdateManager.Contains("GuardianWatchdogArgument", StringComparison.Ordinal)
            && guardianUpdateManager.Contains("Close the active Opticon SSH lease", StringComparison.Ordinal)
-           && ReadSource("src", "Taildesk.Agent", "Program.cs").Contains("/api/v1/update/guardian", StringComparison.Ordinal)
-           && updateCoordinator.Contains("ReconcileGuardianAsync", StringComparison.Ordinal)
-           && updateCoordinator.Contains("post-maintenance Agent sample", StringComparison.Ordinal),
-        "watchdog-capable Agents must reconcile only the production-signed Guardian and externally attest the result without UAC");
+           && ReadSource("src", "Taildesk.Agent", "Program.cs").Contains("/api/v1/update/source/guardian", StringComparison.Ordinal)
+           && updateCoordinator.Contains("ReconcileSourceGuardianAsync", StringComparison.Ordinal)
+           && updateCoordinator.Contains("result.OperationId != sourceRequest.OperationId", StringComparison.Ordinal)
+           && updateCoordinator.Contains("post-source-maintenance Agent sample", StringComparison.Ordinal),
+        "source updates must reconcile the locally built Guardian only through the exact committed source operation and externally attest it without UAC");
     Assert(adminWindow.Contains("Copied PowerShell/UAC maintenance bootstraps are retired", StringComparison.Ordinal)
            && adminWindow.Contains("No command was copied or started", StringComparison.Ordinal)
            && !adminWindow.Contains("Expand-Archive", StringComparison.Ordinal)
@@ -1989,8 +2157,9 @@ static void TestOpenSshRecoveryDesign()
            && authenticode.Contains("does not cover the primary Authenticode signature value", StringComparison.Ordinal),
         "runtime Authenticode checks are not bound to the exact Windows-validated signer and RFC 3161 token");
     Assert(adminWindow.Contains("if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal)
-           && adminWindow.Contains("await RunMaintenanceBootstrapAsync(", StringComparison.Ordinal),
-        "legacy update selection must fail closed through the retired maintenance flow");
+           && adminWindow.Contains("Source-only remote updates do not use the retired maintenance bootstrap.", StringComparison.Ordinal)
+           && !adminWindow.Contains("await RunMaintenanceBootstrapAsync(", StringComparison.Ordinal),
+        "source-only update selection must fail closed instead of launching the retired maintenance flow");
     Assert(adminWindow.Contains("clipboardBusy = unchecked((int)0x800401D0)", StringComparison.Ordinal)
            && adminWindow.Contains("attempt <= 20", StringComparison.Ordinal)
            && adminWindow.Contains("Clipboard.SetDataObject(value, copy: true)", StringComparison.Ordinal),
@@ -2229,7 +2398,10 @@ static void TestOpenSshRecoveryDesign()
            && buildWorkflow.Contains("go test -race", StringComparison.Ordinal)
            && buildWorkflow.Contains("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("Test-CompleteRelease", StringComparison.Ordinal)
-           && targetReleaseCheck.Contains("Publish-OpticonBundles.ps1", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("Publish-OpticonSourceRelease.ps1", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("schemaVersion -ne 2", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("OpticonSource", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("opticon-source-$ReleaseVersion.zip", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("status --porcelain", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("refs/remotes/origin/main", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("DeploymentRequired", StringComparison.Ordinal),

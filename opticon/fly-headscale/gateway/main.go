@@ -41,6 +41,8 @@ const (
 	maxBootstrapArtifactBytes = 128 << 20
 	pinnedSDKVersion          = "10.0.302"
 	pinnedRuntimeVersion      = "10.0.10"
+	sourceOnlyManifestSchema  = 2
+	sourceInstallProtocol     = "source-v1"
 	invitationSigningKeyID    = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
 	// The retired invitation signer is allowed only for this immutable ACL
 	// transition package. It is never a general release signing channel.
@@ -422,27 +424,30 @@ func validProductionArtifactTrust(artifact bundleArtifact) bool {
 }
 
 type hostedInvite struct {
-	DeviceName           string    `json:"deviceName"`
-	Role                 string    `json:"role"`
-	ExpiresAt            time.Time `json:"expiresAt"`
-	ReleaseVersion       string    `json:"releaseVersion"`
-	SourceSHA256         string    `json:"sourceSha256"`
-	SourceFile           string    `json:"sourceFile"`
-	SourceSize           int64     `json:"sourceSize"`
-	SourceManifestSHA256 string    `json:"sourceManifestSha256"`
-	SourceManifestKeyID  string    `json:"sourceManifestKeyId"`
-	SigningProfile       string    `json:"signingProfile"`
-	ProductSigner        string    `json:"productSignerThumbprint"`
-	SDKVersion           string    `json:"sdkVersion"`
-	RuntimeVersion       string    `json:"runtimeVersion"`
-	TargetRuntime        string    `json:"targetRuntime"`
-	TargetRuntimes       []string  `json:"targetRuntimes"`
-	BootstrapVersion     string    `json:"bootstrapVersion"`
-	BootstrapFile        string    `json:"bootstrapFile"`
-	BootstrapSize        int64     `json:"bootstrapSize"`
-	BootstrapSHA256      string    `json:"bootstrapSha256"`
-	BootstrapSigner      string    `json:"bootstrapSignerThumbprint"`
-	Ciphertext           []byte    `json:"ciphertext"`
+	DeviceName string    `json:"deviceName"`
+	Role       string    `json:"role"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	// InstallProtocol is explicit so that a source-only invitation cannot be
+	// silently interpreted as an older bootstrap-and-binary invitation.
+	InstallProtocol      string   `json:"installProtocol"`
+	ReleaseVersion       string   `json:"releaseVersion"`
+	SourceSHA256         string   `json:"sourceSha256"`
+	SourceFile           string   `json:"sourceFile"`
+	SourceSize           int64    `json:"sourceSize"`
+	SourceManifestSHA256 string   `json:"sourceManifestSha256"`
+	SourceManifestKeyID  string   `json:"sourceManifestKeyId"`
+	SigningProfile       string   `json:"signingProfile"`
+	ProductSigner        string   `json:"productSignerThumbprint"`
+	SDKVersion           string   `json:"sdkVersion"`
+	RuntimeVersion       string   `json:"runtimeVersion"`
+	TargetRuntime        string   `json:"targetRuntime"`
+	TargetRuntimes       []string `json:"targetRuntimes"`
+	BootstrapVersion     string   `json:"bootstrapVersion"`
+	BootstrapFile        string   `json:"bootstrapFile"`
+	BootstrapSize        int64    `json:"bootstrapSize"`
+	BootstrapSHA256      string   `json:"bootstrapSha256"`
+	BootstrapSigner      string   `json:"bootstrapSignerThumbprint"`
+	Ciphertext           []byte   `json:"ciphertext"`
 }
 
 type artifactManifest struct {
@@ -533,7 +538,7 @@ func (g *gateway) readStoredArtifactManifestUnlocked() (artifactManifest, error)
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return artifactManifest{}, err
 	}
-	if manifest.SchemaVersion != 1 || len(manifest.Artifacts) < 1 || len(manifest.Artifacts) > 1024 {
+	if (manifest.SchemaVersion != 1 && manifest.SchemaVersion != sourceOnlyManifestSchema) || len(manifest.Artifacts) < 1 || len(manifest.Artifacts) > 1024 {
 		return artifactManifest{}, errors.New("release manifest structure is invalid")
 	}
 	return manifest, nil
@@ -547,7 +552,7 @@ func (g *gateway) artifactManifestPath() string {
 }
 
 func validateArtifactManifest(manifest artifactManifest) error {
-	if manifest.SchemaVersion != 1 {
+	if manifest.SchemaVersion != 1 && manifest.SchemaVersion != sourceOnlyManifestSchema {
 		return errors.New("release manifest schema is unsupported")
 	}
 	if len(manifest.Artifacts) < 1 || len(manifest.Artifacts) > 1024 {
@@ -563,15 +568,46 @@ func validateArtifactManifest(manifest artifactManifest) error {
 			return errors.New("release manifest contains a duplicate artifact filename")
 		}
 		seenFiles[key] = struct{}{}
-		if artifact.Product == "OpticonBundle" && (!validBundleArtifact(artifact) || (artifact.DownloadURL != "" && !validCloudFrontDownloadURL(artifact))) {
-			return errors.New("release manifest contains an invalid Opticon bundle")
+		switch artifact.Product {
+		case "OpticonBundle":
+			if manifest.SchemaVersion == sourceOnlyManifestSchema ||
+				(!validBundleArtifact(artifact) || (artifact.DownloadURL != "" && !validCloudFrontDownloadURL(artifact))) {
+				return errors.New("release manifest contains an invalid Opticon bundle")
+			}
+		case "OpticonBootstrap":
+			if manifest.SchemaVersion == sourceOnlyManifestSchema || !validBootstrapArtifact(artifact) {
+				return errors.New("release manifest contains an invalid Opticon bootstrap")
+			}
+		case "OpticonSource":
+			if !validSourceArtifact(artifact) || (manifest.SchemaVersion == sourceOnlyManifestSchema && artifact.LegacyMigrationSignerThumbprint != "") {
+				return errors.New("release manifest contains an invalid Opticon source archive")
+			}
+		default:
+			if manifest.SchemaVersion == sourceOnlyManifestSchema {
+				return errors.New("source-only release manifest contains a non-source artifact")
+			}
 		}
-		if artifact.Product == "OpticonBootstrap" && !validBootstrapArtifact(artifact) {
-			return errors.New("release manifest contains an invalid Opticon bootstrap")
+	}
+	if manifest.SchemaVersion == sourceOnlyManifestSchema {
+		return validateSourceOnlyArtifactManifest(manifest)
+	}
+	return nil
+}
+
+// validateSourceOnlyArtifactManifest enforces the new release contract: each
+// version is represented by exactly one immutable, signed source archive. It
+// deliberately refuses installers, payload bundles, and dependency binaries so
+// that S3 never becomes a second executable delivery channel.
+func validateSourceOnlyArtifactManifest(manifest artifactManifest) error {
+	seenVersions := make(map[string]struct{}, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Product != "OpticonSource" || !validSourceArtifact(artifact) {
+			return errors.New("source-only release manifest contains an invalid source archive")
 		}
-		if artifact.Product == "OpticonSource" && !validSourceArtifact(artifact) {
-			return errors.New("release manifest contains an invalid Opticon source archive")
+		if _, duplicate := seenVersions[artifact.Version]; duplicate {
+			return errors.New("source-only release manifest contains duplicate source versions")
 		}
+		seenVersions[artifact.Version] = struct{}{}
 	}
 	return nil
 }
@@ -659,8 +695,8 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	currentVersion, currentOK := highestBundleVersion(current)
-	nextVersion, nextOK := highestBundleVersion(next)
+	currentVersion, currentOK := highestReleaseVersion(current)
+	nextVersion, nextOK := highestReleaseVersion(next)
 	if !nextOK {
 		http.Error(w, "manifest has no published release", http.StatusBadRequest)
 		return
@@ -721,6 +757,19 @@ func sameReleaseArtifacts(left, right artifactManifest, version string) bool {
 }
 
 func completeCloudFrontRelease(manifest artifactManifest, version string) bool {
+	if manifest.SchemaVersion == sourceOnlyManifestSchema {
+		sourceCount := 0
+		for _, artifact := range manifest.Artifacts {
+			if artifact.Version != version {
+				continue
+			}
+			if artifact.Product != "OpticonSource" || !validSourceArtifact(artifact) || !validCloudFrontDownloadURL(artifact) {
+				return false
+			}
+			sourceCount++
+		}
+		return sourceCount == 1
+	}
 	roles := make(map[string]bool)
 	bootstrapCount := 0
 	sourceCount := 0
@@ -766,7 +815,40 @@ func highestBundleVersion(manifest artifactManifest) (string, bool) {
 	return selected, selected != ""
 }
 
+// highestReleaseVersion selects the authoritative release item for the active
+// manifest protocol. Schema 1 remains readable only for the one-way migration;
+// schema 2 has no binary bundle, so the signed source archive is authoritative.
+func highestReleaseVersion(manifest artifactManifest) (string, bool) {
+	if manifest.SchemaVersion != sourceOnlyManifestSchema {
+		return highestBundleVersion(manifest)
+	}
+	selected := ""
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Product != "OpticonSource" {
+			continue
+		}
+		if selected == "" {
+			selected = artifact.Version
+			continue
+		}
+		if comparison, valid := compareSemanticVersions(artifact.Version, selected); valid && comparison > 0 {
+			selected = artifact.Version
+		}
+	}
+	return selected, selected != ""
+}
+
 func samePinnedDependencies(left, right artifactManifest) bool {
+	// Source-only releases carry their restore inputs in the signed archive and
+	// do not use gateway/S3 dependency objects. Moving from schema 1 is safe
+	// only in this direction; active legacy invitations are checked separately
+	// before the manifest is committed.
+	if right.SchemaVersion == sourceOnlyManifestSchema {
+		return true
+	}
+	if left.SchemaVersion == sourceOnlyManifestSchema {
+		return false
+	}
 	encode := func(manifest artifactManifest) map[string]string {
 		result := make(map[string]string)
 		for _, artifact := range manifest.Artifacts {
@@ -906,13 +988,24 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		now := time.Now()
+		sourceOnly := invite.InstallProtocol == sourceInstallProtocol
+		legacyBootstrap := invite.InstallProtocol == ""
 		if strings.TrimSpace(invite.DeviceName) == "" || (invite.Role != "ManagedOnly" && invite.Role != "ControllerAndManaged") ||
 			!invite.ExpiresAt.After(now) || invite.ExpiresAt.After(now.Add(366*24*time.Hour)) || len(invite.Ciphertext) < 64 || len(invite.Ciphertext) > maxInviteBody ||
 			!inviteHashPattern.MatchString(strings.ToLower(invite.SourceSHA256)) || !inviteHashPattern.MatchString(strings.ToLower(invite.SourceManifestSHA256)) ||
 			invite.SourceSize <= 0 || invite.SDKVersion != pinnedSDKVersion || invite.RuntimeVersion != pinnedRuntimeVersion || !supportedTargetRuntimes(invite.TargetRuntimes) ||
 			invite.SigningProfile != trustedSigningProfile || invite.SourceManifestKeyID != trustedSourceManifestKeyID ||
-			invite.ProductSigner != trustedProductSignerThumbprint || invite.BootstrapSigner != invite.ProductSigner ||
-			invite.BootstrapVersion != invite.ReleaseVersion ||
+			invite.ProductSigner != trustedProductSignerThumbprint || (!sourceOnly && !legacyBootstrap) {
+			http.Error(w, "invalid invitation", http.StatusBadRequest)
+			return
+		}
+		if sourceOnly {
+			if invite.BootstrapVersion != "" || invite.BootstrapFile != "" || invite.BootstrapSize != 0 ||
+				invite.BootstrapSHA256 != "" || invite.BootstrapSigner != "" {
+				http.Error(w, "source-only invitation carries a release bootstrap", http.StatusBadRequest)
+				return
+			}
+		} else if invite.BootstrapSigner != invite.ProductSigner || invite.BootstrapVersion != invite.ReleaseVersion ||
 			invite.BootstrapFile != "opticon-bootstrap-"+invite.ReleaseVersion+".exe" || invite.BootstrapSize <= 0 || invite.BootstrapSize > maxBootstrapArtifactBytes ||
 			!inviteHashPattern.MatchString(strings.ToLower(invite.BootstrapSHA256)) || !publisherThumbprintPattern.MatchString(invite.BootstrapSigner) {
 			http.Error(w, "invalid invitation", http.StatusBadRequest)
@@ -922,9 +1015,11 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invitation source release is unavailable", http.StatusConflict)
 			return
 		}
-		if _, err := g.bootstrapForInvite(invite); err != nil {
-			http.Error(w, "invitation bootstrap release is unavailable", http.StatusConflict)
-			return
+		if !sourceOnly {
+			if _, err := g.bootstrapForInvite(invite); err != nil {
+				http.Error(w, "invitation bootstrap release is unavailable", http.StatusConflict)
+				return
+			}
 		}
 		encoded, err := json.Marshal(invite)
 		if err != nil {
@@ -1134,6 +1229,10 @@ func (g *gateway) publicInvitation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "This invitation's exact Opticon source release is unavailable.", http.StatusServiceUnavailable)
 		return
 	}
+	if invite.InstallProtocol == sourceInstallProtocol {
+		g.sourceOnlyInvitationLandingSecure(w, r, invite, source)
+		return
+	}
 	g.sourceInvitationLandingSecure(w, r, parts[0], invite, source)
 }
 
@@ -1231,11 +1330,16 @@ func (g *gateway) requireActiveInviteArtifacts(next artifactManifest, now time.T
 		if !invite.ExpiresAt.After(now) || invite.ReleaseVersion == "" {
 			continue
 		}
+		if invite.InstallProtocol != "" && invite.InstallProtocol != sourceInstallProtocol {
+			return errors.New("an invitation record has an unsupported install protocol")
+		}
 		if _, err := sourceForInviteInManifest(invite, next); err != nil {
 			return err
 		}
-		if _, err := bootstrapForInviteInManifest(invite, next); err != nil {
-			return err
+		if invite.InstallProtocol != sourceInstallProtocol {
+			if _, err := bootstrapForInviteInManifest(invite, next); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1340,6 +1444,25 @@ func (g *gateway) pruneUndeclaredBundles() error {
 		}
 	}
 	return nil
+}
+
+// sourceOnlyInvitationLandingSecure deliberately offers no release-specific
+// executable. The sole release object is the signed source archive. After the
+// browser verifies and saves it, the user extracts its fixed signed launcher;
+// that launcher independently verifies this invitation, the archive hash, and
+// the signed inner manifest before it builds anything.
+func (g *gateway) sourceOnlyInvitationLandingSecure(w http.ResponseWriter, r *http.Request, invite hostedInvite, source bundleArtifact) {
+	origin := "'self'"
+	if parsed, err := url.Parse(source.DownloadURL); err == nil && parsed.IsAbs() {
+		origin = parsed.Scheme + "://" + parsed.Host
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src "+origin+"; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'")
+	if r.Method == http.MethodHead {
+		return
+	}
+	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon source invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}button{background:#52d39a;color:#08130e;border:0;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Build and install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p id="status">Preparing authenticated Opticon source <code>%s</code>.</p><button id="download">Download signed source archive</button><p id="diagnostic" class="muted">After the browser verifies the archive, extract it and run <code>OpticonSourceLauncher.exe</code>. When it asks, paste this invitation link. The launcher verifies the link, archive hash, signed inner manifest, and exact SDK before it builds.</p><p class="muted">Source SHA-256: <code>%s</code><br>Requires exact .NET SDK <code>%s</code>. Expires <code>%s</code>.</p><script>const status=document.getElementById('status'),diagnostic=document.getElementById('diagnostic'),button=document.getElementById('download');let active=false;function save(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000)}async function verified(url,size,hash){if(!globalThis.crypto||!crypto.subtle)throw new Error('Use current Microsoft Edge or Chrome; WebCrypto SHA-256 is unavailable.');const r=await fetch(url,{credentials:'omit'});if(!r.ok)throw new Error('Source archive returned HTTP '+r.status+'.');const b=await r.blob();if(b.size!==size)throw new Error('Source archive size is invalid.');const d=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await b.arrayBuffer()))).map(v=>v.toString(16).padStart(2,'0')).join('');if(d!==hash)throw new Error('Source archive SHA-256 is invalid.');return b}async function download(){if(active)return;active=true;button.disabled=true;status.textContent='Downloading and hashing source...';try{const archive=await verified(%q,%d,%q);save(archive,%q);status.textContent='Source verified and downloaded.';diagnostic.textContent='Extract the ZIP, run OpticonSourceLauncher.exe, then paste this complete invitation link when prompted. No release executable was downloaded from this site.'}catch(e){status.textContent='The authenticated source archive could not be downloaded.';diagnostic.textContent=String(e&&e.message||e).slice(0,240)+' Retry in current Microsoft Edge or Chrome; no unsigned fallback is offered.';button.disabled=false}finally{active=false}}button.addEventListener('click',download)</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(source.Version), html.EscapeString(strings.ToLower(source.SHA256)), html.EscapeString(source.SDKVersion), invite.ExpiresAt.Local().Format(time.RFC1123), source.DownloadURL, source.Size, strings.ToLower(source.SHA256), source.File)
+	_, _ = io.WriteString(w, page)
 }
 
 func (g *gateway) sourceInvitationLandingSecure(w http.ResponseWriter, r *http.Request, publicID string, invite hostedInvite, source bundleArtifact) {

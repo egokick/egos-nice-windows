@@ -435,12 +435,16 @@ app.MapGet("/api/v1/update/status", (UpdateManager updates) => Results.Ok(
     }));
 app.MapPost("/api/v1/update/prepare", async (OpticonUpdateRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
     Results.Ok(await updates.PrepareAsync(request, cancellationToken)));
+app.MapPost("/api/v1/update/source/prepare", async (SourceUpdateRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
+    Results.Ok(await updates.PrepareSourceAsync(request, cancellationToken)));
 app.MapPost("/api/v1/update/activate", async (UpdateOperationRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
     Results.Ok(await updates.ActivateAsync(request.OperationId, cancellationToken)));
 app.MapPost("/api/v1/update/commit", async (UpdateOperationRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
     Results.Ok(await updates.RequestCommitAsync(request.OperationId, cancellationToken)));
 app.MapPost("/api/v1/update/guardian", async (OpticonUpdateRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
     Results.Ok(await updates.ReconcileGuardianAsync(request, cancellationToken)));
+app.MapPost("/api/v1/update/source/guardian", async (SourceUpdateRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
+    Results.Ok(await updates.ReconcileSourceGuardianAsync(request, cancellationToken)));
 
 await app.RunAsync();
 

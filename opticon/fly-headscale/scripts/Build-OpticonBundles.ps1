@@ -4,8 +4,11 @@ param(
     [string]$Runtime = "win-x64",
     [ValidateSet("Production", "OwnerManaged")]
     [string]$SigningProfile = "Production",
-    [string]$Version = "1.1.41",
+    [string]$Version = "1.2.0",
     [string]$MinimumGuardianVersion = "1.1.2",
+    # SourceOnly is the v2 release path: it produces exactly one signed source
+    # archive and deliberately emits no standalone bundle/bootstrap artifact.
+    [switch]$SourceOnly,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
     [ValidatePattern('^$|^[A-Fa-f0-9]{40}$')][string]$LegacyMigrationSignerThumbprint = '',
@@ -26,6 +29,9 @@ if ($isLegacyMigration -and ($SigningProfile -ne 'OwnerManaged' -or
         $Version -cne $legacyMigrationBridgeVersion -or
         $LegacyMigrationSignerThumbprint -ne $invitationSigningThumbprint)) {
     throw 'A legacy Agent migration must be the exact OwnerManaged 1.1.41 release signed only with the exact retired invitation certificate.'
+}
+if ($SourceOnly -and $isLegacyMigration) {
+    throw 'A source-only release cannot use the retired legacy migration signer.'
 }
 $script:git = $null
 $script:trustedGitRoot = $null
@@ -682,30 +688,32 @@ foreach ($artifact in @($manifest.artifacts)) {
 if ($retiredObsoleteLegacyMigrationArtifacts.Count -gt 0) {
     $manifest.artifacts = @($normalizedArtifacts)
 }
-$dependencies = @($manifest.artifacts | Where-Object { $_.product -in @("Tailscale", "RustDesk") })
-if ($dependencies.Count -ne 4) { throw "The release manifest must declare four pinned dependency installers." }
-$expectedDependencies = @{
-    'Tailscale|x64' = $true; 'Tailscale|arm64' = $true
-    'RustDesk|x64' = $true; 'RustDesk|arm64' = $true
-}
-$seenDependencies = @{}
-foreach ($artifact in $dependencies) {
-    $dependencyKey = '{0}|{1}' -f ([string]$artifact.product), ([string]$artifact.architecture)
-    if (-not $expectedDependencies.ContainsKey($dependencyKey) -or $seenDependencies.ContainsKey($dependencyKey)) {
-        throw "The release manifest has a missing, duplicate, or unsupported dependency tuple: $dependencyKey"
+if (-not $SourceOnly) {
+    $dependencies = @($manifest.artifacts | Where-Object { $_.product -in @("Tailscale", "RustDesk") })
+    if ($dependencies.Count -ne 4) { throw "The release manifest must declare four pinned dependency installers." }
+    $expectedDependencies = @{
+        'Tailscale|x64' = $true; 'Tailscale|arm64' = $true
+        'RustDesk|x64' = $true; 'RustDesk|arm64' = $true
     }
-    $seenDependencies[$dependencyKey] = $true
-    $path = Get-LocalArtifactPath ([string]$artifact.file)
-    $file = Get-Item -LiteralPath $path
-    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-    if ($file.Length -ne [long]$artifact.size -or $hash -ne [string]$artifact.sha256 -or
-        [string]$artifact.sha256 -notmatch '^[a-f0-9]{64}$' -or
-        [string]$artifact.signerThumbprint -notmatch '^[A-F0-9]{40}$') {
-        throw "Release dependency verification failed for $($artifact.file)."
+    $seenDependencies = @{}
+    foreach ($artifact in $dependencies) {
+        $dependencyKey = '{0}|{1}' -f ([string]$artifact.product), ([string]$artifact.architecture)
+        if (-not $expectedDependencies.ContainsKey($dependencyKey) -or $seenDependencies.ContainsKey($dependencyKey)) {
+            throw "The release manifest has a missing, duplicate, or unsupported dependency tuple: $dependencyKey"
+        }
+        $seenDependencies[$dependencyKey] = $true
+        $path = Get-LocalArtifactPath ([string]$artifact.file)
+        $file = Get-Item -LiteralPath $path
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if ($file.Length -ne [long]$artifact.size -or $hash -ne [string]$artifact.sha256 -or
+            [string]$artifact.sha256 -notmatch '^[a-f0-9]{64}$' -or
+            [string]$artifact.signerThumbprint -notmatch '^[A-F0-9]{40}$') {
+            throw "Release dependency verification failed for $($artifact.file)."
+        }
+        Assert-PinnedDependencySignature -Path $path -ExpectedThumbprint ([string]$artifact.signerThumbprint)
     }
-    Assert-PinnedDependencySignature -Path $path -ExpectedThumbprint ([string]$artifact.signerThumbprint)
+    if ($seenDependencies.Count -ne $expectedDependencies.Count) { throw 'The release manifest omits a required dependency architecture.' }
 }
-if ($seenDependencies.Count -ne $expectedDependencies.Count) { throw 'The release manifest omits a required dependency architecture.' }
 
 $existingBundles = @($manifest.artifacts | Where-Object {
     $_.product -eq "OpticonBundle" -and (Test-ProductionArtifactTrust $_)
@@ -771,13 +779,19 @@ if ($isLegacyMigration) {
         "-p:OpticonLegacyMigrationSignerThumbprint=$LegacyMigrationSignerThumbprint"
     )
 }
-$executables = [ordered]@{
-    Setup = "Taildesk.Setup.exe"
-    Agent = "Taildesk.Agent.exe"
-    Admin = "Opticon.exe"
-    Cli = "opticon.exe"
-    UpdateGuardian = "Taildesk.UpdateGuardian.exe"
-    RouteKeeper = "Taildesk.RouteKeeper.exe"
+$executables = if ($SourceOnly) {
+    # The launcher is embedded in the signed archive; it is the fixed local
+    # trust anchor for a first install, not a separately hosted release asset.
+    [ordered]@{ Setup = "Taildesk.Setup.exe" }
+} else {
+    [ordered]@{
+        Setup = "Taildesk.Setup.exe"
+        Agent = "Taildesk.Agent.exe"
+        Admin = "Opticon.exe"
+        Cli = "opticon.exe"
+        UpdateGuardian = "Taildesk.UpdateGuardian.exe"
+        RouteKeeper = "Taildesk.RouteKeeper.exe"
+    }
 }
 foreach ($component in $executables.Keys) {
     $project = Join-Path $repo "src\Taildesk.$component\Taildesk.$component.csproj"
@@ -815,44 +829,47 @@ foreach ($component in $executables.Keys) {
     Invoke-ProductSigning -Path $executable
 }
 
-$bootstrapFile = "opticon-bootstrap-$Version.exe"
-$bootstrapPath = Join-Path $artifactDirectory $bootstrapFile
-$bootstrapTemporary = "$bootstrapPath.new.exe"
-if (Test-Path -LiteralPath $bootstrapTemporary) { Remove-Item -LiteralPath $bootstrapTemporary -Force }
-Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $bootstrapTemporary
-if ($isLegacyMigration) {
-    # The bundled Setup remains legacy-signed for the pre-trust-split Agent,
-    # but a hosted bootstrap is never an update payload. Strip that signature
-    # and sign its separate immutable copy with the active product identity.
-    Invoke-SignTool -Arguments @('remove', '/s', $bootstrapTemporary)
-    Invoke-ProductSigning -Path $bootstrapTemporary -Thumbprint $ProductCertificateThumbprint
+$bootstrapRecord = $null
+if (-not $SourceOnly) {
+    $bootstrapFile = "opticon-bootstrap-$Version.exe"
+    $bootstrapPath = Join-Path $artifactDirectory $bootstrapFile
+    $bootstrapTemporary = "$bootstrapPath.new.exe"
+    if (Test-Path -LiteralPath $bootstrapTemporary) { Remove-Item -LiteralPath $bootstrapTemporary -Force }
+    Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $bootstrapTemporary
+    if ($isLegacyMigration) {
+        # The bundled Setup remains legacy-signed for the pre-trust-split Agent,
+        # but a hosted bootstrap is never an update payload. Strip that signature
+        # and sign its separate immutable copy with the active product identity.
+        Invoke-SignTool -Arguments @('remove', '/s', $bootstrapTemporary)
+        Invoke-ProductSigning -Path $bootstrapTemporary -Thumbprint $ProductCertificateThumbprint
+    }
+    $bootstrapInfo = Get-Item -LiteralPath $bootstrapTemporary
+    if ($bootstrapInfo.Length -gt 128MB) {
+        Remove-Item -LiteralPath $bootstrapTemporary -Force
+        throw 'The signed source bootstrap exceeds the 128 MiB invitation/download safety cap.'
+    }
+    $bootstrapRecord = [pscustomobject]@{
+        product = "OpticonBootstrap"
+        version = $Version
+        architecture = "x64"
+        file = $bootstrapFile
+        size = $bootstrapInfo.Length
+        sha256 = (Get-FileHash -LiteralPath $bootstrapTemporary -Algorithm SHA256).Hash.ToLowerInvariant()
+        signerThumbprint = $ProductCertificateThumbprint
+        signingProfile = $SigningProfile
+        sourceManifestKeyId = $SourceReleaseCertificateThumbprint
+        productSignerThumbprint = $ProductCertificateThumbprint
+    }
+    $existingBootstraps = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonBootstrap' -and $_.version -eq $Version })
+    if ($existingBootstraps.Count -gt 1) { throw "The outer manifest declares bootstrap release $Version more than once." }
+    if ($existingBootstraps.Count -eq 1 -and (([long]$existingBootstraps[0].size -ne [long]$bootstrapRecord.size) -or
+        -not ([string]$existingBootstraps[0].sha256).Equals([string]$bootstrapRecord.sha256, [StringComparison]::OrdinalIgnoreCase) -or
+        -not ([string]$existingBootstraps[0].signerThumbprint).Equals([string]$bootstrapRecord.signerThumbprint, [StringComparison]::OrdinalIgnoreCase))) {
+        Remove-Item -LiteralPath $bootstrapTemporary -Force
+        throw "Bootstrap release $Version is already declared with different bytes or publisher. Bump -Version."
+    }
+    Move-Item -LiteralPath $bootstrapTemporary -Destination $bootstrapPath -Force
 }
-$bootstrapInfo = Get-Item -LiteralPath $bootstrapTemporary
-if ($bootstrapInfo.Length -gt 128MB) {
-    Remove-Item -LiteralPath $bootstrapTemporary -Force
-    throw 'The signed source bootstrap exceeds the 128 MiB invitation/download safety cap.'
-}
-$bootstrapRecord = [pscustomobject]@{
-    product = "OpticonBootstrap"
-    version = $Version
-    architecture = "x64"
-    file = $bootstrapFile
-    size = $bootstrapInfo.Length
-    sha256 = (Get-FileHash -LiteralPath $bootstrapTemporary -Algorithm SHA256).Hash.ToLowerInvariant()
-    signerThumbprint = $ProductCertificateThumbprint
-    signingProfile = $SigningProfile
-    sourceManifestKeyId = $SourceReleaseCertificateThumbprint
-    productSignerThumbprint = $ProductCertificateThumbprint
-}
-$existingBootstraps = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonBootstrap' -and $_.version -eq $Version })
-if ($existingBootstraps.Count -gt 1) { throw "The outer manifest declares bootstrap release $Version more than once." }
-if ($existingBootstraps.Count -eq 1 -and (([long]$existingBootstraps[0].size -ne [long]$bootstrapRecord.size) -or
-    -not ([string]$existingBootstraps[0].sha256).Equals([string]$bootstrapRecord.sha256, [StringComparison]::OrdinalIgnoreCase) -or
-    -not ([string]$existingBootstraps[0].signerThumbprint).Equals([string]$bootstrapRecord.signerThumbprint, [StringComparison]::OrdinalIgnoreCase))) {
-    Remove-Item -LiteralPath $bootstrapTemporary -Force
-    throw "Bootstrap release $Version is already declared with different bytes or publisher. Bump -Version."
-}
-Move-Item -LiteralPath $bootstrapTemporary -Destination $bootstrapPath -Force
 
 function Write-SignedReleaseManifest {
     param(
@@ -935,11 +952,12 @@ function Write-SignedReleaseManifest {
         $utf8)
 }
 
-$definitions = @(
-    @{ Role = "ManagedOnly"; Suffix = "managed"; IncludeAdmin = $false },
-    @{ Role = "ControllerAndManaged"; Suffix = "controller"; IncludeAdmin = $true }
-)
 $records = @()
+if (-not $SourceOnly) {
+    $definitions = @(
+        @{ Role = "ManagedOnly"; Suffix = "managed"; IncludeAdmin = $false },
+        @{ Role = "ControllerAndManaged"; Suffix = "controller"; IncludeAdmin = $true }
+    )
 foreach ($definition in $definitions) {
     $stage = Join-Path $stageRoot $definition.Suffix
     New-Item -Path (Join-Path $stage "Payload\Agent") -ItemType Directory -Force | Out-Null
@@ -983,6 +1001,7 @@ foreach ($definition in $definitions) {
     Move-Item -LiteralPath $temporaryDestination -Destination $destination -Force
     $records += $record
 }
+}
 
 # Build a separate, immutable source archive.  Only this explicit allowlist is
 # shipped; bin/obj/artifacts, local configuration, credentials, and repository
@@ -1013,7 +1032,16 @@ Copy-Item -LiteralPath (Join-Path $repo 'source-package\Directory.Build.targets'
 $sourceGlobalJson = [ordered]@{ sdk = [ordered]@{ version = '10.0.302'; rollForward = 'disable'; allowPrerelease = $false } }
 [IO.File]::WriteAllText((Join-Path $sourceStage 'global.json'), ($sourceGlobalJson | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath (Join-Path $repo 'source-package\Install-OpticonFromSource.ps1') -Destination (Join-Path $sourceStage 'Install-OpticonFromSource.ps1')
+Copy-Item -LiteralPath (Join-Path $repo 'source-package\Build-OpticonUpdateFromSource.ps1') -Destination (Join-Path $sourceStage 'Build-OpticonUpdateFromSource.ps1')
 Copy-Item -LiteralPath (Join-Path $repo 'source-package\NuGet.Config') -Destination (Join-Path $sourceStage 'NuGet.Config')
+if ($SourceOnly) {
+    $launcher = Join-Path $buildRoot 'Setup\Taildesk.Setup.exe'
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+        throw 'The source-only archive launcher was not produced.'
+    }
+    Assert-ProductSignature -Path $launcher
+    Copy-Item -LiteralPath $launcher -Destination (Join-Path $sourceStage 'OpticonSourceLauncher.exe')
+}
 $sourceRestoreTrustArguments = @($publishArguments | Where-Object {
         $_ -like '-p:Opticon*' -or $_ -like '-p:DirectoryBuild*' -or
         $_ -like '-p:MSBuildUserExtensionsPath*' -or $_ -like '-p:Import*' -or
@@ -1147,6 +1175,16 @@ if ($existingSources.Count -eq 1 -and (([long]$existingSources[0].size -ne [long
 }
 Move-Item -LiteralPath $sourceTemporary -Destination $sourceDestination -Force
 
+if ($SourceOnly) {
+    # Schema 2 is intentionally an all-source manifest. Existing binary,
+    # bootstrap, and dependency records are not carried into its publication;
+    # the authenticated gateway rejects the transition while an older active
+    # invitation still depends on one of them.
+    $manifest = [pscustomobject][ordered]@{
+        schemaVersion = 2
+        artifacts = @($sourceRecord)
+    }
+} else {
 $candidates = @($existingBundles | Where-Object {
     $existing = $_
     -not ($records | Where-Object {
@@ -1209,13 +1247,19 @@ foreach ($artifact in @($retainedBootstraps) + @($retainedSources)) {
     }
 }
 $manifest.artifacts = @($manifest.artifacts | Where-Object { $_.product -notin @("OpticonBundle", "OpticonBootstrap", "OpticonSource") }) + @($retained) + @($retainedBootstraps) + @($bootstrapRecord) + @($retainedSources) + @($sourceRecord)
+}
 $json = $manifest | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($manifestPath, $json, (New-Object Text.UTF8Encoding($false)))
 if ($retiredObsoleteLegacyMigrationArtifacts.Count -gt 0) {
     Write-Host "Retired $($retiredObsoleteLegacyMigrationArtifacts.Count) obsolete local 1.1.40 legacy migration artifact record(s); they were not retained or published." -ForegroundColor Yellow
 }
-$retained | Format-Table role, version, file, size, sha256 -AutoSize
-Write-Host "Run .\scripts\Publish-OpticonBundles.ps1 after deploying the gateway manifest." -ForegroundColor Green
+if ($SourceOnly) {
+    $sourceRecord | Format-Table version, file, size, sha256, sourceManifestSha256 -AutoSize
+    Write-Host "Run .\scripts\Publish-OpticonSourceRelease.ps1 to upload the one signed source archive." -ForegroundColor Green
+} else {
+    $retained | Format-Table role, version, file, size, sha256 -AutoSize
+    Write-Host "Run .\scripts\Publish-OpticonBundles.ps1 after deploying the gateway manifest." -ForegroundColor Green
+}
 } finally {
     if (Get-Variable -Name sourceReleaseCertificate -ErrorAction SilentlyContinue) { $sourceReleaseCertificate.Dispose() }
     if (Get-Variable -Name productCertificate -ErrorAction SilentlyContinue) { $productCertificate.Dispose() }

@@ -15,6 +15,7 @@ public sealed class UpdateManager
     private const int MaximumDownloadAttempts = 4;
     private readonly AgentState _state;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SourceUpdateBuildRunner _sourceBuild = new();
     private readonly HttpClient _http = new(new HttpClientHandler
     {
         CheckCertificateRevocationList = true,
@@ -176,6 +177,205 @@ public sealed class UpdateManager
         finally
         {
             coordinationLease?.Dispose();
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Stages a locally built source release.  It intentionally uses a distinct
+    /// API and journal schema: a Guardian that only knows executable bundles
+    /// must reject it before any installed Agent files are changed.
+    /// </summary>
+    public async Task<UpdateStatusDto> PrepareSourceAsync(
+        SourceUpdateRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        UpdateJournal? journal = null;
+        IDisposable? coordinationLease = null;
+        try
+        {
+            SourceUpdatePackageVerifier.ValidateRequest(request);
+            ValidateSourceTarget(request);
+            if (!IsRustDeskReady())
+                throw new InvalidOperationException(
+                    "The RustDesk recovery channel is not healthy on TCP 21118. Opticon refuses to stage a source update without remote-control fallback.");
+
+            var guardian = GuardianExecutable();
+            await ProductSigning.VerifyAuthenticodeAsync(guardian, cancellationToken);
+            ValidateSourceGuardianCompatibility(guardian);
+            EnsureFreeSpaceForSourceBuild(request.SourceSize);
+            await EnsurePrivateUpdateDirectoryAsync(cancellationToken);
+
+            coordinationLease = await UpdateJournalCoordination.AcquireAsync(
+                TimeSpan.FromMinutes(60), cancellationToken);
+            var existing = UpdateJournalPersistence.Load();
+            if (existing is not null && existing.OperationId == request.OperationId
+                && existing.DeliveryMode == UpdateDeliveryMode.SourceArchive
+                && existing.Phase is UpdatePhase.Ready or UpdatePhase.ActivationScheduled or UpdatePhase.Activating
+                    or UpdatePhase.AwaitingCommit or UpdatePhase.Committed)
+                return existing.ToStatus();
+            if (existing is not null && existing.Phase is UpdatePhase.Downloading or UpdatePhase.Verifying
+                or UpdatePhase.ActivationScheduled or UpdatePhase.Activating or UpdatePhase.AwaitingCommit or UpdatePhase.RollingBack)
+                throw new InvalidOperationException($"Update {existing.OperationId:N} is already {existing.Phase}.");
+
+            var operationDirectory = Path.Combine(AppPaths.UpdateDataDirectory, request.OperationId.ToString("N"));
+            var sourceDirectory = Path.Combine(operationDirectory, "source");
+            var sourceBuildDirectory = Path.Combine(operationDirectory, "source-build");
+            MachineStorageSecurity.EnsureRestrictedDirectoryTree(
+                AppPaths.MachineDataDirectory, operationDirectory, sourceDirectory, sourceBuildDirectory);
+            var archivePath = Path.Combine(operationDirectory, "package.zip");
+            var attestationPath = Path.Combine(operationDirectory, "source-build-attestation.json");
+            var stageAgent = Path.Combine(sourceBuildDirectory, "Payload", "Agent");
+            journal = new UpdateJournal
+            {
+                SchemaVersion = 2,
+                DeliveryMode = UpdateDeliveryMode.SourceArchive,
+                OperationId = request.OperationId,
+                Phase = UpdatePhase.Downloading,
+                CurrentVersion = CurrentVersion,
+                TargetVersion = UpdatePackageVerifier.NormalizeVersion(request.TargetVersion),
+                Role = request.Role,
+                Architecture = request.Architecture.ToLowerInvariant(),
+                PackagePath = archivePath,
+                PackageSha256 = request.SourceSha256.ToLowerInvariant(),
+                PackageSize = request.SourceSize,
+                SourceDownloadUrl = request.DownloadUrl,
+                SourceFile = request.SourceFile,
+                SourceManifestSha256 = request.SourceManifestSha256.ToLowerInvariant(),
+                SourceManifestKeyId = request.SourceManifestKeyId,
+                SigningProfile = request.SigningProfile,
+                ProductSignerThumbprint = request.ProductSignerThumbprint,
+                SdkVersion = request.SdkVersion,
+                RuntimeVersion = request.RuntimeVersion,
+                TargetRuntime = request.TargetRuntime,
+                SourceBuildOutputDirectory = sourceBuildDirectory,
+                SourceBuildAttestationPath = attestationPath,
+                StagedAgentDirectory = stageAgent,
+                CandidateDirectory = AppPaths.AgentInstallDirectory + ".candidate-" + request.OperationId.ToString("N"),
+                RollbackDirectory = AppPaths.AgentInstallDirectory + ".rollback-" + request.OperationId.ToString("N"),
+                FailedCandidateDirectory = AppPaths.AgentInstallDirectory + ".failed-" + request.OperationId.ToString("N"),
+                BindAddress = _state.Config.BindAddress,
+                AgentProcessId = Environment.ProcessId,
+                StartedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+                Message = "Downloading the immutable hash-pinned Opticon source archive. The active Agent and recovery channels remain untouched."
+            };
+            await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: cancellationToken);
+            await DownloadWithResumeAsync(new Uri(request.DownloadUrl), archivePath, request.SourceSize, cancellationToken);
+
+            journal.Phase = UpdatePhase.Verifying;
+            journal.Message = "Verifying the signed source manifest and every source file before the exact local SDK build.";
+            await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: cancellationToken);
+            var manifest = await SourceUpdatePackageVerifier.VerifyAndExtractAsync(
+                archivePath, sourceDirectory, request, cancellationToken);
+            journal.Message = $"Building Agent and Guardian locally with exact .NET SDK {request.SdkVersion}; the installed Agent remains untouched.";
+            await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: cancellationToken);
+            await _sourceBuild.BuildAsync(
+                manifest, request, operationDirectory, sourceDirectory, archivePath,
+                sourceBuildDirectory, attestationPath, cancellationToken);
+
+            journal.Phase = UpdatePhase.Ready;
+            journal.Message = "Verified source archive and sealed local build are staged. Activation still requires an explicit request and will roll back unless the command center confirms health.";
+            await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: cancellationToken);
+            return journal.ToStatus();
+        }
+        catch (OperationCanceledException) when (journal is not null)
+        {
+            journal.Phase = UpdatePhase.Failed;
+            journal.Message = "Source update staging was canceled or timed out before the installed Agent changed.";
+            try { await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: CancellationToken.None); }
+            catch { }
+            throw;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            if (journal is not null)
+            {
+                journal.Phase = UpdatePhase.Failed;
+                journal.Message = "Source update staging failed without changing the installed Agent: " + exception.Message;
+                try { await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: CancellationToken.None); }
+                catch { }
+            }
+            throw;
+        }
+        finally
+        {
+            coordinationLease?.Dispose();
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Promotes the Guardian built from the same already-attested source
+    /// archive after the corresponding Agent has committed.  No executable
+    /// bundle is downloaded as a fallback.
+    /// </summary>
+    public async Task<GuardianMaintenanceStatusDto> ReconcileSourceGuardianAsync(
+        SourceUpdateRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            SourceUpdatePackageVerifier.ValidateRequest(request);
+            ValidateSourceGuardianTarget(request);
+            if (!IsRustDeskReady())
+                throw new InvalidOperationException(
+                    "The RustDesk recovery channel is not healthy on TCP 21118. Opticon refuses to replace its stable Guardian without remote-control fallback.");
+            if (IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+                .Any(endpoint => endpoint.Port == RemoteAdministrationProtocol.SshPort))
+                throw new InvalidOperationException("Close the active Opticon SSH lease before updating the stable Guardian.");
+
+            var journal = RequireCommittedSourceJournal(request);
+            var guardian = GuardianExecutable();
+            await ProductSigning.VerifyAuthenticodeAsync(guardian, cancellationToken);
+            var previousVersion = ReadExecutableVersion(guardian);
+            await EnsurePrivateUpdateDirectoryAsync(cancellationToken);
+
+            var manifest = await SourceUpdatePackageVerifier.VerifyArchiveAsync(
+                journal.PackagePath, request, cancellationToken);
+            var attestation = await SourceUpdatePackageVerifier.VerifyBuiltOutputAsync(
+                journal.SourceBuildAttestationPath, journal.SourceBuildOutputDirectory, request, cancellationToken);
+            var stagedGuardian = Path.Combine(journal.SourceBuildOutputDirectory, "Payload", "UpdateGuardian");
+            await ProductSigning.VerifyAuthenticodeAsync(
+                Path.Combine(stagedGuardian, "Taildesk.UpdateGuardian.exe"), cancellationToken);
+            if (UpdatePackageVerifier.ParseVersion(manifest.Version)
+                < UpdatePackageVerifier.ParseVersion(SourceUpdateProtocol.MinimumGuardianVersion))
+                throw new InvalidDataException("The source-built Guardian does not meet the source-update Guardian protocol floor.");
+
+            await StableGuardianMaintenance.ReconcileSignedReleaseAsync(
+                stagedGuardian, AppPaths.UpdateGuardianInstallDirectory, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(guardian, cancellationToken);
+            var installedVersion = ReadExecutableVersion(guardian);
+            var expectedVersion = UpdatePackageVerifier.NormalizeVersion(request.TargetVersion);
+            if (!installedVersion.Equals(expectedVersion, StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    $"Source Guardian maintenance retained {installedVersion}, not the locally built release {expectedVersion}.");
+
+            var watchdog = await ProcessRunner.RunAsync(
+                guardian,
+                [RemoteAdministrationProtocol.GuardianWatchdogArgument],
+                TimeSpan.FromSeconds(30), cancellationToken,
+                environment: BuildPrivilegedEnvironment(), clearEnvironment: true);
+            if (!watchdog.Succeeded)
+                throw new InvalidOperationException(
+                    "The promoted source-built Guardian did not pass its SYSTEM watchdog startup probe: " +
+                    string.Join(" ", watchdog.StandardOutput.Trim(), watchdog.StandardError.Trim()).Trim());
+
+            return new GuardianMaintenanceStatusDto
+            {
+                OperationId = request.OperationId,
+                PreviousVersion = previousVersion,
+                GuardianVersion = installedVersion,
+                Changed = !installedVersion.Equals(previousVersion, StringComparison.Ordinal),
+                Message = installedVersion.Equals(previousVersion, StringComparison.Ordinal)
+                    ? $"The installed source-built Guardian {installedVersion} already satisfies this release."
+                    : $"The source-built stable Guardian was atomically updated from {previousVersion} to {installedVersion} and passed its watchdog startup probe."
+            };
+        }
+        finally
+        {
             _gate.Release();
         }
     }
@@ -365,6 +565,22 @@ public sealed class UpdateManager
             throw new InvalidOperationException("The Agent is not bound to a valid Tailscale IPv4 address.");
     }
 
+    private void ValidateSourceTarget(SourceUpdateRequest request)
+    {
+        if (request.Role != _state.Config.Role)
+            throw new InvalidOperationException("The source update role does not match this device.");
+        if (!request.Architecture.Equals(CurrentArchitecture, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"The source update is for {request.Architecture}, but this device is {CurrentArchitecture}.");
+        var current = UpdatePackageVerifier.ParseVersion(CurrentVersion);
+        var target = UpdatePackageVerifier.ParseVersion(request.TargetVersion);
+        if (target <= current)
+            throw new InvalidOperationException(
+                $"Opticon source release {request.TargetVersion} is not newer than installed version {CurrentVersion}.");
+        if (!RemoteAdministrationProtocol.IsTailscaleIpv4(_state.Config.BindAddress))
+            throw new InvalidOperationException("The Agent is not bound to a valid Tailscale IPv4 address.");
+    }
+
     private void ValidateGuardianTarget(OpticonUpdateRequest request)
     {
         if (request.Role != _state.Config.Role)
@@ -377,6 +593,22 @@ public sealed class UpdateManager
         if (target != currentAgent)
             throw new InvalidOperationException(
                 $"Update the Agent to {request.TargetVersion} before reconciling the same signed Guardian; the running Agent is {CurrentVersion}.");
+        if (!RemoteAdministrationProtocol.IsTailscaleIpv4(_state.Config.BindAddress))
+            throw new InvalidOperationException("The Agent is not bound to a valid Tailscale IPv4 address.");
+    }
+
+    private void ValidateSourceGuardianTarget(SourceUpdateRequest request)
+    {
+        if (request.Role != _state.Config.Role)
+            throw new InvalidOperationException("The source Guardian role does not match this device.");
+        if (!request.Architecture.Equals(CurrentArchitecture, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"The source Guardian is for {request.Architecture}, but this device is {CurrentArchitecture}.");
+        var current = UpdatePackageVerifier.ParseVersion(CurrentVersion);
+        var target = UpdatePackageVerifier.ParseVersion(request.TargetVersion);
+        if (target != current)
+            throw new InvalidOperationException(
+                $"Update the Agent to {request.TargetVersion} before reconciling its source-built Guardian; the running Agent is {CurrentVersion}.");
         if (!RemoteAdministrationProtocol.IsTailscaleIpv4(_state.Config.BindAddress))
             throw new InvalidOperationException("The Agent is not bound to a valid Tailscale IPv4 address.");
     }
@@ -412,6 +644,95 @@ public sealed class UpdateManager
         if (UpdatePackageVerifier.ParseVersion(installedText) < UpdatePackageVerifier.ParseVersion(minimumVersion))
             throw new InvalidOperationException($"This release requires update guardian {minimumVersion} or newer; installed is {installedText}.");
     }
+
+    private static void ValidateSourceGuardianCompatibility(string guardian)
+    {
+        var installed = ReadExecutableVersion(guardian);
+        if (UpdatePackageVerifier.ParseVersion(installed)
+            < UpdatePackageVerifier.ParseVersion(SourceUpdateProtocol.MinimumGuardianVersion))
+            throw new InvalidOperationException(
+                $"Source updates require Guardian {SourceUpdateProtocol.MinimumGuardianVersion} or newer; installed is {installed}. Use the source-only fresh installer or source Guardian maintenance first.");
+    }
+
+    private static void EnsureFreeSpaceForSourceBuild(long sourceSize)
+    {
+        var root = Path.GetPathRoot(AppPaths.UpdateDataDirectory)
+                   ?? throw new InvalidOperationException("The update drive could not be determined.");
+        var drive = new DriveInfo(root);
+        var currentSize = Directory.Exists(AppPaths.AgentInstallDirectory)
+            ? Directory.EnumerateFiles(AppPaths.AgentInstallDirectory, "*", SearchOption.AllDirectories)
+                .Sum(path => new FileInfo(path).Length)
+            : 0;
+        var required = checked(sourceSize * 4 + currentSize * 2 + 2L * 1024 * 1024 * 1024);
+        if (!drive.IsReady || drive.AvailableFreeSpace < required)
+            throw new IOException(
+                $"The local source update requires {required / (1024 * 1024)} MiB for the verified archive, offline build, candidate, and rollback; only {drive.AvailableFreeSpace / (1024 * 1024)} MiB is available.");
+    }
+
+    private static UpdateJournal RequireCommittedSourceJournal(SourceUpdateRequest request)
+    {
+        var journal = UpdateJournalPersistence.Load()
+                      ?? throw new InvalidOperationException("No source update transaction is available for Guardian maintenance.");
+        if (journal.SchemaVersion != 2 || journal.DeliveryMode != UpdateDeliveryMode.SourceArchive
+            || journal.Phase != UpdatePhase.Committed || journal.OperationId != request.OperationId)
+            throw new InvalidOperationException(
+                "The requested source Guardian release is not the exact committed source Agent transaction.");
+        var durable = SourceRequestFromJournal(journal);
+        SourceUpdatePackageVerifier.ValidateRequest(durable);
+        if (!SameSourceRequest(request, durable))
+            throw new InvalidDataException("The requested source Guardian pins differ from the committed source Agent transaction.");
+
+        var operation = Path.GetFullPath(Path.Combine(AppPaths.UpdateDataDirectory, request.OperationId.ToString("N")));
+        var expectedArchive = Path.Combine(operation, "package.zip");
+        var expectedBuild = Path.Combine(operation, "source-build");
+        var expectedAttestation = Path.Combine(operation, "source-build-attestation.json");
+        if (!Path.GetFullPath(journal.PackagePath).Equals(expectedArchive, StringComparison.OrdinalIgnoreCase)
+            || !Path.GetFullPath(journal.SourceBuildOutputDirectory).Equals(expectedBuild, StringComparison.OrdinalIgnoreCase)
+            || !Path.GetFullPath(journal.SourceBuildAttestationPath).Equals(expectedAttestation, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The committed source update journal has an unsafe staging layout.");
+        MachineStorageSecurity.RequireRestrictedDirectory(operation);
+        MachineStorageSecurity.RequireRestrictedFile(journal.PackagePath);
+        MachineStorageSecurity.RequireRestrictedFile(journal.SourceBuildAttestationPath);
+        return journal;
+    }
+
+    private static SourceUpdateRequest SourceRequestFromJournal(UpdateJournal journal) => new()
+    {
+        ProtocolVersion = SourceUpdateProtocol.Version,
+        OperationId = journal.OperationId,
+        TargetVersion = journal.TargetVersion,
+        Role = journal.Role,
+        Architecture = journal.Architecture,
+        DownloadUrl = journal.SourceDownloadUrl,
+        SourceFile = journal.SourceFile,
+        SourceSize = journal.PackageSize,
+        SourceSha256 = journal.PackageSha256,
+        SourceManifestSha256 = journal.SourceManifestSha256,
+        SourceManifestKeyId = journal.SourceManifestKeyId,
+        SigningProfile = journal.SigningProfile,
+        ProductSignerThumbprint = journal.ProductSignerThumbprint,
+        SdkVersion = journal.SdkVersion,
+        RuntimeVersion = journal.RuntimeVersion,
+        TargetRuntime = journal.TargetRuntime
+    };
+
+    private static bool SameSourceRequest(SourceUpdateRequest left, SourceUpdateRequest right) =>
+        left.ProtocolVersion == right.ProtocolVersion
+        && left.OperationId == right.OperationId
+        && left.TargetVersion.Equals(right.TargetVersion, StringComparison.Ordinal)
+        && left.Role == right.Role
+        && left.Architecture.Equals(right.Architecture, StringComparison.OrdinalIgnoreCase)
+        && left.DownloadUrl.Equals(right.DownloadUrl, StringComparison.Ordinal)
+        && left.SourceFile.Equals(right.SourceFile, StringComparison.Ordinal)
+        && left.SourceSize == right.SourceSize
+        && left.SourceSha256.Equals(right.SourceSha256, StringComparison.OrdinalIgnoreCase)
+        && left.SourceManifestSha256.Equals(right.SourceManifestSha256, StringComparison.OrdinalIgnoreCase)
+        && left.SourceManifestKeyId.Equals(right.SourceManifestKeyId, StringComparison.Ordinal)
+        && left.SigningProfile.Equals(right.SigningProfile, StringComparison.Ordinal)
+        && left.ProductSignerThumbprint.Equals(right.ProductSignerThumbprint, StringComparison.Ordinal)
+        && left.SdkVersion.Equals(right.SdkVersion, StringComparison.Ordinal)
+        && left.RuntimeVersion.Equals(right.RuntimeVersion, StringComparison.Ordinal)
+        && left.TargetRuntime.Equals(right.TargetRuntime, StringComparison.Ordinal);
 
     private async Task DownloadWithResumeAsync(Uri uri, string destination, long expectedSize, CancellationToken cancellationToken)
     {

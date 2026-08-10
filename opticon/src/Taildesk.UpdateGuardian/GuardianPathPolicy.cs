@@ -39,7 +39,10 @@ internal sealed class GuardianPathPolicy
 
     public OperationPaths ValidateJournal(UpdateJournal journal)
     {
-        if (journal.SchemaVersion != 1 || journal.OperationId == Guid.Empty)
+        if (journal.OperationId == Guid.Empty
+            || !Enum.IsDefined(journal.DeliveryMode)
+            || (journal.DeliveryMode == UpdateDeliveryMode.SignedBundle && journal.SchemaVersion != 1)
+            || (journal.DeliveryMode == UpdateDeliveryMode.SourceArchive && journal.SchemaVersion != 2))
             throw new InvalidDataException("The update journal has an unsupported schema or operation ID.");
         if (!Enum.IsDefined(journal.Role))
             throw new InvalidDataException("The update journal contains an unsupported device role.");
@@ -61,10 +64,17 @@ internal sealed class GuardianPathPolicy
 
         var operationName = journal.OperationId.ToString("N");
         var operationDirectory = FullPath(Path.Combine(UpdateRoot, operationName));
+        var sourceBuildOutput = FullPath(Path.Combine(operationDirectory, "source-build"));
+        var sourceBuildAttestation = FullPath(Path.Combine(operationDirectory, "source-build-attestation.json"));
         var expected = new OperationPaths(
             operationDirectory,
             FullPath(Path.Combine(operationDirectory, "package.zip")),
-            FullPath(Path.Combine(operationDirectory, "staged-agent")),
+            journal.DeliveryMode == UpdateDeliveryMode.SourceArchive
+                ? FullPath(Path.Combine(sourceBuildOutput, "Payload", "Agent"))
+                : FullPath(Path.Combine(operationDirectory, "staged-agent")),
+            sourceBuildOutput,
+            sourceBuildAttestation,
+            FullPath(Path.Combine(sourceBuildOutput, "Payload", "UpdateGuardian")),
             FullPath(AgentDirectory + ".candidate-" + operationName),
             FullPath(AgentDirectory + ".rollback-" + operationName),
             FullPath(AgentDirectory + ".failed-" + operationName));
@@ -74,14 +84,28 @@ internal sealed class GuardianPathPolicy
         RequireExactPath(journal.CandidateDirectory, expected.CandidateDirectory, "candidate Agent directory");
         RequireExactPath(journal.RollbackDirectory, expected.RollbackDirectory, "rollback Agent directory");
         RequireExactPath(journal.FailedCandidateDirectory, expected.FailedCandidateDirectory, "failed candidate directory");
+        if (journal.DeliveryMode == UpdateDeliveryMode.SourceArchive)
+        {
+            RequireExactPath(journal.SourceBuildOutputDirectory, expected.SourceBuildOutputDirectory,
+                "source build output directory");
+            RequireExactPath(journal.SourceBuildAttestationPath, expected.SourceBuildAttestationPath,
+                "source build attestation");
+            SourceUpdatePackageVerifier.ValidateRequest(CreateSourceVerificationRequest(journal));
+        }
         EnsureDescendant(UpdateRoot, expected.OperationDirectory, "operation directory");
         EnsureDescendant(UpdateRoot, expected.PackagePath, "staged package");
+        EnsureDescendant(UpdateRoot, expected.SourceBuildOutputDirectory, "source build output directory");
+        EnsureDescendant(UpdateRoot, expected.SourceBuildAttestationPath, "source build attestation");
+        EnsureDescendant(UpdateRoot, expected.StagedGuardianDirectory, "staged Guardian directory");
         EnsureDescendant(ProgramFilesRoot, expected.CandidateDirectory, "candidate Agent directory");
         EnsureDescendant(ProgramFilesRoot, expected.RollbackDirectory, "rollback Agent directory");
         EnsureDescendant(ProgramFilesRoot, expected.FailedCandidateDirectory, "failed candidate directory");
 
         EnsureExistingAncestorsAreNotReparsePoints(expected.PackagePath, UpdateRoot);
         EnsureExistingAncestorsAreNotReparsePoints(expected.StagedAgentDirectory, UpdateRoot);
+        EnsureExistingAncestorsAreNotReparsePoints(expected.SourceBuildOutputDirectory, UpdateRoot);
+        EnsureExistingAncestorsAreNotReparsePoints(expected.SourceBuildAttestationPath, UpdateRoot);
+        EnsureExistingAncestorsAreNotReparsePoints(expected.StagedGuardianDirectory, UpdateRoot);
         EnsureExistingAncestorsAreNotReparsePoints(expected.CandidateDirectory, ProgramFilesRoot);
         EnsureExistingAncestorsAreNotReparsePoints(expected.RollbackDirectory, ProgramFilesRoot);
         EnsureExistingAncestorsAreNotReparsePoints(expected.FailedCandidateDirectory, ProgramFilesRoot);
@@ -107,6 +131,26 @@ internal sealed class GuardianPathPolicy
         DownloadUrl = "https://guardian.invalid/release.zip",
         PackageSize = journal.PackageSize,
         PackageSha256 = journal.PackageSha256
+    };
+
+    public SourceUpdateRequest CreateSourceVerificationRequest(UpdateJournal journal) => new()
+    {
+        ProtocolVersion = SourceUpdateProtocol.Version,
+        OperationId = journal.OperationId,
+        TargetVersion = journal.TargetVersion,
+        Role = journal.Role,
+        Architecture = journal.Architecture,
+        DownloadUrl = journal.SourceDownloadUrl,
+        SourceFile = journal.SourceFile,
+        SourceSize = journal.PackageSize,
+        SourceSha256 = journal.PackageSha256,
+        SourceManifestSha256 = journal.SourceManifestSha256,
+        SourceManifestKeyId = journal.SourceManifestKeyId,
+        SigningProfile = journal.SigningProfile,
+        ProductSignerThumbprint = journal.ProductSignerThumbprint,
+        SdkVersion = journal.SdkVersion,
+        RuntimeVersion = journal.RuntimeVersion,
+        TargetRuntime = journal.TargetRuntime
     };
 
     public void EnsureSafeTree(string path, string allowedRoot)
@@ -212,6 +256,9 @@ internal sealed record OperationPaths(
     string OperationDirectory,
     string PackagePath,
     string StagedAgentDirectory,
+    string SourceBuildOutputDirectory,
+    string SourceBuildAttestationPath,
+    string StagedGuardianDirectory,
     string CandidateDirectory,
     string RollbackDirectory,
     string FailedCandidateDirectory);

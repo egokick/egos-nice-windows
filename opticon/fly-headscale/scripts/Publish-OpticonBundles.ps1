@@ -13,6 +13,9 @@ param(
     [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
     [Parameter(Mandatory)][string]$SignToolPath,
     [ValidatePattern('^[A-Za-z0-9_.-]{1,64}$')][string]$AwsProfile = 'default',
+    # Publish exactly one signed source archive and a schema-2 source-only
+    # manifest. No executable bundle/bootstrap object is uploaded to S3.
+    [switch]$SourceOnly,
     [switch]$SkipBuild,
     [Alias("SkipFlyDeploy")]
     [switch]$SkipManifestPublish
@@ -38,6 +41,9 @@ if ($isLegacyMigration -and ($SigningProfile -ne 'OwnerManaged' -or
         $Version -cne $legacyMigrationBridgeVersion -or
         $LegacyMigrationSignerThumbprint -ne $invitationSigningThumbprint)) {
     throw 'A legacy Agent migration must be the exact OwnerManaged 1.1.41 release signed only with the exact retired invitation certificate.'
+}
+if ($SourceOnly -and $isLegacyMigration) {
+    throw 'A source-only release cannot use the retired legacy migration signer.'
 }
 $timestampUri = $null
 if (-not [Uri]::TryCreate($Rfc3161TimestampUrl, [UriKind]::Absolute, [ref]$timestampUri) -or
@@ -307,23 +313,29 @@ function Test-CompositeSha256Checksum {
 }
 
 function Get-NextReleaseVersion {
+    param([switch]$SourceOnly)
     $listResult = Invoke-AwsCli -Arguments @('s3api', 'list-objects-v2', '--bucket', $bucket,
         '--prefix', 'opticon/releases/', '--query', 'Contents[].Key', '--output', 'json')
     if ($listResult.ExitCode -ne 0) { throw "Could not list published Opticon releases: $($listResult.Error.Trim())" }
     $keys = @($listResult.Output | ConvertFrom-Json)
     $versions = @($keys | ForEach-Object {
-        if ($_ -match '^opticon/releases/(?<version>[0-9]+\.[0-9]+\.[0-9]+)/opticon-bundle-.+-(managed|controller)-win-x64\.zip$') {
+        if ($_ -match '^opticon/releases/(?<version>[0-9]+\.[0-9]+\.[0-9]+)/opticon-bundle-.+-(managed|controller)-win-x64\.zip$' -or
+            ($SourceOnly -and $_ -match '^opticon/releases/(?<version>[0-9]+\.[0-9]+\.[0-9]+)/opticon-source-\k<version>\.zip$')) {
             try { [version]$Matches.version } catch { $null }
         }
     } | Where-Object { $_ })
     if (Test-Path -LiteralPath $manifestPath) {
         $versions += @((Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json).artifacts |
-            Where-Object { $_.product -eq "OpticonBundle" } |
+            Where-Object { $_.product -eq "OpticonBundle" -or ($SourceOnly -and $_.product -eq "OpticonSource") } |
             ForEach-Object { try { [version]$_.version } catch { $null } } |
             Where-Object { $_ })
     }
-    if ($versions.Count -eq 0) { return "1.0.0" }
+    if ($versions.Count -eq 0) {
+        if ($SourceOnly) { return '1.2.0' }
+        return '1.0.0'
+    }
     $highest = $versions | Sort-Object -Descending | Select-Object -First 1
+    if ($SourceOnly -and $highest -lt [version]'1.2.0') { return '1.2.0' }
     return "$($highest.Major).$($highest.Minor).$($highest.Build + 1)"
 }
 
@@ -502,7 +514,8 @@ function Publish-ManifestAtomically([byte[]]$Body) {
 function Assert-OpticonSourceArchive {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)]$Record
+        [Parameter(Mandatory)]$Record,
+        [switch]$RequireSourceLauncher
     )
     Assert-ProductionArtifactTrust -Artifact $Record
     if ([long]$Record.size -lt 1024 -or [long]$Record.size -gt 256MB -or
@@ -616,6 +629,20 @@ function Assert-OpticonSourceArchive {
             if ($actual -ne [string]$file.sha256) { throw "The source file hash is invalid for $name." }
         }
         if ($declared.Count -ne $entries.Count) { throw 'The source archive contains undeclared extra files.' }
+        if ($RequireSourceLauncher) {
+            $launcherKey = 'opticonsourcelauncher.exe'
+            if (-not $entries.ContainsKey($launcherKey) -or -not $declared.ContainsKey($launcherKey)) {
+                throw 'The source-only archive lacks its declared fixed source launcher.'
+            }
+            $launcherRoot = New-PrivatePublisherDirectory -Prefix 'source-launcher-verify'
+            try {
+                $launcherPath = Join-Path $launcherRoot 'OpticonSourceLauncher.exe'
+                [IO.File]::WriteAllBytes($launcherPath, (Read-ZipEntryBounded -Entry $entries[$launcherKey] -MaximumBytes 128MB))
+                Assert-ProductSignature -Path $launcherPath
+            } finally {
+                if (Test-Path -LiteralPath $launcherRoot) { Remove-Item -LiteralPath $launcherRoot -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+        }
     } finally { $zip.Dispose() }
 }
 
@@ -750,7 +777,7 @@ $outputs = $outputsResult.Output | ConvertFrom-Json
 $output = @{}; foreach ($item in $outputs) { $output[$item.OutputKey] = $item.OutputValue }
 if ($output.BucketName -ne $bucket -or $output.DistributionDomainName -notmatch '^[a-z0-9-]+\.cloudfront\.net$') { throw "CloudFormation outputs do not identify the expected private Opticon distribution." }
 
-$version = if ([string]::IsNullOrWhiteSpace($Version)) { Get-NextReleaseVersion } else { $Version }
+$version = if ([string]::IsNullOrWhiteSpace($Version)) { Get-NextReleaseVersion -SourceOnly:$SourceOnly } else { $Version }
 if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw "Version must be a stable major.minor.patch release." }
 if ($SkipBuild -and [string]::IsNullOrWhiteSpace($Version)) { throw "-SkipBuild requires an explicit -Version so an existing build is never misidentified." }
 if (-not $SkipBuild) {
@@ -765,6 +792,9 @@ if (-not $SkipBuild) {
     if ($isLegacyMigration) {
         $buildArguments += @('-LegacyMigrationSignerThumbprint', $LegacyMigrationSignerThumbprint)
     }
+    if ($SourceOnly) {
+        $buildArguments += '-SourceOnly'
+    }
     & (Join-Path $PSScriptRoot "Build-OpticonBundles.ps1") @buildArguments
 }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
@@ -773,32 +803,45 @@ foreach ($artifact in @($manifest.artifacts | Where-Object {
     })) {
     $null = Assert-LegacyMigrationArtifact -Artifact $artifact
 }
-$allOpticonArtifacts = @($manifest.artifacts | Where-Object { $_.product -in @('OpticonBundle', 'OpticonBootstrap', 'OpticonSource') })
-if ($allOpticonArtifacts.Count -eq 0) { throw 'The release manifest has no Opticon artifacts.' }
-foreach ($artifact in $allOpticonArtifacts) { Assert-ProductionArtifactTrust -Artifact $artifact }
-$releaseArtifacts = @($manifest.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap", "OpticonSource") })
-$bundles = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBundle" })
-$bootstraps = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBootstrap" })
-$sources = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonSource" })
-if ($bundles.Count -ne 2 -or $bootstraps.Count -ne 1 -or $sources.Count -ne 1) { throw "Build did not produce two bundles, one bootstrap, and one source archive for $version." }
-foreach ($bundle in $bundles) {
-    $actualLegacyMigrationSigner = Get-ArtifactString $bundle 'legacyMigrationSignerThumbprint'
-    if ($isLegacyMigration) {
-        if ($actualLegacyMigrationSigner -cne $LegacyMigrationSignerThumbprint) {
-            throw "The requested legacy migration signer was not embedded in $($bundle.file)."
-        }
-    } elseif (-not [string]::IsNullOrWhiteSpace($actualLegacyMigrationSigner)) {
-        throw "An ordinary release must not publish a legacy migration bundle: $($bundle.file)."
+$releaseArtifacts = @()
+if ($SourceOnly) {
+    if ([int]$manifest.schemaVersion -ne 2) { throw 'The source-only build did not produce schema version 2.' }
+    $unexpected = @($manifest.artifacts | Where-Object { $_.product -ne 'OpticonSource' })
+    $sources = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonSource' })
+    if ($unexpected.Count -ne 0 -or $sources.Count -ne 1 -or [string]$sources[0].version -cne $version) {
+        throw "A source-only publication must contain exactly one current OpticonSource archive for $version."
     }
-}
-$bootstrapPath = Get-LocalArtifactPath ([string]$bootstraps[0].file)
-if ([string]$bootstraps[0].signerThumbprint -ne $ProductCertificateThumbprint) {
-    throw 'The source bootstrap outer signer pin does not match the production product signer.'
-}
-Assert-ProductSignature -Path $bootstrapPath
-Assert-OpticonSourceArchive -Path (Get-LocalArtifactPath ([string]$sources[0].file)) -Record $sources[0]
-foreach ($bundle in @($allOpticonArtifacts | Where-Object { $_.product -eq 'OpticonBundle' })) {
-    Assert-OpticonBundleArchive -Path (Get-LocalArtifactPath ([string]$bundle.file)) -Record $bundle
+    Assert-ProductionArtifactTrust -Artifact $sources[0]
+    Assert-OpticonSourceArchive -Path (Get-LocalArtifactPath ([string]$sources[0].file)) -Record $sources[0] -RequireSourceLauncher
+    $releaseArtifacts = @($sources[0])
+} else {
+    $allOpticonArtifacts = @($manifest.artifacts | Where-Object { $_.product -in @('OpticonBundle', 'OpticonBootstrap', 'OpticonSource') })
+    if ($allOpticonArtifacts.Count -eq 0) { throw 'The release manifest has no Opticon artifacts.' }
+    foreach ($artifact in $allOpticonArtifacts) { Assert-ProductionArtifactTrust -Artifact $artifact }
+    $releaseArtifacts = @($manifest.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap", "OpticonSource") })
+    $bundles = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBundle" })
+    $bootstraps = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBootstrap" })
+    $sources = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonSource" })
+    if ($bundles.Count -ne 2 -or $bootstraps.Count -ne 1 -or $sources.Count -ne 1) { throw "Build did not produce two bundles, one bootstrap, and one source archive for $version." }
+    foreach ($bundle in $bundles) {
+        $actualLegacyMigrationSigner = Get-ArtifactString $bundle 'legacyMigrationSignerThumbprint'
+        if ($isLegacyMigration) {
+            if ($actualLegacyMigrationSigner -cne $LegacyMigrationSignerThumbprint) {
+                throw "The requested legacy migration signer was not embedded in $($bundle.file)."
+            }
+        } elseif (-not [string]::IsNullOrWhiteSpace($actualLegacyMigrationSigner)) {
+            throw "An ordinary release must not publish a legacy migration bundle: $($bundle.file)."
+        }
+    }
+    $bootstrapPath = Get-LocalArtifactPath ([string]$bootstraps[0].file)
+    if ([string]$bootstraps[0].signerThumbprint -ne $ProductCertificateThumbprint) {
+        throw 'The source bootstrap outer signer pin does not match the production product signer.'
+    }
+    Assert-ProductSignature -Path $bootstrapPath
+    Assert-OpticonSourceArchive -Path (Get-LocalArtifactPath ([string]$sources[0].file)) -Record $sources[0]
+    foreach ($bundle in @($allOpticonArtifacts | Where-Object { $_.product -eq 'OpticonBundle' })) {
+        Assert-OpticonBundleArchive -Path (Get-LocalArtifactPath ([string]$bundle.file)) -Record $bundle
+    }
 }
 $fullStreamFiles = @($releaseArtifacts | ForEach-Object { [string]$_.file })
 
@@ -873,9 +916,19 @@ if (-not $SkipManifestPublish) {
         })) {
         $null = Assert-LegacyMigrationArtifact -Artifact $artifact
     }
-    $liveRelease = @($live.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap", "OpticonSource") })
-    if ($liveRelease.Count -ne 4 -or @($liveRelease | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.downloadUrl) }).Count -ne 0) {
-        throw "Fly accepted the manifest but did not serve the complete CloudFront release."
+    if ($SourceOnly) {
+        if ([int]$live.schemaVersion -ne 2 -or @($live.artifacts | Where-Object { $_.product -ne 'OpticonSource' }).Count -ne 0) {
+            throw 'Fly accepted the source-only manifest but served a binary release artifact.'
+        }
+        $liveRelease = @($live.artifacts | Where-Object { $_.version -eq $version -and $_.product -eq 'OpticonSource' })
+        if ($liveRelease.Count -ne 1 -or @($liveRelease | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.downloadUrl) }).Count -ne 0) {
+            throw 'Fly accepted the source-only manifest but did not serve exactly one CloudFront source archive.'
+        }
+    } else {
+        $liveRelease = @($live.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap", "OpticonSource") })
+        if ($liveRelease.Count -ne 4 -or @($liveRelease | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.downloadUrl) }).Count -ne 0) {
+            throw "Fly accepted the manifest but did not serve the complete CloudFront release."
+        }
     }
     foreach ($expected in $releaseArtifacts) {
         $actual = @($liveRelease | Where-Object { [string]$_.file -ceq [string]$expected.file })

@@ -657,6 +657,87 @@ func TestAuthenticatedManifestPublicationIsAtomicPersistentAndReplaySafe(t *test
 	}
 }
 
+func TestSourceOnlyManifestHasOneSignedArchivePerRelease(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	source := productionArtifact(bundleArtifact{
+		Product: "OpticonSource", Version: "1.2.0", Architecture: "source",
+		File: "opticon-source-1.2.0.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.0.zip",
+		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
+		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+	})
+	manifest := artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{source}}
+	if err := validateArtifactManifest(manifest); err != nil {
+		t.Fatalf("valid source-only manifest was rejected: %v", err)
+	}
+	if version, ok := highestReleaseVersion(manifest); !ok || version != source.Version {
+		t.Fatalf("source-only release version is %q", version)
+	}
+	if !completeCloudFrontRelease(manifest, source.Version) {
+		t.Fatal("complete source-only CloudFront release was rejected")
+	}
+
+	duplicate := manifest
+	duplicate.Artifacts = append(duplicate.Artifacts, source)
+	duplicate.Artifacts[1].File = "opticon-source-1.2.1.zip"
+	duplicate.Artifacts[1].DownloadURL = "https://d111.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.1.zip"
+	if err := validateArtifactManifest(duplicate); err == nil {
+		t.Fatal("source-only manifest accepted two archives for the same version")
+	}
+	withBundle := manifest
+	withBundle.Artifacts = append(withBundle.Artifacts, bundleArtifact{
+		Product: "OpticonBundle", Version: "1.2.0", Role: "ManagedOnly", Architecture: "x64",
+		File: "opticon-bundle-1.2.0-managed-win-x64.zip", Size: 2048, SHA256: hash,
+	})
+	if err := validateArtifactManifest(withBundle); err == nil {
+		t.Fatal("source-only manifest accepted a binary bundle")
+	}
+}
+
+func TestAuthenticatedSourceOnlyManifestReplacesUnservableLegacyMarker(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, "release", "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	hash := strings.Repeat("a", 64)
+	// This is intentionally the obsolete, invalid marker format that causes
+	// the currently deployed gateway to return 503. It is structurally readable
+	// but not trusted/servable, so only the authenticated source-only PUT may
+	// replace it.
+	stale := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{{
+		Product: "OpticonBundle", Version: "1.1.40", Role: "ManagedOnly", Architecture: "x64",
+		File: "opticon-bundle-1.1.40-managed-win-x64.zip", Size: 2048, SHA256: hash,
+		LegacyMigrationSignerThumbprint: invitationSigningKeyID,
+	}}}
+	staleBytes, _ := json.Marshal(stale)
+	if err := os.WriteFile(manifestPath, staleBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	next := artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{productionArtifact(bundleArtifact{
+		Product: "OpticonSource", Version: "1.2.0", Architecture: "source",
+		File: "opticon-source-1.2.0.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.0.zip",
+		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
+		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+	})}}
+	body, _ := json.Marshal(next)
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	g := &gateway{artifactDir: root, manifestPath: manifestPath, adminSecret: secret, nonces: make(map[string]time.Time)}
+	result := httptest.NewRecorder()
+	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPut, releaseAdminPath, "source-only-recovery-nonce-0123", body))
+	if result.Code != http.StatusCreated {
+		t.Fatalf("source-only recovery returned %d: %s", result.Code, result.Body.String())
+	}
+	published, err := g.readArtifactManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.SchemaVersion != sourceOnlyManifestSchema || len(published.Artifacts) != 1 || published.Artifacts[0].Product != "OpticonSource" {
+		t.Fatalf("stale manifest was not atomically replaced with one source record: %#v", published)
+	}
+}
+
 func TestAuthenticatedManifestPublicationCanRotateAnObsoleteTrustDomain(t *testing.T) {
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, "manifest.json")
@@ -725,6 +806,59 @@ func TestSourceInvitationPinsAndHashesBothImmutableDownloads(t *testing.T) {
 	}
 	if strings.Contains(landing, "a.href=\"https://d222.cloudfront.net") {
 		t.Fatal("invitation still relies on a cross-origin anchor download filename")
+	}
+}
+
+func TestSourceOnlyInvitationPinsNoReleaseBootstrap(t *testing.T) {
+	root := t.TempDir()
+	inviteDir := filepath.Join(root, "invites")
+	if err := os.MkdirAll(inviteDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	hash := strings.Repeat("b", 64)
+	source := productionArtifact(bundleArtifact{
+		Product: "OpticonSource", Version: "1.2.0", Architecture: "source",
+		File: "opticon-source-1.2.0.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.0.zip",
+		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
+		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+	})
+	encoded, _ := json.Marshal(artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{source}})
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	g := &gateway{artifactDir: root, inviteDir: inviteDir, adminSecret: secret, nonces: make(map[string]time.Time)}
+	publicID := strings.Repeat("S", 24)
+	idHash := sha256.Sum256([]byte(publicID))
+	invite := productionInvite(hostedInvite{
+		DeviceName: "Source-only PC", Role: "ManagedOnly", ExpiresAt: time.Now().Add(time.Hour),
+		InstallProtocol: sourceInstallProtocol, ReleaseVersion: source.Version,
+		SourceFile: source.File, SourceSize: source.Size, SourceSHA256: source.SHA256,
+		SourceManifestSHA256: source.SourceManifestSHA256, SDKVersion: source.SDKVersion,
+		RuntimeVersion: source.RuntimeVersion, TargetRuntimes: source.TargetRuntimes,
+		Ciphertext: bytes.Repeat([]byte{0x5a}, 96),
+	})
+	body, _ := json.Marshal(invite)
+	put := httptest.NewRecorder()
+	g.ServeHTTP(put, signedRouteRequest(secret, http.MethodPut, inviteAdminPrefix+hex.EncodeToString(idHash[:]), "source-only-invite-nonce-0123", body))
+	if put.Code != http.StatusCreated {
+		t.Fatalf("source-only invitation PUT returned %d: %s", put.Code, put.Body.String())
+	}
+	landing := httptest.NewRecorder()
+	g.ServeHTTP(landing, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID, nil))
+	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), source.DownloadURL) ||
+		!strings.Contains(landing.Body.String(), "OpticonSourceLauncher.exe") ||
+		strings.Contains(landing.Body.String(), "opticon-bootstrap-") {
+		t.Fatalf("source-only landing is not limited to the archive and embedded launcher: %d %s", landing.Code, landing.Body.String())
+	}
+	withBootstrap := invite
+	withBootstrap.BootstrapFile = "opticon-bootstrap-1.2.0.exe"
+	invalid, _ := json.Marshal(withBootstrap)
+	bad := httptest.NewRecorder()
+	g.ServeHTTP(bad, signedRouteRequest(secret, http.MethodPut, inviteAdminPrefix+strings.Repeat("a", 64), "source-only-bootstrap-nonce-012", invalid))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("source-only invitation carrying a bootstrap returned %d", bad.Code)
 	}
 }
 

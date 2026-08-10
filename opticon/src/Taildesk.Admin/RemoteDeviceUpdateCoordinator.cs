@@ -17,28 +17,22 @@ public sealed class RemoteDeviceUpdateCoordinator
     {
         var currentAgentVersion = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
         var releaseVersion = UpdatePackageVerifier.ParseVersion(release.Version);
-        var requiresLegacyMachineStateMigration = RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(
-            currentAgentVersion, releaseVersion);
-        var isLegacyMachineStateMigrationBridge = RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
-            currentAgentVersion, releaseVersion, release.LegacyMigrationSignerThumbprint);
-        if (release.IsLegacyMachineStateMigrationBridge != isLegacyMachineStateMigrationBridge)
-            throw new InvalidDataException(
-                "The selected Opticon release does not match the canonical legacy machine-state bridge identity.");
-        if (!isLegacyMachineStateMigrationBridge
-            && !string.IsNullOrEmpty(release.LegacyMigrationSignerThumbprint))
-            throw new InvalidDataException(
-                "A legacy migration marker is not valid for this installed Agent and release version.");
-        if (requiresLegacyMachineStateMigration && !isLegacyMachineStateMigrationBridge)
+        var sourceProtocolFloor = UpdatePackageVerifier.ParseVersion(SourceUpdateProtocol.MinimumGuardianVersion);
+        var installedGuardianVersion = ParseInstalledGuardianVersion(device.GuardianVersion);
+        if (release.RequiresCleanReinstall
+            || currentAgentVersion < sourceProtocolFloor
+            || installedGuardianVersion < sourceProtocolFloor)
             throw new InvalidOperationException(
-                $"Opticon Agent {device.AgentVersion} uses the legacy machine-state ACL layout and cannot be updated unattended to {release.Version}. " +
-                "No candidate was staged. Only the exact signed 1.1.38-to-1.1.41 migration bridge can cross this boundary.");
-        if (isLegacyMachineStateMigrationBridge && release.RequiresMaintenanceBootstrap)
-            throw new InvalidOperationException(
-                "The signed legacy machine-state bridge requires the guarded Opticon update API and stable Guardian already present on Agent 1.1.38. " +
-                "The retired maintenance bootstrap cannot launch this bridge.");
+                $"Opticon Agent {device.AgentVersion} and Guardian {device.GuardianVersion} cannot stage the source-only release {release.Version}. " +
+                "No remote candidate was staged. Perform an attended clean uninstall and re-enroll with a new signed source invitation.");
         if (release.RequiresMaintenanceBootstrap)
             throw new InvalidOperationException(
-                "This legacy Agent requires the signed one-time maintenance bootstrap before API-driven updates.");
+                "Source-only remote updates do not support the retired maintenance bootstrap.");
+        if (release.SourceRelease is not { } sourceRelease)
+            throw new InvalidDataException("The selected Opticon release does not contain a verified source archive.");
+        if (releaseVersion <= currentAgentVersion)
+            throw new InvalidOperationException(
+                $"Opticon source release {release.Version} is not newer than installed version {device.AgentVersion}.");
         if (!AgentClient.IsTailscaleIp(device.TailscaleIp))
             throw new InvalidOperationException("The selected device has no valid Tailscale address.");
         if (device.State != DeviceConnectionState.Online)
@@ -46,24 +40,12 @@ public sealed class RemoteDeviceUpdateCoordinator
         if (!await AgentClient.ProbeTcpAsync(device.TailscaleIp, 21118, TimeSpan.FromSeconds(10), cancellationToken))
             throw new InvalidOperationException("RustDesk TCP 21118 is unavailable. Opticon will not update a distant device without a verified recovery channel.");
 
-        if (currentAgentVersion == releaseVersion && release.RequiresGuardianReconciliation)
-        {
-            await ReconcileGuardianAsync(device, agentToken, release, progress, cancellationToken);
-            return await _agents.GetUpdateStatusAsync(device, agentToken, cancellationToken);
-        }
-
         var operationId = Guid.NewGuid();
-        progress?.Report($"Staging Opticon Agent {release.Version} on {device.Name}; the installed Agent and remote-control services remain active.");
-        var prepareTask = _agents.PrepareUpdateAsync(device, agentToken, new OpticonUpdateRequest
-        {
-            OperationId = operationId,
-            TargetVersion = release.Version,
-            Role = release.Role,
-            Architecture = release.Architecture,
-            DownloadUrl = release.DownloadUri.AbsoluteUri,
-            PackageSize = release.Size,
-            PackageSha256 = release.Sha256
-        }, cancellationToken);
+        var sourceRequest = CreateSourceUpdateRequest(device, release, sourceRelease, operationId);
+        progress?.Report(
+            $"Staging the signed Opticon source release {release.Version} on {device.Name}; " +
+            "the target will verify the archive and locally build an attested candidate while the installed Agent and recovery services remain active.");
+        var prepareTask = _agents.PrepareSourceUpdateAsync(device, agentToken, sourceRequest, cancellationToken);
         var lastPreparationProgress = string.Empty;
         while (!prepareTask.IsCompleted)
         {
@@ -137,7 +119,9 @@ public sealed class RemoteDeviceUpdateCoordinator
         var sshWasListening = await AgentClient.ProbeTcpAsync(
             device.TailscaleIp, RemoteAdministrationProtocol.SshPort,
             TimeSpan.FromSeconds(5), cancellationToken);
-        progress?.Report("Package verified. Scheduling the guarded Agent swap; Tailscale, RustDesk, SSH, credentials, and routing will not be changed.");
+        progress?.Report(
+            "The signed source archive and its local attested build are ready. Scheduling the guarded Agent swap; " +
+            "Tailscale, RustDesk, SSH, credentials, and routing will not be changed.");
         UpdateStatusDto activation;
         try
         {
@@ -153,12 +137,14 @@ public sealed class RemoteDeviceUpdateCoordinator
             progress?.Report(
                 "Activation delivery is indeterminate; polling the Guardian's durable terminal state. " +
                 exception.Message);
-            return await WaitForTerminalStatusAsync(
+            var activationTerminal = await WaitForTerminalStatusAsync(
                 device, agentToken, operationId,
                 DateTimeOffset.UtcNow
                     .Add(RemoteAdministrationProtocol.UpdateCommitWindow)
                     .AddMinutes(2),
                 progress, cancellationToken);
+            return await CompleteSourceTransactionAsync(
+                activationTerminal, device, agentToken, sourceRequest, progress, cancellationToken);
         }
         var deadline = activation.CommitDeadline ?? DateTimeOffset.UtcNow.Add(RemoteAdministrationProtocol.UpdateCommitWindow);
         var requiredHealthySamples = 3;
@@ -194,7 +180,12 @@ public sealed class RemoteDeviceUpdateCoordinator
                 {
                     healthySamples = 0;
                     if (update?.Phase is UpdatePhase.RollingBack or UpdatePhase.RolledBack or UpdatePhase.Failed)
-                        return await WaitForTerminalStatusAsync(device, agentToken, operationId, deadline.AddMinutes(2), progress, cancellationToken);
+                    {
+                        var rollbackTerminal = await WaitForTerminalStatusAsync(
+                            device, agentToken, operationId, deadline.AddMinutes(2), progress, cancellationToken);
+                        return await CompleteSourceTransactionAsync(
+                            rollbackTerminal, device, agentToken, sourceRequest, progress, cancellationToken);
+                    }
                 }
             }
             catch (Exception exception) when (IsRecoverableRemoteFailure(exception, cancellationToken))
@@ -229,44 +220,109 @@ public sealed class RemoteDeviceUpdateCoordinator
         }
         var terminal = await WaitForTerminalStatusAsync(
             device, agentToken, operationId, DateTimeOffset.UtcNow.AddMinutes(2), progress, cancellationToken);
-        if (terminal.Phase == UpdatePhase.Committed)
-            await ReconcileGuardianAsync(device, agentToken, release, progress, cancellationToken);
-        return terminal;
+        return await CompleteSourceTransactionAsync(
+            terminal, device, agentToken, sourceRequest, progress, cancellationToken);
     }
 
-    private async Task ReconcileGuardianAsync(
+    private async Task<UpdateStatusDto> CompleteSourceTransactionAsync(
+        UpdateStatusDto terminal,
         DeviceRecord device,
         string agentToken,
-        OpticonUpdateRelease release,
+        SourceUpdateRequest sourceRequest,
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        var operationId = Guid.NewGuid();
+        if (terminal.Phase == UpdatePhase.Committed)
+            await ReconcileSourceGuardianAsync(device, agentToken, sourceRequest, progress, cancellationToken);
+        return terminal;
+    }
+
+    private async Task ReconcileSourceGuardianAsync(
+        DeviceRecord device,
+        string agentToken,
+        SourceUpdateRequest sourceRequest,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
         progress?.Report(
-            $"Reconciling the production-signed stable Guardian with Opticon {release.Version}; no UAC or arbitrary command execution is used.");
-        var result = await _agents.ReconcileGuardianAsync(device, agentToken, new OpticonUpdateRequest
+            $"Reconciling the locally built, attested stable Guardian from source operation {sourceRequest.OperationId:N}; " +
+            "no executable bundle or arbitrary command is used.");
+        var result = await _agents.ReconcileSourceGuardianAsync(
+            device, agentToken, sourceRequest, cancellationToken);
+        if (result.OperationId != sourceRequest.OperationId)
+            throw new InvalidDataException("The Agent returned a different source Guardian operation ID.");
+        var expectedVersion = UpdatePackageVerifier.NormalizeVersion(sourceRequest.TargetVersion);
+        if (!UpdatePackageVerifier.NormalizeVersion(result.GuardianVersion)
+            .Equals(expectedVersion, StringComparison.Ordinal))
+            throw new InvalidDataException(
+                $"The Agent reported Guardian {result.GuardianVersion} after source operation {sourceRequest.OperationId:N}.");
+        var status = await _agents.GetStatusAsync(device, agentToken, cancellationToken);
+        if (!UpdatePackageVerifier.NormalizeVersion(status.AgentVersion)
+                .Equals(expectedVersion, StringComparison.Ordinal)
+            || !UpdatePackageVerifier.NormalizeVersion(status.GuardianVersion)
+                .Equals(expectedVersion, StringComparison.Ordinal)
+            || !status.RustDeskReady
+            || !status.TailscaleIp.Equals(device.TailscaleIp, StringComparison.Ordinal)
+            || (string.IsNullOrWhiteSpace(device.TailnetDeviceId)
+                ? false
+                : !status.TailnetDeviceId.Equals(device.TailnetDeviceId, StringComparison.Ordinal)))
+            throw new InvalidDataException(
+                "The post-source-maintenance Agent sample did not attest the expected Agent and Guardian, Tailnet identity, and RustDesk recovery channel.");
+        progress?.Report(result.Message);
+    }
+
+    private static SourceUpdateRequest CreateSourceUpdateRequest(
+        DeviceRecord device,
+        OpticonUpdateRelease release,
+        OpticonSourceRelease source,
+        Guid operationId)
+    {
+        var architecture = release.Architecture.ToLowerInvariant();
+        var targetRuntime = architecture switch
+        {
+            "x64" => "win-x64",
+            "arm64" => "win-arm64",
+            _ => throw new InvalidDataException("The selected source release has an unsupported device architecture.")
+        };
+        var deviceArchitecture = string.IsNullOrWhiteSpace(device.Architecture)
+            ? "x64"
+            : device.Architecture.ToLowerInvariant();
+        if (release.Role != device.Role
+            || !architecture.Equals(deviceArchitecture, StringComparison.Ordinal)
+            || !source.Version.Equals(release.Version, StringComparison.Ordinal)
+            || source.Size != release.Size
+            || !source.Sha256.Equals(release.Sha256, StringComparison.OrdinalIgnoreCase)
+            || !source.DownloadUri.AbsoluteUri.Equals(release.DownloadUri.AbsoluteUri, StringComparison.Ordinal)
+            || !source.TargetRuntimes.Contains(targetRuntime, StringComparer.Ordinal))
+            throw new InvalidDataException(
+                "The selected source release does not exactly match the requested device role, architecture, and immutable archive pins.");
+
+        var request = new SourceUpdateRequest
         {
             OperationId = operationId,
-            TargetVersion = release.Version,
+            TargetVersion = source.Version,
             Role = release.Role,
-            Architecture = release.Architecture,
-            DownloadUrl = release.DownloadUri.AbsoluteUri,
-            PackageSize = release.Size,
-            PackageSha256 = release.Sha256
-        }, cancellationToken);
-        if (result.OperationId != operationId)
-            throw new InvalidDataException("The Agent returned a different Guardian maintenance operation ID.");
-        var expected = UpdatePackageVerifier.ParseVersion(release.Version);
-        if (UpdatePackageVerifier.ParseVersion(result.GuardianVersion) < expected)
-            throw new InvalidDataException(
-                $"The Agent reported Guardian {result.GuardianVersion} after reconciling release {release.Version}.");
-        var status = await _agents.GetStatusAsync(device, agentToken, cancellationToken);
-        if (UpdatePackageVerifier.ParseVersion(status.GuardianVersion) < expected
-            || !status.RustDeskReady
-            || !status.TailscaleIp.Equals(device.TailscaleIp, StringComparison.Ordinal))
-            throw new InvalidDataException(
-                "The post-maintenance Agent sample did not attest the expected Guardian, Tailscale identity, and RustDesk recovery channel.");
-        progress?.Report(result.Message);
+            Architecture = architecture,
+            DownloadUrl = source.DownloadUri.AbsoluteUri,
+            SourceFile = source.File,
+            SourceSize = source.Size,
+            SourceSha256 = source.Sha256,
+            SourceManifestSha256 = source.SourceManifestSha256,
+            SourceManifestKeyId = source.SourceManifestKeyId,
+            SigningProfile = source.SigningProfile,
+            ProductSignerThumbprint = source.ProductSignerThumbprint,
+            SdkVersion = source.SdkVersion,
+            RuntimeVersion = source.RuntimeVersion,
+            TargetRuntime = targetRuntime
+        };
+        SourceUpdatePackageVerifier.ValidateRequest(request);
+        return request;
+    }
+
+    private static Version ParseInstalledGuardianVersion(string value)
+    {
+        try { return UpdatePackageVerifier.ParseVersion(value); }
+        catch (InvalidDataException) { return new Version(0, 0, 0); }
     }
 
     public async Task<UpdateStatusDto> ObserveMaintenanceBootstrapAsync(

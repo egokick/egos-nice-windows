@@ -801,7 +801,12 @@ try {
 }
 
 if ($BuildProfile -eq 'Production' -and -not $SkipTargetReleaseDeployment) {
-    & (Join-Path $repo 'scripts\Ensure-OpticonTargetRelease.ps1')
+    & (Join-Path $repo 'scripts\Ensure-OpticonTargetRelease.ps1') `
+        -SigningProfile $BuildProfile `
+        -SourceReleaseCertificateThumbprint $sourceThumbprint `
+        -ProductCertificateThumbprint $productThumbprint `
+        -Rfc3161TimestampUrl $TimestampServer `
+        -SignToolPath $signTool
     if ($LASTEXITCODE -ne 0) {
         throw 'The Opticon target release check or deployment failed.'
     }

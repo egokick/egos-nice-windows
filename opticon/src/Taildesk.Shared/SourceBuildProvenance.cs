@@ -9,7 +9,7 @@ namespace Taildesk.Shared;
 
 public sealed class SourceBuildAttestation
 {
-    public int SchemaVersion { get; set; } = 2;
+    public int SchemaVersion { get; set; } = 3;
     public string ReleaseVersion { get; set; } = string.Empty;
     public string SourceFile { get; set; } = string.Empty;
     public long SourceSize { get; set; }
@@ -21,11 +21,6 @@ public sealed class SourceBuildAttestation
     public string SdkVersion { get; set; } = string.Empty;
     public string RuntimeVersion { get; set; } = string.Empty;
     public string TargetRuntime { get; set; } = string.Empty;
-    public string BootstrapVersion { get; set; } = string.Empty;
-    public string BootstrapFile { get; set; } = string.Empty;
-    public long BootstrapSize { get; set; }
-    public string BootstrapSha256 { get; set; } = string.Empty;
-    public string BootstrapSignerThumbprint { get; set; } = string.Empty;
     public string InviteCiphertextSha256 { get; set; } = string.Empty;
     public List<SourceBuildFileAttestation> Files { get; set; } = [];
 }
@@ -327,6 +322,118 @@ public static class SourceBuildProvenance
         WriteProtectedStore(store);
     }
 
+    /// <summary>
+    /// Registers a source-built update only after the Agent has verified its
+    /// signed source archive and sealed its build attestation.  The record is
+    /// canonicalized to the installed Agent/Guardian paths; TryVerify maps the
+    /// guarded candidate, rollback, and source-build staging paths back to
+    /// those canonical paths while the exact journal is live.
+    /// </summary>
+    public static async Task RegisterVerifiedSourceUpdateAsync(
+        SourceUpdateBuildAttestation attestation,
+        string outputDirectory,
+        Guid operationId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Source update provenance requires Windows.");
+        ArgumentNullException.ThrowIfNull(attestation);
+        if (operationId == Guid.Empty)
+            throw new InvalidDataException("The source update operation ID is empty.");
+
+        var operationDirectory = Path.GetFullPath(Path.Combine(
+            AppPaths.UpdateDataDirectory, operationId.ToString("N")));
+        var expectedOutput = Path.GetFullPath(Path.Combine(operationDirectory, "source-build"));
+        var actualOutput = Path.GetFullPath(outputDirectory);
+        if (!actualOutput.Equals(expectedOutput, StringComparison.OrdinalIgnoreCase)
+            || !Directory.Exists(actualOutput))
+            throw new InvalidDataException("The source build output is not at the protected transaction path.");
+        MachineStorageSecurity.RequireRestrictedDirectory(operationDirectory);
+        RejectReparsePoints(actualOutput);
+
+        var journal = UpdateJournalPersistence.Load()
+                      ?? throw new InvalidDataException("The source update journal is missing.");
+        if (journal.SchemaVersion != 2 || journal.DeliveryMode != UpdateDeliveryMode.SourceArchive
+            || journal.OperationId != operationId
+            || !Path.GetFullPath(journal.SourceBuildOutputDirectory)
+                .Equals(expectedOutput, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The source build does not match the protected update journal.");
+
+        if (attestation.SchemaVersion != 1
+            || UpdatePackageVerifier.NormalizeVersion(attestation.ReleaseVersion)
+                != UpdatePackageVerifier.NormalizeVersion(journal.TargetVersion)
+            || attestation.SourceFile != journal.SourceFile
+            || attestation.SourceSize != journal.PackageSize
+            || !FixedHash(attestation.SourceSha256, journal.PackageSha256)
+            || !FixedHash(attestation.SourceManifestSha256, journal.SourceManifestSha256)
+            || attestation.SourceManifestKeyId != journal.SourceManifestKeyId
+            || attestation.SigningProfile != BuildSigningTrust.ProfileName
+            || attestation.SigningProfile != journal.SigningProfile
+            || !BuildSigningTrust.IsPublishable
+            || attestation.SourceManifestKeyId != SourceReleaseSigning.KeyId
+            || attestation.ProductSignerThumbprint != journal.ProductSignerThumbprint
+            || attestation.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
+            || attestation.SdkVersion != journal.SdkVersion
+            || attestation.SdkVersion != SourceUpdateProtocol.RequiredSdkVersion
+            || attestation.RuntimeVersion != journal.RuntimeVersion
+            || attestation.RuntimeVersion != SourceUpdateProtocol.RequiredRuntimeVersion
+            || attestation.TargetRuntime != journal.TargetRuntime
+            || attestation.TargetRuntime != CurrentTargetRuntime()
+            || attestation.Role != journal.Role
+            || !attestation.Architecture.Equals(journal.Architecture, StringComparison.OrdinalIgnoreCase)
+            || attestation.Files.Count is < 2 or > 512)
+            throw new InvalidDataException("The source build attestation has unsupported trust metadata.");
+
+        var files = new List<InstalledSourceFile>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in attestation.Files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var relative = NormalizeRelativePath(file.Path);
+            var installedPath = MapInstalledPath(relative)
+                                ?? throw new InvalidDataException("The source update attestation declares an unsupported component.");
+            if (file.Size <= 0 || !Sha256Pattern.IsMatch(file.Sha256))
+                throw new InvalidDataException("The source update attestation has an invalid output hash.");
+            var outputPath = Path.GetFullPath(Path.Combine(
+                actualOutput, relative.Replace('/', Path.DirectorySeparatorChar)));
+            var outputPrefix = actualOutput.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!outputPath.StartsWith(outputPrefix, StringComparison.OrdinalIgnoreCase)
+                || !seen.Add(installedPath))
+                throw new InvalidDataException("The source update attestation has a duplicate or unsafe output path.");
+            await VerifyHashAsync(outputPath, file.Size, file.Sha256, cancellationToken);
+            files.Add(new InstalledSourceFile
+            {
+                Path = installedPath,
+                Size = file.Size,
+                Sha256 = file.Sha256.ToLowerInvariant()
+            });
+        }
+
+        var generation = new InstalledSourceGeneration
+        {
+            ReleaseVersion = attestation.ReleaseVersion,
+            SourceSha256 = attestation.SourceSha256.ToLowerInvariant(),
+            SourceManifestSha256 = attestation.SourceManifestSha256.ToLowerInvariant(),
+            SourceManifestKeyId = attestation.SourceManifestKeyId,
+            SigningProfile = attestation.SigningProfile,
+            ProductSignerThumbprint = attestation.ProductSignerThumbprint,
+            SdkVersion = attestation.SdkVersion,
+            RuntimeVersion = attestation.RuntimeVersion,
+            TargetRuntime = attestation.TargetRuntime,
+            Files = files.OrderBy(file => file.Path, StringComparer.OrdinalIgnoreCase).ToList()
+        };
+        ValidateGeneration(generation);
+
+        using var storeLease = AcquireStoreLease(cancellationToken);
+        var store = ReadProtectedStore();
+        if (store.Pending is not null)
+            throw new InvalidOperationException(
+                "A source-installation recovery transaction is still pending; source update trust cannot overlap it.");
+        store.Installed = PruneInstalledGenerations(store.Installed);
+        AddInstalledGeneration(store, generation, generation.Files);
+        WriteProtectedStore(store);
+    }
+
     public static SourceInstallationBinding RequireActiveInstallationBinding(Guid expectedInviteId)
     {
         if (expectedInviteId == Guid.Empty)
@@ -556,7 +663,8 @@ public static class SourceBuildProvenance
     private static async Task ValidatePinsAsync(SourceBuildAttestation attestation, string invitePath, InvitePayload invite,
         CancellationToken cancellationToken)
     {
-        if (attestation.SchemaVersion != 2 || invite.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion
+        if (attestation.SchemaVersion != 3 || invite.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion
+            || !string.Equals(invite.InstallProtocol, InvitationPolicy.SourceInstallProtocol, StringComparison.Ordinal)
             || attestation.ReleaseVersion != invite.ReleaseVersion || attestation.SourceFile != invite.SourceFile
             || attestation.SourceSize != invite.SourceSize || attestation.SdkVersion != invite.SdkVersion
             || attestation.RuntimeVersion != invite.RuntimeVersion || attestation.SourceManifestKeyId != invite.SourceManifestKeyId
@@ -568,12 +676,8 @@ public static class SourceBuildProvenance
             || attestation.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
             || !invite.TargetRuntimes.Contains(attestation.TargetRuntime, StringComparer.Ordinal)
             || attestation.TargetRuntime != CurrentTargetRuntime()
-            || attestation.BootstrapVersion != invite.BootstrapVersion || attestation.BootstrapFile != invite.BootstrapFile
-            || attestation.BootstrapSize != invite.BootstrapSize
-            || !attestation.BootstrapSignerThumbprint.Equals(invite.BootstrapSignerThumbprint, StringComparison.OrdinalIgnoreCase)
             || !FixedHash(attestation.SourceSha256, invite.SourceSha256)
-            || !FixedHash(attestation.SourceManifestSha256, invite.SourceManifestSha256)
-            || !FixedHash(attestation.BootstrapSha256, invite.BootstrapSha256))
+            || !FixedHash(attestation.SourceManifestSha256, invite.SourceManifestSha256))
             throw new InvalidDataException("The elevated source-build attestation does not match the signed invitation pins.");
         await using var inviteStream = new FileStream(invitePath, FileMode.Open, FileAccess.Read, FileShare.Read,
             4096, FileOptions.SequentialScan);
@@ -617,6 +721,18 @@ public static class SourceBuildProvenance
     }
 
     private static IEnumerable<string> ResolveCanonicalTrustPaths(string path)
+    {
+        UpdateJournal? journal = null;
+        try { journal = UpdateJournalPersistence.Load(); } catch { }
+        foreach (var canonical in ResolveCanonicalTrustPaths(path, journal))
+            yield return canonical;
+    }
+
+    // Keeping the journal-dependent mapping pure lets the source-update
+    // transaction be exercised without reading mutable machine state in a
+    // unit test.  The production caller above is still the only entrypoint
+    // that obtains its journal from protected storage.
+    private static IEnumerable<string> ResolveCanonicalTrustPaths(string path, UpdateJournal? journal)
     {
         yield return path;
         var installRoot = Path.GetFullPath(AppPaths.InstallDirectory).TrimEnd(Path.DirectorySeparatorChar)
@@ -664,9 +780,26 @@ public static class SourceBuildProvenance
             }
         }
 
-        UpdateJournal? journal = null;
-        try { journal = UpdateJournalPersistence.Load(); } catch { }
         if (journal is null || journal.OperationId == Guid.Empty) yield break;
+        if (journal.SchemaVersion == 2 && journal.DeliveryMode == UpdateDeliveryMode.SourceArchive)
+        {
+            var operation = Path.GetFullPath(Path.Combine(
+                AppPaths.UpdateDataDirectory, journal.OperationId.ToString("N")));
+            var sourceBuild = Path.GetFullPath(Path.Combine(operation, "source-build"));
+            if (!string.Equals(Path.GetFullPath(journal.SourceBuildOutputDirectory), sourceBuild,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The source update journal has an unsafe source-build output path.");
+
+            var stagedAgent = Path.Combine(sourceBuild, "Payload", "Agent");
+            var stagedAgentPrefix = stagedAgent.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (path.StartsWith(stagedAgentPrefix, StringComparison.OrdinalIgnoreCase))
+                yield return Path.GetFullPath(Path.Combine(
+                    AppPaths.AgentInstallDirectory, path[stagedAgentPrefix.Length..]));
+
+            var stagedGuardian = Path.Combine(sourceBuild, "Payload", "UpdateGuardian", "Taildesk.UpdateGuardian.exe");
+            if (path.Equals(stagedGuardian, StringComparison.OrdinalIgnoreCase))
+                yield return guardian;
+        }
         var suffix = journal.OperationId.ToString("N");
         foreach (var transactionRoot in new[]
                  {
