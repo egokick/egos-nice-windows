@@ -366,17 +366,21 @@ function Compare-SemanticVersion {
     param([Parameter(Mandatory)][string]$Left, [Parameter(Mandatory)][string]$Right)
     $leftParts = Get-SemanticVersionParts $Left
     $rightParts = Get-SemanticVersionParts $Right
+    # PowerShell enumerates an empty array-valued PSCustomObject property as
+    # $null. Re-wrap it before strict-mode Count/index access.
+    $leftPreRelease = @($leftParts.PreRelease)
+    $rightPreRelease = @($rightParts.PreRelease)
     for ($index = 0; $index -lt 3; $index++) {
         $comparison = Compare-NumericIdentifier $leftParts.Core[$index] $rightParts.Core[$index]
         if ($comparison -ne 0) { return $comparison }
     }
-    if ($leftParts.PreRelease.Count -eq 0 -and $rightParts.PreRelease.Count -eq 0) { return 0 }
-    if ($leftParts.PreRelease.Count -eq 0) { return 1 }
-    if ($rightParts.PreRelease.Count -eq 0) { return -1 }
-    $count = [Math]::Min($leftParts.PreRelease.Count, $rightParts.PreRelease.Count)
+    if ($leftPreRelease.Count -eq 0 -and $rightPreRelease.Count -eq 0) { return 0 }
+    if ($leftPreRelease.Count -eq 0) { return 1 }
+    if ($rightPreRelease.Count -eq 0) { return -1 }
+    $count = [Math]::Min($leftPreRelease.Count, $rightPreRelease.Count)
     for ($index = 0; $index -lt $count; $index++) {
-        $leftIdentifier = $leftParts.PreRelease[$index]
-        $rightIdentifier = $rightParts.PreRelease[$index]
+        $leftIdentifier = $leftPreRelease[$index]
+        $rightIdentifier = $rightPreRelease[$index]
         $leftNumeric = $leftIdentifier -match '^[0-9]+$'
         $rightNumeric = $rightIdentifier -match '^[0-9]+$'
         if ($leftNumeric -and $rightNumeric) {
@@ -390,7 +394,7 @@ function Compare-SemanticVersion {
         }
         if ($comparison -ne 0) { return $comparison }
     }
-    return [Math]::Sign($leftParts.PreRelease.Count - $rightParts.PreRelease.Count)
+    return [Math]::Sign($leftPreRelease.Count - $rightPreRelease.Count)
 }
 
 function Enter-OpticonPackageBuildLock {
