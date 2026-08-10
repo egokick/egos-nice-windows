@@ -18,14 +18,19 @@ public static class MachineStorageSecurity
     private const FileSystemRights BootstrapUserRights =
         FileSystemRights.ReadAndExecute | FileSystemRights.Delete;
 
-    public static void EnsureOpticonMachineState() => EnsureRestrictedDirectoryTree(
-        AppPaths.MachineDataDirectory,
-        AppPaths.AgentDataDirectory,
-        AppPaths.SshAccessDataDirectory,
-        AppPaths.UpdateDataDirectory,
-        AppPaths.SshDataDirectory,
-        AppPaths.SetupStagingDirectory,
-        AppPaths.ControllerHandoffDirectory);
+    public static void EnsureOpticonMachineState()
+    {
+        // SshAccessDataDirectory is intentionally excluded. Its isolated SSH
+        // supervisor owns a stricter SYSTEM-only or SYSTEM-and-daemon ACL,
+        // which must not be normalized to this general storage contract.
+        EnsureRestrictedDirectoryTree(
+            AppPaths.MachineDataDirectory,
+            AppPaths.AgentDataDirectory,
+            AppPaths.UpdateDataDirectory,
+            AppPaths.SshDataDirectory,
+            AppPaths.SetupStagingDirectory,
+            AppPaths.ControllerHandoffDirectory);
+    }
 
     public static bool IsProtectedMachinePath(string path)
     {

@@ -250,6 +250,18 @@ public partial class MainWindow : Window
                 return;
             }
 
+            if (release.RequiresLegacyMachineStateMigration)
+            {
+                MessageBox.Show(
+                    $"{device.Name} runs Opticon Agent {device.AgentVersion}, which predates the protected machine-state storage contract.\n\n" +
+                    $"The signed release {release.Version} intentionally refuses to adopt that legacy state during an unattended update. No candidate was staged or activated.\n\n" +
+                    "There is not yet a supported attended migration or clean re-enrollment workflow for this legacy state. " +
+                    "The retired maintenance bootstrap and a fresh source-build invitation do not migrate it. " +
+                    "Leave the device on its current Agent and do not retry Update Opticon until a dedicated migration release is available.",
+                    "Legacy Opticon migration required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             if (release.RequiresMaintenanceBootstrap)
             {
                 await RunMaintenanceBootstrapAsync(

@@ -32,6 +32,8 @@ var tests = new (string Name, Action Body)[]
     ("RustDesk installer configures every Windows service profile before validation", TestRustDeskInstallerProfiles),
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
     ("remote administration contracts reject unpinned or unsafe updates", TestRemoteAdministrationProtocol),
+    ("remote update polling distinguishes Agent restarts from caller cancellation", TestRemoteUpdatePollingRecovery),
+    ("legacy machine state cannot cross the protected update boundary unattended", TestLegacyMachineStateUpdateGate),
     ("release distribution keeps signed bundles private and CloudFront-addressed", TestReleaseDistributionDesign),
     ("OpenSSH recovery is fixed-path, Windows-compatible, and independently supervised", TestOpenSshRecoveryDesign),
     ("runtime tailnet policy keeps administrative SSH hub-only", TestTailnetSshPolicy),
@@ -706,6 +708,73 @@ static void TestRemoteAdministrationProtocol()
             targetCreatedAt, targetCreatedAt, TimeSpan.FromHours(1)),
         "an already-expired SSH lease was accepted");
 }
+
+static void TestRemoteUpdatePollingRecovery()
+{
+    var coordinator = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Admin", "RemoteDeviceUpdateCoordinator.cs"));
+
+    Assert(coordinator.Contains("IsRecoverableRemoteFailure", StringComparison.Ordinal)
+           && coordinator.Contains("!cancellationToken.IsCancellationRequested", StringComparison.Ordinal)
+           && coordinator.Contains("exception is not InvalidDataException", StringComparison.Ordinal),
+        "remote update polling must preserve an explicit caller cancellation while safely retrying transient Agent failures");
+    Assert(coordinator.Contains("Activation delivery is indeterminate; polling the Guardian's durable terminal state.", StringComparison.Ordinal)
+           && coordinator.Contains("Commit delivery is indeterminate; polling the Guardian's durable terminal state.", StringComparison.Ordinal)
+           && coordinator.Contains("Maintenance commit delivery is indeterminate; polling the exact durable terminal state.", StringComparison.Ordinal)
+           && coordinator.Contains("rollbackTerminal.Phase is UpdatePhase.RolledBack or UpdatePhase.Failed", StringComparison.Ordinal)
+           && coordinator.Contains("The guardian restored the previous Agent; Tailscale and remote control were left untouched.", StringComparison.Ordinal),
+        "ambiguous activation, commit, and maintenance responses must recover the exact durable terminal update result");
+}
+
+static void TestLegacyMachineStateUpdateGate()
+{
+    var firstProtected = new Version(1, 1, 39);
+    Assert(RemoteAdministrationProtocol.MinimumProtectedMachineStateAgentVersion == "1.1.39"
+           && RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 1, 38), firstProtected)
+           && RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 0, 0), new Version(1, 1, 40))
+           && !RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(firstProtected, new Version(1, 1, 40))
+           && !RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 1, 38), new Version(1, 1, 38)),
+        "only Agents at 1.1.38 or earlier crossing into 1.1.39+ may require an attended machine-state migration");
+
+    var releaseClient = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Admin", "OpticonReleaseClient.cs"));
+    var coordinator = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Admin", "RemoteDeviceUpdateCoordinator.cs"));
+    var mainWindow = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Admin", "MainWindow.xaml.cs"));
+    var storage = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Shared", "MachineStorageSecurity.cs"));
+
+    Assert(releaseClient.Contains(
+               "RequiresLegacyMachineStateMigration = RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(",
+               StringComparison.Ordinal),
+        "release selection must expose the canonical legacy machine-state migration requirement");
+    Assert(coordinator.Contains(
+               "RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(currentAgentVersion, releaseVersion)",
+               StringComparison.Ordinal)
+           && coordinator.IndexOf("RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration", StringComparison.Ordinal)
+              < coordinator.IndexOf("_agents.PrepareUpdateAsync", StringComparison.Ordinal),
+        "the remote update coordinator must block legacy state before it can stage a candidate");
+
+    const string legacyGate = "if (release.RequiresLegacyMachineStateMigration)";
+    var gateStart = mainWindow.IndexOf(legacyGate, StringComparison.Ordinal);
+    var maintenanceStart = mainWindow.IndexOf("if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal);
+    Assert(gateStart >= 0
+           && maintenanceStart > gateStart
+           && mainWindow[gateStart..maintenanceStart].Contains("Legacy Opticon migration required", StringComparison.Ordinal)
+           && mainWindow[gateStart..maintenanceStart].Contains("No candidate was staged or activated", StringComparison.Ordinal)
+           && mainWindow[gateStart..maintenanceStart].Contains("not yet a supported attended migration", StringComparison.Ordinal)
+           && !mainWindow[gateStart..maintenanceStart].Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal),
+        "the Update Opticon UI must explain the unsupported legacy migration boundary and return before staging or maintenance bootstrap");
+
+    var ensureEnd = storage.IndexOf("public static bool IsProtectedMachinePath", StringComparison.Ordinal);
+    Assert(ensureEnd > 0
+           && storage[..ensureEnd].Contains("SshAccessDataDirectory is intentionally excluded", StringComparison.Ordinal)
+           && storage[..ensureEnd].Contains("SYSTEM-only or SYSTEM-and-daemon ACL", StringComparison.Ordinal)
+           && !storage[..ensureEnd].Contains("AppPaths.SshAccessDataDirectory", StringComparison.Ordinal),
+        "generic machine-state ACL validation must leave SSH's dedicated SYSTEM/daemon contract intact");
+}
+
 static void TestReleaseDistributionDesign()
 {
     DirectoryInfo? root = null;

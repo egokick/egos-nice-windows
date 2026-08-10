@@ -14,6 +14,7 @@ public sealed record OpticonUpdateRelease(
     bool RequiresMaintenanceBootstrap)
 {
     public bool RequiresGuardianReconciliation { get; init; }
+    public bool RequiresLegacyMachineStateMigration { get; init; }
 }
 
 public sealed class OpticonReleaseClient
@@ -78,7 +79,9 @@ public sealed class OpticonReleaseClient
             device.UpdateProtocolVersion < RemoteAdministrationProtocol.UpdateVersion
             || installedGuardian < GuardianApiBootstrapVersion)
         {
-            RequiresGuardianReconciliation = installedGuardian < selectedCandidate.Version
+            RequiresGuardianReconciliation = installedGuardian < selectedCandidate.Version,
+            RequiresLegacyMachineStateMigration = RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(
+                current, selectedCandidate.Version)
         };
     }
 

@@ -12,15 +12,28 @@ public static class RemoteAdministrationProtocol
     public const string GuardianWatchdogTaskName = "Taildesk Update Guardian Watchdog";
     public const string GuardianWatchdogArgument = "--update-watchdog";
     public const string MinimumWatchdogGuardianVersion = "1.1.2";
+    public const string MinimumProtectedMachineStateAgentVersion = "1.1.39";
     public const string SshSupervisorTaskName = "Taildesk Opticon SSH Supervisor";
     public const string SshAccountName = "OpticonRemoteAdmin";
     public const string SshAdminProbeArgument = "--ssh-admin-probe";
     public const int SshAdminProbeVersion = 1;
     public static readonly TimeSpan MaximumSshSession = TimeSpan.FromHours(8);
     public static readonly TimeSpan UpdateCommitWindow = TimeSpan.FromMinutes(5);
+    private static readonly Version MinimumProtectedMachineStateVersion =
+        Version.Parse(MinimumProtectedMachineStateAgentVersion);
 
     public static bool SupportsGuardianWatchdog(Version version) =>
         version >= UpdatePackageVerifier.ParseVersion(MinimumWatchdogGuardianVersion);
+
+    // 1.1.39 is the first published Agent that creates the protected,
+    // non-inherited ProgramData machine-state layout. An older Agent cannot
+    // cross this boundary unattended because the new Agent must not adopt
+    // mutable legacy state with inherited ACLs.
+    public static bool RequiresLegacyMachineStateMigration(
+        Version installedAgentVersion,
+        Version targetAgentVersion) =>
+        installedAgentVersion < MinimumProtectedMachineStateVersion
+        && targetAgentVersion >= MinimumProtectedMachineStateVersion;
 
     public static bool IsTailscaleIpv4(string value)
     {

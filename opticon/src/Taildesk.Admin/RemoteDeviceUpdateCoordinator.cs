@@ -15,6 +15,12 @@ public sealed class RemoteDeviceUpdateCoordinator
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        var currentAgentVersion = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
+        var releaseVersion = UpdatePackageVerifier.ParseVersion(release.Version);
+        if (RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(currentAgentVersion, releaseVersion))
+            throw new InvalidOperationException(
+                $"Opticon Agent {device.AgentVersion} uses the legacy machine-state ACL layout and cannot be updated unattended to {release.Version}. " +
+                "No candidate was staged. A dedicated supported migration release is required before retrying.");
         if (release.RequiresMaintenanceBootstrap)
             throw new InvalidOperationException(
                 "This legacy Agent requires the signed one-time maintenance bootstrap before API-driven updates.");
@@ -25,8 +31,6 @@ public sealed class RemoteDeviceUpdateCoordinator
         if (!await AgentClient.ProbeTcpAsync(device.TailscaleIp, 21118, TimeSpan.FromSeconds(10), cancellationToken))
             throw new InvalidOperationException("RustDesk TCP 21118 is unavailable. Opticon will not update a distant device without a verified recovery channel.");
 
-        var currentAgentVersion = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
-        var releaseVersion = UpdatePackageVerifier.ParseVersion(release.Version);
         if (currentAgentVersion == releaseVersion && release.RequiresGuardianReconciliation)
         {
             await ReconcileGuardianAsync(device, agentToken, release, progress, cancellationToken);
@@ -90,7 +94,7 @@ public sealed class RemoteDeviceUpdateCoordinator
         {
             prepared = await prepareTask;
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (IsRecoverableRemoteFailure(exception, cancellationToken))
         {
             try
             {
@@ -101,7 +105,7 @@ public sealed class RemoteDeviceUpdateCoordinator
                     return failed;
                 }
             }
-            catch (Exception statusException) when (statusException is not OperationCanceledException)
+            catch (Exception statusException) when (IsRecoverableRemoteFailure(statusException, cancellationToken))
             {
                 throw new InvalidOperationException(
                     "The update request failed and Opticon could not retrieve the remote failure journal. " +
@@ -119,7 +123,28 @@ public sealed class RemoteDeviceUpdateCoordinator
             device.TailscaleIp, RemoteAdministrationProtocol.SshPort,
             TimeSpan.FromSeconds(5), cancellationToken);
         progress?.Report("Package verified. Scheduling the guarded Agent swap; Tailscale, RustDesk, SSH, credentials, and routing will not be changed.");
-        var activation = await _agents.ActivateUpdateAsync(device, agentToken, operationId, cancellationToken);
+        UpdateStatusDto activation;
+        try
+        {
+            activation = await _agents.ActivateUpdateAsync(device, agentToken, operationId, cancellationToken);
+        }
+        catch (Exception exception) when (IsRecoverableRemoteFailure(exception, cancellationToken))
+        {
+            // The protected request can be durable even when the Agent begins
+            // its scheduled swap before HTTP has delivered the acknowledgement.
+            // Do not turn that expected restart window into a generic cancelled
+            // task: inspect the exact durable transaction through its terminal
+            // state instead.
+            progress?.Report(
+                "Activation delivery is indeterminate; polling the Guardian's durable terminal state. " +
+                exception.Message);
+            return await WaitForTerminalStatusAsync(
+                device, agentToken, operationId,
+                DateTimeOffset.UtcNow
+                    .Add(RemoteAdministrationProtocol.UpdateCommitWindow)
+                    .AddMinutes(2),
+                progress, cancellationToken);
+        }
         var deadline = activation.CommitDeadline ?? DateTimeOffset.UtcNow.Add(RemoteAdministrationProtocol.UpdateCommitWindow);
         var requiredHealthySamples = 3;
         var healthySamples = 0;
@@ -157,7 +182,7 @@ public sealed class RemoteDeviceUpdateCoordinator
                         return await WaitForTerminalStatusAsync(device, agentToken, operationId, deadline.AddMinutes(2), progress, cancellationToken);
                 }
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception) when (IsRecoverableRemoteFailure(exception, cancellationToken))
             {
                 lastConnectionError = exception;
                 healthySamples = 0;
@@ -168,9 +193,9 @@ public sealed class RemoteDeviceUpdateCoordinator
         if (healthySamples < requiredHealthySamples)
         {
             progress?.Report("The replacement did not earn external health confirmation. Withholding commit so the guardian restores the previous Agent.");
-            var rolledBack = await WaitForTerminalStatusAsync(
+            var rollbackTerminal = await WaitForTerminalStatusAsync(
                 device, agentToken, operationId, deadline.AddMinutes(2), progress, cancellationToken);
-            if (rolledBack.Phase == UpdatePhase.RolledBack) return rolledBack;
+            if (rollbackTerminal.Phase is UpdatePhase.RolledBack or UpdatePhase.Failed) return rollbackTerminal;
             throw new TimeoutException("The new Agent never became safely committable. The guardian was instructed by omission to roll back." +
                                        (lastConnectionError is null ? string.Empty : " Last connection error: " + lastConnectionError.Message));
         }
@@ -180,7 +205,7 @@ public sealed class RemoteDeviceUpdateCoordinator
         {
             await _agents.CommitUpdateAsync(device, agentToken, operationId, cancellationToken);
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (IsRecoverableRemoteFailure(exception, cancellationToken))
         {
             // A lost HTTP response is not proof that the commit was rejected:
             // the protected request may already be durable on the target.
@@ -352,9 +377,7 @@ public sealed class RemoteDeviceUpdateCoordinator
                     $"Maintenance external health sample {healthySamples}/3 passed for exact operation {operationId:N}.");
                 if (healthySamples >= 3) break;
             }
-            catch (Exception exception) when (
-                exception is not OperationCanceledException
-                && exception is not InvalidDataException)
+            catch (Exception exception) when (IsRecoverableRemoteFailure(exception, cancellationToken))
             {
                 healthySamples = 0;
                 lastFailure = exception.Message;
@@ -380,7 +403,7 @@ public sealed class RemoteDeviceUpdateCoordinator
         {
             await _agents.CommitUpdateAsync(device, agentToken, operationId, cancellationToken);
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (IsRecoverableRemoteFailure(exception, cancellationToken))
         {
             progress?.Report(
                 "Maintenance commit delivery is indeterminate; polling the exact durable terminal state. " +
@@ -435,9 +458,7 @@ public sealed class RemoteDeviceUpdateCoordinator
                 }
                 last = null;
             }
-            catch (Exception exception) when (
-                exception is not OperationCanceledException
-                && exception is not InvalidDataException)
+            catch (Exception exception) when (IsRecoverableRemoteFailure(exception, cancellationToken))
             {
                 last = exception;
             }
@@ -446,4 +467,10 @@ public sealed class RemoteDeviceUpdateCoordinator
         throw new TimeoutException("The target did not report a terminal update state." +
                                    (last is null ? string.Empty : " Last connection error: " + last.Message));
     }
+
+    private static bool IsRecoverableRemoteFailure(
+        Exception exception,
+        CancellationToken cancellationToken) =>
+        !cancellationToken.IsCancellationRequested
+        && exception is not InvalidDataException;
 }

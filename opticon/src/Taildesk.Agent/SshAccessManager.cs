@@ -67,7 +67,7 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
         : this(
             config.BindAddress,
             CoordinatorHost(config.CoordinatorUrl),
-            Path.Combine(AppPaths.AgentDataDirectory, "SshAccess"))
+            AppPaths.SshAccessDataDirectory)
     {
     }
 
@@ -80,7 +80,7 @@ public sealed class SshAccessManager : IHostedService, IAsyncDisposable
         _bindAddress = ParseTailscaleAddress(targetTailscaleAddress, "target");
         _coordinatorAddress = ParseTailscaleAddress(coordinatorTailscaleAddress, "coordinator");
         _stateDirectory = Path.GetFullPath(stateDirectory
-                                           ?? Path.Combine(AppPaths.AgentDataDirectory, "SshAccess"));
+                                           ?? AppPaths.SshAccessDataDirectory);
         _statePath = Path.Combine(_stateDirectory, "leases.json");
         _sshdConfigPath = Path.Combine(_stateDirectory, "sshd_config");
         _authorizedKeysPath = Path.Combine(_stateDirectory, "authorized_keys");
