@@ -358,13 +358,17 @@ internal static class Program
         start.Environment.Clear();
         SetEnvironment(start, "SystemRoot", windows);
         SetEnvironment(start, "WINDIR", windows);
-        SetEnvironment(start, "ProgramData",
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        SetEnvironment(start, "ProgramData", programData);
+        // Windows PowerShell 5.1 resolves CommonApplicationData through this
+        // compatibility variable after the child environment is deliberately cleared.
+        SetEnvironment(start, "ALLUSERSPROFILE", programData);
         SetEnvironment(start, "ProgramFiles",
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
         SetEnvironment(start, "ProgramFiles(x86)",
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86));
         SetEnvironment(start, "ComSpec", Path.Combine(system32, "cmd.exe"));
+        SetEnvironment(start, "SystemDrive", Path.GetPathRoot(windows) ?? string.Empty);
         SetEnvironment(start, "PATH", string.Join(
             Path.PathSeparator, system32, Path.Combine(system32, "Wbem"),
             Path.GetDirectoryName(powerShell)!));
