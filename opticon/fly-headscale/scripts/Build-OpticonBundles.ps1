@@ -164,7 +164,10 @@ function Assert-ProductSigningCertificate {
 }
 
 function Assert-ProductSignature {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$ExpectedThumbprint = $script:payloadSignerThumbprint
+    )
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     $allowedStatus = if ($SigningProfile -eq 'Production') {
         @([Management.Automation.SignatureStatus]::Valid)
@@ -173,7 +176,7 @@ function Assert-ProductSignature {
     }
     if ($signature.Status -notin $allowedStatus -or
         $null -eq $signature.SignerCertificate -or
-        -not $signature.SignerCertificate.Thumbprint.Equals($script:payloadSignerThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $signature.SignerCertificate.Thumbprint.Equals($ExpectedThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
         $null -eq $signature.TimeStamperCertificate) {
         throw "$SigningProfile Authenticode verification, publisher pinning, or RFC3161 timestamp validation failed for $Path."
     }
@@ -256,10 +259,13 @@ function Invoke-SignTool {
 }
 
 function Invoke-ProductSigning {
-    param([Parameter(Mandatory)][string]$Path)
-    Invoke-SignTool -Arguments @('sign', '/fd', 'SHA256', '/sha1', $script:payloadSignerThumbprint,
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Thumbprint = $script:payloadSignerThumbprint
+    )
+    Invoke-SignTool -Arguments @('sign', '/fd', 'SHA256', '/sha1', $Thumbprint,
         '/tr', $Rfc3161TimestampUrl, '/td', 'SHA256', $Path)
-    Assert-ProductSignature -Path $Path
+    Assert-ProductSignature -Path $Path -ExpectedThumbprint $Thumbprint
 }
 
 function Get-OpticonManifestSigningKey {
@@ -750,6 +756,13 @@ $bootstrapPath = Join-Path $artifactDirectory $bootstrapFile
 $bootstrapTemporary = "$bootstrapPath.new.exe"
 if (Test-Path -LiteralPath $bootstrapTemporary) { Remove-Item -LiteralPath $bootstrapTemporary -Force }
 Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $bootstrapTemporary
+if ($isLegacyMigration) {
+    # The bundled Setup remains legacy-signed for the pre-trust-split Agent,
+    # but a hosted bootstrap is never an update payload. Strip that signature
+    # and sign its separate immutable copy with the active product identity.
+    Invoke-SignTool -Arguments @('remove', '/s', $bootstrapTemporary)
+    Invoke-ProductSigning -Path $bootstrapTemporary -Thumbprint $ProductCertificateThumbprint
+}
 $bootstrapInfo = Get-Item -LiteralPath $bootstrapTemporary
 if ($bootstrapInfo.Length -gt 128MB) {
     Remove-Item -LiteralPath $bootstrapTemporary -Force
