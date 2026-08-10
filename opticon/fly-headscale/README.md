@@ -12,18 +12,17 @@ plaintext RustDesk, agent, controller, or Headscale enrollment credentials.
 - Internet routing: disabled unless the administrator explicitly enables an enrolled Opticon exit node
 
 `/opticon/i/<random-id>#<key>` is the recipient link. Only the random ID is
-sent to Fly; browser JavaScript downloads and SHA-256-verifies the one exact
-signed source archive through CloudFront, while displaying its hash and pinned
-SDK version. The recipient extracts the archive and runs its fixed signed
+sent to Fly. Clicking the download button revalidates that invitation and its
+exact published source record, then redirects to a private S3 GET URL that
+expires after 30 minutes. The browser performs a normal streamed download and
+never buffers the archive in JavaScript. The recipient extracts the archive and runs its fixed signed
 `OpticonSourceLauncher.exe`; it verifies the signed schema-6 invitation, its
 own byte identity, the exact RSA-PSS-authenticated source archive, and then
 builds locally with .NET SDK 10.0.302 and runtime 10.0.10. Hosted ciphertext expires after
 14 days by default and is removed on manual expiration or successful enrollment.
 The command center can extend an active invitation without changing its URL;
 it rotates the one-use Headscale key and replaces the signed encrypted envelope.
-If the browser cannot perform the required WebCrypto verification, the page
-fails closed and asks the recipient to retry with current Edge or Chrome. No
-unsigned command starter, execution-policy bypass, or legacy binary-bundle
+No unsigned command starter, execution-policy bypass, or legacy binary-bundle
 invitation is generated. Schemas 2-4 remain status/cancellation history only.
 
 Each release has exactly one immutable S3 object,
@@ -31,15 +30,24 @@ Each release has exactly one immutable S3 object,
 build inputs, and the fixed signed local launcher; no release-specific binary
 bundle or bootstrap is published separately. Fly retains only the small public manifest on its
 persistent volume. Before deploying, configure the two public production trust
-identities; the gateway intentionally refuses to start without exact, distinct
-source-release and product-signing pins (neither may be the invitation key):
+identities and the dedicated S3 presigner credential. The IAM identity must
+have only `s3:GetObject` on `arn:aws:s3:::opticon-053663732727/opticon/releases/*`;
+the gateway intentionally refuses to start without exact, distinct source-release
+and product-signing pins (neither may be the invitation key) or without a valid
+presigner configuration:
 
 ```powershell
 fly secrets set `
   OPTICON_SOURCE_RELEASE_KEY_ID=<40-HEX-OFFLINE-SOURCE-CERT-THUMBPRINT> `
-  OPTICON_PRODUCT_SIGNER_THUMBPRINT=<40-HEX-PUBLIC-CODE-SIGNING-THUMBPRINT>
+  OPTICON_PRODUCT_SIGNER_THUMBPRINT=<40-HEX-PUBLIC-CODE-SIGNING-THUMBPRINT> `
+  OPTICON_S3_ACCESS_KEY_ID=<DEDICATED-GET-ONLY-ACCESS-KEY> `
+  OPTICON_S3_SECRET_ACCESS_KEY=<DEDICATED-GET-ONLY-SECRET>
 fly deploy
 ```
+
+The non-secret bucket and region are pinned in `fly.toml`. Presigner credentials
+are stripped from the Headscale child environment and never appear in the page,
+invitation, manifest, logs, or redirect path before the short-lived S3 URL is minted.
 
 Provision the private distribution once, then publish from a clean committed
 checkout with explicit production identities, an HTTPS RFC3161 service, and the

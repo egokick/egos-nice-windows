@@ -57,6 +57,8 @@ type gateway struct {
 	proxy         *httputil.ReverseProxy
 	adminSecret   []byte
 	headscaleKey  string
+	sourceSigner  sourceDownloadSigner
+	now           func() time.Time
 	artifactDir   string
 	manifestPath  string
 	bundleDir     string
@@ -103,12 +105,17 @@ func main() {
 	if err := configureProductionTrust(); err != nil {
 		log.Fatal(err)
 	}
+	sourceSigner, err := newS3SourceDownloadSignerFromEnvironment()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	child := exec.Command("/ko-app/headscale", "serve")
 	child.Env = make([]string, 0, len(os.Environ()))
 	for _, item := range os.Environ() {
 		name := strings.SplitN(item, "=", 2)[0]
-		if name == "OPTICON_ADMIN_HMAC_KEY" || name == "HEADSCALE_API_KEY" {
+		if name == "OPTICON_ADMIN_HMAC_KEY" || name == "HEADSCALE_API_KEY" ||
+			name == "OPTICON_S3_ACCESS_KEY_ID" || name == "OPTICON_S3_SECRET_ACCESS_KEY" || name == "OPTICON_S3_SESSION_TOKEN" {
 			continue
 		}
 		child.Env = append(child.Env, item)
@@ -136,7 +143,7 @@ func main() {
 	if appName == "" {
 		log.Fatal("FLY_APP_NAME is missing")
 	}
-	g := &gateway{proxy: proxy, adminSecret: []byte(secret), headscaleKey: headscaleKey,
+	g := &gateway{proxy: proxy, adminSecret: []byte(secret), headscaleKey: headscaleKey, sourceSigner: sourceSigner, now: time.Now,
 		artifactDir: "/opt/opticon/artifacts", bundleDir: "/var/lib/headscale/opticon-artifacts", inviteDir: "/var/lib/headscale/opticon-invites",
 		nonceDir:     "/var/lib/headscale/opticon-nonces",
 		manifestPath: "/var/lib/headscale/opticon-release/manifest.json",
@@ -1201,13 +1208,21 @@ func (g *gateway) publicInvitation(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if !invite.ExpiresAt.After(time.Now()) {
+	now := time.Now()
+	if g.now != nil {
+		now = g.now()
+	}
+	if !invite.ExpiresAt.After(now) {
 		_ = os.Remove(path)
 		http.Error(w, "This invitation has expired. Ask for a new Opticon link.", http.StatusGone)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if len(parts) == 2 {
+		if parts[1] == "source" {
+			g.redirectInvitationSource(w, r, invite, now)
+			return
+		}
 		if parts[1] != "invite.tdinvite" {
 			http.NotFound(w, r)
 			return
@@ -1230,10 +1245,30 @@ func (g *gateway) publicInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if invite.InstallProtocol == sourceInstallProtocol {
-		g.sourceOnlyInvitationLandingSecure(w, r, invite, source)
+		g.sourceOnlyInvitationLandingSecure(w, r, parts[0], invite, source)
 		return
 	}
 	g.sourceInvitationLandingSecure(w, r, parts[0], invite, source)
+}
+
+func (g *gateway) redirectInvitationSource(w http.ResponseWriter, r *http.Request, invite hostedInvite, now time.Time) {
+	if invite.InstallProtocol != sourceInstallProtocol || g.sourceSigner == nil {
+		http.Error(w, "This invitation cannot issue a source download.", http.StatusServiceUnavailable)
+		return
+	}
+	source, err := g.sourceForInvite(invite)
+	if err != nil {
+		http.Error(w, "This invitation's exact Opticon source release is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	location, err := g.sourceSigner.Presign(source, now)
+	if err != nil {
+		http.Error(w, "The private source download could not be authorized.", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", source.File))
+	http.Redirect(w, r, location, http.StatusTemporaryRedirect)
 }
 
 func (g *gateway) readHostedInvite(publicID string) (hostedInvite, string, error) {
@@ -1446,22 +1481,19 @@ func (g *gateway) pruneUndeclaredBundles() error {
 	return nil
 }
 
-// sourceOnlyInvitationLandingSecure deliberately offers no release-specific
-// executable. The sole release object is the signed source archive. After the
-// browser verifies and saves it, the user extracts its fixed signed launcher;
-// that launcher independently verifies this invitation, the archive hash, and
-// the signed inner manifest before it builds anything.
-func (g *gateway) sourceOnlyInvitationLandingSecure(w http.ResponseWriter, r *http.Request, invite hostedInvite, source bundleArtifact) {
-	origin := "'self'"
-	if parsed, err := url.Parse(source.DownloadURL); err == nil && parsed.IsAbs() {
-		origin = parsed.Scheme + "://" + parsed.Host
-	}
+// sourceOnlyInvitationLandingSecure offers a normal same-origin link. Each
+// click revalidates the live invitation and exact release before issuing a
+// private S3 GET URL that expires after thirty minutes. The browser never
+// buffers or executes release bytes; the embedded signed launcher still
+// verifies the invitation, archive hash, inner manifest, and exact SDK.
+func (g *gateway) sourceOnlyInvitationLandingSecure(w http.ResponseWriter, r *http.Request, publicID string, invite hostedInvite, source bundleArtifact) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src "+origin+"; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
 	if r.Method == http.MethodHead {
 		return
 	}
-	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon source invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}button{background:#52d39a;color:#08130e;border:0;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Build and install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p id="status">Preparing authenticated Opticon source <code>%s</code>.</p><button id="download">Download signed source archive</button><p id="diagnostic" class="muted">After the browser verifies the archive, extract it and run <code>OpticonSourceLauncher.exe</code>. When it asks, paste this invitation link. The launcher verifies the link, archive hash, signed inner manifest, and exact SDK before it builds.</p><p class="muted">Source SHA-256: <code>%s</code><br>Requires exact .NET SDK <code>%s</code>. Expires <code>%s</code>.</p><script>const status=document.getElementById('status'),diagnostic=document.getElementById('diagnostic'),button=document.getElementById('download');let active=false;function save(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000)}async function verified(url,size,hash){if(!globalThis.crypto||!crypto.subtle)throw new Error('Use current Microsoft Edge or Chrome; WebCrypto SHA-256 is unavailable.');const r=await fetch(url,{credentials:'omit'});if(!r.ok)throw new Error('Source archive returned HTTP '+r.status+'.');const b=await r.blob();if(b.size!==size)throw new Error('Source archive size is invalid.');const d=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await b.arrayBuffer()))).map(v=>v.toString(16).padStart(2,'0')).join('');if(d!==hash)throw new Error('Source archive SHA-256 is invalid.');return b}async function download(){if(active)return;active=true;button.disabled=true;status.textContent='Downloading and hashing source...';try{const archive=await verified(%q,%d,%q);save(archive,%q);status.textContent='Source verified and downloaded.';diagnostic.textContent='Extract the ZIP, run OpticonSourceLauncher.exe, then paste this complete invitation link when prompted. No release executable was downloaded from this site.'}catch(e){status.textContent='The authenticated source archive could not be downloaded.';diagnostic.textContent=String(e&&e.message||e).slice(0,240)+' Retry in current Microsoft Edge or Chrome; no unsigned fallback is offered.';button.disabled=false}finally{active=false}}button.addEventListener('click',download)</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(source.Version), html.EscapeString(strings.ToLower(source.SHA256)), html.EscapeString(source.SDKVersion), invite.ExpiresAt.Local().Format(time.RFC1123), source.DownloadURL, source.Size, strings.ToLower(source.SHA256), source.File)
+	downloadPath := invitePublicPrefix + url.PathEscape(publicID) + "/source"
+	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon source invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}.download{display:inline-block;background:#52d39a;color:#08130e;text-decoration:none;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Build and install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Authenticated Opticon source <code>%s</code> is ready.</p><p><a class="download" href="%s">Download signed source archive</a></p><p class="muted">The download link is generated when you click and is valid for 30 minutes. Extract the ZIP and run <code>OpticonSourceLauncher.exe</code>. When it asks, paste this invitation link. The signed launcher verifies the invitation, archive SHA-256, signed inner manifest, and exact SDK before it builds or installs anything.</p><p class="muted">Source SHA-256: <code>%s</code><br>Requires exact .NET SDK <code>%s</code>. Invitation expires <code>%s</code>.</p></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(source.Version), html.EscapeString(downloadPath), html.EscapeString(strings.ToLower(source.SHA256)), html.EscapeString(source.SDKVersion), invite.ExpiresAt.Local().Format(time.RFC1123))
 	_, _ = io.WriteString(w, page)
 }
 

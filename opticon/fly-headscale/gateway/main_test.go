@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -828,11 +830,16 @@ func TestSourceOnlyInvitationPinsNoReleaseBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	g := &gateway{artifactDir: root, inviteDir: inviteDir, adminSecret: secret, nonces: make(map[string]time.Time)}
+	fixedNow := time.Date(2026, time.August, 10, 21, 30, 0, 0, time.UTC)
+	signer := &s3SourceDownloadSigner{
+		bucket: "opticon-test-bucket", region: "us-east-1",
+		accessKeyID: "AKIAIOSFODNN7EXAMPLE", secretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+	}
+	g := &gateway{artifactDir: root, inviteDir: inviteDir, adminSecret: secret, nonces: make(map[string]time.Time), sourceSigner: signer, now: func() time.Time { return fixedNow }}
 	publicID := strings.Repeat("S", 24)
 	idHash := sha256.Sum256([]byte(publicID))
 	invite := productionInvite(hostedInvite{
-		DeviceName: "Source-only PC", Role: "ManagedOnly", ExpiresAt: time.Now().Add(time.Hour),
+		DeviceName: "Source-only PC", Role: "ManagedOnly", ExpiresAt: fixedNow.Add(time.Hour),
 		InstallProtocol: sourceInstallProtocol, ReleaseVersion: source.Version,
 		SourceFile: source.File, SourceSize: source.Size, SourceSHA256: source.SHA256,
 		SourceManifestSHA256: source.SourceManifestSHA256, SDKVersion: source.SDKVersion,
@@ -847,10 +854,28 @@ func TestSourceOnlyInvitationPinsNoReleaseBootstrap(t *testing.T) {
 	}
 	landing := httptest.NewRecorder()
 	g.ServeHTTP(landing, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID, nil))
-	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), source.DownloadURL) ||
+	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), invitePublicPrefix+publicID+"/source") ||
+		!strings.Contains(landing.Body.String(), "valid for 30 minutes") ||
 		!strings.Contains(landing.Body.String(), "OpticonSourceLauncher.exe") ||
-		strings.Contains(landing.Body.String(), "opticon-bootstrap-") {
+		strings.Contains(landing.Body.String(), source.DownloadURL) || strings.Contains(landing.Body.String(), "fetch(") ||
+		strings.Contains(landing.Body.String(), "crypto.subtle") || strings.Contains(landing.Body.String(), "opticon-bootstrap-") {
 		t.Fatalf("source-only landing is not limited to the archive and embedded launcher: %d %s", landing.Code, landing.Body.String())
+	}
+	redirect := httptest.NewRecorder()
+	g.ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID+"/source", nil))
+	if redirect.Code != http.StatusTemporaryRedirect || redirect.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("source download returned %d: %s", redirect.Code, redirect.Body.String())
+	}
+	location, err := url.Parse(redirect.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.Scheme != "https" || location.Host != "opticon-test-bucket.s3.us-east-1.amazonaws.com" ||
+		location.Path != "/opticon/releases/1.2.0/opticon-source-1.2.0.zip" ||
+		location.Query().Get("X-Amz-Expires") != "1800" ||
+		location.Query().Get("X-Amz-Date") != "20260810T213000Z" ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(location.Query().Get("X-Amz-Signature")) {
+		t.Fatalf("source download was not an exact 30-minute S3 signature: %s", location.String())
 	}
 	withBootstrap := invite
 	withBootstrap.BootstrapFile = "opticon-bootstrap-1.2.0.exe"
