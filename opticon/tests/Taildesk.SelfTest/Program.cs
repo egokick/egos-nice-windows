@@ -2044,6 +2044,11 @@ static void TestOpenSshRecoveryDesign()
            && commandCenterInstaller.Contains("ALLUSERSPROFILE", StringComparison.Ordinal)
            && !commandCenterInstaller.Contains("Bypass", StringComparison.Ordinal),
         "the only command-center entry point must bind manifest verification to protected staging and fixed PowerShell policy");
+    Assert(installer.Contains("Assert-LegacyCanonicalOpticonDirectory", StringComparison.Ordinal)
+           && installer.Contains("$script:InvitationSigningThumbprint", StringComparison.Ordinal)
+           && installer.Contains("The legacy Opticon executable is not signed by the exact retired Opticon signer", StringComparison.Ordinal)
+           && installer.Contains("-AllowLegacyCanonical", StringComparison.Ordinal),
+        "only exact legacy signer payloads at the canonical controller path may migrate to the OwnerManaged signer");
     Assert(buildScript.Contains("SkipTargetReleaseDeployment", StringComparison.Ordinal)
            && buildScript.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
            && buildWorkflow.Contains("contents: read", StringComparison.Ordinal)

@@ -206,6 +206,46 @@ function Assert-PinnedOpticonExecutable {
     }
 }
 
+function Assert-LegacyOpticonExecutable {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "The legacy Opticon executable is missing: $Path"
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if (-not $signature.SignerCertificate -or
+        -not $signature.SignerCertificate.Thumbprint.Equals(
+            $script:InvitationSigningThumbprint,[StringComparison]::OrdinalIgnoreCase) -or
+        $signature.Status -notin @(
+            [Management.Automation.SignatureStatus]::Valid,
+            [Management.Automation.SignatureStatus]::UnknownError)) {
+        throw "The legacy Opticon executable is not signed by the exact retired Opticon signer: $Path"
+    }
+    $codeSigning = $false
+    foreach ($extension in $signature.SignerCertificate.Extensions) {
+        if ($extension -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
+            foreach ($oid in $extension.EnhancedKeyUsages) {
+                if ($oid.Value -ceq '1.3.6.1.5.5.7.3.3') { $codeSigning = $true }
+            }
+        }
+    }
+    if (-not $codeSigning) { throw "The legacy Opticon signer lacks the Code Signing EKU: $Path" }
+}
+
+function Assert-LegacyCanonicalOpticonDirectory {
+    param([Parameter(Mandatory)][string]$Directory)
+
+    Assert-NoDirectoryReparsePoints -Directory $Directory
+    $legacyExecutables = @(Get-ChildItem -LiteralPath $Directory -Filter '*.exe' -File -Recurse)
+    if ($legacyExecutables.Count -lt 2) {
+        throw "The legacy canonical controller directory has no complete executable payload: $Directory"
+    }
+    foreach ($executable in $legacyExecutables) {
+        Assert-LegacyOpticonExecutable -Path $executable.FullName
+    }
+    Assert-MatchingOpticonUiCliVersion -Directory $Directory
+}
+
 function Get-MatchingOpticonUiCliVersion {
     param([Parameter(Mandatory)][string]$Directory)
     $uiPath = Join-Path $Directory 'Opticon.exe'
@@ -345,7 +385,15 @@ function Assert-OwnedOpticonDirectory {
     Assert-NoDirectoryReparsePoints -Directory $full
     $marker = Join-Path $full $script:ControllerOwnershipMarkerName
     if (Test-Path -LiteralPath $marker -PathType Leaf) {
-        Assert-VerifiedOpticonDirectory -Directory $full
+        try {
+            Assert-VerifiedOpticonDirectory -Directory $full
+        } catch {
+            $legacyAllowed = $AllowLegacyCanonical -and
+                ((Test-SameFullPath -Left $full -Right $script:CanonicalControllerInstallDirectory) -or
+                 (Test-SameFullPath -Left $full -Right ($script:CanonicalControllerInstallDirectory + '.previous')))
+            if (-not $legacyAllowed) { throw }
+            Assert-LegacyCanonicalOpticonDirectory -Directory $full
+        }
         return
     }
 
@@ -362,13 +410,7 @@ function Assert-OwnedOpticonDirectory {
     if (-not $legacyExecutable) {
         throw "The legacy canonical controller directory is not recognizably Opticon-owned: $full"
     }
-    $legacyExecutables = @(Get-ChildItem -LiteralPath $full -Filter '*.exe' -File -Recurse)
-    if ($legacyExecutables.Count -eq 0) {
-        throw "The legacy canonical controller directory has no executable payload: $full"
-    }
-    foreach ($executable in $legacyExecutables) {
-        Assert-PinnedOpticonExecutable -Path $executable.FullName
-    }
+    Assert-LegacyCanonicalOpticonDirectory -Directory $full
 }
 
 function Remove-OwnedOpticonDirectory {
