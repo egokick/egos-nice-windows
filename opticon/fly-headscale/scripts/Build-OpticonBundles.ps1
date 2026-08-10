@@ -4,7 +4,7 @@ param(
     [string]$Runtime = "win-x64",
     [ValidateSet("Production", "OwnerManaged")]
     [string]$SigningProfile = "Production",
-    [string]$Version = "1.1.40",
+    [string]$Version = "1.1.41",
     [string]$MinimumGuardianVersion = "1.1.2",
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
@@ -21,8 +21,9 @@ $ProductCertificateThumbprint = $ProductCertificateThumbprint.ToUpperInvariant()
 $LegacyMigrationSignerThumbprint = $LegacyMigrationSignerThumbprint.ToUpperInvariant()
 $isLegacyMigration = -not [string]::IsNullOrWhiteSpace($LegacyMigrationSignerThumbprint)
 if ($isLegacyMigration -and ($SigningProfile -ne 'OwnerManaged' -or
+        $Version -cne '1.1.41' -or
         $LegacyMigrationSignerThumbprint -ne $invitationSigningThumbprint)) {
-    throw 'A legacy Agent migration must be an OwnerManaged release signed only with the exact retired invitation certificate.'
+    throw 'A legacy Agent migration must be the exact OwnerManaged 1.1.41 release signed only with the exact retired invitation certificate.'
 }
 $script:git = $null
 $script:trustedGitRoot = $null
@@ -118,6 +119,23 @@ function Test-ProductionArtifactTrust {
     return (Get-ArtifactString $Artifact 'signingProfile') -ceq $SigningProfile -and
         (Get-ArtifactString $Artifact 'sourceManifestKeyId') -eq $SourceReleaseCertificateThumbprint -and
         (Get-ArtifactString $Artifact 'productSignerThumbprint') -eq $ProductCertificateThumbprint
+}
+
+function Test-LegacyMigrationArtifact {
+    param([Parameter(Mandatory)]$Artifact)
+
+    $marker = Get-ArtifactString $Artifact 'legacyMigrationSignerThumbprint'
+    if ([string]::IsNullOrWhiteSpace($marker)) { return $false }
+    if ($marker -cne $invitationSigningThumbprint) {
+        throw "A retained legacy migration bundle must use only the exact retired invitation signer: $($Artifact.file)."
+    }
+    if ((Get-ArtifactString $Artifact 'signingProfile') -cne 'OwnerManaged') {
+        throw "A retained legacy migration bundle must be OwnerManaged: $($Artifact.file)."
+    }
+    if ([string]$Artifact.version -cne '1.1.41') {
+        throw "A retained legacy migration bundle must be the exact 1.1.41 bridge: $($Artifact.file)."
+    }
+    return $true
 }
 
 function Get-LocalArtifactPath {
@@ -1092,25 +1110,29 @@ $candidates = @($existingBundles | Where-Object {
 $retained = @()
 $groups = @($candidates | Group-Object -Property { "$($_.role)|$($_.architecture)" } | Sort-Object -Property Name)
 foreach ($group in $groups) {
-    $remaining = @($group.Group)
-    $keptForGroup = 0
-    while ($remaining.Count -gt 0 -and $keptForGroup -lt 1) {
-        $bestIndex = 0
-        for ($index = 1; $index -lt $remaining.Count; $index++) {
-            $comparison = Compare-SemanticVersion ([string]$remaining[$index].version) ([string]$remaining[$bestIndex].version)
-            if ($comparison -gt 0) { $bestIndex = $index }
-            elseif ($comparison -eq 0) {
-                if ([string]$remaining[$index].version -ne [string]$remaining[$bestIndex].version -or
-                    -not ([string]$remaining[$index].sha256).Equals([string]$remaining[$bestIndex].sha256, [StringComparison]::OrdinalIgnoreCase)) {
-                    throw "The outer manifest contains ambiguous precedence-equivalent releases for $($group.Name)."
-                }
+    $ordinary = @()
+    $legacyMigration = @()
+    foreach ($candidate in @($group.Group)) {
+        if (Test-LegacyMigrationArtifact $candidate) { $legacyMigration += $candidate }
+        else { $ordinary += $candidate }
+    }
+    # Keep the newest ordinary bundle for normal clients, plus the newest exact
+    # retired-signer bridge.  The latter must remain available after ordinary
+    # releases so pre-trust-split Agents can migrate exactly once.
+    foreach ($partition in @($ordinary, $legacyMigration)) {
+        if ($partition.Count -eq 0) { continue }
+        $best = $partition[0]
+        foreach ($candidate in $partition | Select-Object -Skip 1) {
+            $comparison = Compare-SemanticVersion ([string]$candidate.version) ([string]$best.version)
+            if ($comparison -gt 0) { $best = $candidate }
+            elseif ($comparison -eq 0 -and
+                ([string]$candidate.version -ne [string]$best.version -or
+                 [string]$candidate.file -ne [string]$best.file -or
+                 -not ([string]$candidate.sha256).Equals([string]$best.sha256, [StringComparison]::OrdinalIgnoreCase))) {
+                throw "The outer manifest contains ambiguous precedence-equivalent releases for $($group.Name)."
             }
         }
-        $retained += $remaining[$bestIndex]
-        $keptForGroup++
-        $remaining = @(for ($index = 0; $index -lt $remaining.Count; $index++) {
-            if ($index -ne $bestIndex) { $remaining[$index] }
-        })
+        $retained += $best
     }
 }
 foreach ($artifact in $retained) {

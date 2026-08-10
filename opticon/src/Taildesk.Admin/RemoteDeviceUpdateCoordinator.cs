@@ -17,10 +17,25 @@ public sealed class RemoteDeviceUpdateCoordinator
     {
         var currentAgentVersion = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
         var releaseVersion = UpdatePackageVerifier.ParseVersion(release.Version);
-        if (RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(currentAgentVersion, releaseVersion))
+        var requiresLegacyMachineStateMigration = RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(
+            currentAgentVersion, releaseVersion);
+        var isLegacyMachineStateMigrationBridge = RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+            currentAgentVersion, releaseVersion, release.LegacyMigrationSignerThumbprint);
+        if (release.IsLegacyMachineStateMigrationBridge != isLegacyMachineStateMigrationBridge)
+            throw new InvalidDataException(
+                "The selected Opticon release does not match the canonical legacy machine-state bridge identity.");
+        if (!isLegacyMachineStateMigrationBridge
+            && !string.IsNullOrEmpty(release.LegacyMigrationSignerThumbprint))
+            throw new InvalidDataException(
+                "A legacy migration marker is not valid for this installed Agent and release version.");
+        if (requiresLegacyMachineStateMigration && !isLegacyMachineStateMigrationBridge)
             throw new InvalidOperationException(
                 $"Opticon Agent {device.AgentVersion} uses the legacy machine-state ACL layout and cannot be updated unattended to {release.Version}. " +
-                "No candidate was staged. A dedicated supported migration release is required before retrying.");
+                "No candidate was staged. Only the exact signed 1.1.38-to-1.1.41 migration bridge can cross this boundary.");
+        if (isLegacyMachineStateMigrationBridge && release.RequiresMaintenanceBootstrap)
+            throw new InvalidOperationException(
+                "The signed legacy machine-state bridge requires the guarded Opticon update API and stable Guardian already present on Agent 1.1.38. " +
+                "The retired maintenance bootstrap cannot launch this bridge.");
         if (release.RequiresMaintenanceBootstrap)
             throw new InvalidOperationException(
                 "This legacy Agent requires the signed one-time maintenance bootstrap before API-driven updates.");

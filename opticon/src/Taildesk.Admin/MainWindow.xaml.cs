@@ -250,19 +250,51 @@ public partial class MainWindow : Window
                 return;
             }
 
+            var isLegacyMachineStateMigrationBridge = release.IsLegacyMachineStateMigrationBridge;
+            if (isLegacyMachineStateMigrationBridge
+                && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+                    UpdatePackageVerifier.ParseVersion(device.AgentVersion),
+                    UpdatePackageVerifier.ParseVersion(release.Version),
+                    release.LegacyMigrationSignerThumbprint))
+                throw new InvalidDataException(
+                    "The selected release does not match the canonical Opticon legacy machine-state bridge.");
+            if (!isLegacyMachineStateMigrationBridge
+                && !string.IsNullOrEmpty(release.LegacyMigrationSignerThumbprint))
+                throw new InvalidDataException(
+                    "A legacy migration marker is not valid for this installed Agent and release version.");
+
             if (release.RequiresLegacyMachineStateMigration)
             {
                 MessageBox.Show(
                     $"{device.Name} runs Opticon Agent {device.AgentVersion}, which predates the protected machine-state storage contract.\n\n" +
                     $"The signed release {release.Version} intentionally refuses to adopt that legacy state during an unattended update. No candidate was staged or activated.\n\n" +
-                    "There is not yet a supported attended migration or clean re-enrollment workflow for this legacy state. " +
-                    "The retired maintenance bootstrap and a fresh source-build invitation do not migrate it. " +
-                    "Leave the device on its current Agent and do not retry Update Opticon until a dedicated migration release is available.",
+                    "The one-time signed bridge is supported only from Opticon Agent 1.1.38 to 1.1.41. " +
+                    "The retired maintenance bootstrap and a fresh source-build invitation do not migrate this legacy state. " +
+                    "Leave the device on its current Agent until the supported bridge is published for this exact device.",
                     "Legacy Opticon migration required", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            if (release.RequiresMaintenanceBootstrap)
+            if (isLegacyMachineStateMigrationBridge)
+            {
+                if (release.RequiresMaintenanceBootstrap)
+                    throw new InvalidOperationException(
+                        "The signed legacy machine-state bridge requires the guarded Opticon update API and stable Guardian already present on Agent 1.1.38. " +
+                        "The retired maintenance bootstrap cannot launch this bridge.");
+                var bridgeExplanation =
+                    $"Run the one-time signed Opticon machine-state bridge on '{device.Name}'?\n\n" +
+                    "This exact 1.1.38-to-1.1.41 release seals the existing Opticon ProgramData state with the protected ACL layout before the replacement Agent starts. " +
+                    "It keeps the same device identity, Tailnet identity, Tailscale address, RustDesk configuration, credentials, routes, and remote recovery lifelines.\n\n" +
+                    "The normal SYSTEM Guardian verification, repeated health checks, final commit, and automatic rollback by omission still apply. " +
+                    "After the bridge commits, run Update Opticon again to install the current normal signed release.";
+                if (MessageBox.Show(
+                        bridgeExplanation,
+                        "Run signed legacy Opticon bridge",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                    return;
+            }
+            else if (release.RequiresMaintenanceBootstrap)
             {
                 await RunMaintenanceBootstrapAsync(
                     device,
@@ -271,13 +303,16 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var explanation =
-                $"Update '{device.Name}' from Opticon Agent {device.AgentVersion} to {release.Version}?\n\n" +
-                "Opticon will first download and fully verify the release while the current Agent and recovery lifelines remain active. " +
-                "The stable SYSTEM Guardian, installed outside the versioned Agent, then swaps only the signed Agent/runtime directory. Tailscale, RustDesk, Guardian-owned SSH, credentials, and routes are not changed.\n\n" +
-                "The new Agent must pass repeated command-center and local checks for every applicable recovery lifeline. If it crashes, loses a lifeline, the PC reboots, or this command center cannot send the final commit, the Guardian automatically restores the previous Agent.";
-            if (MessageBox.Show(explanation, "Guarded Opticon Agent update", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
-                return;
+            if (!isLegacyMachineStateMigrationBridge)
+            {
+                var explanation =
+                    $"Update '{device.Name}' from Opticon Agent {device.AgentVersion} to {release.Version}?\n\n" +
+                    "Opticon will first download and fully verify the release while the current Agent and recovery lifelines remain active. " +
+                    "The stable SYSTEM Guardian, installed outside the versioned Agent, then swaps only the signed Agent/runtime directory. Tailscale, RustDesk, Guardian-owned SSH, credentials, and routes are not changed.\n\n" +
+                    "The new Agent must pass repeated command-center and local checks for every applicable recovery lifeline. If it crashes, loses a lifeline, the PC reboots, or this command center cannot send the final commit, the Guardian automatically restores the previous Agent.";
+                if (MessageBox.Show(explanation, "Guarded Opticon Agent update", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                    return;
+            }
 
             var progressWindow = new UpdateProgressWindow(device.Name, device.AgentVersion, release.Version)
             {
@@ -296,9 +331,14 @@ public partial class MainWindow : Window
                 Activate();
             }
             var message = result.Phase == UpdatePhase.Committed
-                ? $"Opticon Agent {result.TargetVersion} is healthy and committed on {device.Name}. The prior Agent remains available locally for boot-time recovery."
+                ? isLegacyMachineStateMigrationBridge
+                    ? $"The signed Opticon 1.1.41 machine-state bridge is healthy and committed on {device.Name}. " +
+                      "Its protected ProgramData ACL transition completed in place; device identity and recovery lifelines were preserved. " +
+                      "Run Update Opticon again to install the current normal signed release."
+                    : $"Opticon Agent {result.TargetVersion} is healthy and committed on {device.Name}. The prior Agent remains available locally for boot-time recovery."
                 : $"The candidate was not committed. {device.Name} reported {result.Phase} and remains on Opticon Agent {result.CurrentVersion}.\n\n{result.Message}";
-            var requiresAttendedMaintenance = result.Phase == UpdatePhase.Failed
+            var requiresAttendedMaintenance = !isLegacyMachineStateMigrationBridge
+                                              && result.Phase == UpdatePhase.Failed
                                               && (result.Message.Contains("download", StringComparison.OrdinalIgnoreCase)
                                                   || (result.Message.Contains("requires update guardian", StringComparison.OrdinalIgnoreCase)
                                                       && result.Message.Contains("installed is", StringComparison.OrdinalIgnoreCase)));

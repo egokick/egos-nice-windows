@@ -13,6 +13,10 @@ public static class RemoteAdministrationProtocol
     public const string GuardianWatchdogArgument = "--update-watchdog";
     public const string MinimumWatchdogGuardianVersion = "1.1.2";
     public const string MinimumProtectedMachineStateAgentVersion = "1.1.39";
+    // This is deliberately a one-version bridge, not a rolling legacy channel.
+    // Its package is signed by the retired invitation trust root solely so 1.1.38
+    // can transition its protected machine-state ACLs before normal updates resume.
+    public const string LegacyMachineStateMigrationBridgeVersion = "1.1.41";
     public const string SshSupervisorTaskName = "Taildesk Opticon SSH Supervisor";
     public const string SshAccountName = "OpticonRemoteAdmin";
     public const string SshAdminProbeArgument = "--ssh-admin-probe";
@@ -21,6 +25,8 @@ public static class RemoteAdministrationProtocol
     public static readonly TimeSpan UpdateCommitWindow = TimeSpan.FromMinutes(5);
     private static readonly Version MinimumProtectedMachineStateVersion =
         Version.Parse(MinimumProtectedMachineStateAgentVersion);
+    private static readonly Version LegacyMachineStateMigrationBridgeTargetVersion =
+        Version.Parse(LegacyMachineStateMigrationBridgeVersion);
 
     public static bool SupportsGuardianWatchdog(Version version) =>
         version >= UpdatePackageVerifier.ParseVersion(MinimumWatchdogGuardianVersion);
@@ -34,6 +40,17 @@ public static class RemoteAdministrationProtocol
         Version targetAgentVersion) =>
         installedAgentVersion < MinimumProtectedMachineStateVersion
         && targetAgentVersion >= MinimumProtectedMachineStateVersion;
+
+    public static bool IsLegacyMachineStateMigrationBridge(
+        Version installedAgentVersion,
+        Version targetAgentVersion,
+        string? legacyMigrationSignerThumbprint) =>
+        installedAgentVersion == new Version(1, 1, 38)
+        && targetAgentVersion == LegacyMachineStateMigrationBridgeTargetVersion
+        && string.Equals(
+            legacyMigrationSignerThumbprint,
+            InvitationSigning.CertificateThumbprint,
+            StringComparison.Ordinal);
 
     public static bool IsTailscaleIpv4(string value)
     {
@@ -207,6 +224,8 @@ public sealed class OpticonReleaseManifest
     public string SigningProfile { get; set; } = string.Empty;
     public string SourceReleaseKeyId { get; set; } = string.Empty;
     public string ProductSignerThumbprint { get; set; } = string.Empty;
+    public bool LegacyMigration { get; set; }
+    public string LegacyMigrationSignerThumbprint { get; set; } = string.Empty;
     public DeviceRole Role { get; set; }
     public string Architecture { get; set; } = string.Empty;
     public int UpdateProtocolVersion { get; set; } = RemoteAdministrationProtocol.UpdateVersion;
@@ -247,6 +266,9 @@ public sealed class ArtifactRecordDto
     public string SourceManifestKeyId { get; set; } = string.Empty;
     public string SigningProfile { get; set; } = string.Empty;
     public string ProductSignerThumbprint { get; set; } = string.Empty;
+    // Non-empty only for the immutable 1.1.41 bridge. The Agent independently
+    // verifies the matching signed inner manifest before it can run.
+    public string LegacyMigrationSignerThumbprint { get; set; } = string.Empty;
     public string TargetRuntime { get; set; } = string.Empty;
     public List<string> TargetRuntimes { get; set; } = [];
 }

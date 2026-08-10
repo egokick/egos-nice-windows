@@ -9,6 +9,7 @@ param(
     [string]$SigningProfile = "Production",
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
+    [ValidatePattern('^$|^[A-Fa-f0-9]{40}$')][string]$LegacyMigrationSignerThumbprint = '',
     [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
     [Parameter(Mandatory)][string]$SignToolPath,
     [ValidatePattern('^[A-Za-z0-9_.-]{1,64}$')][string]$AwsProfile = 'default',
@@ -25,10 +26,17 @@ Add-Type -AssemblyName System.Net.Http
 $invitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
 $SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint.ToUpperInvariant()
 $ProductCertificateThumbprint = $ProductCertificateThumbprint.ToUpperInvariant()
+$LegacyMigrationSignerThumbprint = $LegacyMigrationSignerThumbprint.ToUpperInvariant()
+$isLegacyMigration = -not [string]::IsNullOrWhiteSpace($LegacyMigrationSignerThumbprint)
 if ($SourceReleaseCertificateThumbprint -eq $invitationSigningThumbprint -or
     $ProductCertificateThumbprint -eq $invitationSigningThumbprint -or
     $SourceReleaseCertificateThumbprint -eq $ProductCertificateThumbprint) {
     throw 'Production invitation, source-release, and Authenticode trust domains must be pairwise distinct.'
+}
+if ($isLegacyMigration -and ($SigningProfile -ne 'OwnerManaged' -or
+        $Version -cne '1.1.41' -or
+        $LegacyMigrationSignerThumbprint -ne $invitationSigningThumbprint)) {
+    throw 'A legacy Agent migration must be the exact OwnerManaged 1.1.41 release signed only with the exact retired invitation certificate.'
 }
 $timestampUri = $null
 if (-not [Uri]::TryCreate($Rfc3161TimestampUrl, [UriKind]::Absolute, [ref]$timestampUri) -or
@@ -707,12 +715,18 @@ $version = if ([string]::IsNullOrWhiteSpace($Version)) { Get-NextReleaseVersion 
 if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw "Version must be a stable major.minor.patch release." }
 if ($SkipBuild -and [string]::IsNullOrWhiteSpace($Version)) { throw "-SkipBuild requires an explicit -Version so an existing build is never misidentified." }
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot "Build-OpticonBundles.ps1") -Version $version `
-        -SigningProfile $SigningProfile `
-        -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
-        -ProductCertificateThumbprint $ProductCertificateThumbprint `
-        -Rfc3161TimestampUrl $Rfc3161TimestampUrl `
-        -SignToolPath $SignToolPath
+    $buildArguments = @(
+        '-Version', $version,
+        '-SigningProfile', $SigningProfile,
+        '-SourceReleaseCertificateThumbprint', $SourceReleaseCertificateThumbprint,
+        '-ProductCertificateThumbprint', $ProductCertificateThumbprint,
+        '-Rfc3161TimestampUrl', $Rfc3161TimestampUrl,
+        '-SignToolPath', $SignToolPath
+    )
+    if ($isLegacyMigration) {
+        $buildArguments += @('-LegacyMigrationSignerThumbprint', $LegacyMigrationSignerThumbprint)
+    }
+    & (Join-Path $PSScriptRoot "Build-OpticonBundles.ps1") @buildArguments
 }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $allOpticonArtifacts = @($manifest.artifacts | Where-Object { $_.product -in @('OpticonBundle', 'OpticonBootstrap', 'OpticonSource') })
@@ -723,6 +737,16 @@ $bundles = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBundle" }
 $bootstraps = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBootstrap" })
 $sources = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonSource" })
 if ($bundles.Count -ne 2 -or $bootstraps.Count -ne 1 -or $sources.Count -ne 1) { throw "Build did not produce two bundles, one bootstrap, and one source archive for $version." }
+foreach ($bundle in $bundles) {
+    $actualLegacyMigrationSigner = Get-ArtifactString $bundle 'legacyMigrationSignerThumbprint'
+    if ($isLegacyMigration) {
+        if ($actualLegacyMigrationSigner -cne $LegacyMigrationSignerThumbprint) {
+            throw "The requested legacy migration signer was not embedded in $($bundle.file)."
+        }
+    } elseif (-not [string]::IsNullOrWhiteSpace($actualLegacyMigrationSigner)) {
+        throw "An ordinary release must not publish a legacy migration bundle: $($bundle.file)."
+    }
+}
 $bootstrapPath = Get-LocalArtifactPath ([string]$bootstraps[0].file)
 if ([string]$bootstraps[0].signerThumbprint -ne $ProductCertificateThumbprint) {
     throw 'The source bootstrap outer signer pin does not match the production product signer.'
@@ -811,7 +835,9 @@ if (-not $SkipManifestPublish) {
             [string]$actual[0].sha256 -cne [string]$expected.sha256 -or [string]$actual[0].downloadUrl -cne [string]$expected.downloadUrl -or
             [string]$actual[0].signingProfile -cne $SigningProfile -or
             [string]$actual[0].sourceManifestKeyId -cne $SourceReleaseCertificateThumbprint -or
-            [string]$actual[0].productSignerThumbprint -cne $ProductCertificateThumbprint) {
+            [string]$actual[0].productSignerThumbprint -cne $ProductCertificateThumbprint -or
+            (Get-ArtifactString $actual[0] 'legacyMigrationSignerThumbprint') -cne
+                (Get-ArtifactString $expected 'legacyMigrationSignerThumbprint')) {
             throw "Fly served release metadata that differed from the verified publication for $($expected.file)."
         }
     }

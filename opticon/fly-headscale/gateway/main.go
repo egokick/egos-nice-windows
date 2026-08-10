@@ -42,6 +42,9 @@ const (
 	pinnedSDKVersion          = "10.0.302"
 	pinnedRuntimeVersion      = "10.0.10"
 	invitationSigningKeyID    = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
+	// The retired invitation signer is allowed only for this immutable ACL
+	// transition package. It is never a general release signing channel.
+	legacyMachineStateMigrationBridgeVersion = "1.1.41"
 )
 
 var trustedSourceManifestKeyID string
@@ -448,23 +451,24 @@ type artifactManifest struct {
 }
 
 type bundleArtifact struct {
-	Product              string   `json:"product"`
-	Version              string   `json:"version"`
-	Role                 string   `json:"role,omitempty"`
-	Architecture         string   `json:"architecture"`
-	File                 string   `json:"file"`
-	Size                 int64    `json:"size"`
-	SHA256               string   `json:"sha256"`
-	SignerThumbprint     string   `json:"signerThumbprint,omitempty"`
-	DownloadURL          string   `json:"downloadUrl,omitempty"`
-	SDKVersion           string   `json:"sdkVersion,omitempty"`
-	RuntimeVersion       string   `json:"runtimeVersion,omitempty"`
-	SourceManifestSHA256 string   `json:"sourceManifestSha256,omitempty"`
-	SourceManifestKeyID  string   `json:"sourceManifestKeyId,omitempty"`
-	SigningProfile       string   `json:"signingProfile,omitempty"`
-	ProductSigner        string   `json:"productSignerThumbprint,omitempty"`
-	TargetRuntime        string   `json:"targetRuntime,omitempty"`
-	TargetRuntimes       []string `json:"targetRuntimes,omitempty"`
+	Product                         string   `json:"product"`
+	Version                         string   `json:"version"`
+	Role                            string   `json:"role,omitempty"`
+	Architecture                    string   `json:"architecture"`
+	File                            string   `json:"file"`
+	Size                            int64    `json:"size"`
+	SHA256                          string   `json:"sha256"`
+	SignerThumbprint                string   `json:"signerThumbprint,omitempty"`
+	DownloadURL                     string   `json:"downloadUrl,omitempty"`
+	SDKVersion                      string   `json:"sdkVersion,omitempty"`
+	RuntimeVersion                  string   `json:"runtimeVersion,omitempty"`
+	SourceManifestSHA256            string   `json:"sourceManifestSha256,omitempty"`
+	SourceManifestKeyID             string   `json:"sourceManifestKeyId,omitempty"`
+	SigningProfile                  string   `json:"signingProfile,omitempty"`
+	ProductSigner                   string   `json:"productSignerThumbprint,omitempty"`
+	LegacyMigrationSignerThumbprint string   `json:"legacyMigrationSignerThumbprint,omitempty"`
+	TargetRuntime                   string   `json:"targetRuntime,omitempty"`
+	TargetRuntimes                  []string `json:"targetRuntimes,omitempty"`
 }
 
 func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request) {
@@ -794,7 +798,21 @@ func validBundleArtifact(artifact bundleArtifact) bool {
 		return false
 	}
 	version, valid := parseSemanticVersion(artifact.Version)
-	return valid && version.core[0] != "0" && !strings.ContainsAny(artifact.Version, "-+")
+	if !valid || version.core[0] == "0" || strings.ContainsAny(artifact.Version, "-+") {
+		return false
+	}
+	return artifact.LegacyMigrationSignerThumbprint == "" || validLegacyMachineStateMigrationBridgeArtifact(artifact)
+}
+
+// The gateway preserves the marker for the Admin selection logic, but it does
+// not make the marker itself a signing authority. In addition to this exact
+// outer trust record, the target Agent independently verifies the legacy-signed
+// inner manifest and payload before it can stage the bridge.
+func validLegacyMachineStateMigrationBridgeArtifact(artifact bundleArtifact) bool {
+	return artifact.LegacyMigrationSignerThumbprint == invitationSigningKeyID &&
+		artifact.Version == legacyMachineStateMigrationBridgeVersion &&
+		artifact.SigningProfile == "OwnerManaged" &&
+		validProductionArtifactTrust(artifact)
 }
 
 func validCloudFrontDownloadURL(artifact bundleArtifact) bool {
@@ -1143,7 +1161,8 @@ func (g *gateway) bundleForRole(role string) (bundleArtifact, error) {
 	var selected bundleArtifact
 	found := false
 	for _, artifact := range manifest.Artifacts {
-		if validBundleArtifact(artifact) && artifact.Role == role && artifact.Architecture == "x64" && g.bundleIsAvailable(artifact) {
+		if validBundleArtifact(artifact) && artifact.LegacyMigrationSignerThumbprint == "" &&
+			artifact.Role == role && artifact.Architecture == "x64" && g.bundleIsAvailable(artifact) {
 			if !found {
 				selected = artifact
 				found = true

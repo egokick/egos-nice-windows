@@ -181,6 +181,83 @@ func TestValidBundleArtifactRequiresStableSupportedVersion(t *testing.T) {
 	}
 }
 
+func TestLegacyMachineStateMigrationBridgeMarkerIsPreservedButNeverNormalSelection(t *testing.T) {
+	previousProfile := trustedSigningProfile
+	trustedSigningProfile = "OwnerManaged"
+	defer func() { trustedSigningProfile = previousProfile }()
+
+	bridge := productionArtifact(bundleArtifact{
+		Product: "OpticonBundle", Version: legacyMachineStateMigrationBridgeVersion,
+		Role: "ManagedOnly", Architecture: "x64",
+		File: "opticon-bundle-1.1.41-legacy-bridge-managed-win-x64.zip", Size: 1024,
+		SHA256:      strings.Repeat("a", 64),
+		DownloadURL: "https://d111111abcdef8.cloudfront.net/opticon/releases/1.1.41/opticon-bundle-1.1.41-legacy-bridge-managed-win-x64.zip",
+	})
+	bridge.SigningProfile = "OwnerManaged"
+	bridge.LegacyMigrationSignerThumbprint = invitationSigningKeyID
+	if !validBundleArtifact(bridge) {
+		t.Fatal("the exact trusted legacy bridge was rejected")
+	}
+
+	root := t.TempDir()
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{bridge}})
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), manifest, 0600); err != nil {
+		t.Fatal(err)
+	}
+	g := &gateway{artifactDir: root, bundleDir: t.TempDir()}
+	result := httptest.NewRecorder()
+	g.ServeHTTP(result, httptest.NewRequest(http.MethodGet, artifactPrefix+"manifest.json", nil))
+	if result.Code != http.StatusOK {
+		t.Fatalf("bridge manifest returned %d: %s", result.Code, result.Body.String())
+	}
+	var public artifactManifest
+	if err := json.Unmarshal(result.Body.Bytes(), &public); err != nil {
+		t.Fatal(err)
+	}
+	if len(public.Artifacts) != 1 || public.Artifacts[0].LegacyMigrationSignerThumbprint != invitationSigningKeyID {
+		t.Fatal("public manifest did not preserve the exact legacy migration marker")
+	}
+	if _, err := g.bundleForRole("ManagedOnly"); err == nil {
+		t.Fatal("normal source-build selection accepted a legacy migration bridge")
+	}
+}
+
+func TestLegacyMachineStateMigrationBridgeRejectsForgedOuterMarker(t *testing.T) {
+	previousProfile := trustedSigningProfile
+	trustedSigningProfile = "OwnerManaged"
+	defer func() { trustedSigningProfile = previousProfile }()
+
+	bridge := productionArtifact(bundleArtifact{
+		Product: "OpticonBundle", Version: legacyMachineStateMigrationBridgeVersion,
+		Role: "ManagedOnly", Architecture: "x64",
+		File: "opticon-bundle-1.1.41-legacy-bridge-managed-win-x64.zip", Size: 1024,
+		SHA256: strings.Repeat("a", 64),
+	})
+	bridge.SigningProfile = "OwnerManaged"
+	bridge.LegacyMigrationSignerThumbprint = invitationSigningKeyID
+
+	for name, mutate := range map[string]func(*bundleArtifact){
+		"wrong signer": func(value *bundleArtifact) {
+			value.LegacyMigrationSignerThumbprint = strings.ToLower(invitationSigningKeyID)
+		},
+		"wrong target":            func(value *bundleArtifact) { value.Version = "1.1.40" },
+		"wrong profile":           func(value *bundleArtifact) { value.SigningProfile = "Production" },
+		"confused source key":     func(value *bundleArtifact) { value.SourceManifestKeyID = invitationSigningKeyID },
+		"confused product signer": func(value *bundleArtifact) { value.ProductSigner = invitationSigningKeyID },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := bridge
+			mutate(&candidate)
+			if validBundleArtifact(candidate) {
+				t.Fatal("forged legacy migration metadata was accepted")
+			}
+			if err := validateArtifactManifest(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{candidate}}); err == nil {
+				t.Fatal("forged legacy migration manifest was accepted")
+			}
+		})
+	}
+}
+
 func TestCloudFrontBundleURLIsStrictAndDoesNotNeedFlyVolume(t *testing.T) {
 	artifact := bundleArtifact{
 		Product: "OpticonBundle", Version: "1.2.3", Role: "ManagedOnly", Architecture: "x64",

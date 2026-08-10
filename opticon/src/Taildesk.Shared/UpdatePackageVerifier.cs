@@ -42,12 +42,8 @@ public static partial class UpdatePackageVerifier
         byte[] signature;
         try { signature = Convert.FromBase64String(signatureText); }
         catch (FormatException exception) { throw new InvalidDataException("The Opticon release signature is malformed.", exception); }
-        if (!SourceReleaseSigning.Verify(manifestBytes, signature))
-            throw new InvalidDataException("The Opticon release manifest signature is invalid.");
-
-        var manifest = JsonSerializer.Deserialize<OpticonReleaseManifest>(manifestBytes, JsonDefaults.Options)
-                       ?? throw new InvalidDataException("The Opticon release manifest is empty.");
-        ValidateManifest(manifest, request);
+        var (manifest, isLegacyMigrationBridge) = VerifyManifestSignatureAndValidate(
+            manifestBytes, signature, request);
 
         var agentFiles = manifest.Files
             .Where(file => NormalizeEntry(file.Path).StartsWith("Payload/Agent/", StringComparison.Ordinal))
@@ -72,7 +68,7 @@ public static partial class UpdatePackageVerifier
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var normalized = NormalizeEntry(file.Path);
-                ValidateReleaseFile(file, normalized);
+                ValidateReleaseFile(file, normalized, isLegacyMigrationBridge);
                 var entry = FindUniqueEntry(archive, normalized);
                 if (entry.Length != file.Size) throw new InvalidDataException($"Release file size mismatch: {normalized}");
                 var relative = normalized["Payload/Agent/".Length..].Replace('/', Path.DirectorySeparatorChar);
@@ -141,12 +137,8 @@ public static partial class UpdatePackageVerifier
         byte[] signature;
         try { signature = Convert.FromBase64String(signatureText); }
         catch (FormatException exception) { throw new InvalidDataException("The Opticon release signature is malformed.", exception); }
-        if (!SourceReleaseSigning.Verify(manifestBytes, signature))
-            throw new InvalidDataException("The Opticon release manifest signature is invalid.");
-
-        var manifest = JsonSerializer.Deserialize<OpticonReleaseManifest>(manifestBytes, JsonDefaults.Options)
-                       ?? throw new InvalidDataException("The Opticon release manifest is empty.");
-        ValidateManifest(manifest, request);
+        var (manifest, isLegacyMigrationBridge) = VerifyManifestSignatureAndValidate(
+            manifestBytes, signature, request);
 
         const string prefix = "Payload/UpdateGuardian/";
         var guardianFiles = manifest.Files
@@ -169,7 +161,7 @@ public static partial class UpdatePackageVerifier
         {
             var file = guardianFiles[0];
             var normalized = NormalizeEntry(file.Path);
-            ValidateReleaseFile(file, normalized);
+            ValidateReleaseFile(file, normalized, isLegacyMigrationBridge);
             var entry = FindUniqueEntry(archive, normalized);
             if (entry.Length != file.Size) throw new InvalidDataException($"Release file size mismatch: {normalized}");
             var output = Path.Combine(destination, "Taildesk.UpdateGuardian.exe");
@@ -244,14 +236,91 @@ public static partial class UpdatePackageVerifier
                 : version.ToString(3);
     }
 
-    private static void ValidateManifest(OpticonReleaseManifest manifest, OpticonUpdateRequest request)
+    private static (OpticonReleaseManifest Manifest, bool IsLegacyMigrationBridge)
+        VerifyManifestSignatureAndValidate(
+            byte[] manifestBytes,
+            byte[] signature,
+            OpticonUpdateRequest request)
+    {
+        OpticonReleaseManifest manifest;
+        try
+        {
+            manifest = JsonSerializer.Deserialize<OpticonReleaseManifest>(manifestBytes, JsonDefaults.Options)
+                       ?? throw new InvalidDataException("The Opticon release manifest is empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("The Opticon release manifest is malformed.", exception);
+        }
+
+        var declaresLegacyMigration = manifest.LegacyMigration
+                                      || !string.IsNullOrWhiteSpace(manifest.LegacyMigrationSignerThumbprint);
+        var isLegacyMigrationBridge = IsExactLegacyMigrationBridgeManifest(manifest, request);
+        if (declaresLegacyMigration)
+        {
+            // The retired invitation key is not a general release key. It can
+            // authenticate only this self-identifying 1.1.41 bridge while the
+            // running binary itself carries matching one-version metadata.
+            if (!isLegacyMigrationBridge || !InvitationSigning.Verify(manifestBytes, signature))
+                throw new InvalidDataException("The Opticon legacy migration manifest signature is invalid.");
+        }
+        else if (!SourceReleaseSigning.Verify(manifestBytes, signature))
+        {
+            throw new InvalidDataException("The Opticon release manifest signature is invalid.");
+        }
+
+        ValidateManifest(manifest, request, isLegacyMigrationBridge);
+        return (manifest, isLegacyMigrationBridge);
+    }
+
+    private static bool IsExactLegacyMigrationBridgeManifest(
+        OpticonReleaseManifest manifest,
+        OpticonUpdateRequest request)
+    {
+        var bridgeVersion = RemoteAdministrationProtocol.LegacyMachineStateMigrationBridgeVersion;
+        var runningVersion = NormalizeVersion(
+            typeof(UpdatePackageVerifier).Assembly.GetName().Version?.ToString() ?? string.Empty);
+        return BuildSigningTrust.IsLegacyMigrationBuild
+               && string.Equals(BuildSigningTrust.LegacyMigrationVersion, bridgeVersion, StringComparison.Ordinal)
+               && string.Equals(runningVersion, bridgeVersion, StringComparison.Ordinal)
+               && manifest.LegacyMigration
+               && string.Equals(manifest.LegacyMigrationSignerThumbprint,
+                   InvitationSigning.CertificateThumbprint, StringComparison.Ordinal)
+               && string.Equals(NormalizeVersion(manifest.Version), bridgeVersion, StringComparison.Ordinal)
+               && string.Equals(NormalizeVersion(request.TargetVersion), bridgeVersion, StringComparison.Ordinal)
+               && string.Equals(manifest.SourceReleaseKeyId,
+                   SourceReleaseSigning.KeyId, StringComparison.Ordinal)
+               && string.Equals(manifest.ProductSignerThumbprint,
+                   InvitationSigning.CertificateThumbprint, StringComparison.Ordinal);
+    }
+
+    private static void ValidateManifest(
+        OpticonReleaseManifest manifest,
+        OpticonUpdateRequest request,
+        bool isLegacyMigrationBridge)
     {
         if (manifest.SchemaVersion != 1 || manifest.UpdateProtocolVersion != RemoteAdministrationProtocol.UpdateVersion
             || manifest.SigningProfile != BuildSigningTrust.ProfileName
-            || !BuildSigningTrust.IsPublishable
-            || manifest.SourceReleaseKeyId != SourceReleaseSigning.KeyId
-            || manifest.ProductSignerThumbprint != ProductSigning.CertificateThumbprint)
+            || !BuildSigningTrust.IsPublishable)
             throw new InvalidDataException("The signed release requires an unsupported update protocol.");
+        if (isLegacyMigrationBridge)
+        {
+            if (!manifest.LegacyMigration
+                || !string.Equals(manifest.LegacyMigrationSignerThumbprint,
+                    InvitationSigning.CertificateThumbprint, StringComparison.Ordinal)
+                || !string.Equals(manifest.SourceReleaseKeyId,
+                    SourceReleaseSigning.KeyId, StringComparison.Ordinal)
+                || !string.Equals(manifest.ProductSignerThumbprint,
+                    InvitationSigning.CertificateThumbprint, StringComparison.Ordinal))
+                throw new InvalidDataException("The signed legacy bridge does not use the exact retired migration signer.");
+        }
+        else if (manifest.LegacyMigration
+                 || !string.IsNullOrWhiteSpace(manifest.LegacyMigrationSignerThumbprint)
+                 || manifest.SourceReleaseKeyId != SourceReleaseSigning.KeyId
+                 || manifest.ProductSignerThumbprint != ProductSigning.CertificateThumbprint)
+        {
+            throw new InvalidDataException("The signed release requires an unsupported update protocol.");
+        }
         if (!NormalizeVersion(manifest.Version).Equals(NormalizeVersion(request.TargetVersion), StringComparison.Ordinal)
             || manifest.Role != request.Role
             || !manifest.Architecture.Equals(request.Architecture, StringComparison.OrdinalIgnoreCase))
@@ -263,7 +332,10 @@ public static partial class UpdatePackageVerifier
         _ = ParseVersion(manifest.MinimumGuardianVersion);
     }
 
-    private static void ValidateReleaseFile(OpticonReleaseFile file, string normalized)
+    private static void ValidateReleaseFile(
+        OpticonReleaseFile file,
+        string normalized,
+        bool isLegacyMigrationBridge)
     {
         if (normalized.Length == 0 || !file.Path.Equals(normalized, StringComparison.Ordinal)
             || normalized.Split('/').Any(part => part is "" or "." or "..")
@@ -271,8 +343,11 @@ public static partial class UpdatePackageVerifier
             throw new InvalidDataException("The signed release contains an unsafe path.");
         if (file.Size is < 0 or > MaximumExpandedBytes || file.Sha256.Length != 64 || file.Sha256.Any(character => !Uri.IsHexDigit(character)))
             throw new InvalidDataException($"The signed release metadata is invalid for {normalized}.");
+        var expectedSigner = isLegacyMigrationBridge
+            ? InvitationSigning.CertificateThumbprint
+            : ProductSigning.CertificateThumbprint;
         if (normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-            && !file.SignerThumbprint.Equals(ProductSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase))
+            && !file.SignerThumbprint.Equals(expectedSigner, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"The executable signer pin is invalid for {normalized}.");
     }
 

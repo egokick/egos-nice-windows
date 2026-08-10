@@ -15,6 +15,8 @@ public sealed record OpticonUpdateRelease(
 {
     public bool RequiresGuardianReconciliation { get; init; }
     public bool RequiresLegacyMachineStateMigration { get; init; }
+    public bool IsLegacyMachineStateMigrationBridge { get; init; }
+    public string LegacyMigrationSignerThumbprint { get; init; } = string.Empty;
 }
 
 public sealed class OpticonReleaseClient
@@ -50,25 +52,67 @@ public sealed class OpticonReleaseClient
         var architecture = string.IsNullOrWhiteSpace(device.Architecture) ? "x64" : device.Architecture.ToLowerInvariant();
         var current = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
         var installedGuardian = ParseInstalledGuardianVersion(device.GuardianVersion);
-        var candidates = manifest.Artifacts
+        var matchingArtifacts = manifest.Artifacts
             .Where(artifact => artifact.Product.Equals("OpticonBundle", StringComparison.Ordinal)
                                && artifact.Role == device.Role
                                && artifact.Architecture.Equals(architecture, StringComparison.OrdinalIgnoreCase))
             .Select(artifact => (Artifact: artifact, Version: ParseArtifactVersion(artifact)))
-            .Where(candidate => candidate.Version > current
-                                || (candidate.Version == current
-                                    && installedGuardian < candidate.Version))
-            .OrderByDescending(candidate => candidate.Version)
             .ToArray();
-        if (candidates.Length == 0) return null;
 
-        var selectedCandidate = candidates[0];
+        var requiresLegacyMachineStateMigration = RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(
+            current,
+            UpdatePackageVerifier.ParseVersion(RemoteAdministrationProtocol.MinimumProtectedMachineStateAgentVersion));
+        var isSupportedLegacySource = current == new Version(1, 1, 38);
+        (ArtifactRecordDto Artifact, Version Version) selectedCandidate;
+        var isLegacyMachineStateMigrationBridge = false;
+        if (requiresLegacyMachineStateMigration)
+        {
+            if (!isSupportedLegacySource)
+                throw new InvalidOperationException(
+                    $"Opticon Agent {device.AgentVersion} uses an older legacy machine-state layout. " +
+                    "The signed in-place bridge is supported only from Opticon Agent 1.1.38; no candidate was staged.");
+
+            var bridges = matchingArtifacts
+                .Where(candidate => RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+                    current, candidate.Version, candidate.Artifact.LegacyMigrationSignerThumbprint))
+                .ToArray();
+            if (bridges.Length != 1)
+                throw new InvalidDataException(
+                    "The release manifest must contain exactly one trusted Opticon 1.1.41 legacy machine-state bridge for this device role and architecture.");
+            selectedCandidate = bridges[0];
+            isLegacyMachineStateMigrationBridge = true;
+        }
+        else
+        {
+            var candidates = matchingArtifacts
+                // A migration marker is never a normal release channel. Newer
+                // Agents must ignore it even if the record is otherwise valid.
+                .Where(candidate => string.IsNullOrEmpty(candidate.Artifact.LegacyMigrationSignerThumbprint))
+                .Where(candidate => candidate.Version > current
+                                    || (candidate.Version == current
+                                        && installedGuardian < candidate.Version))
+                .OrderByDescending(candidate => candidate.Version)
+                .ToArray();
+            if (candidates.Length == 0) return null;
+            selectedCandidate = candidates[0];
+        }
+
         var selected = selectedCandidate.Artifact;
         if (selected.Size is < 1024 or > 1024L * 1024 * 1024
             || selected.Sha256.Length != 64 || selected.Sha256.Any(character => !Uri.IsHexDigit(character))
             || Path.GetFileName(selected.File) != selected.File || !selected.File.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The selected Opticon release record has invalid immutable artifact metadata.");
+        if (isLegacyMachineStateMigrationBridge && !HasCanonicalLegacyBridgeOuterTrust(selected))
+            throw new InvalidDataException(
+                "The selected legacy machine-state bridge is missing its required OwnerManaged release trust metadata.");
         var download = ResolveDownloadUri(controlOrigin, selected);
+        var requiresMaintenanceBootstrap = device.UpdateProtocolVersion < RemoteAdministrationProtocol.UpdateVersion
+                                          || installedGuardian < GuardianApiBootstrapVersion;
+        if (isLegacyMachineStateMigrationBridge && requiresMaintenanceBootstrap)
+            throw new InvalidOperationException(
+                "The signed legacy machine-state bridge requires the guarded Opticon update API and stable Guardian already present on Agent 1.1.38. " +
+                "The retired maintenance bootstrap cannot launch this bridge.");
+
         return new OpticonUpdateRelease(
             selected.Version,
             device.Role,
@@ -76,12 +120,13 @@ public sealed class OpticonReleaseClient
             download,
             selected.Size,
             selected.Sha256.ToLowerInvariant(),
-            device.UpdateProtocolVersion < RemoteAdministrationProtocol.UpdateVersion
-            || installedGuardian < GuardianApiBootstrapVersion)
+            requiresMaintenanceBootstrap)
         {
             RequiresGuardianReconciliation = installedGuardian < selectedCandidate.Version,
-            RequiresLegacyMachineStateMigration = RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(
-                current, selectedCandidate.Version)
+            RequiresLegacyMachineStateMigration = requiresLegacyMachineStateMigration
+                                                   && !isLegacyMachineStateMigrationBridge,
+            IsLegacyMachineStateMigrationBridge = isLegacyMachineStateMigrationBridge,
+            LegacyMigrationSignerThumbprint = selected.LegacyMigrationSignerThumbprint
         };
     }
 
@@ -99,6 +144,20 @@ public sealed class OpticonReleaseClient
             throw new InvalidDataException($"The release manifest contains an invalid Opticon version for {artifact.File}.", exception);
         }
     }
+
+    private static bool HasCanonicalLegacyBridgeOuterTrust(ArtifactRecordDto artifact) =>
+        artifact.SigningProfile.Equals("OwnerManaged", StringComparison.Ordinal)
+        && IsThumbprint(artifact.SourceManifestKeyId)
+        && IsThumbprint(artifact.ProductSignerThumbprint)
+        && !artifact.SourceManifestKeyId.Equals(
+            InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase)
+        && !artifact.ProductSignerThumbprint.Equals(
+            InvitationSigning.CertificateThumbprint, StringComparison.OrdinalIgnoreCase)
+        && !artifact.SourceManifestKeyId.Equals(
+            artifact.ProductSignerThumbprint, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsThumbprint(string value) =>
+        value.Length == 40 && value.All(Uri.IsHexDigit);
 
     private static Uri ResolveDownloadUri(Uri controlOrigin, ArtifactRecordDto artifact)
     {

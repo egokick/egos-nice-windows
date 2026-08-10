@@ -20,6 +20,11 @@ public static class MachineStorageSecurity
 
     public static void EnsureOpticonMachineState()
     {
+        // A single, explicitly signed 1.1.41 bridge may transition the
+        // pre-protected 1.1.38 layout. Ordinary builds continue to validate
+        // existing state without ever repairing it.
+        LegacyMachineStateMigration.MigrateIfRequiredForSignedBridge();
+
         // SshAccessDataDirectory is intentionally excluded. Its isolated SSH
         // supervisor owns a stricter SYSTEM-only or SYSTEM-and-daemon ACL,
         // which must not be normalized to this general storage contract.
@@ -401,7 +406,7 @@ public static class MachineStorageSecurity
                           && rule.InheritanceFlags == inheritance
                           && rule.PropagationFlags == PropagationFlags.None);
 
-    private static DirectorySecurity CreateRestrictedDirectorySecurity()
+    internal static DirectorySecurity CreateRestrictedDirectorySecurity()
     {
         var security = new DirectorySecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
@@ -414,7 +419,7 @@ public static class MachineStorageSecurity
         return security;
     }
 
-    private static FileSecurity CreateRestrictedFileSecurity()
+    internal static FileSecurity CreateRestrictedFileSecurity()
     {
         var security = new FileSecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);

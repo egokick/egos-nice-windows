@@ -309,6 +309,9 @@ internal static class NativePath
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
     private const uint DeleteAccess = 0x00010000;
+    private const uint ReadControl = 0x00020000;
+    private const uint WriteDac = 0x00040000;
+    private const uint WriteOwner = 0x00080000;
     private const uint Synchronize = 0x00100000;
     private const uint FileListDirectory = 0x00000001;
     private const uint FileTraverse = 0x00000020;
@@ -362,12 +365,14 @@ internal static class NativePath
         bool delete,
         bool requireDirectory,
         uint createDisposition,
-        bool exclusive = false)
+        bool exclusive = false,
+        bool changeSecurity = false)
     {
         var access = FileReadAttributes | Synchronize;
         if (readFile) access |= GenericRead;
         if (writeFile) access |= GenericWrite;
         if (delete) access |= DeleteAccess;
+        if (changeSecurity) access |= ReadControl | WriteDac | WriteOwner;
         if (requireDirectory) access |= FileListDirectory | FileTraverse;
         var options = FileSynchronousIoNonAlert | FileOpenReparsePoint
                       | (requireDirectory ? FileDirectoryFile : 0u)

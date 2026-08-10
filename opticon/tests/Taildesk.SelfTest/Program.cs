@@ -34,6 +34,7 @@ var tests = new (string Name, Action Body)[]
     ("remote administration contracts reject unpinned or unsafe updates", TestRemoteAdministrationProtocol),
     ("remote update polling distinguishes Agent restarts from caller cancellation", TestRemoteUpdatePollingRecovery),
     ("legacy machine state cannot cross the protected update boundary unattended", TestLegacyMachineStateUpdateGate),
+    ("the signed 1.1.41 bridge is the only legacy ACL and trust exception", TestLegacyMachineStateBridgeSafety),
     ("release distribution keeps signed bundles private and CloudFront-addressed", TestReleaseDistributionDesign),
     ("OpenSSH recovery is fixed-path, Windows-compatible, and independently supervised", TestOpenSshRecoveryDesign),
     ("runtime tailnet policy keeps administrative SSH hub-only", TestTailnetSshPolicy),
@@ -729,12 +730,22 @@ static void TestRemoteUpdatePollingRecovery()
 static void TestLegacyMachineStateUpdateGate()
 {
     var firstProtected = new Version(1, 1, 39);
+    var bridgeTarget = new Version(1, 1, 41);
     Assert(RemoteAdministrationProtocol.MinimumProtectedMachineStateAgentVersion == "1.1.39"
+           && RemoteAdministrationProtocol.LegacyMachineStateMigrationBridgeVersion == "1.1.41"
            && RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 1, 38), firstProtected)
            && RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 0, 0), new Version(1, 1, 40))
            && !RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(firstProtected, new Version(1, 1, 40))
-           && !RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 1, 38), new Version(1, 1, 38)),
-        "only Agents at 1.1.38 or earlier crossing into 1.1.39+ may require an attended machine-state migration");
+           && !RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(new Version(1, 1, 38), new Version(1, 1, 38))
+           && RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+               new Version(1, 1, 38), bridgeTarget, InvitationSigning.CertificateThumbprint)
+           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+               new Version(1, 1, 37), bridgeTarget, InvitationSigning.CertificateThumbprint)
+           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+               new Version(1, 1, 38), new Version(1, 1, 40), InvitationSigning.CertificateThumbprint)
+           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+               new Version(1, 1, 38), bridgeTarget, InvitationSigning.CertificateThumbprint.ToLowerInvariant()),
+        "only the exact 1.1.38-to-1.1.41 release bearing the canonical retired signer may cross the protected machine-state boundary");
 
     var releaseClient = File.ReadAllText(FindSourceFile(
         "src", "Taildesk.Admin", "OpticonReleaseClient.cs"));
@@ -745,27 +756,40 @@ static void TestLegacyMachineStateUpdateGate()
     var storage = File.ReadAllText(FindSourceFile(
         "src", "Taildesk.Shared", "MachineStorageSecurity.cs"));
 
-    Assert(releaseClient.Contains(
-               "RequiresLegacyMachineStateMigration = RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(",
-               StringComparison.Ordinal),
-        "release selection must expose the canonical legacy machine-state migration requirement");
+    Assert(releaseClient.Contains("IsLegacyMachineStateMigrationBridge", StringComparison.Ordinal)
+           && releaseClient.Contains("bridges.Length != 1", StringComparison.Ordinal)
+           && releaseClient.Contains("LegacyMigrationSignerThumbprint", StringComparison.Ordinal)
+           && releaseClient.Contains("HasCanonicalLegacyBridgeOuterTrust", StringComparison.Ordinal)
+           && releaseClient.Contains("The retired maintenance bootstrap cannot launch this bridge.", StringComparison.Ordinal)
+           && releaseClient.Contains("string.IsNullOrEmpty(candidate.Artifact.LegacyMigrationSignerThumbprint)", StringComparison.Ordinal),
+        "release selection must select exactly one authenticated bridge for 1.1.38 and exclude every bridge marker from newer normal releases");
     Assert(coordinator.Contains(
-               "RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(currentAgentVersion, releaseVersion)",
-               StringComparison.Ordinal)
-           && coordinator.IndexOf("RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration", StringComparison.Ordinal)
-              < coordinator.IndexOf("_agents.PrepareUpdateAsync", StringComparison.Ordinal),
-        "the remote update coordinator must block legacy state before it can stage a candidate");
+                "RemoteAdministrationProtocol.RequiresLegacyMachineStateMigration(",
+                StringComparison.Ordinal)
+           && coordinator.Contains("RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(", StringComparison.Ordinal)
+           && coordinator.Contains("release.IsLegacyMachineStateMigrationBridge != isLegacyMachineStateMigrationBridge", StringComparison.Ordinal)
+           && coordinator.Contains("A legacy migration marker is not valid", StringComparison.Ordinal)
+           && coordinator.IndexOf("RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge", StringComparison.Ordinal)
+               < coordinator.IndexOf("_agents.PrepareUpdateAsync", StringComparison.Ordinal),
+        "the remote update coordinator must re-derive the exact bridge identity and reject forged markers before it stages a candidate");
 
     const string legacyGate = "if (release.RequiresLegacyMachineStateMigration)";
     var gateStart = mainWindow.IndexOf(legacyGate, StringComparison.Ordinal);
-    var maintenanceStart = mainWindow.IndexOf("if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal);
+    const string bridgeGate = "if (isLegacyMachineStateMigrationBridge)";
+    var bridgeStart = mainWindow.IndexOf(bridgeGate, StringComparison.Ordinal);
+    var maintenanceStart = mainWindow.IndexOf("else if (release.RequiresMaintenanceBootstrap)", StringComparison.Ordinal);
     Assert(gateStart >= 0
-           && maintenanceStart > gateStart
-           && mainWindow[gateStart..maintenanceStart].Contains("Legacy Opticon migration required", StringComparison.Ordinal)
-           && mainWindow[gateStart..maintenanceStart].Contains("No candidate was staged or activated", StringComparison.Ordinal)
-           && mainWindow[gateStart..maintenanceStart].Contains("not yet a supported attended migration", StringComparison.Ordinal)
-           && !mainWindow[gateStart..maintenanceStart].Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal),
-        "the Update Opticon UI must explain the unsupported legacy migration boundary and return before staging or maintenance bootstrap");
+           && bridgeStart > gateStart
+           && maintenanceStart > bridgeStart
+           && mainWindow[gateStart..bridgeStart].Contains("supported only from Opticon Agent 1.1.38 to 1.1.41", StringComparison.Ordinal)
+           && mainWindow[gateStart..bridgeStart].Contains("No candidate was staged or activated", StringComparison.Ordinal)
+           && !mainWindow[gateStart..bridgeStart].Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal)
+           && mainWindow[bridgeStart..maintenanceStart].Contains("Run signed legacy Opticon bridge", StringComparison.Ordinal)
+           && mainWindow[bridgeStart..maintenanceStart].Contains("seals the existing Opticon ProgramData state", StringComparison.Ordinal)
+           && mainWindow[bridgeStart..maintenanceStart].Contains("automatic rollback by omission", StringComparison.Ordinal)
+           && !mainWindow[bridgeStart..maintenanceStart].Contains("RunMaintenanceBootstrapAsync", StringComparison.Ordinal)
+           && mainWindow.Contains("!isLegacyMachineStateMigrationBridge", StringComparison.Ordinal),
+        "the Update Opticon UI must block unsupported legacy versions, explicitly confirm the one-time ACL bridge, and never divert it to retired maintenance");
 
     var ensureEnd = storage.IndexOf("public static bool IsProtectedMachinePath", StringComparison.Ordinal);
     Assert(ensureEnd > 0
@@ -773,6 +797,77 @@ static void TestLegacyMachineStateUpdateGate()
            && storage[..ensureEnd].Contains("SYSTEM-only or SYSTEM-and-daemon ACL", StringComparison.Ordinal)
            && !storage[..ensureEnd].Contains("AppPaths.SshAccessDataDirectory", StringComparison.Ordinal),
         "generic machine-state ACL validation must leave SSH's dedicated SYSTEM/daemon contract intact");
+}
+
+static void TestLegacyMachineStateBridgeSafety()
+{
+    var retiredSigner = InvitationSigning.CertificateThumbprint;
+    var bridge = new Version(1, 1, 41);
+    Assert(RemoteAdministrationProtocol.LegacyMachineStateMigrationBridgeVersion == "1.1.41"
+           && RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+               new Version(1, 1, 38), bridge, retiredSigner)
+           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+               new Version(1, 1, 37), bridge, retiredSigner)
+           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+               new Version(1, 1, 38), new Version(1, 1, 40), retiredSigner)
+           && !RemoteAdministrationProtocol.IsLegacyMachineStateMigrationBridge(
+               new Version(1, 1, 38), bridge, "0000000000000000000000000000000000000000"),
+        "the legacy bridge must be restricted to exactly 1.1.38 -> 1.1.41 and the retired signer marker");
+
+    var migration = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Shared", "LegacyMachineStateMigration.cs"));
+    var storage = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Shared", "MachineStorageSecurity.cs"));
+    var pathGuard = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Shared", "PathGuard.cs"));
+    var verifier = File.ReadAllText(FindSourceFile(
+        "src", "Taildesk.Shared", "UpdatePackageVerifier.cs"));
+
+    var sealBeforeValidation = migration.IndexOf("SealLegacyStateBeforeValidation(root)", StringComparison.Ordinal);
+    var validationAfterSeal = migration.IndexOf("ValidateLegacyState(sealedState)", StringComparison.Ordinal);
+    Assert(migration.Contains("BuildSigningTrust.IsLegacyMigrationBuild", StringComparison.Ordinal)
+           && migration.Contains("LegacyMachineStateMigrationBridgeVersion", StringComparison.Ordinal)
+           && migration.Contains("UpdatePhase.AwaitingCommit", StringComparison.Ordinal)
+           && migration.Contains("\"1.1.38\"", StringComparison.Ordinal)
+           && migration.Contains("FileFlagOpenReparsePoint", StringComparison.Ordinal)
+           && migration.Contains("OpenLegacyChildNoSharing", StringComparison.Ordinal)
+           && migration.Contains("NativePath.Enumerate(handle)", StringComparison.Ordinal)
+           && migration.Contains("GetSecurityInfo", StringComparison.Ordinal)
+           && migration.Contains("SetSecurityInfo", StringComparison.Ordinal)
+           && migration.Contains("RequireLegacyProvenanceAcl", StringComparison.Ordinal)
+           && migration.Contains("BuiltinUsersSid", StringComparison.Ordinal)
+           && migration.Contains("GenericAllRights", StringComparison.Ordinal)
+           && migration.Contains("CreatorOwnerSid", StringComparison.Ordinal)
+           && migration.Contains("FileSystemRights.Synchronize", StringComparison.Ordinal)
+           && migration.Contains("RootLegacyCreateRights", StringComparison.Ordinal)
+           && migration.Contains("SealGuardianHeldTransactionLock", StringComparison.Ordinal)
+           && migration.Contains("SetNamedSecurityInfo", StringComparison.Ordinal)
+           && migration.Contains("GetNamedSecurityInfo", StringComparison.Ordinal)
+           && migration.Contains("ExclusiveOpenDeadline", StringComparison.Ordinal)
+           && migration.Contains("unknown entry", StringComparison.OrdinalIgnoreCase)
+           && migration.Contains("RequireIsolatedSshAccessDirectory", StringComparison.Ordinal)
+           && migration.Contains("HasProtectedActiveBridgeJournal", StringComparison.Ordinal)
+           && sealBeforeValidation >= 0
+           && validationAfterSeal > sealBeforeValidation
+           && !migration.Contains("ApplyExactRestricted", StringComparison.Ordinal)
+           && !migration.Contains("UpdateJournalPersistence.Load", StringComparison.Ordinal)
+           && !migration.Contains("Directory.Delete", StringComparison.Ordinal)
+           && !migration.Contains("File.Delete", StringComparison.Ordinal),
+        "the bridge must seal each no-share, non-reparse legacy handle before validation, accept only the known root ACL provenance, preserve SSH access, and never delete legacy state");
+    Assert(storage.Contains("LegacyMachineStateMigration.MigrateIfRequiredForSignedBridge", StringComparison.Ordinal)
+           && storage.Contains("CreateRestrictedDirectorySecurity", StringComparison.Ordinal)
+           && storage.Contains("CreateRestrictedFileSecurity", StringComparison.Ordinal)
+           && pathGuard.Contains("bool changeSecurity = false", StringComparison.Ordinal)
+           && pathGuard.Contains("ReadControl", StringComparison.Ordinal)
+           && pathGuard.Contains("WriteDac", StringComparison.Ordinal)
+           && pathGuard.Contains("WriteOwner", StringComparison.Ordinal),
+        "the bridge must use the ordinary exact ACL descriptors through a same-handle guarded-open API");
+    Assert(verifier.Contains("VerifyManifestSignatureAndValidate", StringComparison.Ordinal)
+           && verifier.Contains("InvitationSigning.Verify(manifestBytes, signature)", StringComparison.Ordinal)
+           && verifier.Contains("IsExactLegacyMigrationBridgeManifest", StringComparison.Ordinal)
+           && verifier.Contains("manifest.LegacyMigration", StringComparison.Ordinal)
+           && verifier.Contains("expectedSigner = isLegacyMigrationBridge", StringComparison.Ordinal),
+        "retired manifest and payload trust must be scoped to the exact signed bridge rather than normal releases");
 }
 
 static void TestReleaseDistributionDesign()
