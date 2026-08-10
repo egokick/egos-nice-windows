@@ -16,7 +16,10 @@ sent to Fly. Clicking the download button revalidates that invitation and its
 exact published source record, then redirects to a private S3 GET URL that
 expires after 30 minutes. The browser performs a normal streamed download and
 never buffers the archive in JavaScript. The recipient extracts the archive and runs its fixed signed
-`OpticonSourceLauncher.exe`; it verifies the signed schema-6 invitation, its
+`OpticonSourceLauncher.exe`; the invitation page serves those exact signed
+bytes under an invitation-bound filename. The user only downloads and opens
+that installer: it recovers the fragment locally, requests the 30-minute S3
+source URL itself, and verifies the signed schema-6 invitation, its
 own byte identity, the exact RSA-PSS-authenticated source archive, and then
 builds locally with .NET SDK 10.0.302 and runtime 10.0.10. Hosted ciphertext expires after
 14 days by default and is removed on manual expiration or successful enrollment.

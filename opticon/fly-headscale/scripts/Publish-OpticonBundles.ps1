@@ -631,14 +631,29 @@ function Assert-OpticonSourceArchive {
         if ($declared.Count -ne $entries.Count) { throw 'The source archive contains undeclared extra files.' }
         if ($RequireSourceLauncher) {
             $launcherKey = 'opticonsourcelauncher.exe'
-            if (-not $entries.ContainsKey($launcherKey) -or -not $declared.ContainsKey($launcherKey)) {
+            $expectedLauncherFile = "opticon-source-launcher-$([string]$Record.version).exe"
+            if (-not $entries.ContainsKey($launcherKey) -or -not $declared.ContainsKey($launcherKey) -or
+                (Get-ArtifactString $Record 'sourceLauncherFile') -cne $expectedLauncherFile -or
+                [long]$Record.sourceLauncherSize -le 0 -or [long]$Record.sourceLauncherSize -gt 128MB -or
+                (Get-ArtifactString $Record 'sourceLauncherSha256') -notmatch '^[a-f0-9]{64}$') {
                 throw 'The source-only archive lacks its declared fixed source launcher.'
             }
             $launcherRoot = New-PrivatePublisherDirectory -Prefix 'source-launcher-verify'
             try {
                 $launcherPath = Join-Path $launcherRoot 'OpticonSourceLauncher.exe'
                 [IO.File]::WriteAllBytes($launcherPath, (Read-ZipEntryBounded -Entry $entries[$launcherKey] -MaximumBytes 128MB))
+                $sidecarPath = Join-Path (Split-Path -Parent $Path) $expectedLauncherFile
+                if (-not (Test-Path -LiteralPath $sidecarPath -PathType Leaf) -or
+                    (Get-Item -LiteralPath $launcherPath).Length -ne [long]$Record.sourceLauncherSize -or
+                    (Get-Item -LiteralPath $sidecarPath).Length -ne [long]$Record.sourceLauncherSize -or
+                    -not (Get-FileHash -LiteralPath $launcherPath -Algorithm SHA256).Hash.Equals(
+                        [string]$Record.sourceLauncherSha256, [StringComparison]::OrdinalIgnoreCase) -or
+                    -not (Get-FileHash -LiteralPath $sidecarPath -Algorithm SHA256).Hash.Equals(
+                        [string]$Record.sourceLauncherSha256, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'The Fly-embedded source launcher does not exactly match the signed source archive.'
+                }
                 Assert-ProductSignature -Path $launcherPath
+                Assert-ProductSignature -Path $sidecarPath
             } finally {
                 if (Test-Path -LiteralPath $launcherRoot) { Remove-Item -LiteralPath $launcherRoot -Recurse -Force -ErrorAction SilentlyContinue }
             }
@@ -938,6 +953,10 @@ if (-not $SkipManifestPublish) {
             [string]$actual[0].signingProfile -cne $SigningProfile -or
             [string]$actual[0].sourceManifestKeyId -cne $SourceReleaseCertificateThumbprint -or
             [string]$actual[0].productSignerThumbprint -cne $ProductCertificateThumbprint -or
+            ([string]$expected.product -ceq 'OpticonSource' -and (
+                (Get-ArtifactString $actual[0] 'sourceLauncherFile') -cne (Get-ArtifactString $expected 'sourceLauncherFile') -or
+                [long]$actual[0].sourceLauncherSize -ne [long]$expected.sourceLauncherSize -or
+                (Get-ArtifactString $actual[0] 'sourceLauncherSha256') -cne (Get-ArtifactString $expected 'sourceLauncherSha256'))) -or
             (Get-ArtifactString $actual[0] 'legacyMigrationSignerThumbprint') -cne
                 (Get-ArtifactString $expected 'legacyMigrationSignerThumbprint')) {
             throw "Fly served release metadata that differed from the verified publication for $($expected.file)."

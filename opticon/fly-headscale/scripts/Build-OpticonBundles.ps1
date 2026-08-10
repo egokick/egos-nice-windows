@@ -4,7 +4,7 @@ param(
     [string]$Runtime = "win-x64",
     [ValidateSet("Production", "OwnerManaged")]
     [string]$SigningProfile = "Production",
-    [string]$Version = "1.2.0",
+    [string]$Version = "1.2.1",
     [string]$MinimumGuardianVersion = "1.1.2",
     # SourceOnly is the v2 release path: it produces exactly one signed source
     # archive and deliberately emits no standalone bundle/bootstrap artifact.
@@ -1164,6 +1164,9 @@ $sourceRecord = [pscustomobject][ordered]@{
     sourceManifestKeyId = $SourceReleaseCertificateThumbprint
     signingProfile = $SigningProfile
     productSignerThumbprint = $ProductCertificateThumbprint
+    sourceLauncherFile = if ($SourceOnly) { "opticon-source-launcher-$Version.exe" } else { '' }
+    sourceLauncherSize = if ($SourceOnly) { (Get-Item -LiteralPath (Join-Path $sourceStage 'OpticonSourceLauncher.exe')).Length } else { 0 }
+    sourceLauncherSha256 = if ($SourceOnly) { (Get-FileHash -LiteralPath (Join-Path $sourceStage 'OpticonSourceLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
 }
 $existingSources = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonSource' -and $_.version -eq $Version })
 if ($existingSources.Count -gt 1) { throw "The outer manifest declares source release $Version more than once." }
@@ -1174,6 +1177,21 @@ if ($existingSources.Count -eq 1 -and (([long]$existingSources[0].size -ne [long
     throw "Source release $Version is already declared with different bytes. Bump -Version."
 }
 Move-Item -LiteralPath $sourceTemporary -Destination $sourceDestination -Force
+
+if ($SourceOnly) {
+    # S3 still receives only the source ZIP. Fly embeds these exact signed
+    # launcher bytes so the invitation page can provide a one-click entry point.
+    $sourceLauncherDestination = Join-Path $artifactDirectory $sourceRecord.sourceLauncherFile
+    $sourceLauncherTemporary = "$sourceLauncherDestination.new"
+    Copy-Item -LiteralPath (Join-Path $sourceStage 'OpticonSourceLauncher.exe') -Destination $sourceLauncherTemporary -Force
+    if ((Get-Item -LiteralPath $sourceLauncherTemporary).Length -ne [long]$sourceRecord.sourceLauncherSize -or
+        -not (Get-FileHash -LiteralPath $sourceLauncherTemporary -Algorithm SHA256).Hash.Equals(
+            [string]$sourceRecord.sourceLauncherSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item -LiteralPath $sourceLauncherTemporary -Force
+        throw 'The staged one-click source launcher did not match the signed source archive.'
+    }
+    Move-Item -LiteralPath $sourceLauncherTemporary -Destination $sourceLauncherDestination -Force
+}
 
 if ($SourceOnly) {
     # Schema 2 is intentionally an all-source manifest. Existing binary,

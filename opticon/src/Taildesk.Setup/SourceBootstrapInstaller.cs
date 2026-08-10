@@ -41,7 +41,7 @@ internal static class SourceBootstrapInstaller
     {
         var directory = HostedBootstrapper.CreateProtectedHandoffDirectory();
         var invitePath = Path.Combine(directory, "invite.tdinvite");
-        using var client = DirectHttp.CreateClient(TimeSpan.FromMinutes(10));
+        using var client = DirectHttp.CreateClient(TimeSpan.FromMinutes(30));
         report("Downloading the encrypted Opticon invitation...");
         await HostedBootstrapper.DownloadAsync(client,
             $"{Origin}/opticon/i/{Uri.EscapeDataString(bootstrap.PublicId)}/invite.tdinvite", invitePath,
@@ -53,10 +53,18 @@ internal static class SourceBootstrapInstaller
         finally { CryptographicOperations.ZeroMemory(signedEnvelope); }
         ValidateInvitation(invite);
 
-        var selectedSourceArchive = ResolveSourceArchive(bootstrap, launcherPath, invite);
-        report("Copying the hash-pinned source archive into a protected elevated stage...");
         var sourceArchive = Path.Combine(directory, invite.SourceFile);
-        await CopyAndVerifyAsync(selectedSourceArchive, sourceArchive, invite.SourceSize, invite.SourceSha256);
+        var selectedSourceArchive = ResolveSourceArchive(bootstrap, launcherPath, invite);
+        if (selectedSourceArchive is null)
+        {
+            report("Downloading the hash-pinned Opticon source archive...");
+            await DownloadPresignedSourceAsync(client, bootstrap.PublicId, invite, sourceArchive);
+        }
+        else
+        {
+            report("Copying the hash-pinned source archive into a protected elevated stage...");
+            await CopyAndVerifyAsync(selectedSourceArchive, sourceArchive, invite.SourceSize, invite.SourceSha256);
+        }
 
         report("Verifying the signed source allowlist and every source file...");
         var sourceDirectory = HostedBootstrapper.CreateOrRequireRestrictedChildDirectory(directory, "source");
@@ -120,7 +128,7 @@ internal static class SourceBootstrapInstaller
     private static async Task VerifyLauncherMatchesArchiveAsync(string launcherPath, SourceReleaseManifest manifest)
     {
         launcherPath = Path.GetFullPath(launcherPath);
-        if (!string.Equals(Path.GetFileName(launcherPath), "OpticonSourceLauncher.exe", StringComparison.OrdinalIgnoreCase)
+        if (!HostedBootstrapper.IsSourceLauncher(launcherPath)
             || !File.Exists(launcherPath) || (File.GetAttributes(launcherPath) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidDataException("The source-only launcher path is invalid.");
         var declared = manifest.Files.Where(file =>
@@ -138,7 +146,7 @@ internal static class SourceBootstrapInstaller
             throw new InvalidDataException("The running source launcher does not match the signed source archive.");
     }
 
-    private static string ResolveSourceArchive(
+    private static string? ResolveSourceArchive(
         SourceBootstrapRequest bootstrap,
         string launcherPath,
         InvitePayload invite)
@@ -162,10 +170,32 @@ internal static class SourceBootstrapInstaller
                            && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0
                            && string.Equals(Path.GetFileName(path), invite.SourceFile, StringComparison.Ordinal))
             .ToArray();
-        if (existing.Length != 1)
-            throw new FileNotFoundException(
-                $"Place {invite.SourceFile} beside the extracted OpticonSourceLauncher.exe, or launch it with --source-archive=<path>.");
-        return existing[0];
+        if (existing.Length > 1)
+            throw new InvalidDataException("More than one adjacent Opticon source archive matched the signed invitation.");
+        return existing.Length == 1 ? existing[0] : null;
+    }
+
+    private static async Task DownloadPresignedSourceAsync(
+        HttpClient client,
+        string publicId,
+        InvitePayload invite,
+        string destination)
+    {
+        var authorizationUrl = $"{Origin}/opticon/i/{Uri.EscapeDataString(publicId)}/source";
+        using var response = await client.GetAsync(authorizationUrl, HttpCompletionOption.ResponseHeadersRead);
+        if (response.StatusCode != System.Net.HttpStatusCode.TemporaryRedirect || response.Headers.Location is null)
+            throw new InvalidDataException("The Opticon source download authorization did not return a private S3 link.");
+        var location = response.Headers.Location;
+        if (!location.IsAbsoluteUri || location.Scheme != Uri.UriSchemeHttps || location.Port != 443
+            || location.UserInfo.Length != 0 || location.Fragment.Length != 0
+            || !string.Equals(location.Host, "opticon-053663732727.s3.us-east-1.amazonaws.com", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(location.AbsolutePath,
+                $"/opticon/releases/{Uri.EscapeDataString(invite.ReleaseVersion)}/{Uri.EscapeDataString(invite.SourceFile)}",
+                StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(location.Query))
+            throw new InvalidDataException("The Opticon source authorization returned an unexpected download location.");
+        await HostedBootstrapper.DownloadAsync(client, location.AbsoluteUri, destination,
+            invite.SourceSize, 256L * 1024 * 1024, invite.SourceSha256);
     }
 
     private static async Task CopyAndVerifyAsync(string source, string destination, long size, string hash)

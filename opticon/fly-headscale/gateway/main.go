@@ -476,6 +476,9 @@ type bundleArtifact struct {
 	RuntimeVersion                  string   `json:"runtimeVersion,omitempty"`
 	SourceManifestSHA256            string   `json:"sourceManifestSha256,omitempty"`
 	SourceManifestKeyID             string   `json:"sourceManifestKeyId,omitempty"`
+	SourceLauncherFile              string   `json:"sourceLauncherFile,omitempty"`
+	SourceLauncherSize              int64    `json:"sourceLauncherSize,omitempty"`
+	SourceLauncherSHA256            string   `json:"sourceLauncherSha256,omitempty"`
 	SigningProfile                  string   `json:"signingProfile,omitempty"`
 	ProductSigner                   string   `json:"productSignerThumbprint,omitempty"`
 	LegacyMigrationSignerThumbprint string   `json:"legacyMigrationSignerThumbprint,omitempty"`
@@ -948,7 +951,17 @@ func validSourceArtifact(artifact bundleArtifact) bool {
 		return false
 	}
 	version, valid := parseSemanticVersion(artifact.Version)
-	return valid && version.core[0] != "0" && !strings.ContainsAny(artifact.Version, "-+") && validCloudFrontDownloadURL(artifact)
+	if !valid || version.core[0] == "0" || strings.ContainsAny(artifact.Version, "-+") || !validCloudFrontDownloadURL(artifact) {
+		return false
+	}
+	comparison, _ := compareSemanticVersions(artifact.Version, "1.2.1")
+	return comparison < 0 || validSourceLauncherMetadata(artifact)
+}
+
+func validSourceLauncherMetadata(artifact bundleArtifact) bool {
+	return artifact.SourceLauncherFile == "opticon-source-launcher-"+artifact.Version+".exe" &&
+		artifact.SourceLauncherSize > 0 && artifact.SourceLauncherSize <= maxBootstrapArtifactBytes &&
+		inviteHashPattern.MatchString(strings.ToLower(artifact.SourceLauncherSHA256))
 }
 
 func supportedTargetRuntimes(values []string) bool {
@@ -1223,6 +1236,10 @@ func (g *gateway) publicInvitation(w http.ResponseWriter, r *http.Request) {
 			g.redirectInvitationSource(w, r, invite, now)
 			return
 		}
+		if parts[1] == "launcher" {
+			g.serveInvitationSourceLauncher(w, r, invite)
+			return
+		}
 		if parts[1] != "invite.tdinvite" {
 			http.NotFound(w, r)
 			return
@@ -1269,6 +1286,43 @@ func (g *gateway) redirectInvitationSource(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", source.File))
 	http.Redirect(w, r, location, http.StatusTemporaryRedirect)
+}
+
+func (g *gateway) serveInvitationSourceLauncher(w http.ResponseWriter, r *http.Request, invite hostedInvite) {
+	if invite.InstallProtocol != sourceInstallProtocol || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		http.NotFound(w, r)
+		return
+	}
+	source, err := g.sourceForInvite(invite)
+	if err != nil || !validSourceLauncherMetadata(source) {
+		http.Error(w, "This invitation's signed Opticon launcher is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	file, err := os.Open(filepath.Join(g.artifactDir, source.SourceLauncherFile))
+	if err != nil {
+		http.Error(w, "This invitation's signed Opticon launcher is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != source.SourceLauncherSize {
+		http.Error(w, "This invitation's signed Opticon launcher is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil || !hmac.Equal(
+		[]byte(hex.EncodeToString(hasher.Sum(nil))), []byte(strings.ToLower(source.SourceLauncherSHA256))) {
+		http.Error(w, "This invitation's signed Opticon launcher failed integrity validation.", http.StatusServiceUnavailable)
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		http.Error(w, "This invitation's signed Opticon launcher is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/vnd.microsoft.portable-executable")
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	http.ServeContent(w, r, source.SourceLauncherFile, info.ModTime(), file)
 }
 
 func (g *gateway) readHostedInvite(publicID string) (hostedInvite, string, error) {
@@ -1481,19 +1535,21 @@ func (g *gateway) pruneUndeclaredBundles() error {
 	return nil
 }
 
-// sourceOnlyInvitationLandingSecure offers a normal same-origin link. Each
-// click revalidates the live invitation and exact release before issuing a
-// private S3 GET URL that expires after thirty minutes. The browser never
-// buffers or executes release bytes; the embedded signed launcher still
-// verifies the invitation, archive hash, inner manifest, and exact SDK.
+// sourceOnlyInvitationLandingSecure binds the URL fragment into the local
+// download filename without sending it to the gateway. The browser downloads
+// only the signed launcher. It decrypts the invitation and fetches the source.
 func (g *gateway) sourceOnlyInvitationLandingSecure(w http.ResponseWriter, r *http.Request, publicID string, invite hostedInvite, source bundleArtifact) {
+	if !validSourceLauncherMetadata(source) {
+		http.Error(w, "This invitation's one-click signed launcher is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
 	if r.Method == http.MethodHead {
 		return
 	}
-	downloadPath := invitePublicPrefix + url.PathEscape(publicID) + "/source"
-	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon source invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}.download{display:inline-block;background:#52d39a;color:#08130e;text-decoration:none;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Build and install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Authenticated Opticon source <code>%s</code> is ready.</p><p><a class="download" href="%s">Download signed source archive</a></p><p class="muted">The download link is generated when you click and is valid for 30 minutes. Extract the ZIP and run <code>OpticonSourceLauncher.exe</code>. When it asks, paste this invitation link. The signed launcher verifies the invitation, archive SHA-256, signed inner manifest, and exact SDK before it builds or installs anything.</p><p class="muted">Source SHA-256: <code>%s</code><br>Requires exact .NET SDK <code>%s</code>. Invitation expires <code>%s</code>.</p></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(source.Version), html.EscapeString(downloadPath), html.EscapeString(strings.ToLower(source.SHA256)), html.EscapeString(source.SDKVersion), invite.ExpiresAt.Local().Format(time.RFC1123))
+	launcherPath := invitePublicPrefix + url.PathEscape(publicID) + "/launcher"
+	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}.download{display:inline-block;background:#52d39a;color:#08130e;text-decoration:none;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px}.disabled{pointer-events:none;opacity:.45}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Opticon <code>%s</code> is ready to build and install.</p><p><a id="install" class="download" href="%s">Download signed installer</a></p><p id="status" class="muted">Download the installer, then double-click it. Windows will ask for administrator approval. No ZIP extraction or invitation paste is needed.</p><p class="muted">The signed installer downloads a private source link valid for 30 minutes, then verifies the invitation, source SHA-256, signed manifest, and exact .NET SDK before building.</p><p class="muted">Source SHA-256: <code>%s</code><br>Requires exact .NET SDK <code>%s</code>. Invitation expires <code>%s</code>.</p><script>const key=location.hash.slice(1),install=document.getElementById('install'),status=document.getElementById('status');if(!/^[A-Za-z0-9_-]{43}$/.test(key)){install.removeAttribute('href');install.classList.add('disabled');status.textContent='This invitation link is incomplete. Ask the command center for a new link.'}else{install.download='Install-Opticon-%s--'+key+'--%s.exe'}</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(source.Version), html.EscapeString(launcherPath), html.EscapeString(strings.ToLower(source.SHA256)), html.EscapeString(source.SDKVersion), invite.ExpiresAt.Local().Format(time.RFC1123), publicID, strings.ToLower(source.SourceLauncherSHA256))
 	_, _ = io.WriteString(w, page)
 }
 

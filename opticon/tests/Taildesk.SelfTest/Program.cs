@@ -1037,7 +1037,8 @@ static void TestReleaseDistributionDesign()
            && sourceClient.Contains("manifest.SchemaVersion != 2", StringComparison.Ordinal)
            && sourceClient.Contains("source-only release manifest contains a non-source artifact", StringComparison.Ordinal)
            && gateway.Contains("sourceInstallProtocol", StringComparison.Ordinal)
-           && gateway.Contains("OpticonSourceLauncher.exe", StringComparison.Ordinal),
+           && gateway.Contains("SourceLauncherFile", StringComparison.Ordinal)
+           && builder.Contains("opticon-source-launcher-$Version.exe", StringComparison.Ordinal),
         "the source-only release channel must publish one signed archive and an embedded fixed launcher");
     Assert(publisher.Contains("--checksum-algorithm", StringComparison.Ordinal)
            && publisher.Contains("--metadata", StringComparison.Ordinal)
@@ -1087,6 +1088,8 @@ static void TestReleaseDistributionDesign()
     Assert(hostedBootstrap.Contains("SourceBootstrapInstaller.RunAsync", StringComparison.Ordinal)
            && hostedBootstrap.Contains("IsSourceLauncher", StringComparison.Ordinal)
            && hostedBootstrap.Contains("ParseSourceLaunch", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("BoundSourceLauncherPattern", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("LauncherSha256", StringComparison.Ordinal)
            && hostedBootstrap.Contains("ProductSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
            && !hostedBootstrap.Contains("BootstrapSha256", StringComparison.Ordinal)
            && hostedBootstrap.Contains("BootstrapHandoffDirectory", StringComparison.Ordinal)
@@ -1094,6 +1097,8 @@ static void TestReleaseDistributionDesign()
            && hostedBootstrap.Contains("RequireRestrictedAcl", StringComparison.Ordinal)
            && hostedBootstrap.Contains("RequireProtectedHandoff", StringComparison.Ordinal)
            && sourceBootstrap.Contains("VerifyLauncherMatchesArchiveAsync", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("DownloadPresignedSourceAsync", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("TemporaryRedirect", StringComparison.Ordinal)
            && sourceBootstrap.IndexOf("VerifyLauncherMatchesArchiveAsync", StringComparison.Ordinal)
               < sourceBootstrap.IndexOf("LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync", StringComparison.Ordinal)
            && sourceBootstrap.Contains("ResolveSourceArchive", StringComparison.Ordinal)
@@ -1139,13 +1144,14 @@ static void TestReleaseDistributionDesign()
            && legacyRemovalPrompt.Contains("LegacyOpticonRemoval.ConfirmationPhrase", StringComparison.Ordinal)
            && legacyRemovalPrompt.Contains("Tailscale and RustDesk are deliberately preserved", StringComparison.Ordinal),
         "legacy removal must be signed-launcher gated, typed-confirmed, exact-task/path bounded, and leave Tailscale/RustDesk untouched");
-    Assert(gateway.Contains("await fetch(", StringComparison.Ordinal)
-           && gateway.Contains("URL.createObjectURL(blob)", StringComparison.Ordinal)
-           && gateway.Contains("crypto.subtle.digest", StringComparison.Ordinal)
+    Assert(gateway.Contains("serveInvitationSourceLauncher", StringComparison.Ordinal)
+           && gateway.Contains("validSourceLauncherMetadata", StringComparison.Ordinal)
+           && gateway.Contains("No ZIP extraction or invitation paste is needed", StringComparison.Ordinal)
+           && gateway.Contains("install.download='Install-Opticon-", StringComparison.Ordinal)
+           && gateway.Contains("location.hash.slice(1)", StringComparison.Ordinal)
            && !gateway.Contains("buildBootstrapStarterCommand", StringComparison.Ordinal)
-           && !gateway.Contains("ExecutionPolicy", StringComparison.Ordinal)
-           && gateway.Contains("connect-src ", StringComparison.Ordinal),
-        "source invitation download no longer hashes both authenticated artifacts or retained an unsigned compatibility handoff");
+           && !gateway.Contains("ExecutionPolicy", StringComparison.Ordinal),
+        "source-only invitations must deliver one fragment-bound signed launcher without an unsigned script or manual handoff");
     Assert(sourceBootstrap.Contains("clearEnvironment: true", StringComparison.Ordinal)
            && sourceBootstrap.Contains("DirectHttp.CreateClient", StringComparison.Ordinal)
            && sourceBootstrap.Contains("maximumSize: 64 * 1024", StringComparison.Ordinal)

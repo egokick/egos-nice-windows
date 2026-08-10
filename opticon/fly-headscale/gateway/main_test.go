@@ -662,11 +662,12 @@ func TestAuthenticatedManifestPublicationIsAtomicPersistentAndReplaySafe(t *test
 func TestSourceOnlyManifestHasOneSignedArchivePerRelease(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	source := productionArtifact(bundleArtifact{
-		Product: "OpticonSource", Version: "1.2.0", Architecture: "source",
-		File: "opticon-source-1.2.0.zip", Size: 2048, SHA256: hash,
-		DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.0.zip",
+		Product: "OpticonSource", Version: "1.2.1", Architecture: "source",
+		File: "opticon-source-1.2.1.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.1/opticon-source-1.2.1.zip",
 		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
 		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+		SourceLauncherFile: "opticon-source-launcher-1.2.1.exe", SourceLauncherSize: 1024, SourceLauncherSHA256: hash,
 	})
 	manifest := artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{source}}
 	if err := validateArtifactManifest(manifest); err != nil {
@@ -681,18 +682,24 @@ func TestSourceOnlyManifestHasOneSignedArchivePerRelease(t *testing.T) {
 
 	duplicate := manifest
 	duplicate.Artifacts = append(duplicate.Artifacts, source)
-	duplicate.Artifacts[1].File = "opticon-source-1.2.1.zip"
-	duplicate.Artifacts[1].DownloadURL = "https://d111.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.1.zip"
+	duplicate.Artifacts[1].File = "opticon-source-1.2.1-copy.zip"
+	duplicate.Artifacts[1].DownloadURL = "https://d111.cloudfront.net/opticon/releases/1.2.1/opticon-source-1.2.1-copy.zip"
 	if err := validateArtifactManifest(duplicate); err == nil {
 		t.Fatal("source-only manifest accepted two archives for the same version")
 	}
 	withBundle := manifest
 	withBundle.Artifacts = append(withBundle.Artifacts, bundleArtifact{
-		Product: "OpticonBundle", Version: "1.2.0", Role: "ManagedOnly", Architecture: "x64",
-		File: "opticon-bundle-1.2.0-managed-win-x64.zip", Size: 2048, SHA256: hash,
+		Product: "OpticonBundle", Version: "1.2.1", Role: "ManagedOnly", Architecture: "x64",
+		File: "opticon-bundle-1.2.1-managed-win-x64.zip", Size: 2048, SHA256: hash,
 	})
 	if err := validateArtifactManifest(withBundle); err == nil {
 		t.Fatal("source-only manifest accepted a binary bundle")
+	}
+	missingLauncher := manifest
+	missingLauncher.Artifacts = append([]bundleArtifact(nil), manifest.Artifacts...)
+	missingLauncher.Artifacts[0].SourceLauncherSHA256 = ""
+	if err := validateArtifactManifest(missingLauncher); err == nil {
+		t.Fatal("source-only 1.2.1 manifest accepted missing one-click launcher metadata")
 	}
 }
 
@@ -818,13 +825,20 @@ func TestSourceOnlyInvitationPinsNoReleaseBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	hash := strings.Repeat("b", 64)
+	launcherBytes := []byte("signed-launcher-test-bytes")
+	launcherHash := sha256.Sum256(launcherBytes)
 	source := productionArtifact(bundleArtifact{
-		Product: "OpticonSource", Version: "1.2.0", Architecture: "source",
-		File: "opticon-source-1.2.0.zip", Size: 2048, SHA256: hash,
-		DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.0.zip",
+		Product: "OpticonSource", Version: "1.2.1", Architecture: "source",
+		File: "opticon-source-1.2.1.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.1/opticon-source-1.2.1.zip",
 		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
 		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+		SourceLauncherFile: "opticon-source-launcher-1.2.1.exe", SourceLauncherSize: int64(len(launcherBytes)),
+		SourceLauncherSHA256: hex.EncodeToString(launcherHash[:]),
 	})
+	if err := os.WriteFile(filepath.Join(root, source.SourceLauncherFile), launcherBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
 	encoded, _ := json.Marshal(artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{source}})
 	if err := os.WriteFile(filepath.Join(root, "manifest.json"), encoded, 0600); err != nil {
 		t.Fatal(err)
@@ -836,7 +850,7 @@ func TestSourceOnlyInvitationPinsNoReleaseBootstrap(t *testing.T) {
 		accessKeyID: "AKIAIOSFODNN7EXAMPLE", secretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 	}
 	g := &gateway{artifactDir: root, inviteDir: inviteDir, adminSecret: secret, nonces: make(map[string]time.Time), sourceSigner: signer, now: func() time.Time { return fixedNow }}
-	publicID := strings.Repeat("S", 24)
+	publicID := strings.Repeat("S", 32)
 	idHash := sha256.Sum256([]byte(publicID))
 	invite := productionInvite(hostedInvite{
 		DeviceName: "Source-only PC", Role: "ManagedOnly", ExpiresAt: fixedNow.Add(time.Hour),
@@ -854,12 +868,20 @@ func TestSourceOnlyInvitationPinsNoReleaseBootstrap(t *testing.T) {
 	}
 	landing := httptest.NewRecorder()
 	g.ServeHTTP(landing, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID, nil))
-	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), invitePublicPrefix+publicID+"/source") ||
+	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), invitePublicPrefix+publicID+"/launcher") ||
 		!strings.Contains(landing.Body.String(), "valid for 30 minutes") ||
-		!strings.Contains(landing.Body.String(), "OpticonSourceLauncher.exe") ||
+		!strings.Contains(landing.Body.String(), "No ZIP extraction or invitation paste is needed") ||
+		!strings.Contains(landing.Body.String(), "Install-Opticon-"+publicID+"--'+key+'--"+source.SourceLauncherSHA256+".exe") ||
 		strings.Contains(landing.Body.String(), source.DownloadURL) || strings.Contains(landing.Body.String(), "fetch(") ||
 		strings.Contains(landing.Body.String(), "crypto.subtle") || strings.Contains(landing.Body.String(), "opticon-bootstrap-") {
-		t.Fatalf("source-only landing is not limited to the archive and embedded launcher: %d %s", landing.Code, landing.Body.String())
+		t.Fatalf("source-only landing is not a one-click fragment-bound installer: %d %s", landing.Code, landing.Body.String())
+	}
+	launcher := httptest.NewRecorder()
+	g.ServeHTTP(launcher, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID+"/launcher", nil))
+	if launcher.Code != http.StatusOK || !bytes.Equal(launcher.Body.Bytes(), launcherBytes) ||
+		launcher.Header().Get("Cache-Control") != "no-store" ||
+		launcher.Header().Get("Content-Disposition") != "" {
+		t.Fatalf("signed source launcher returned %d with unexpected headers or bytes", launcher.Code)
 	}
 	redirect := httptest.NewRecorder()
 	g.ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID+"/source", nil))
@@ -871,7 +893,7 @@ func TestSourceOnlyInvitationPinsNoReleaseBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	if location.Scheme != "https" || location.Host != "opticon-test-bucket.s3.us-east-1.amazonaws.com" ||
-		location.Path != "/opticon/releases/1.2.0/opticon-source-1.2.0.zip" ||
+		location.Path != "/opticon/releases/1.2.1/opticon-source-1.2.1.zip" ||
 		location.Query().Get("X-Amz-Expires") != "1800" ||
 		location.Query().Get("X-Amz-Date") != "20260810T213000Z" ||
 		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(location.Query().Get("X-Amz-Signature")) {

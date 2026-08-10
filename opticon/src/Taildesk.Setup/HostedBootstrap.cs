@@ -6,7 +6,11 @@ using Taildesk.Shared;
 
 namespace Taildesk.Setup;
 
-internal sealed record SourceBootstrapRequest(string PublicId, string PrivateKey, string? SourceArchivePath);
+internal sealed record SourceBootstrapRequest(
+    string PublicId,
+    string PrivateKey,
+    string? SourceArchivePath,
+    string? LauncherSha256);
 
 internal static class HostedBootstrapper
 {
@@ -15,14 +19,22 @@ internal static class HostedBootstrapper
     internal const string InviteKeyEnvironmentVariable = "OPTICON_HOSTED_INVITE_KEY";
     private static readonly Regex PublicIdPattern = new("^[A-Za-z0-9_-]{32}$", RegexOptions.CultureInvariant);
     private static readonly Regex PrivateKeyPattern = new("^[A-Za-z0-9_-]{43}$", RegexOptions.CultureInvariant);
+    private static readonly Regex BoundSourceLauncherPattern = new(
+        "^Install-Opticon-(?<public>[A-Za-z0-9_-]{32})--(?<key>[A-Za-z0-9_-]{43})--(?<hash>[a-f0-9]{64})(?: \\([1-9][0-9]{0,2}\\))?\\.exe$",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// The source archive contains this small, publisher-signed launcher. It is
-    /// a fixed trust anchor, not a separately published release artifact: the
-    /// launcher verifies the invite and signed archive before it builds source.
+    /// The source archive contains this publisher-signed launcher. The invite
+    /// page may also serve the exact same bytes under an invitation-bound local
+    /// filename. The fragment key is placed into that filename by browser-side
+    /// JavaScript and is never sent to the gateway.
     /// </summary>
-    internal static bool IsSourceLauncher(string? executablePath) =>
-        string.Equals(Path.GetFileName(executablePath), "OpticonSourceLauncher.exe", StringComparison.OrdinalIgnoreCase);
+    internal static bool IsSourceLauncher(string? executablePath)
+    {
+        var name = Path.GetFileName(executablePath) ?? string.Empty;
+        return string.Equals(name, "OpticonSourceLauncher.exe", StringComparison.OrdinalIgnoreCase)
+               || BoundSourceLauncherPattern.IsMatch(name);
+    }
 
     internal static SourceBootstrapRequest ParseSourceLaunch(
         IReadOnlyList<string> arguments,
@@ -33,8 +45,11 @@ internal static class HostedBootstrapper
         if (arguments.Any(argument => !argument.StartsWith("--invite-url=", StringComparison.OrdinalIgnoreCase)
                                       && !argument.StartsWith("--source-archive=", StringComparison.OrdinalIgnoreCase)))
             throw new InvalidDataException("The source-only launcher accepts only --invite-url and --source-archive.");
+        var bound = BoundSourceLauncherPattern.Match(Path.GetFileName(executablePath) ?? string.Empty);
         var invitationUrl = ReadOptionalArgument(arguments, "--invite-url=")
-                            ?? SourceLauncherPrompt.ReadInvitationUrl();
+                            ?? (bound.Success
+                                ? $"{Origin}/opticon/i/{bound.Groups["public"].Value}#{bound.Groups["key"].Value}"
+                                : SourceLauncherPrompt.ReadInvitationUrl());
         var sourceArchive = ReadOptionalArgument(arguments, "--source-archive=");
         if (!Uri.TryCreate(invitationUrl, UriKind.Absolute, out var invitation)
             || invitation.Scheme != Uri.UriSchemeHttps || invitation.Port != 443
@@ -55,7 +70,8 @@ internal static class HostedBootstrapper
                 || !File.Exists(sourceArchive) || (File.GetAttributes(sourceArchive) & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidDataException("The selected source archive must be a regular local .zip file.");
         }
-        return new SourceBootstrapRequest(publicId, privateKey, sourceArchive);
+        return new SourceBootstrapRequest(publicId, privateKey, sourceArchive,
+            bound.Success ? bound.Groups["hash"].Value.ToLowerInvariant() : null);
     }
 
     internal static async Task LaunchSourceOnlyAsync(SourceBootstrapRequest bootstrap, Action<string> report)
@@ -64,6 +80,15 @@ internal static class HostedBootstrapper
                            ?? throw new InvalidOperationException("The Opticon source launcher path is unavailable.");
         if (!IsSourceLauncher(launcherPath))
             throw new InvalidDataException("The source-only installer was not started by the fixed Opticon source launcher.");
+        if (bootstrap.LauncherSha256 is not null)
+        {
+            await using var stream = new FileStream(launcherPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream)).ToLowerInvariant();
+            if (!CryptographicOperations.FixedTimeEquals(
+                    Convert.FromHexString(actual), Convert.FromHexString(bootstrap.LauncherSha256)))
+                throw new InvalidDataException("The downloaded Opticon launcher does not match its invitation filename.");
+        }
         await ProductSigning.VerifyAuthenticodeAsync(launcherPath);
         await SourceBootstrapInstaller.RunAsync(bootstrap, launcherPath, report);
     }
