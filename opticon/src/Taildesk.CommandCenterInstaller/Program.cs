@@ -33,6 +33,7 @@ internal static class Program
     private const string SignatureName = "command-center.manifest.sig";
     private const string InstallerResource = "Taildesk.CommandCenterInstaller.Install-CommandCenter.ps1";
     private const int MaximumManifestBytes = 1024 * 1024;
+    private const int MaximumInstallerDiagnosticCharacters = 4096;
     private const long MaximumPackageBytes = 2L * 1024 * 1024 * 1024;
     private static readonly Regex VersionPattern =
         new("^[0-9]+\\.[0-9]+\\.[0-9]+$", RegexOptions.CultureInvariant);
@@ -331,7 +332,9 @@ internal static class Program
             FileName = powerShell,
             WorkingDirectory = staging,
             UseShellExecute = false,
-            CreateNoWindow = true
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
         };
         start.ArgumentList.Add("-NoLogo");
         start.ArgumentList.Add("-NoProfile");
@@ -374,8 +377,28 @@ internal static class Program
 
         using var process = Process.Start(start)
             ?? throw new InvalidOperationException("Windows could not start the protected Opticon installer.");
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
+        var output = await standardOutput;
+        var error = await standardError;
+        if (process.ExitCode != 0)
+        {
+            var diagnostic = BoundedInstallerDiagnostic(error, output);
+            throw new InvalidOperationException(
+                $"The protected Opticon installer returned {process.ExitCode}." +
+                (string.IsNullOrWhiteSpace(diagnostic) ? string.Empty : $"\n\n{diagnostic}"));
+        }
         return process.ExitCode;
+    }
+
+    private static string BoundedInstallerDiagnostic(string standardError, string standardOutput)
+    {
+        var value = string.IsNullOrWhiteSpace(standardError) ? standardOutput : standardError;
+        value = value.Trim();
+        if (value.Length > MaximumInstallerDiagnosticCharacters)
+            value = value[^MaximumInstallerDiagnosticCharacters..];
+        return value;
     }
 
     private static void SetEnvironment(ProcessStartInfo start, string key, string value)

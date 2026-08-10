@@ -2039,6 +2039,8 @@ static void TestOpenSshRecoveryDesign()
            && commandCenterInstaller.Contains("CreateProtectedStagingDirectory", StringComparison.Ordinal)
            && commandCenterInstaller.Contains("-ExecutionPolicy", StringComparison.Ordinal)
            && commandCenterInstaller.Contains("RemoteSigned", StringComparison.Ordinal)
+           && commandCenterInstaller.Contains("RedirectStandardError = true", StringComparison.Ordinal)
+           && commandCenterInstaller.Contains("BoundedInstallerDiagnostic", StringComparison.Ordinal)
            && !commandCenterInstaller.Contains("Bypass", StringComparison.Ordinal),
         "the only command-center entry point must bind manifest verification to protected staging and fixed PowerShell policy");
     Assert(buildScript.Contains("SkipTargetReleaseDeployment", StringComparison.Ordinal)
