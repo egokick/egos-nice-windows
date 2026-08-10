@@ -645,49 +645,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task CancelInviteAsync(InviteRecord invite, CancellationToken cancellationToken = default)
     {
         RequirePrimary();
-        var bundlePath = string.Empty;
-        var hostedRemoved = true;
-        await _state.InviteGate.WaitAsync(cancellationToken);
-        try
-        {
-            if (invite.RedeemedAt.HasValue) throw new InvalidOperationException("A redeemed invitation cannot be canceled; change or remove the enrolled device instead.");
-            await _headscale.RevokeKeyAsync(invite.TailscaleKeyId, cancellationToken);
-            if (!await new InviteBundleService(_state, _headscale).RevokePendingKeysAsync(invite, cancellationToken))
-                throw new InvalidOperationException(
-                    "A superseded Headscale key could not be revoked. Cancellation remains pending and will be retried.");
-            if (invite.RedeemedAt.HasValue) throw new InvalidOperationException("The device completed enrollment before cancellation; the invitation was not canceled.");
-            if (!string.IsNullOrWhiteSpace(invite.HostedInviteIdHash))
-            {
-                try
-                {
-                    await new HostedInviteClient(_state).DeleteAsync(invite.HostedInviteIdHash, cancellationToken);
-                    invite.HostedInviteIdHash = string.Empty;
-                    invite.HostedUrlProtected = string.Empty;
-                }
-                catch (Exception exception)
-                {
-                    hostedRemoved = false;
-                    Log($"The network key was revoked, but Fly link cleanup will need retrying: {exception.Message}");
-                }
-            }
-            bundlePath = invite.BundlePath;
-            invite.ExpiresAt = DateTimeOffset.UtcNow;
-            invite.BundlePath = string.Empty;
-            await _state.SaveAsync(cancellationToken);
-        }
-        finally
-        {
-            _state.InviteGate.Release();
-        }
-        var bundleDeleted = true;
-        try { if (File.Exists(bundlePath)) File.Delete(bundlePath); }
-        catch (Exception exception)
-        {
-            bundleDeleted = false;
-            Log($"Invitation was canceled, but its legacy local bundle could not be deleted ({bundlePath}): {exception.Message}");
-        }
+        var result = await new InviteBundleService(_state, _headscale).CancelAsync(invite, cancellationToken);
         ReplaceInvites();
-        Log(hostedRemoved && bundleDeleted
+        Log(result.HostedLinkRemoved && result.LegacyBundleDeleted
             ? $"Canceled the invitation for {invite.DeviceName}; its link and network key are disabled."
             : $"Canceled the network key for {invite.DeviceName}; retry cancellation to finish any pending cleanup.");
     }

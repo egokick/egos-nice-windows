@@ -47,6 +47,7 @@ var tests = new (string Name, Action Body)[]
     ("scheduled transfers parse standard cron and calculate the next local occurrence", TestScheduledTransferCron),
     ("scheduled transfer file filters are bounded and predictable", TestScheduledTransferFilters),
     ("scheduled transfers expose UI history/retry and a complete CLI surface", TestScheduledTransferSurface),
+    ("CLI invitation creation and cancellation share the UI lifecycle", TestInviteCliSurface),
     ("scheduled transfer retention and destructive operations fail closed", TestScheduledTransferSecurityPolicy),
     ("Admin media, local-file, and invitation trust boundaries are enforced", TestAdminTrustBoundarySource),
     ("path guard permits a child and blocks traversal", TestPathGuard),
@@ -235,6 +236,33 @@ static void TestScheduledTransferSurface()
            && !engine.Contains("File.Delete(localSource)", StringComparison.Ordinal)
            && !engine.Contains("_agents.DeleteAsync", StringComparison.Ordinal),
         "Move must prove identical bytes and delete the open local source handle; pathname remote deletion must remain disabled");
+}
+
+static void TestInviteCliSurface()
+{
+    var cli = ReadSource("src", "Taildesk.Cli", "Program.cs");
+    var service = ReadSource("src", "Taildesk.Admin", "InviteBundleService.cs");
+    var viewModel = ReadSource("src", "Taildesk.Admin", "MainViewModel.cs");
+    Assert(cli.Contains("\"invite\" or \"invites\"", StringComparison.Ordinal)
+           && cli.Contains("\"create\" => await RunInviteCreateAsync", StringComparison.Ordinal)
+           && cli.Contains("\"list\" => await RunInviteListAsync", StringComparison.Ordinal)
+           && cli.Contains("\"cancel\" or \"revoke\"", StringComparison.Ordinal)
+           && cli.Contains("new InviteBundleService(state, new HeadscaleApiClient(state))", StringComparison.Ordinal),
+        "the CLI must expose create/list/cancel and reuse the production invitation service");
+    Assert(cli.Contains("roots.AddRange([\"Desktop\", \"Documents\", \"Downloads\", \"Pictures\", \"Videos\"])", StringComparison.Ordinal)
+           && cli.Contains("Invitation cancellation requires --yes", StringComparison.Ordinal)
+           && cli.Contains("all five standard profile folders are shared", StringComparison.Ordinal)
+           && cli.Contains("is a secret and is printed only by invite create", StringComparison.Ordinal),
+        "the CLI invitation defaults, destructive confirmation, or secret-output contract regressed");
+
+    var cancel = service.IndexOf("Task<InviteCancellationResult> CancelAsync", StringComparison.Ordinal);
+    var revokeKey = service.IndexOf("_headscale.RevokeKeyAsync", cancel, StringComparison.Ordinal);
+    var deleteHosted = service.IndexOf("HostedInviteClient(_state).DeleteAsync", revokeKey, StringComparison.Ordinal);
+    var expire = service.IndexOf("record.ExpiresAt = DateTimeOffset.UtcNow", deleteHosted, StringComparison.Ordinal);
+    Assert(cancel >= 0 && revokeKey > cancel && deleteHosted > revokeKey && expire > deleteHosted,
+        "shared cancellation must revoke the network key, remove the hosted link, then durably expire the record");
+    Assert(viewModel.Contains("InviteBundleService(_state, _headscale).CancelAsync", StringComparison.Ordinal),
+        "the UI and CLI must share one invitation cancellation implementation");
 }
 
 static void TestScheduledTransferSecurityPolicy()

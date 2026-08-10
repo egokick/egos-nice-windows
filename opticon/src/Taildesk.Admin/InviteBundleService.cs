@@ -5,6 +5,7 @@ using Taildesk.Shared;
 namespace Taildesk.Admin;
 
 public sealed record InviteBundleResult(InviteRecord Record, string InvitationUrl);
+public sealed record InviteCancellationResult(bool HostedLinkRemoved, bool LegacyBundleDeleted);
 
 public sealed class InviteBundleService
 {
@@ -164,6 +165,66 @@ public sealed class InviteBundleService
             try { await _headscale.RevokeKeyAsync(authKey.Id, CancellationToken.None); } catch { }
             throw;
         }
+    }
+
+    public async Task<InviteCancellationResult> CancelAsync(
+        InviteRecord record,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        if (_state.Config.Mode != AdminMode.Primary)
+            throw new InvalidOperationException("Only the primary command center can cancel invitations.");
+
+        var bundlePath = string.Empty;
+        var hostedRemoved = true;
+        await _state.InviteGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (record.RedeemedAt.HasValue)
+                throw new InvalidOperationException("A redeemed invitation cannot be canceled; change or remove the enrolled device instead.");
+
+            await _headscale.RevokeKeyAsync(record.TailscaleKeyId, cancellationToken);
+            if (!await RevokePendingKeysAsync(record, cancellationToken))
+                throw new InvalidOperationException(
+                    "A superseded Headscale key could not be revoked. Cancellation remains pending and will be retried.");
+            if (record.RedeemedAt.HasValue)
+                throw new InvalidOperationException("The device completed enrollment before cancellation; the invitation was not canceled.");
+
+            if (!string.IsNullOrWhiteSpace(record.HostedInviteIdHash))
+            {
+                try
+                {
+                    await new HostedInviteClient(_state).DeleteAsync(record.HostedInviteIdHash, cancellationToken);
+                    record.HostedInviteIdHash = string.Empty;
+                    record.HostedUrlProtected = string.Empty;
+                }
+                catch
+                {
+                    hostedRemoved = false;
+                }
+            }
+
+            bundlePath = record.BundlePath;
+            record.ExpiresAt = DateTimeOffset.UtcNow;
+            record.BundlePath = string.Empty;
+            await _state.SaveAsync(cancellationToken);
+        }
+        finally
+        {
+            _state.InviteGate.Release();
+        }
+
+        var bundleDeleted = true;
+        try
+        {
+            if (File.Exists(bundlePath)) File.Delete(bundlePath);
+        }
+        catch
+        {
+            bundleDeleted = false;
+        }
+
+        return new InviteCancellationResult(hostedRemoved, bundleDeleted);
     }
 
     public async Task<bool> ExtendAsync(

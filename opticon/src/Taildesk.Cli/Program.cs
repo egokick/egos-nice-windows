@@ -157,7 +157,7 @@ internal static class Program
     {
         if (args.Count == 0) return false;
         var command = args[0].ToLowerInvariant();
-        return command is "devices" or "status" or "update" or "schedule" or "transcriptions"
+        return command is "devices" or "status" or "update" or "invite" or "schedule" or "transcriptions"
                && args.Skip(1).Any(value => value.Equals("--json", StringComparison.Ordinal));
     }
 
@@ -218,10 +218,124 @@ internal sealed class CliApplication
             "status" => await RunStatusAsync(args[1..], cancellationToken),
             "ssh" => await RunSshAsync(args[1..], cancellationToken),
             "update" => await RunUpdateAsync(args[1..], cancellationToken),
+            "invite" or "invites" => await RunInviteAsync(args[1..], cancellationToken),
             "schedule" => await new ScheduledTransferCli().RunAsync(args[1..], cancellationToken),
             "transcriptions" or "transcripts" => await new TranscriptionCli().RunAsync(args[1..], cancellationToken),
             "version" or "--version" or "-v" => RunVersion(args[1..]),
             _ => throw CliException.Usage($"Unknown command '{Clean(args[0])}'. Run 'opticon help' for usage.")
+        };
+    }
+
+    private async Task<int> RunInviteAsync(string[] args, CancellationToken cancellationToken)
+    {
+        if (args.Length == 0 || IsHelp(args[0]))
+        {
+            WriteInviteHelp();
+            return 0;
+        }
+
+        return args[0].ToLowerInvariant() switch
+        {
+            "create" => await RunInviteCreateAsync(ParseInviteCreateOptions(args[1..]), cancellationToken),
+            "list" => await RunInviteListAsync(ParseJsonOnly(args[1..], "invite list"), cancellationToken),
+            "cancel" or "revoke" => await RunInviteCancelAsync(ParseInviteCancelOptions(args[1..]), cancellationToken),
+            _ => throw CliException.Usage($"Unknown invite command '{Clean(args[0])}'. Run 'opticon invite --help' for usage.")
+        };
+    }
+
+    private static async Task<int> RunInviteCreateAsync(
+        InviteCreateOptions options,
+        CancellationToken cancellationToken)
+    {
+        var state = await LoadStateAsync(requireSetup: true, cancellationToken);
+        RequirePrimary(state.Config, "Invitation creation");
+        var service = new InviteBundleService(state, new HeadscaleApiClient(state));
+        var progress = new InlineProgress(message => Console.Error.WriteLine(Clean(message)));
+        var result = await service.CreateAsync(
+            options.DeviceName,
+            options.Role,
+            options.AdvertiseExitNode,
+            options.AllowedRoots,
+            progress,
+            cancellationToken);
+
+        var output = ToInviteSummary(result.Record, result.InvitationUrl);
+        if (options.Json)
+            WriteJson(new InviteEnvelope(1, true, "invite.create", output));
+        else
+        {
+            Console.Out.WriteLine($"Invitation created for {Clean(output.DeviceName)} (Opticon {output.ReleaseVersion}).");
+            Console.Out.WriteLine(output.Url);
+            Console.Out.WriteLine($"Expires: {output.ExpiresAt.LocalDateTime:g}");
+        }
+        return 0;
+    }
+
+    private static async Task<int> RunInviteListAsync(bool json, CancellationToken cancellationToken)
+    {
+        var state = await LoadStateAsync(requireSetup: true, cancellationToken);
+        RequirePrimary(state.Config, "Invitation listing");
+        var invites = state.Config.Invites
+            .OrderByDescending(invite => invite.CreatedAt)
+            .Select(invite => ToInviteSummary(invite, url: null))
+            .ToArray();
+
+        if (json)
+        {
+            WriteJson(new InviteListEnvelope(1, true, "invite.list", invites));
+            return 0;
+        }
+        if (invites.Length == 0)
+        {
+            Console.Out.WriteLine("No invitations have been created.");
+            return 0;
+        }
+
+        Console.Out.WriteLine("ID\tDEVICE\tSTATUS\tVERSION\tROLE\tEXPIRES");
+        foreach (var invite in invites)
+            Console.Out.WriteLine($"{invite.Id:D}\t{Clean(invite.DeviceName)}\t{invite.Status}\t{invite.ReleaseVersion}\t{invite.Role}\t{invite.ExpiresAt.LocalDateTime:g}");
+        return 0;
+    }
+
+    private static async Task<int> RunInviteCancelAsync(
+        InviteCancelOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (!options.Confirmed)
+            throw CliException.Usage("Invitation cancellation requires --yes because it immediately revokes the link and one-use network key.");
+
+        var state = await LoadStateAsync(requireSetup: true, cancellationToken);
+        RequirePrimary(state.Config, "Invitation cancellation");
+        var invite = SelectInvite(state.Config.Invites, options.Selector);
+        var result = await new InviteBundleService(state, new HeadscaleApiClient(state))
+            .CancelAsync(invite, cancellationToken);
+        var cleanupComplete = result.HostedLinkRemoved && result.LegacyBundleDeleted;
+        var output = new InviteCancellation(invite.Id, invite.DeviceName, cleanupComplete);
+        if (options.Json)
+            WriteJson(new InviteEnvelope<InviteCancellation>(1, true, "invite.cancel", output));
+        else
+            Console.Out.WriteLine(cleanupComplete
+                ? $"Canceled invitation {invite.Id:D} for {Clean(invite.DeviceName)}. Its link and network key are disabled."
+                : $"Canceled the network key for {Clean(invite.DeviceName)}; run cancel again to retry remaining cleanup.");
+        return cleanupComplete ? 0 : 1;
+    }
+
+    private static InviteRecord SelectInvite(IReadOnlyList<InviteRecord> invites, string selector)
+    {
+        if (Guid.TryParse(selector, out var id))
+        {
+            return invites.SingleOrDefault(invite => invite.Id == id)
+                   ?? throw new CliException("invite_not_found", "No invitation has that ID.", 1);
+        }
+
+        var matches = invites
+            .Where(invite => invite.DeviceName.Equals(selector, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        return matches.Length switch
+        {
+            1 => matches[0],
+            0 => throw new CliException("invite_not_found", "No invitation has that exact device name.", 1),
+            _ => throw new CliException("ambiguous_invite", "More than one invitation has that device name; use the invitation ID.", 1)
         };
     }
 
@@ -701,8 +815,101 @@ internal sealed class CliApplication
         return new UpdateOptions(args[0], confirmed, json);
     }
 
+    private static InviteCreateOptions ParseInviteCreateOptions(string[] args)
+    {
+        string? deviceName = null;
+        var role = DeviceRole.ManagedOnly;
+        var advertiseExitNode = false;
+        var json = false;
+        var roots = new List<string>();
+        for (var index = 0; index < args.Length; index++)
+        {
+            switch (args[index].ToLowerInvariant())
+            {
+                case "--name":
+                    if (++index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                        throw CliException.Usage("--name requires a non-empty device name.");
+                    if (deviceName is not null) throw CliException.Usage("--name may be specified only once.");
+                    deviceName = args[index].Trim();
+                    break;
+                case "--role":
+                    if (++index >= args.Length) throw CliException.Usage("--role requires managed or controller.");
+                    role = args[index].ToLowerInvariant() switch
+                    {
+                        "managed" or "managed-only" => DeviceRole.ManagedOnly,
+                        "controller" or "controller-and-managed" => DeviceRole.ControllerAndManaged,
+                        _ => throw CliException.Usage("--role must be managed or controller.")
+                    };
+                    break;
+                case "--exit-node":
+                    advertiseExitNode = true;
+                    break;
+                case "--root":
+                    if (++index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                        throw CliException.Usage("--root requires Desktop, Documents, Downloads, Pictures, or Videos.");
+                    roots.Add(CanonicalInviteRoot(args[index]));
+                    break;
+                case "--json":
+                    json = true;
+                    break;
+                default:
+                    throw CliException.Usage($"Unknown option '{Clean(args[index])}' for invite create.");
+            }
+        }
+
+        if (deviceName is null)
+            throw CliException.Usage("Usage: opticon invite create --name <device-name> [--role managed|controller] [--exit-node] [--root <folder>] [--json]");
+        if (roots.Count == 0)
+            roots.AddRange(["Desktop", "Documents", "Downloads", "Pictures", "Videos"]);
+        return new InviteCreateOptions(deviceName, role, advertiseExitNode, roots.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), json);
+    }
+
+    private static InviteCancelOptions ParseInviteCancelOptions(string[] args)
+    {
+        if (args.Length == 0 || string.IsNullOrWhiteSpace(args[0]) || args[0].StartsWith('-'))
+            throw CliException.Usage("Usage: opticon invite cancel <invite-id|exact-device-name> --yes [--json]");
+        var confirmed = false;
+        var json = false;
+        for (var index = 1; index < args.Length; index++)
+        {
+            switch (args[index].ToLowerInvariant())
+            {
+                case "--yes" when !confirmed: confirmed = true; break;
+                case "--json" when !json: json = true; break;
+                case "--yes":
+                case "--json":
+                    throw CliException.Usage($"{args[index]} may be specified only once.");
+                default: throw CliException.Usage($"Unknown option '{Clean(args[index])}' for invite cancel.");
+            }
+        }
+        return new InviteCancelOptions(args[0], confirmed, json);
+    }
+
+    private static string CanonicalInviteRoot(string value) =>
+        value.Trim().ToLowerInvariant() switch
+        {
+            "desktop" => "Desktop",
+            "documents" => "Documents",
+            "downloads" => "Downloads",
+            "pictures" => "Pictures",
+            "videos" => "Videos",
+            _ => throw CliException.Usage("--root requires Desktop, Documents, Downloads, Pictures, or Videos.")
+        };
+
     private static bool IsHelp(string value) =>
         value is "help" or "--help" or "-h";
+
+    private static void WriteInviteHelp() => Console.Out.WriteLine(
+        """
+        Usage:
+          opticon invite create --name <device-name> [--role managed|controller]
+              [--exit-node] [--root <folder>]... [--json]
+          opticon invite list [--json]
+          opticon invite cancel <invite-id|exact-device-name> --yes [--json]
+
+        Creation prints the secret one-click installer URL once. With no --root,
+        Desktop, Documents, Downloads, Pictures, and Videos are shared.
+        """);
 
     private static void WriteHelp()
     {
@@ -717,6 +924,10 @@ internal sealed class CliApplication
               opticon ssh <device> [--minutes 5..480] --command <command>
               opticon ssh <device> [--minutes 5..480] --powershell <script|->
               opticon update <device> --yes [--json]
+              opticon invite create --name <device-name> [--role managed|controller]
+                  [--exit-node] [--root <folder>]... [--json]
+              opticon invite list [--json]
+              opticon invite cancel <invite-id|exact-device-name> --yes [--json]
               opticon transcriptions devices [--json]
               opticon transcriptions sync --device <device> --destination <folder>
                   --start <ISO-8601> --end <ISO-8601> [--metadata-only] [--move] [--json]
@@ -745,6 +956,11 @@ internal sealed class CliApplication
 
             Updates use the guarded Agent/Guardian transaction and require verified
             RustDesk recovery. Legacy one-time maintenance bootstrap remains UI-only.
+
+            Invitations use the same signed source release, one-use Headscale key,
+            encrypted hosted payload, and one-click launcher link as the UI. If no
+            --root is supplied, all five standard profile folders are shared. The URL
+            is a secret and is printed only by invite create.
 
             Scheduled transfers support standard five-field cron expressions. Friendly
             --every options generate cron without requiring cron knowledge. Move mode
@@ -831,9 +1047,27 @@ internal sealed class CliApplication
     private static void WriteJson<T>(T value) =>
         Console.Out.WriteLine(JsonSerializer.Serialize(value, JsonDefaults.Options));
 
+    private static InviteSummary ToInviteSummary(InviteRecord invite, string? url) => new(
+        invite.Id,
+        invite.DeviceName,
+        invite.Status,
+        invite.ReleaseVersion,
+        invite.Role,
+        invite.AdvertiseExitNode,
+        invite.CreatedAt,
+        invite.ExpiresAt,
+        url);
+
     private sealed record SelectorOptions(string Selector, bool Json);
     private sealed record SshOptions(string Selector, int Minutes, string? Command, string? PowerShell);
     private sealed record UpdateOptions(string Selector, bool Confirmed, bool Json);
+    private sealed record InviteCreateOptions(
+        string DeviceName,
+        DeviceRole Role,
+        bool AdvertiseExitNode,
+        IReadOnlyList<string> AllowedRoots,
+        bool Json);
+    private sealed record InviteCancelOptions(string Selector, bool Confirmed, bool Json);
 
     private sealed record DevicesEnvelope(
         int SchemaVersion,
@@ -856,6 +1090,42 @@ internal sealed class CliApplication
         string CurrentVersion,
         string? TargetVersion,
         SafeUpdateStatus? Status);
+
+    private sealed record InviteEnvelope(
+        int SchemaVersion,
+        bool Ok,
+        string Command,
+        InviteSummary Invite);
+
+    private sealed record InviteEnvelope<T>(
+        int SchemaVersion,
+        bool Ok,
+        string Command,
+        T Invite);
+
+    private sealed record InviteListEnvelope(
+        int SchemaVersion,
+        bool Ok,
+        string Command,
+        IReadOnlyList<InviteSummary> Invites);
+
+    private sealed record InviteSummary(
+        Guid Id,
+        string DeviceName,
+        string Status,
+        string ReleaseVersion,
+        DeviceRole Role,
+        bool AdvertiseExitNode,
+        DateTimeOffset CreatedAt,
+        DateTimeOffset ExpiresAt,
+        string? Url);
+
+    private sealed record InviteCancellation(Guid Id, string DeviceName, bool CleanupComplete);
+
+    private sealed class InlineProgress(Action<string> report) : IProgress<string>
+    {
+        public void Report(string value) => report(value);
+    }
 
     private sealed record DeviceSummary(
         Guid Id,
