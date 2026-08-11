@@ -31,6 +31,7 @@ internal static class LegacyOpticonRemoval
     private const uint Synchronize = 0x00100000;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
+    private const uint FileShareDelete = 0x00000004;
     private const uint OpenExisting = 3;
     private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint FileFlagOpenReparsePoint = 0x00200000;
@@ -287,8 +288,29 @@ internal static class LegacyOpticonRemoval
 
     private static void RequirePathStillHasIdentity(PinnedEntry expected)
     {
-        using var observed = OpenPinnedEntry(expected.Path, expected.IsDirectory, expected.Depth);
-        if (observed.Identity != expected.Identity)
+        // The retained pinned handle requests DELETE while deliberately
+        // withholding FILE_SHARE_DELETE. Reopening through OpenPinnedEntry
+        // therefore conflicts with our own handle. The observation handle
+        // requests only attributes and shares delete so it is compatible with
+        // the retained handle, while that retained handle still prevents any
+        // third party from opening the path for deletion or replacement.
+        using var observed = CreateFile(
+            expected.Path,
+            FileReadAttributes | Synchronize,
+            FileShareRead | FileShareWrite | FileShareDelete,
+            IntPtr.Zero,
+            OpenExisting,
+            FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+            IntPtr.Zero);
+        if (observed.IsInvalid)
+            throw new IOException(
+                $"Could not re-observe a pinned Opticon path safely (Win32 error {Marshal.GetLastWin32Error()}).");
+        var information = ReadPinnedInformation(observed);
+        var isDirectory = (information.FileAttributes & FileAttributeDirectory) != 0;
+        var identity = new DirectoryIdentity(
+            information.VolumeSerialNumber,
+            ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow);
+        if (isDirectory != expected.IsDirectory || identity != expected.Identity)
             throw new InvalidDataException("An existing Opticon directory changed while its cleanup boundary was being established.");
     }
 
