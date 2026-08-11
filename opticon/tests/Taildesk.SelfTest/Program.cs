@@ -1,6 +1,8 @@
 using System.IO.Compression;
 using System.Reflection;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text.Json;
 using System.Xml.Linq;
 using Taildesk.Shared;
@@ -779,6 +781,53 @@ static void TestSourceUpdateRuntime()
            && DotNetSdkPolicy.InventoryContainsAcceptedSdk("9.0.999 [x]\n10.0.302 [y]")
            && !DotNetSdkPolicy.InventoryContainsAcceptedSdk("9.0.999 [x]\n11.0.100 [y]"),
         "the stable .NET 10 SDK wildcard policy accepted an invalid major or rejected a valid 10.x SDK");
+
+    var createDirectorySecurity = typeof(SourceBuildProvenance).GetMethod(
+        "CreateRestrictedDirectorySecurity",
+        BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("The provenance ACL factory is missing.");
+    var requireDirectorySecurity = typeof(SourceBuildProvenance).GetMethod(
+        "RequireRestrictedSecurity",
+        BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("The provenance ACL validator is missing.");
+    var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+    const InheritanceFlags directoryInheritance =
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+
+    var safeReadOnlyAcl = (DirectorySecurity)createDirectorySecurity.Invoke(null, null)!;
+    safeReadOnlyAcl.AddAccessRule(new FileSystemAccessRule(
+        worldSid,
+        FileSystemRights.Read,
+        directoryInheritance,
+        PropagationFlags.None,
+        AccessControlType.Allow));
+    safeReadOnlyAcl.AddAccessRule(new FileSystemAccessRule(
+        worldSid,
+        FileSystemRights.Write,
+        directoryInheritance,
+        PropagationFlags.None,
+        AccessControlType.Deny));
+    requireDirectorySecurity.Invoke(null, new object[] { safeReadOnlyAcl, true });
+
+    var unsafeWritableAcl = (DirectorySecurity)createDirectorySecurity.Invoke(null, null)!;
+    unsafeWritableAcl.AddAccessRule(new FileSystemAccessRule(
+        worldSid,
+        FileSystemRights.Write,
+        directoryInheritance,
+        PropagationFlags.None,
+        AccessControlType.Allow));
+    var rejectedUntrustedWriter = false;
+    try
+    {
+        requireDirectorySecurity.Invoke(null, new object[] { unsafeWritableAcl, true });
+    }
+    catch (TargetInvocationException exception)
+        when (exception.InnerException is UnauthorizedAccessException)
+    {
+        rejectedUntrustedWriter = true;
+    }
+    Assert(rejectedUntrustedWriter,
+        "the provenance ACL validator accepted mutation rights outside SYSTEM and Administrators");
 
     var journal = new UpdateJournal
     {

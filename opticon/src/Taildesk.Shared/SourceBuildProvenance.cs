@@ -1009,19 +1009,8 @@ public static class SourceBuildProvenance
     {
         var security = new FileInfo(ProvenanceLockFile).GetAccessControl(
             AccessControlSections.Owner | AccessControlSections.Access);
-        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-        if (owner is null || (!owner.Equals(SystemSid) && !owner.Equals(AdministratorsSid)))
-            throw new UnauthorizedAccessException("The source-build provenance lock owner is not SYSTEM or Administrators.");
-        if (!security.AreAccessRulesProtected)
-            throw new UnauthorizedAccessException("The source-build provenance lock inherits unsafe permissions.");
-        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
-            .OfType<FileSystemAccessRule>().ToArray();
-        if (rules.Length != 2
-            || rules.Any(rule => rule.IsInherited || rule.AccessControlType != AccessControlType.Allow)
-            || !HasExactRule(rules, SystemSid, FileSystemRights.FullControl, InheritanceFlags.None)
-            || !HasExactRule(rules, AdministratorsSid, FileSystemRights.FullControl, InheritanceFlags.None))
-            throw new UnauthorizedAccessException(
-                "The source-build provenance lock is not restricted to SYSTEM and Administrators.");
+        RequireTrustedWritersSecurity(security, isDirectory: false,
+            "The source-build provenance lock");
     }
 
     private static void ValidateFileSet(IEnumerable<InstalledSourceFile> files)
@@ -1097,23 +1086,46 @@ public static class SourceBuildProvenance
 
     private static void RequireRestrictedSecurity(FileSystemSecurity security, bool isDirectory)
     {
+        RequireTrustedWritersSecurity(security, isDirectory,
+            "The machine source-build provenance ACL");
+    }
+
+    private static void RequireTrustedWritersSecurity(
+        FileSystemSecurity security,
+        bool isDirectory,
+        string description)
+    {
         var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
         if (owner is null || (!owner.Equals(SystemSid) && !owner.Equals(AdministratorsSid)))
-            throw new UnauthorizedAccessException("The machine source-build provenance owner is not SYSTEM or Administrators.");
+            throw new UnauthorizedAccessException($"{description} owner is not SYSTEM or Administrators.");
         if (!security.AreAccessRulesProtected)
-            throw new UnauthorizedAccessException("The machine source-build provenance ACL inherits unsafe permissions.");
+            throw new UnauthorizedAccessException($"{description} inherits unsafe permissions.");
         var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
             .OfType<FileSystemAccessRule>().ToArray();
         var inheritance = isDirectory
             ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
             : InheritanceFlags.None;
-        if (rules.Length != 3
-            || rules.Any(rule => rule.IsInherited || rule.AccessControlType != AccessControlType.Allow)
+        if (rules.Length < 2
+            || rules.Any(rule => rule.IsInherited)
             || !HasExactRule(rules, SystemSid, FileSystemRights.FullControl, inheritance)
             || !HasExactRule(rules, AdministratorsSid, FileSystemRights.FullControl, inheritance)
-            || !HasExactRule(rules, UsersSid, FileSystemRights.ReadAndExecute, inheritance))
+            || rules.Any(GrantsUntrustedMutationRights))
             throw new UnauthorizedAccessException(
-                "The machine source-build provenance ACL is not the exact integrity-protected, read-only-public ACL.");
+                $"{description} grants mutation rights outside SYSTEM and Administrators.");
+    }
+
+    private static bool GrantsUntrustedMutationRights(FileSystemAccessRule rule)
+    {
+        if (rule.AccessControlType != AccessControlType.Allow
+            || rule.IdentityReference.Equals(SystemSid)
+            || rule.IdentityReference.Equals(AdministratorsSid))
+            return false;
+        const FileSystemRights mutationRights = FileSystemRights.Write
+                                                | FileSystemRights.Delete
+                                                | FileSystemRights.DeleteSubdirectoriesAndFiles
+                                                | FileSystemRights.ChangePermissions
+                                                | FileSystemRights.TakeOwnership;
+        return (rule.FileSystemRights & mutationRights) != 0;
     }
 
     private static bool HasExactRule(
