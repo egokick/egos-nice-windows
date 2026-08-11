@@ -8,10 +8,19 @@ param(
     [string]$ProductCertificateThumbprint = '',
     [string]$Rfc3161TimestampUrl = '',
     [string]$SignToolPath = '',
-    [switch]$CheckOnly
+    [switch]$CheckOnly,
+    # Build/upload/verify the immutable source release, but leave the live
+    # invitation manifest untouched until a later explicit commit.
+    [switch]$StageOnly,
+    # Commit the exact local-or-S3 source stage receipt without rebuilding or
+    # uploading a replacement archive.
+    [switch]$CommitStaged
 )
 
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -lt [Version]'7.1') {
+    throw 'The Opticon target-release publisher requires PowerShell 7.1 or newer. Run this script with pwsh.exe, not Windows PowerShell.'
+}
 Add-Type -AssemblyName System.Net.Http
 $opticonRoot = Split-Path $PSScriptRoot -Parent
 $publisher = Join-Path $opticonRoot 'fly-headscale\scripts\Publish-OpticonSourceRelease.ps1'
@@ -113,6 +122,12 @@ function Assert-ReleaseSourceIsPublishable {
 
 if ([string]::IsNullOrWhiteSpace($Version)) { $Version = Get-SourceVersion }
 Assert-StableVersion $Version
+if ($StageOnly -and $CommitStaged) {
+    throw '-StageOnly and -CommitStaged cannot be combined.'
+}
+if (($StageOnly -or $CommitStaged) -and $CheckOnly) {
+    throw '-StageOnly and -CommitStaged cannot be combined with -CheckOnly.'
+}
 $manifest = $null
 $manifestReadFailure = $null
 try { $manifest = Get-ReleaseManifest } catch { $manifestReadFailure = $_ }
@@ -132,28 +147,74 @@ if ($newer.Count -ne 0) {
 }
 
 if ($CheckOnly) {
-    $reason = if ($null -ne $manifestReadFailure) { " The live manifest is unavailable: $($manifestReadFailure.Exception.Message)" } else { '' }
-    Write-Host "Opticon target release $Version requires source-only deployment.$reason" -ForegroundColor Yellow
-    [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false }
+    if ($null -ne $manifestReadFailure) {
+        throw "The live Opticon release manifest is unavailable: $($manifestReadFailure.Exception.Message)"
+    }
+    Assert-ReleaseSourceIsPublishable
+    if ([string]::IsNullOrWhiteSpace($SourceReleaseCertificateThumbprint) -or
+        [string]::IsNullOrWhiteSpace($ProductCertificateThumbprint) -or
+        [string]::IsNullOrWhiteSpace($Rfc3161TimestampUrl) -or
+        [string]::IsNullOrWhiteSpace($SignToolPath)) {
+        throw 'Source-only target readiness requires explicit source-release/product certificate thumbprints, RFC3161 URL, and SignToolPath.'
+    }
+    # Delegate the non-mutating identity, AWS, CloudFormation, .NET, signing,
+    # and DPAPI checks to the same publisher that performs the real release.
+    & $publisher -Version $Version -ControlOrigin $ControlOrigin -SigningProfile $SigningProfile `
+        -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
+        -ProductCertificateThumbprint $ProductCertificateThumbprint `
+        -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath -CheckOnly
+    $publisherExitCode = $LASTEXITCODE
+    if ($publisherExitCode -ne 0) { throw "Opticon target readiness check for $Version failed." }
+    Write-Host "Opticon target release $Version passed non-mutating publisher readiness checks." -ForegroundColor Green
+    [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false; Ready = $true }
     return
 }
 if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
     throw '-ManifestPath is permitted only with -CheckOnly; a local manifest can never authorize production deployment.'
 }
 
-Assert-ReleaseSourceIsPublishable
+# StageOnly proves the exact checked-in source before producing the immutable
+# receipt/archive. CommitStaged consumes that receipt after invitation
+# cancellation, so it must not introduce a fresh mutable Git/fetch dependency
+# at the irreversible point. The publisher still independently revalidates the
+# signed archive, S3 object, CloudFront bytes, and leased manifest commit.
+if (-not $CommitStaged) {
+    Assert-ReleaseSourceIsPublishable
+}
 if ([string]::IsNullOrWhiteSpace($SourceReleaseCertificateThumbprint) -or
     [string]::IsNullOrWhiteSpace($ProductCertificateThumbprint) -or
     [string]::IsNullOrWhiteSpace($Rfc3161TimestampUrl) -or
     [string]::IsNullOrWhiteSpace($SignToolPath)) {
     throw 'Source-only target deployment requires explicit source-release/product certificate thumbprints, RFC3161 URL, and SignToolPath.'
 }
-Write-Host "Opticon target release $Version is absent, incomplete, or unservable; publishing the one source archive now." -ForegroundColor Yellow
-& $publisher -Version $Version -ControlOrigin $ControlOrigin -SigningProfile $SigningProfile `
-    -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
-    -ProductCertificateThumbprint $ProductCertificateThumbprint `
-    -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath
-if ($LASTEXITCODE -ne 0) { throw "Publishing Opticon target release $Version failed." }
+$publisherArguments = @{
+    Version = $Version
+    ControlOrigin = $ControlOrigin
+    SigningProfile = $SigningProfile
+    SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint
+    ProductCertificateThumbprint = $ProductCertificateThumbprint
+    Rfc3161TimestampUrl = $Rfc3161TimestampUrl
+    SignToolPath = $SignToolPath
+}
+if ($StageOnly) {
+    Write-Host "Staging immutable Opticon target source release $Version; the live invitation manifest will remain unchanged." -ForegroundColor Yellow
+    $publisherArguments.StageOnly = $true
+} elseif ($CommitStaged) {
+    Write-Host "Committing the verified staged Opticon target source release $Version without rebuilding or uploading a replacement." -ForegroundColor Yellow
+    $publisherArguments.CommitStaged = $true
+} else {
+    Write-Host "Opticon target release $Version is absent, incomplete, or unservable; publishing the one source archive now." -ForegroundColor Yellow
+}
+& $publisher @publisherArguments
+if ($LASTEXITCODE -ne 0) {
+    $operation = if ($StageOnly) { 'Staging' } elseif ($CommitStaged) { 'Committing the staged' } else { 'Publishing' }
+    throw "$operation Opticon target release $Version failed."
+}
+if ($StageOnly) {
+    Write-Host "Opticon target release $Version is staged and fully verified; its live invitation manifest is unchanged." -ForegroundColor Green
+    [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false; Staged = $true }
+    return
+}
 
 $manifest = Get-ReleaseManifest
 if (-not (Test-CompleteRelease $manifest $Version)) {

@@ -14,8 +14,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7) {
-    throw 'The Opticon release build requires PowerShell 7 or newer. Run build.ps1 with pwsh.exe, not Windows PowerShell.'
+if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -lt [Version]'7.1') {
+    throw 'The Opticon release build requires PowerShell 7.1 or newer. Run build.ps1 with pwsh.exe, not Windows PowerShell.'
 }
 
 $SdkPolicy = '10.*.*'

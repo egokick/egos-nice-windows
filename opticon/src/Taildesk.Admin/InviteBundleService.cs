@@ -139,7 +139,7 @@ public sealed class InviteBundleService
             try
             {
                 publication = await new HostedInviteClient(_state).PublishAsync(
-                    payload, encryptedEnvelope, publicId, fragmentKey, cancellationToken);
+                    payload, encryptedEnvelope, publicId, fragmentKey, authKey.Id, cancellationToken);
             }
             finally
             {
@@ -292,7 +292,7 @@ public sealed class InviteBundleService
             try
             {
                 progress?.Report("Publishing the extended invitation...");
-                await hosted.PublishAsync(payload, newEncrypted, publicId, fragmentKey, cancellationToken);
+                await hosted.PublishAsync(payload, newEncrypted, publicId, fragmentKey, replacementKey.Id, cancellationToken);
                 replacementPublished = true;
             }
             finally { CryptographicOperations.ZeroMemory(newEncrypted); }
@@ -311,7 +311,7 @@ public sealed class InviteBundleService
             {
                 payload.ExpiresAt = oldExpiry;
                 payload.TailscaleAuthKey = oldAuthKey;
-                try { await hosted.PublishAsync(payload, originalEncrypted, publicId, fragmentKey, CancellationToken.None); } catch { }
+                try { await hosted.PublishAsync(payload, originalEncrypted, publicId, fragmentKey, oldKeyId, CancellationToken.None); } catch { }
                 record.ExpiresAt = oldExpiry;
                 record.TailscaleKeyId = oldKeyId;
                 record.PendingTailscaleKeyRevocations = oldPendingRevocations;

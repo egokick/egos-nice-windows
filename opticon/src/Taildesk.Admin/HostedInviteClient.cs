@@ -22,13 +22,20 @@ internal sealed record HostedInviteUpload(
     string RuntimeVersion,
     string[] TargetRuntimes,
     string InstallProtocol,
+    string TailscaleKeyId,
     byte[] Ciphertext);
 
 public sealed class HostedInviteClient
 {
     private const string InviteAdminPath = "/opticon/v1/invitations/";
+    private const string ReleasePreflightPath = "/opticon/v1/releases/preflight";
+    private const string ReleaseAcquirePath = "/opticon/v1/releases/acquire";
+    private const string ReleaseRevokeActivePath = "/opticon/v1/releases/revoke-active";
+    private const string ReleaseReleasePath = "/opticon/v1/releases/release";
+    private const string ReleaseFinalizePath = "/opticon/v1/releases/finalize";
     private readonly AdminState _state;
     private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(30));
+    private readonly HttpClient _releaseHttp = DirectHttp.CreateClient(TimeSpan.FromMinutes(5));
 
     public HostedInviteClient(AdminState state)
     {
@@ -41,15 +48,18 @@ public sealed class HostedInviteClient
         byte[] encryptedEnvelope,
         string publicId,
         string fragmentKey,
+        string tailscaleKeyId,
         CancellationToken cancellationToken = default)
     {
         BuildSigningTrust.RequirePublishable();
+        if (string.IsNullOrWhiteSpace(tailscaleKeyId))
+            throw new ArgumentException("A Headscale pre-authentication key identity is required for a hosted invitation.", nameof(tailscaleKeyId));
         var idHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(publicId))).ToLowerInvariant();
         var upload = new HostedInviteUpload(payload.DeviceName, payload.Role.ToString(), payload.ExpiresAt,
             payload.ReleaseVersion, payload.SourceSha256, payload.SourceFile, payload.SourceSize,
             payload.SourceManifestSha256, payload.SourceManifestKeyId,
             payload.SigningProfile, payload.ProductSignerThumbprint, payload.SdkVersion,
-            payload.RuntimeVersion, payload.TargetRuntimes, payload.InstallProtocol, encryptedEnvelope);
+            payload.RuntimeVersion, payload.TargetRuntimes, payload.InstallProtocol, tailscaleKeyId, encryptedEnvelope);
         var body = JsonSerializer.SerializeToUtf8Bytes(upload, JsonDefaults.Options);
         var uri = BuildUri(InviteAdminPath + idHash);
         using var response = await SendSignedAsync(HttpMethod.Put, uri, body, cancellationToken);
@@ -86,6 +96,81 @@ public sealed class HostedInviteClient
         }
         throw new InvalidOperationException("Fly invitation removal failed after three attempts.", lastError);
     }
+
+    public async Task<ReleaseDeploymentPreflight> GetReleasePreflightAsync(
+        string targetVersion,
+        CancellationToken cancellationToken = default)
+    {
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion }, JsonDefaults.Options);
+        using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleasePreflightPath), body, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Fly release preflight failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
+        var content = await ReadBoundedAsync(response, 1024 * 1024, cancellationToken);
+        return JsonSerializer.Deserialize<ReleaseDeploymentPreflight>(content, JsonDefaults.Options)
+               ?? throw new InvalidDataException("Fly release preflight returned an empty response.");
+    }
+
+    public async Task<ReleaseCancellationResponse> RevokeActiveReleaseInvitationsAsync(
+        string targetVersion,
+        string leaseToken,
+        CancellationToken cancellationToken = default)
+    {
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, leaseToken }, JsonDefaults.Options);
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleaseRevokeActivePath), body, cancellationToken, _releaseHttp);
+                if (!response.IsSuccessStatusCode)
+                    throw new InvalidOperationException($"Fly active-invitation removal failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
+                var content = await ReadBoundedAsync(response, 1024 * 1024, cancellationToken);
+                return JsonSerializer.Deserialize<ReleaseCancellationResponse>(content, JsonDefaults.Options)
+                       ?? throw new InvalidDataException("Fly active-invitation removal returned an empty response.");
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested && exception is HttpRequestException or TaskCanceledException)
+            {
+                lastError = exception;
+            }
+            if (attempt < 2) await Task.Delay(TimeSpan.FromMilliseconds(500 * (attempt + 1)), cancellationToken);
+        }
+        throw new InvalidOperationException("Fly active-invitation removal did not return a durable result after retries.", lastError);
+    }
+
+    public async Task<ReleaseDeploymentLease> AcquireReleaseLeaseAsync(
+        string targetVersion,
+        string deploymentRevision,
+        string leaseToken,
+        CancellationToken cancellationToken = default)
+    {
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, deploymentRevision, leaseToken }, JsonDefaults.Options);
+        using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleaseAcquirePath), body, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Fly release deployment acquisition failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
+        var content = await ReadBoundedAsync(response, 1024 * 1024, cancellationToken);
+        return JsonSerializer.Deserialize<ReleaseDeploymentLease>(content, JsonDefaults.Options)
+               ?? throw new InvalidDataException("Fly release deployment acquisition returned an empty response.");
+    }
+
+    public async Task ReleaseDeploymentLeaseAsync(string leaseToken, CancellationToken cancellationToken = default)
+    {
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { leaseToken }, JsonDefaults.Options);
+        using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleaseReleasePath), body, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Fly release deployment release failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
+    }
+
+    public async Task FinalizeDeploymentLeaseAsync(
+        string targetVersion,
+        string leaseToken,
+        CancellationToken cancellationToken = default)
+    {
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, leaseToken }, JsonDefaults.Options);
+        using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleaseFinalizePath), body, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Fly release deployment finalization failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
+    }
+
     public async Task<byte[]> DownloadEncryptedAsync(string publicId, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(publicId)) throw new ArgumentException("A hosted invitation ID is required.", nameof(publicId));
@@ -108,7 +193,12 @@ public sealed class HostedInviteClient
         return new Uri(new Uri(control.GetLeftPart(UriPartial.Authority)), path);
     }
 
-    private async Task<HttpResponseMessage> SendSignedAsync(HttpMethod method, Uri uri, byte[] body, CancellationToken cancellationToken)
+    private async Task<HttpResponseMessage> SendSignedAsync(
+        HttpMethod method,
+        Uri uri,
+        byte[] body,
+        CancellationToken cancellationToken,
+        HttpClient? client = null)
     {
         var request = new HttpRequestMessage(method, uri);
         if (body.Length > 0)
@@ -135,6 +225,34 @@ public sealed class HostedInviteClient
         request.Headers.Add("X-Opticon-Nonce", nonce);
         request.Headers.Add("X-Opticon-Content-SHA256", bodyHash);
         request.Headers.Add("X-Opticon-Signature", signature);
-        return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        return await (client ?? _http).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+    }
+
+    private static async Task<byte[]> ReadBoundedAsync(HttpResponseMessage response, int maximum, CancellationToken cancellationToken)
+    {
+        if (response.Content.Headers.ContentEncoding.Count != 0)
+            throw new InvalidDataException("Compressed Fly administrative metadata is not accepted.");
+        if (response.Content.Headers.ContentLength is long length && (length <= 0 || length > maximum))
+            throw new InvalidDataException("Fly administrative metadata exceeds its size limit.");
+        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var output = new MemoryStream();
+        var buffer = new byte[32 * 1024];
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            if (output.Length + read > maximum)
+                throw new InvalidDataException("Fly administrative metadata exceeds its size limit.");
+            output.Write(buffer, 0, read);
+        }
+        if (output.Length == 0) throw new InvalidDataException("Fly administrative metadata is empty.");
+        return output.ToArray();
+    }
+
+    private static async Task<string> ReadDetailAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+        detail = detail.Trim();
+        return detail.Length <= 800 ? detail : detail[..800];
     }
 }

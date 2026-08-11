@@ -12,7 +12,7 @@ public enum AdminMode
 
 public sealed class AdminConfig
 {
-    public int SchemaVersion { get; set; } = 5;
+    public int SchemaVersion { get; set; } = 7;
     public AdminMode Mode { get; set; } = AdminMode.Primary;
     public bool SetupComplete { get; set; }
     public string HeadscaleApiUrl { get; set; } = string.Empty;
@@ -26,6 +26,14 @@ public sealed class AdminConfig
     public string InviteOutputDirectory { get; set; } = PrivateStorage.InviteDirectory;
     public string RustDeskPath { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RustDesk", "rustdesk.exe");
+    // The release page delegates publishing to the checked-in, audited source
+    // pipeline. This is deliberately a workspace location, never a place to
+    // save AWS credentials or signing keys.
+    public string ReleaseWorkspacePath { get; set; } = string.Empty;
+    // A short-lived gateway lease is DPAPI-protected so a Command Center can
+    // resume a confirmed deployment after interruption. It is cleared only
+    // after live-manifest verification or before any invitation is revoked.
+    public string ReleaseDeploymentLeaseProtected { get; set; } = string.Empty;
     public List<DeviceRecord> Devices { get; set; } = [];
     public List<InviteRecord> Invites { get; set; } = [];
     public Dictionary<Guid, bool> PrivacyMode2ByDevice { get; set; } = [];
@@ -47,9 +55,9 @@ public sealed class AdminState
     {
         Config = await _store.LoadAsync(cancellationToken);
         Config.PrivacyMode2ByDevice ??= [];
-        if (Config.SchemaVersion < 5)
+        if (Config.SchemaVersion < 7)
         {
-            Config.SchemaVersion = 5;
+            Config.SchemaVersion = 7;
             await SaveAsync(cancellationToken);
         }
         if (string.IsNullOrWhiteSpace(Config.InviteOutputDirectory) || PrivateStorage.IsOneDrivePath(Config.InviteOutputDirectory))

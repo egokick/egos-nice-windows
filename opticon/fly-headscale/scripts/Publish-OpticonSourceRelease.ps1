@@ -3,7 +3,7 @@ param(
     [string]$StackName = 'opticon-release-distribution',
     [string]$Region = 'us-east-1',
     [string]$ArtifactDirectory = '',
-    [string]$Version = '1.2.14',
+    [string]$Version = '1.2.15',
     [string]$ControlOrigin = 'https://taildesk-egokick-control.fly.dev',
     [ValidateSet('Production', 'OwnerManaged')]
     [string]$SigningProfile = 'Production',
@@ -12,9 +12,18 @@ param(
     [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
     [Parameter(Mandatory)][string]$SignToolPath,
     [ValidatePattern('^[A-Za-z0-9_.-]{1,64}$')][string]$AwsProfile = 'default',
+    [switch]$CheckOnly,
     [switch]$SkipBuild,
     [Alias('SkipFlyDeploy')]
-    [switch]$SkipManifestPublish
+    [switch]$SkipManifestPublish,
+    # Upload and verify the immutable source archive, preserving a local and
+    # S3-durable receipt whose unique ID is bound into the archive metadata for
+    # a later lease-bound manifest commit/recovery.
+    [switch]$StageOnly,
+    # Commit the exact previously staged source artifact without building or
+    # uploading a replacement; missing local archive/launcher files are
+    # rehydrated from the receipt-selected immutable S3 archive.
+    [switch]$CommitStaged
 )
 
 # The public release channel has one immutable object per version:
@@ -23,6 +32,9 @@ param(
 # bundles and release-specific bootstraps are intentionally never uploaded.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -lt [Version]'7.1') {
+    throw 'The Opticon source-release publisher requires PowerShell 7.1 or newer. Run this script with pwsh.exe, not Windows PowerShell.'
+}
 
 $arguments = @{
     StackName = $StackName
@@ -37,8 +49,11 @@ $arguments = @{
     SignToolPath = $SignToolPath
     AwsProfile = $AwsProfile
     SourceOnly = $true
+    CheckOnly = $CheckOnly
     SkipBuild = $SkipBuild
     SkipManifestPublish = $SkipManifestPublish
+    StageOnly = $StageOnly
+    CommitStaged = $CommitStaged
 }
 
 & (Join-Path $PSScriptRoot 'Publish-OpticonBundles.ps1') @arguments

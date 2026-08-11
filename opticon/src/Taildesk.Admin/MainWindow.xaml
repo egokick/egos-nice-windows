@@ -39,10 +39,11 @@
                     <Button Style="{StaticResource NavButton}" Content="Transfers" Tag="3" Click="Navigation_Click" />
                     <Button Style="{StaticResource NavButton}" Content="Scheduled transfers" Tag="1" Click="Navigation_Click" />
                     <Button Style="{StaticResource NavButton}" Content="Invitations" Tag="4" Click="Navigation_Click" />
-                    <Button Style="{StaticResource NavButton}" Content="Activity log" Tag="5" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Release deployment" Tag="5" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Activity log" Tag="6" Click="Navigation_Click" />
                     <Separator Margin="14,12" Background="{StaticResource BorderBrush}" />
-                    <Button Style="{StaticResource NavButton}" Content="System checks" Tag="6" Click="Navigation_Click" />
-                    <Button Style="{StaticResource NavButton}" Content="Settings" Tag="7" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="System checks" Tag="7" Click="Navigation_Click" />
+                    <Button Style="{StaticResource NavButton}" Content="Settings" Tag="8" Click="Navigation_Click" />
                 </StackPanel>
                 <Border Grid.Row="1" Margin="12" Padding="10" Background="#121519" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="4">
                     <StackPanel>
@@ -333,6 +334,66 @@
                         </DataGrid.Columns>
                     </DataGrid>
                 </Grid>
+            </TabItem>
+
+            <TabItem>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid Margin="20">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="Invite release deployment" Style="{StaticResource SectionTitle}" />
+                        <TextBlock Grid.Row="1" Margin="0,4,0,18"
+                                   Text="Publish the exact source archive used by new invitations. The live invite manifest is checked before any upload."
+                                   Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        <Border Grid.Row="2" Padding="16" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                <TextBlock Text="This Command Center" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{Binding OpticonVersion}" FontFamily="Cascadia Mono,Consolas" FontSize="15" FontWeight="SemiBold" />
+                                <TextBlock Grid.Row="1" Text="Currently deployed" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding DeployedReleaseVersion}" FontFamily="Cascadia Mono,Consolas" FontSize="15" FontWeight="SemiBold" />
+                                <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Margin="0,14,0,0" Text="{Binding ReleaseDeploymentStatus}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" />
+                                <TextBlock Grid.Row="3" Text="Source workspace" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Row="3" Grid.Column="1" Margin="0,12,0,0">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <TextBox x:Name="ReleaseWorkspaceText" VerticalAlignment="Center" ToolTip="Trusted Opticon source workspace containing the guarded source-release publisher" />
+                                        <Button Grid.Column="1" Margin="8,0,0,0" Content="Save workspace" Click="SaveReleaseWorkspace_Click" IsEnabled="{Binding IsPrimary}" />
+                                    </Grid>
+                                    <TextBlock Margin="0,5,0,0" Text="{Binding ReleaseWorkspaceHint}" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+                                </StackPanel>
+                                <StackPanel Grid.Row="4" Grid.ColumnSpan="2" Margin="0,15,0,0" Orientation="Horizontal">
+                                    <Button Content="Refresh live release" Click="RefreshReleaseDeployment_Click" IsEnabled="{Binding IsPrimary}" />
+                                    <Button Margin="8,0,0,0" Content="{Binding DeployReleaseButtonText}" Style="{StaticResource PrimaryButton}"
+                                            IsEnabled="{Binding CanDeployRelease}" Click="DeployRelease_Click" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <TextBlock Grid.Row="3" Margin="0,14,0,10" Text="Files currently deployed for invitation creation" Style="{StaticResource LabelText}" />
+                        <DataGrid Grid.Row="4" ItemsSource="{Binding DeployedReleaseArtifacts}" IsReadOnly="True" CanUserAddRows="False"
+                                  AutoGenerateColumns="False" HeadersVisibility="Column" MinHeight="190">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="VERSION" Binding="{Binding Version}" Width="110" />
+                                <DataGridTextColumn Header="FILE" Binding="{Binding File}" Width="2*" />
+                                <DataGridTextColumn Header="SIZE" Binding="{Binding Size}" Width="100" />
+                                <DataGridTextColumn Header="SHA-256" Binding="{Binding Sha256}" Width="2*" />
+                                <DataGridTextColumn Header="IMMUTABLE DOWNLOAD" Binding="{Binding DownloadUrl}" Width="3*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </ScrollViewer>
             </TabItem>
 
             <TabItem>

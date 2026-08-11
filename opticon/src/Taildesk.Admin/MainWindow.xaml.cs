@@ -40,7 +40,7 @@ public partial class MainWindow : Window
         LoadSettingsControls();
         if (!_viewModel.Config.SetupComplete)
         {
-            WorkspaceTabs.SelectedIndex = 7;
+            WorkspaceTabs.SelectedIndex = 8;
             _viewModel.Status = "Complete command-center setup";
         }
         await _viewModel.InitializeAsync();
@@ -53,7 +53,8 @@ public partial class MainWindow : Window
         if (sender is not Button { Tag: string value } || !int.TryParse(value, out var index)) return;
         WorkspaceTabs.SelectedIndex = index;
         if (index == 1) await _viewModel.ScheduledTransferManager.RefreshAsync();
-        if (index == 6) await _viewModel.RunSystemChecksAsync();
+        if (index == 5) await RunAsync(() => _viewModel.RefreshReleaseDeploymentAsync());
+        if (index == 7) await _viewModel.RunSystemChecksAsync();
     }
 
     private void GoToInvites_Click(object sender, RoutedEventArgs e) => WorkspaceTabs.SelectedIndex = 4;
@@ -507,6 +508,68 @@ public partial class MainWindow : Window
                 "Expire invitation", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
         await RunAsync(() => _viewModel.CancelInviteAsync(invite));
     }
+
+    private async void RefreshReleaseDeployment_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(() => _viewModel.RefreshReleaseDeploymentAsync());
+
+    private async void SaveReleaseWorkspace_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(() => _viewModel.SaveReleaseWorkspaceAsync(ReleaseWorkspaceText.Text));
+
+    private async void DeployRelease_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_viewModel.CanDeployRelease) return;
+        ReleaseDeploymentPreflight plan;
+        try
+        {
+            // This is an authenticated, read-only preflight. It must happen
+            // before any prompt, local cancellation, build, S3 upload, or
+            // manifest publication so an unseen gateway invitation cannot be
+            // bypassed by a stale UI list.
+            plan = await _viewModel.PrepareReleaseDeploymentAsync(ReleaseWorkspaceText.Text);
+        }
+        catch (Exception exception)
+        {
+            ShowError(exception);
+            return;
+        }
+
+        if (plan.AlreadyDeployed) return;
+        // A protected local lease means the operator already chose Yes before
+        // this Command Center was interrupted. Resume that exact decision;
+            // otherwise show the one early default-No confirmation before any
+            // lease, key revocation, build, S3 upload, or manifest mutation.
+        var resuming = plan.DeploymentBlocked && _viewModel.CanResumeReleaseDeployment;
+        if (plan.RequiresInvitationRemoval && !resuming)
+        {
+            if (plan.CancellationBlocked)
+            {
+                var blocked = plan.BlockingInvitations.FirstOrDefault(item => !item.CanRevoke);
+                ShowError(new InvalidOperationException(
+                    blocked is null || string.IsNullOrWhiteSpace(blocked.BlockedReason)
+                        ? "An active legacy invitation must be reconciled before a new source release can be deployed."
+                        : blocked.BlockedReason));
+                return;
+            }
+
+            var names = plan.BlockingInvitations
+                .Select(item => string.IsNullOrWhiteSpace(item.DeviceName) ? "unnamed machine" : item.DeviceName)
+                .Take(5)
+                .ToArray();
+            var nameText = string.Join(", ", names);
+            if (plan.BlockingInvitations.Count > names.Length)
+                nameText += $" and {plan.BlockingInvitations.Count - names.Length} more";
+            var prompt =
+                $"Deploy Opticon {plan.TargetVersion} for new invitations?\n\n" +
+                $"A replacement archive is staged and verified first. It then revokes and removes {plan.BlockingInvitations.Count} active invitation(s): {nameText}.\n\n" +
+                "Each affected one-use network key is revoked before its hosted link is removed. This cannot be undone.";
+            if (MessageBox.Show(prompt, "Remove active invitations?", MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+                return;
+        }
+
+        await RunAsync(() => _viewModel.DeployReleaseAsync(plan, ReleaseWorkspaceText.Text));
+    }
+
     private async void SaveSettings_Click(object sender, RoutedEventArgs e)
     {
         await RunAsync(async () =>
@@ -571,8 +634,9 @@ public partial class MainWindow : Window
         CoordinatorIpText.Text = _viewModel.Config.CoordinatorBindAddress;
         InviteFolderText.Text = _viewModel.Config.InviteOutputDirectory;
         RustDeskPathText.Text = _viewModel.Config.RustDeskPath;
+        ReleaseWorkspaceText.Text = ReleaseDeploymentService.FindWorkspaceCandidate(_viewModel.Config);
         var editable = _viewModel.Config.Mode == AdminMode.Primary;
-        TailnetText.IsEnabled = OAuthIdText.IsEnabled = OAuthSecretText.IsEnabled = CoordinatorIpText.IsEnabled = editable;
+        TailnetText.IsEnabled = OAuthIdText.IsEnabled = OAuthSecretText.IsEnabled = CoordinatorIpText.IsEnabled = ReleaseWorkspaceText.IsEnabled = editable;
     }
 
     private Task RunMaintenanceBootstrapAsync(
