@@ -32,6 +32,7 @@ internal static class Program
     private const string ManifestName = "command-center.manifest.json";
     private const string SignatureName = "command-center.manifest.sig";
     private const string InstallerResource = "Taildesk.CommandCenterInstaller.Install-CommandCenter.ps1";
+    private const string ShutdownForUpdateEventName = "Local\\Taildesk.Admin.ShutdownForUpdate";
     private const int MaximumManifestBytes = 1024 * 1024;
     private const int MaximumInstallerDiagnosticCharacters = 4096;
     private const long MaximumPackageBytes = 2L * 1024 * 1024 * 1024;
@@ -71,6 +72,7 @@ internal static class Program
                 ?? throw new InvalidOperationException("The command-center package directory is unavailable.");
             ValidatePackageRoot(packageRoot);
             var manifest = await ReadAndVerifyManifestAsync(packageRoot);
+            await RequestInstalledControllerShutdownAsync();
 
             staging = CreateProtectedStagingDirectory();
             await CopyVerifiedPayloadAsync(packageRoot, staging, manifest);
@@ -403,6 +405,78 @@ internal static class Program
         if (value.Length > MaximumInstallerDiagnosticCharacters)
             value = value[^MaximumInstallerDiagnosticCharacters..];
         return value;
+    }
+
+    private static async Task RequestInstalledControllerShutdownAsync()
+    {
+        var roots = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Taildesk", "Admin"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Opticon")
+        }.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))).ToArray();
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(35);
+        DateTimeOffset? quietSince = null;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var running = GetInstalledControllerProcesses(roots);
+            if (running.Count == 0)
+            {
+                quietSince ??= DateTimeOffset.UtcNow;
+                if (DateTimeOffset.UtcNow - quietSince >= TimeSpan.FromSeconds(2)) return;
+            }
+            else
+            {
+                quietSince = null;
+                try
+                {
+                    using var shutdown = EventWaitHandle.OpenExisting(ShutdownForUpdateEventName);
+                    shutdown.Set();
+                }
+                catch (WaitHandleCannotBeOpenedException)
+                {
+                    // A short-lived CLI has no UI event. Wait for normal exit so
+                    // it can release installation locks and erase ephemeral keys.
+                }
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(200));
+        }
+
+        var remaining = GetInstalledControllerProcesses(roots);
+        throw new InvalidOperationException(
+            "Opticon UI or CLI processes did not close before installation (" +
+            string.Join(", ", remaining.Select(item => $"{item.Name} ({item.Id})")) + ").");
+    }
+
+    private static List<(int Id, string Name)> GetInstalledControllerProcesses(IReadOnlyList<string> roots)
+    {
+        var running = new List<(int Id, string Name)>();
+        foreach (var processName in new[] { "Opticon", "Taildesk.Admin", "Taildesk.OpticonCli" })
+        {
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                using (process)
+                {
+                    string path;
+                    try
+                    {
+                        path = Path.GetFullPath(process.MainModule?.FileName
+                            ?? throw new InvalidOperationException("Windows did not expose the executable path."));
+                    }
+                    catch (Exception exception)
+                    {
+                        throw new InvalidOperationException(
+                            $"Opticon could not verify running process {process.ProcessName} ({process.Id}).",
+                            exception);
+                    }
+                    if (roots.Any(root => path.StartsWith(
+                            root + Path.DirectorySeparatorChar,
+                            StringComparison.OrdinalIgnoreCase)))
+                        running.Add((process.Id, process.ProcessName));
+                }
+            }
+        }
+        return running;
     }
 
     private static void SetEnvironment(ProcessStartInfo start, string key, string value)

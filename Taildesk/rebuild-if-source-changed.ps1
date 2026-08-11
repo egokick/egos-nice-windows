@@ -121,16 +121,21 @@ function Test-ControllerInstallationReady {
     return ($requiredFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0
 }
 
-function Get-InstalledOpticonProcessIds {
+function Get-InstalledOpticonProcesses {
     param([Parameter(Mandatory)][string]$InstalledPath)
 
-    $expected = [IO.Path]::GetFullPath($InstalledPath)
-    $ids = @()
-    foreach ($process in @(Get-Process -Name 'Opticon','Taildesk.Admin' -ErrorAction SilentlyContinue)) {
+    $installedRoot = [IO.Path]::GetFullPath((Split-Path -Parent $InstalledPath)).TrimEnd('\')
+    $running = @()
+    foreach ($process in @(Get-Process -Name 'Opticon','Taildesk.Admin','Taildesk.OpticonCli' -ErrorAction SilentlyContinue)) {
         try {
-            if ([IO.Path]::GetFullPath($process.MainModule.FileName).Equals(
-                    $expected, [StringComparison]::OrdinalIgnoreCase)) {
-                $ids += $process.Id
+            $processPath = [IO.Path]::GetFullPath($process.MainModule.FileName)
+            if ($processPath.StartsWith(
+                    $installedRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                $running += [pscustomobject]@{
+                    Id = $process.Id
+                    Name = $process.ProcessName
+                    Path = $processPath
+                }
             }
         } catch {
             throw "Opticon could not verify running process $($process.ProcessName) ($($process.Id)); exit Opticon from its notification-area icon and try again."
@@ -138,34 +143,39 @@ function Get-InstalledOpticonProcessIds {
             $process.Dispose()
         }
     }
-    return @($ids)
+    return @($running)
 }
 
 function Request-InstalledOpticonShutdown {
     param([Parameter(Mandatory)][string]$InstalledPath)
 
-    $processIds = @(Get-InstalledOpticonProcessIds -InstalledPath $InstalledPath)
-    if ($processIds.Count -eq 0) { return }
-
-    try {
-        $shutdownEvent = [Threading.EventWaitHandle]::OpenExisting(
-            'Local\Taildesk.Admin.ShutdownForUpdate')
-    } catch [Threading.WaitHandleCannotBeOpenedException] {
-        throw "The running Opticon command center predates automatic source-update handoff. Exit Opticon once from its notification-area icon, then start it from the Admin Panel again."
-    }
-    try { [void]$shutdownEvent.Set() }
-    finally { $shutdownEvent.Dispose() }
-
     $deadline = [DateTime]::UtcNow.AddSeconds(35)
+    $quietSince = $null
     do {
-        $remaining = @($processIds | Where-Object {
-            Get-Process -Id $_ -ErrorAction SilentlyContinue
-        })
-        if ($remaining.Count -eq 0) { return }
+        $running = @(Get-InstalledOpticonProcesses -InstalledPath $InstalledPath)
+        if ($running.Count -eq 0) {
+            if ($null -eq $quietSince) { $quietSince = [DateTime]::UtcNow }
+            if (([DateTime]::UtcNow - $quietSince).TotalSeconds -ge 2) { return }
+        } else {
+            $quietSince = $null
+            try {
+                $shutdownEvent = [Threading.EventWaitHandle]::OpenExisting(
+                    'Local\Taildesk.Admin.ShutdownForUpdate')
+                try { [void]$shutdownEvent.Set() }
+                finally { $shutdownEvent.Dispose() }
+            } catch [Threading.WaitHandleCannotBeOpenedException] {
+                # A short-lived CLI has no UI event. Keep waiting for it to
+                # finish normally; a legacy UI fails with the bounded message.
+            }
+        }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "Opticon did not finish its bounded SSH-session cleanup before the local update. Exit it from its notification-area icon, then try again."
+    $remainingText = @(
+        Get-InstalledOpticonProcesses -InstalledPath $InstalledPath |
+            ForEach-Object { "$($_.Name) ($($_.Id))" }
+    ) -join ', '
+    throw "Opticon did not finish its bounded SSH-session cleanup before the local update ($remainingText). Exit it from its notification-area icon, then try again."
 }
 
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot)

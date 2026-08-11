@@ -7,8 +7,20 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$startupMutex = [Threading.Mutex]::new($false, 'Local\Taildesk.Opticon.Startup')
+$ownsStartupMutex = $false
 
 try {
+    try {
+        $ownsStartupMutex = $startupMutex.WaitOne(0)
+    } catch [Threading.AbandonedMutexException] {
+        $ownsStartupMutex = $true
+    }
+    if (-not $ownsStartupMutex) {
+        Write-Host 'Another Opticon startup or repair is already running.' -ForegroundColor Yellow
+        exit 0
+    }
+
     Write-Host 'Preparing Opticon...' -ForegroundColor Cyan
     if ((Test-Path -LiteralPath (Join-Path $SourceRoot 'Taildesk.sln')) -and
         (Test-Path -LiteralPath $RebuildScript -PathType Leaf)) {
@@ -45,4 +57,7 @@ try {
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     } catch { }
     exit 1
+} finally {
+    if ($ownsStartupMutex) { $startupMutex.ReleaseMutex() }
+    $startupMutex.Dispose()
 }

@@ -1933,12 +1933,24 @@ static void TestOpenSshRecoveryDesign()
            && !mainWindow.Contains("await RunMaintenanceBootstrapAsync(", StringComparison.Ordinal),
         "legacy devices must fail closed to clean uninstall/re-enrollment while supported devices use only the source-built update path");
     var adminApp = ReadSource("src", "Taildesk.Admin", "App.xaml.cs");
+    var commandCenterInstallerSource = ReadSource("src", "Taildesk.CommandCenterInstaller", "Program.cs");
     var incrementalRebuild = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "rebuild-if-source-changed.ps1"));
     var sourceLauncher = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "start.bat"));
+    var startupHelper = File.ReadAllText(Path.Combine(root.FullName, "..", "Taildesk", "launch-opticon.ps1"));
     Assert(adminApp.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal)
            && incrementalRebuild.Contains("Request-InstalledOpticonShutdown", StringComparison.Ordinal)
-           && incrementalRebuild.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal),
-        "source-triggered controller rebuilds must request a graceful Command Center shutdown before swapping the installed payload");
+           && incrementalRebuild.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("Get-InstalledOpticonProcesses", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("Taildesk.OpticonCli", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("TotalSeconds -ge 2", StringComparison.Ordinal)
+           && startupHelper.Contains("Local\\Taildesk.Opticon.Startup", StringComparison.Ordinal)
+           && startupHelper.Contains("WaitOne(0)", StringComparison.Ordinal),
+        "source-triggered controller rebuilds must serialize startup, gracefully close UI and CLI processes, and require a quiet window before swapping the installed payload");
+    Assert(commandCenterInstallerSource.Contains("RequestInstalledControllerShutdownAsync", StringComparison.Ordinal)
+           && commandCenterInstallerSource.Contains("Taildesk.Admin.ShutdownForUpdate", StringComparison.Ordinal)
+           && commandCenterInstallerSource.Contains("Taildesk.OpticonCli", StringComparison.Ordinal)
+           && commandCenterInstallerSource.Contains("TimeSpan.FromSeconds(2)", StringComparison.Ordinal),
+        "the signed command-center installer must independently require a quiet UI and CLI window before its protected swap");
     Assert(incrementalRebuild.Contains("Get-PowerShell7Path", StringComparison.Ordinal)
            && incrementalRebuild.Contains("PowerShell\\7\\pwsh.exe", StringComparison.Ordinal)
            && incrementalRebuild.Contains("Opticon\\Tools\\PowerShell-7.6.4\\pwsh.exe", StringComparison.Ordinal)
