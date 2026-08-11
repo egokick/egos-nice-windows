@@ -119,15 +119,27 @@ internal sealed class SourceUpdateBuildRunner
     private static IReadOnlyDictionary<string, string?> BuildSanitizedEnvironment(string protectedRoot, string dotnet)
     {
         var root = Path.GetFullPath(protectedRoot);
-        var systemRoot = Path.GetFullPath(Environment.SystemDirectory + "\\..");
+        var system32 = Path.GetFullPath(Environment.SystemDirectory);
+        var systemRoot = Path.GetFullPath(system32 + "\\..");
+        var systemDrive = Path.GetPathRoot(systemRoot)?.TrimEnd(Path.DirectorySeparatorChar)
+                          ?? throw new InvalidOperationException("Windows has no fixed system drive.");
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        var dotnetRoot = Path.GetDirectoryName(dotnet)!;
         var sandbox = Path.Combine(root, "build-sandbox");
+        var cliHome = Path.Combine(sandbox, "dotnet-home");
+        var appDataRoaming = Path.Combine(sandbox, "appdata-roaming");
+        var appDataLocal = Path.Combine(sandbox, "appdata-local");
+        var pluginsCache = Path.Combine(sandbox, "nuget-plugins-cache");
         var directories = new[]
         {
             sandbox,
             Path.Combine(sandbox, "temp"),
-            Path.Combine(sandbox, "dotnet-home"),
+            cliHome,
+            appDataRoaming,
+            appDataLocal,
             Path.Combine(sandbox, "nuget-packages"),
             Path.Combine(sandbox, "nuget-http-cache"),
+            pluginsCache,
             Path.Combine(sandbox, "msbuild-user-extensions")
         };
         foreach (var directory in directories)
@@ -139,28 +151,42 @@ internal sealed class SourceUpdateBuildRunner
         {
             ["SystemRoot"] = systemRoot,
             ["WINDIR"] = systemRoot,
+            ["SystemDrive"] = systemDrive,
+            ["ProgramData"] = programData,
+            ["ALLUSERSPROFILE"] = programData,
             ["ProgramFiles"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             ["ProgramFiles(x86)"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
             ["ProgramW6432"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            ["COMSPEC"] = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            ["COMSPEC"] = Path.Combine(system32, "cmd.exe"),
             ["PATHEXT"] = ".COM;.EXE;.BAT;.CMD",
             ["PATH"] = string.Join(Path.PathSeparator,
-                Environment.SystemDirectory,
+                system32,
                 Path.Combine(systemRoot, "System32", "WindowsPowerShell", "v1.0"),
-                Path.GetDirectoryName(dotnet)!),
-            ["DOTNET_ROOT"] = Path.GetDirectoryName(dotnet),
+                dotnetRoot),
+            ["DOTNET_ROOT"] = dotnetRoot,
             ["TEMP"] = Path.Combine(sandbox, "temp"),
             ["TMP"] = Path.Combine(sandbox, "temp"),
-            ["DOTNET_CLI_HOME"] = Path.Combine(sandbox, "dotnet-home"),
+            ["DOTNET_CLI_HOME"] = cliHome,
+            ["USERPROFILE"] = cliHome,
+            ["HOME"] = cliHome,
+            ["HOMEDRIVE"] = systemDrive,
+            ["HOMEPATH"] = cliHome[systemDrive.Length..],
+            ["APPDATA"] = appDataRoaming,
+            ["LOCALAPPDATA"] = appDataLocal,
             ["NUGET_PACKAGES"] = Path.Combine(sandbox, "nuget-packages"),
             ["NUGET_HTTP_CACHE_PATH"] = Path.Combine(sandbox, "nuget-http-cache"),
+            ["NUGET_PLUGINS_CACHE_PATH"] = pluginsCache,
             ["NUGET_AUDIT"] = "false",
+            ["NUGET_XMLDOC_MODE"] = "skip",
+            ["NUGET_CERT_REVOCATION_MODE"] = "online",
             ["MSBuildUserExtensionsPath"] = Path.Combine(sandbox, "msbuild-user-extensions"),
             ["MSBUILDDISABLENODEREUSE"] = "1",
             ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
             ["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1",
             ["DOTNET_NOLOGO"] = "1",
             ["DOTNET_MULTILEVEL_LOOKUP"] = "0",
+            ["DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE"] = "1",
+            ["DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK"] = "1",
             ["MSBuildEnableWorkloadResolver"] = "false",
             ["PSModulePath"] = Path.Combine(systemRoot, "System32", "WindowsPowerShell", "v1.0", "Modules"),
             ["POWERSHELL_TELEMETRY_OPTOUT"] = "1"
