@@ -151,7 +151,7 @@ Fly CLI references: [deploy](https://fly.io/docs/flyctl/deploy/), [status](https
 
 ## Build and install
 
-Production packaging requires exact .NET SDK 10.0.302, a publicly trusted product
+Production packaging requires any stable .NET SDK matching `10.*.*`, a publicly trusted product
 code-signing certificate, a separate offline source-release certificate, and an
 RFC 3161 timestamp service:
 

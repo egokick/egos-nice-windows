@@ -18,7 +18,8 @@ if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion.Major -lt
     throw 'The Opticon release build requires PowerShell 7 or newer. Run build.ps1 with pwsh.exe, not Windows PowerShell.'
 }
 
-$RequiredSdkVersion = '10.0.302'
+$SdkPolicy = '10.*.*'
+$SdkFloorVersion = '10.0.100'
 $InvitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
 $repo = [IO.Path]::GetFullPath($PSScriptRoot)
 $artifacts = Join-Path $repo 'artifacts'
@@ -98,14 +99,18 @@ function Get-RequiredDotNet {
     $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
     $dotnet = Join-Path $programFiles 'dotnet\dotnet.exe'
     if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) {
-        throw ".NET SDK $RequiredSdkVersion is required at the fixed Program Files dotnet location."
+        throw "A stable .NET SDK matching $SdkPolicy is required at the fixed Program Files dotnet location."
     }
     Assert-NoReparseTraversal -Root $programFiles -Path $dotnet
-    $sdkDirectory = Join-Path (Split-Path $dotnet -Parent) "sdk\$RequiredSdkVersion"
-    if (-not (Test-Path -LiteralPath $sdkDirectory -PathType Container)) {
-        throw ".NET SDK $RequiredSdkVersion is required exactly. Install it from https://dotnet.microsoft.com/download/dotnet/10.0"
+    $sdkRoot = Join-Path (Split-Path $dotnet -Parent) 'sdk'
+    $acceptedSdk = @(Get-ChildItem -LiteralPath $sdkRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^10\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' } |
+        Sort-Object { [Version]$_.Name } -Descending |
+        Select-Object -First 1)
+    if ($acceptedSdk.Count -ne 1) {
+        throw "A stable .NET SDK matching $SdkPolicy is required. Install it from https://dotnet.microsoft.com/download/dotnet/10.0"
     }
-    Assert-NoReparseTraversal -Root $programFiles -Path $sdkDirectory
+    Assert-NoReparseTraversal -Root $programFiles -Path $acceptedSdk[0].FullName
     return $dotnet
 }
 
@@ -597,8 +602,8 @@ try {
     $utf8NoBom = [Text.UTF8Encoding]::new($false)
     $sdkPin = [ordered]@{
         sdk = [ordered]@{
-            version = $RequiredSdkVersion
-            rollForward = 'disable'
+            version = $SdkFloorVersion
+            rollForward = 'latestMinor'
             allowPrerelease = $false
         }
     }

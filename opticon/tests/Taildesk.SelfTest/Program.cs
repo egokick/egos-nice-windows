@@ -2441,7 +2441,8 @@ static void TestOpenSshRecoveryDesign()
            && hostedBuild.Contains("The clean $component publish must contain only", StringComparison.Ordinal)
            && hostedBuild.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal),
         "release packaging must fail on native build/test errors and ship a single signed CLI app");
-    Assert(buildScript.Contains("10.0.302", StringComparison.Ordinal)
+    Assert(buildScript.Contains("$SdkPolicy = '10.*.*'", StringComparison.Ordinal)
+           && buildScript.Contains("rollForward = 'latestMinor'", StringComparison.Ordinal)
            && buildProps.Contains("net10.0-windows10.0.19041.0", StringComparison.Ordinal)
            && buildProps.Contains("<OpticonRuntimeVersion>10.0.10</OpticonRuntimeVersion>", StringComparison.Ordinal)
            && buildProps.Contains("<TargetLatestRuntimePatch>true</TargetLatestRuntimePatch>", StringComparison.Ordinal)
@@ -2461,7 +2462,7 @@ static void TestOpenSshRecoveryDesign()
            && solution.Contains("Taildesk.CommandCenterInstaller", StringComparison.Ordinal)
            && solution.Contains("Taildesk.RouteKeeper", StringComparison.Ordinal)
            && !solution.Contains("Taildesk.InviteLauncher", StringComparison.Ordinal),
-        "command-center packaging must use exact SDK/runtime pins, separated timestamped signers, and the signed wrapper only");
+        "command-center packaging must use the stable .NET 10 SDK policy, an exact output-runtime pin, separated timestamped signers, and the signed wrapper only");
     Assert(commandCenterInstaller.Contains("SourceReleaseSigning.Verify", StringComparison.Ordinal)
            && commandCenterInstaller.Contains("AllowedPayloadPaths", StringComparison.Ordinal)
            && commandCenterInstaller.Contains("ProductSigning.VerifyAuthenticodeAsync", StringComparison.Ordinal)
@@ -2490,7 +2491,7 @@ static void TestOpenSshRecoveryDesign()
     Assert(buildScript.Contains("SkipTargetReleaseDeployment", StringComparison.Ordinal)
            && buildScript.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
            && buildWorkflow.Contains("contents: read", StringComparison.Ordinal)
-           && buildWorkflow.Contains("10.0.302", StringComparison.Ordinal)
+           && buildWorkflow.Contains("dotnet-version: '10.x'", StringComparison.Ordinal)
            && buildWorkflow.Contains("go test -race", StringComparison.Ordinal)
            && buildWorkflow.Contains("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("Test-CompleteRelease", StringComparison.Ordinal)

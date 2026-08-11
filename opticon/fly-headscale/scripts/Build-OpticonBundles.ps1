@@ -537,7 +537,7 @@ if ($SourceReleaseCertificateThumbprint -eq $invitationSigningThumbprint -or
     throw 'Production invitation, source-release, and Authenticode trust domains must be pairwise distinct.'
 }
 if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) {
-    throw 'Release builds require exact .NET SDK 10.0.302 (the SDK carrying runtime 10.0.10).'
+    throw 'Release builds require a stable .NET SDK matching 10.*.*.'
 }
 Assert-NoReparseTraversal -Root ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) -Path $dotnet
 $artifactDirectory = Join-Path $flyRoot "artifacts"
@@ -548,7 +548,7 @@ $buildRoot = Join-Path $sdkAnchor 'hosted-build'
 $stageRoot = Join-Path $sdkAnchor 'hosted-bundle-stage'
 [IO.File]::WriteAllText(
     (Join-Path $sdkAnchor 'global.json'),
-    '{"sdk":{"version":"10.0.302","rollForward":"disable","allowPrerelease":false}}',
+    '{"sdk":{"version":"10.0.100","rollForward":"latestMinor","allowPrerelease":false}}',
     [Text.UTF8Encoding]::new($false))
 $packageCache = Join-Path $sdkAnchor 'packages'
 $nugetHttpCache = Join-Path $sdkAnchor 'nuget-http-cache'
@@ -581,7 +581,7 @@ $nugetConfig = Join-Path $sdkAnchor 'NuGet.Config'
 </configuration>
 "@, [Text.UTF8Encoding]::new($false))
 
-function Invoke-ExactDotNet {
+function Invoke-StableDotNet10 {
     param([Parameter(Mandatory)][string[]]$Arguments, [switch]$CaptureOutput)
     $windows = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
     $system32 = [IO.Path]::GetFullPath([Environment]::SystemDirectory)
@@ -629,19 +629,21 @@ function Invoke-ExactDotNet {
             $diagnosticParts = @($stderr.Trim(), $stdout.Trim()) | Where-Object { $_ }
             $diagnostic = [string]::Join([Environment]::NewLine, $diagnosticParts)
             if ($diagnostic.Length -gt 8192) { $diagnostic = $diagnostic.Substring(0, 8192) + ' [truncated]' }
-            throw "The exact .NET SDK command '$([string]::Join(' ', $Arguments))' failed ($($process.ExitCode)): $diagnostic"
+            throw "The stable .NET 10 SDK command '$([string]::Join(' ', $Arguments))' failed ($($process.ExitCode)): $diagnostic"
         }
         if ($CaptureOutput) { return $stdout }
         if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host $stdout.TrimEnd() }
     } finally { $process.Dispose() }
 }
 
-$installedSdks = @((Invoke-ExactDotNet -Arguments @('--list-sdks') -CaptureOutput) -split "`r?`n")
-if (-not ($installedSdks | Where-Object { $_ -match '^10\.0\.302\s' })) {
-    throw 'Release builds require exact .NET SDK 10.0.302 (the SDK carrying runtime 10.0.10).'
+$installedSdks = @((Invoke-StableDotNet10 -Arguments @('--list-sdks') -CaptureOutput) -split "`r?`n")
+if (-not ($installedSdks | Where-Object { $_ -match '^10\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\s' })) {
+    throw 'Release builds require a stable .NET SDK matching 10.*.*.'
 }
-$selectedSdk = (Invoke-ExactDotNet -Arguments @('--version') -CaptureOutput).Trim()
-if ($selectedSdk -ne '10.0.302') { throw "global.json selected SDK '$selectedSdk', not exact SDK 10.0.302." }
+$selectedSdk = (Invoke-StableDotNet10 -Arguments @('--version') -CaptureOutput).Trim()
+if ($selectedSdk -notmatch '^10\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+    throw "global.json selected SDK '$selectedSdk', which does not match stable policy 10.*.*."
+}
 $packageBuildLock = Enter-OpticonPackageBuildLock (Join-Path $repo "artifacts\.opticon-package-build.lock")
 try {
 $sourceReleaseCertificate = Get-ReleaseCertificate -Thumbprint $SourceReleaseCertificateThumbprint -Purpose 'Offline source-release signing'
@@ -800,12 +802,12 @@ foreach ($component in $executables.Keys) {
     $trustArguments = @($publishArguments | Where-Object { $_ -like '-p:Opticon*' -or $_ -like '-p:DirectoryBuild*' -or
             $_ -like '-p:MSBuildUserExtensionsPath*' -or $_ -like '-p:Import*' -or
             $_ -eq '-p:UseSharedCompilation=false' -or $_ -eq '-p:MSBuildEnableWorkloadResolver=false' -or $_ -eq '-nodeReuse:false' })
-    Invoke-ExactDotNet -Arguments (@(
+    Invoke-StableDotNet10 -Arguments (@(
         'restore', $project, '-r', $Runtime, '--configfile', $nugetConfig, '--packages', $packageCache,
         '--no-cache', '--force', '--force-evaluate', '--disable-parallel',
         '--artifacts-path', $componentArtifacts, '-p:EnableWindowsTargeting=true'
     ) + $trustArguments)
-    Invoke-ExactDotNet -Arguments (@('publish', $project) + $publishArguments + @(
+    Invoke-StableDotNet10 -Arguments (@('publish', $project) + $publishArguments + @(
         '--artifacts-path', $componentArtifacts, '-o', $output))
     if ($component -eq "Cli") {
         $publishedCli = Join-Path $output "Taildesk.OpticonCli.exe"
@@ -1049,7 +1051,7 @@ $sourceRestoreTrustArguments = @($publishArguments | Where-Object {
     })
 $sourceRestoreProject = Join-Path $repo 'src\Taildesk.Setup\Taildesk.Setup.csproj'
 foreach ($sourceRuntime in @('win-x64', 'win-arm64')) {
-    Invoke-ExactDotNet -Arguments (@(
+    Invoke-StableDotNet10 -Arguments (@(
         'restore', $sourceRestoreProject, '-r', $sourceRuntime,
         '--configfile', $nugetConfig, '--packages', $packageCache,
         '--no-cache', '--force', '--force-evaluate', '--disable-parallel',
