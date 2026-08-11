@@ -19,8 +19,6 @@ internal static class LegacyOpticonRemoval
     // so keep this deliberately low rather than exhausting the machine on a
     // corrupted existing tree.
     private const int MaximumTreeEntries = 4_096;
-    private const uint GenericRead = 0x80000000;
-    private const uint ReadControl = 0x00020000;
     private const uint WriteDac = 0x00040000;
     private const uint WriteOwner = 0x00080000;
     private const uint Delete = 0x00010000;
@@ -72,19 +70,26 @@ internal static class LegacyOpticonRemoval
         plan = await CreatePlanAsync()
                ?? throw new InvalidOperationException("The existing Opticon installation disappeared before removal.");
 
-        report("Stopping Opticon scheduled tasks at their fixed names...");
-        foreach (var task in plan.Tasks)
-            await EndTaskAsync(task.Name);
-        foreach (var task in plan.Tasks)
-            await DeleteTaskAsync(task.Name);
+        // Prior releases intentionally protect machine state for SYSTEM. The
+        // elevated source launcher holds these privileges, but Windows leaves
+        // them disabled until a backup/restore operation explicitly enables
+        // them. FILE_FLAG_BACKUP_SEMANTICS then permits the handle-bound walk
+        // to pin those protected descendants without broadening their ACLs by
+        // path or weakening the no-reparse boundary.
+        using var backupPrivilege = ScopedProcessPrivilege.Enable("SeBackupPrivilege");
+        using var restorePrivilege = ScopedProcessPrivilege.Enable("SeRestorePrivilege");
 
-        report("Stopping processes running from Opticon's fixed installation root...");
-        await StopValidatedProcessesAsync(plan.InstallDirectory);
-
-        report("Removing the existing Opticon installation and machine state...");
         var sealedRoots = new List<PinnedDirectoryTree>();
         try
         {
+            report("Stopping Opticon scheduled tasks at their fixed names...");
+            foreach (var task in plan.Tasks)
+                await EndTaskAsync(task.Name);
+
+            report("Stopping processes running from Opticon's fixed installation root...");
+            await StopValidatedProcessesAsync(plan.InstallDirectory);
+
+            report("Removing the existing Opticon installation and machine state...");
             // The 1.1.38 tree can have a weak inherited ACL. Each root and
             // every descendant directory is opened without following a
             // reparse point and sealed through that open handle. The root
@@ -106,6 +111,12 @@ internal static class LegacyOpticonRemoval
             if (Directory.Exists(directory) || File.Exists(directory))
                 throw new IOException("The existing Opticon directory could not be removed completely.");
         }
+
+        // Keep the definitions registered until every pinned filesystem entry
+        // is gone. A handle/ACL failure therefore stops old processes but does
+        // not also erase the recovery task definitions.
+        foreach (var task in plan.Tasks)
+            await DeleteTaskAsync(task.Name);
 
         report("The existing Opticon installation was removed. Tailscale and RustDesk were left unchanged.");
     }
@@ -239,7 +250,11 @@ internal static class LegacyOpticonRemoval
 
     private static PinnedEntry OpenPinnedEntry(string path, bool? directory, int depth)
     {
-        var desiredAccess = GenericRead | ReadControl | Delete | FileReadAttributes | Synchronize;
+        // GENERIC_READ and READ_CONTROL are unnecessary for deletion and can
+        // be denied on protected SYSTEM-only state. Backup/restore privilege
+        // plus FILE_FLAG_BACKUP_SEMANTICS authorizes only the explicit rights
+        // needed to identify, seal, and delete the exact pinned node.
+        var desiredAccess = Delete | FileReadAttributes | Synchronize;
         if (directory == true)
             desiredAccess |= WriteDac | WriteOwner | FileListDirectory;
         var handle = CreateFile(
@@ -256,7 +271,9 @@ internal static class LegacyOpticonRemoval
         {
             var error = Marshal.GetLastWin32Error();
             handle.Dispose();
-            throw new IOException($"Could not open an existing Opticon path safely (Win32 error {error}).");
+            throw new IOException(
+                $"Could not open existing Opticon path '{DescribeCleanupPath(path)}' safely " +
+                $"with requested access 0x{desiredAccess:X8} (Win32 error {error}).");
         }
         try
         {
@@ -278,6 +295,25 @@ internal static class LegacyOpticonRemoval
             handle.Dispose();
             throw;
         }
+    }
+
+    private static string DescribeCleanupPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        foreach (var (folder, label) in new[]
+                 {
+                     (Environment.SpecialFolder.ProgramFiles, "%ProgramFiles%"),
+                     (Environment.SpecialFolder.CommonApplicationData, "%ProgramData%")
+                 })
+        {
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(
+                Environment.GetFolderPath(folder)));
+            if (fullPath.Equals(root, StringComparison.OrdinalIgnoreCase)) return label;
+            var prefix = root + Path.DirectorySeparatorChar;
+            if (fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return label + Path.DirectorySeparatorChar + fullPath[prefix.Length..];
+        }
+        return "[outside fixed Opticon roots]";
     }
 
     private static void RequirePathStillHasIdentity(PinnedEntry expected)

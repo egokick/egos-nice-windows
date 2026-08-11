@@ -1040,6 +1040,7 @@ static void TestReleaseDistributionDesign()
     var hostedBootstrap = Read("src", "Taildesk.Setup", "HostedBootstrap.cs");
     var sourceBootstrap = Read("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
     var legacyRemoval = Read("src", "Taildesk.Setup", "LegacyOpticonRemoval.cs");
+    var setupPrivilege = Read("src", "Taildesk.Setup", "ScopedProcessPrivilege.cs");
     var sourceInstaller = Read("source-package", "Install-OpticonFromSource.ps1");
     var sourceNuget = Read("source-package", "NuGet.Config");
     var sourceProvenance = Read("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
@@ -1159,9 +1160,19 @@ static void TestReleaseDistributionDesign()
            && legacyRemoval.Contains("OwnerSecurityInformation", StringComparison.Ordinal)
            && legacyRemoval.Contains("SetFileInformationByHandle", StringComparison.Ordinal)
             && legacyRemoval.Contains("PinnedDirectoryTree", StringComparison.Ordinal)
-            && legacyRemoval.Contains("FileShareDelete", StringComparison.Ordinal)
+           && legacyRemoval.Contains("FileShareDelete", StringComparison.Ordinal)
             && legacyRemoval.Contains("FileReadAttributes | Synchronize", StringComparison.Ordinal)
             && legacyRemoval.Contains("Could not re-observe a pinned Opticon path safely", StringComparison.Ordinal)
+            && legacyRemoval.Contains("ScopedProcessPrivilege.Enable(\"SeBackupPrivilege\")", StringComparison.Ordinal)
+            && legacyRemoval.Contains("ScopedProcessPrivilege.Enable(\"SeRestorePrivilege\")", StringComparison.Ordinal)
+            && legacyRemoval.Contains("var desiredAccess = Delete | FileReadAttributes | Synchronize", StringComparison.Ordinal)
+            && !legacyRemoval.Contains("GenericRead", StringComparison.Ordinal)
+            && !legacyRemoval.Contains("ReadControl", StringComparison.Ordinal)
+            && legacyRemoval.Contains("DescribeCleanupPath(path)", StringComparison.Ordinal)
+            && legacyRemoval.IndexOf("DeleteAllPinnedEntries", StringComparison.Ordinal)
+               < legacyRemoval.IndexOf("await DeleteTaskAsync", StringComparison.Ordinal)
+            && setupPrivilege.Contains("AdjustTokenPrivileges", StringComparison.Ordinal)
+            && setupPrivilege.Contains("ErrorNotAllAssigned", StringComparison.Ordinal)
             && !legacyRemoval.Contains("using var observed = OpenPinnedEntry", StringComparison.Ordinal)
             && !legacyRemoval.Contains("Directory.Delete(", StringComparison.Ordinal)
            && !legacyRemoval.Contains("File.Delete(", StringComparison.Ordinal)
