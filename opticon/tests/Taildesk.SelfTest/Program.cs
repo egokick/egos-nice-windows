@@ -36,6 +36,7 @@ var tests = new (string Name, Action Body)[]
     ("controller registry contains no permanent credentials", TestControllerRegistryShape),
     ("remote administration contracts reject unpinned or unsafe updates", TestRemoteAdministrationProtocol),
     ("source-only updates pin one archive, seal local build output, and retain Guardian rollback", TestSourceUpdateRuntime),
+    ("Setup accepts an exact trusted user profile root and an absent transaction journal", TestSetupPreflightContracts),
     ("source-built Agent and Guardian paths remain trusted through atomic promotion", TestSourceUpdateProvenanceMappings),
     ("remote update polling distinguishes Agent restarts from caller cancellation", TestRemoteUpdatePollingRecovery),
     ("legacy machine state cannot cross the protected update boundary unattended", TestLegacyMachineStateUpdateGate),
@@ -891,6 +892,67 @@ static void TestSourceUpdateRuntime()
            && buildScript.Contains("opticon-offline", StringComparison.Ordinal)
            && buildScript.Contains("source build attestation", StringComparison.Ordinal),
         "the fixed source build script must build both rollback-aware components with an offline package feed");
+}
+
+static void TestSetupPreflightContracts()
+{
+    var requireNoReparseTraversal = typeof(Taildesk.Setup.InteractiveUserProfile).GetMethod(
+        "RequireNoReparseTraversal",
+        BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("The Setup user-profile path validator is missing.");
+    var root = Directory.CreateTempSubdirectory("opticon-profile-test-").FullName;
+    try
+    {
+        requireNoReparseTraversal.Invoke(null, new object[] { root, root });
+        requireNoReparseTraversal.Invoke(null, new object[] { root, Path.Combine(root, "missing-child") });
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    var persistence = ReadSource("src", "Taildesk.Shared", "AgentInstallTransactionPersistence.cs");
+    Assert(persistence.Contains("if (!File.Exists(AppPaths.AgentInstallTransactionFile))", StringComparison.Ordinal)
+           && persistence.IndexOf(
+               "if (!File.Exists(AppPaths.AgentInstallTransactionFile))",
+               StringComparison.Ordinal) < persistence.IndexOf(
+               "MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.SetupStagingDirectory)",
+               StringComparison.Ordinal),
+        "an absent Agent transaction journal still requires a not-yet-created SetupStaging directory");
+
+    var pendingFileCheck = typeof(SourceBuildProvenance).GetMethod(
+        "HasPendingFilesOutsideInstalledGenerations",
+        BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("The stale source-provenance recovery check is missing.");
+    var pendingPath = Path.Combine(Path.GetTempPath(), "opticon-pending-" + Guid.NewGuid().ToString("N"));
+    File.WriteAllText(pendingPath, "pending");
+    try
+    {
+        var pendingHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(pendingPath))).ToLowerInvariant();
+        var pendingFile = new InstalledSourceFile
+        {
+            Path = pendingPath,
+            Size = new FileInfo(pendingPath).Length,
+            Sha256 = pendingHash
+        };
+        var pendingGeneration = new InstalledSourceGeneration { Files = [pendingFile] };
+        var noInstalledGeneration = (bool)pendingFileCheck.Invoke(
+            null,
+            new object[] { pendingGeneration, Array.Empty<InstalledSourceGeneration>() })!;
+        var alreadyInstalledGeneration = (bool)pendingFileCheck.Invoke(
+            null,
+            new object[]
+            {
+                pendingGeneration,
+                new[] { new InstalledSourceGeneration { Files = [pendingFile] } }
+            })!;
+        Assert(noInstalledGeneration && !alreadyInstalledGeneration,
+            "stale source provenance recovery cannot distinguish uncommitted files from an installed generation");
+    }
+    finally
+    {
+        File.Delete(pendingPath);
+    }
 }
 
 static void TestSourceUpdateProvenanceMappings()

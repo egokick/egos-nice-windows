@@ -3,4 +3,7 @@
     <AssemblyName>Taildesk.Shared</AssemblyName>
     <RootNamespace>Taildesk.Shared</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Taildesk.SelfTest" />
+  </ItemGroup>
 </Project>

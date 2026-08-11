@@ -129,6 +129,8 @@ public sealed class InteractiveUserProfile
         var current = root;
         if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidDataException("The selected user's ProfileList root is a reparse point.");
+        if (full.Equals(root, StringComparison.OrdinalIgnoreCase))
+            return;
         foreach (var component in Path.GetRelativePath(root, full).Split(
                      [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
                      StringSplitOptions.RemoveEmptyEntries))

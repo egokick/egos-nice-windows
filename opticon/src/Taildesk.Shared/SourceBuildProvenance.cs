@@ -174,6 +174,7 @@ public static class SourceBuildProvenance
             var current = ReadProtectedStore();
             current.Installed = PruneInstalledGenerations(current.Installed);
             var machineInstall = MachineInstallTransactionPersistence.Load();
+            var agentInstall = AgentInstallTransactionPersistence.Load();
             if (machineInstall is not null)
             {
                 if (current.Pending is null)
@@ -187,6 +188,20 @@ public static class SourceBuildProvenance
                         current.PendingInviteCiphertextSha256,
                         current.Pending.SourceSha256,
                         current.Pending.SourceManifestSha256));
+            }
+            if (machineInstall is null
+                && agentInstall is null
+                && current.Pending is not null
+                && !HasPendingFilesOutsideInstalledGenerations(current.Pending, current.Installed))
+            {
+                // A prior Setup can fail during preflight before machine state
+                // exists. Its process lease is gone and no filesystem or
+                // enrollment transaction needs recovery, so retaining that
+                // invitation would permanently block the corrected release.
+                current.Pending = null;
+                current.PendingTransactionId = string.Empty;
+                current.PendingInviteId = Guid.Empty;
+                current.PendingInviteCiphertextSha256 = string.Empty;
             }
             string transactionId;
             if (current.Pending is not null)
@@ -469,16 +484,9 @@ public static class SourceBuildProvenance
         if (AgentInstallTransactionPersistence.Load() is not null)
             throw new InvalidOperationException(
                 "The Agent filesystem transaction is still active; pending source trust was preserved for recovery.");
-        foreach (var pendingFile in candidate.Files.Where(file => File.Exists(file.Path)))
-        {
-            try { VerifyHashAsync(pendingFile.Path, pendingFile.Size, pendingFile.Sha256, CancellationToken.None).GetAwaiter().GetResult(); }
-            catch (InvalidDataException) { continue; }
-            if (!store.Installed.SelectMany(generation => generation.Files).Any(installed =>
-                    installed.Path.Equals(pendingFile.Path, StringComparison.OrdinalIgnoreCase)
-                    && installed.Size == pendingFile.Size && FixedHash(installed.Sha256, pendingFile.Sha256)))
-                throw new InvalidOperationException(
-                    "A pending source-built file remains installed; pending trust was preserved for filesystem recovery.");
-        }
+        if (HasPendingFilesOutsideInstalledGenerations(candidate, store.Installed))
+            throw new InvalidOperationException(
+                "A pending source-built file remains installed; pending trust was preserved for filesystem recovery.");
         store.Pending = null;
         store.PendingTransactionId = string.Empty;
         store.PendingInviteId = Guid.Empty;
@@ -490,6 +498,31 @@ public static class SourceBuildProvenance
         }
         else WriteProtectedStore(store);
         ReleaseActiveInstallation(candidate, storeLease);
+    }
+
+    private static bool HasPendingFilesOutsideInstalledGenerations(
+        InstalledSourceGeneration pending,
+        IEnumerable<InstalledSourceGeneration> installedGenerations)
+    {
+        var installed = installedGenerations.SelectMany(generation => generation.Files).ToArray();
+        foreach (var pendingFile in pending.Files.Where(file => File.Exists(file.Path)))
+        {
+            try
+            {
+                VerifyHashAsync(pendingFile.Path, pendingFile.Size, pendingFile.Sha256, CancellationToken.None)
+                    .GetAwaiter().GetResult();
+            }
+            catch (InvalidDataException)
+            {
+                continue;
+            }
+            if (!installed.Any(file =>
+                    file.Path.Equals(pendingFile.Path, StringComparison.OrdinalIgnoreCase)
+                    && file.Size == pendingFile.Size
+                    && FixedHash(file.Sha256, pendingFile.Sha256)))
+                return true;
+        }
+        return false;
     }
 
     private static (

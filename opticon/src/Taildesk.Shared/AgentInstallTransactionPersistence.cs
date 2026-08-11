@@ -46,8 +46,15 @@ public static class AgentInstallTransactionPersistence
 
     public static AgentInstallTransactionJournal? Load()
     {
+        if (!File.Exists(AppPaths.AgentInstallTransactionFile))
+        {
+            if (Directory.Exists(AppPaths.AgentInstallTransactionFile))
+                throw new InvalidDataException("The protected Agent installation journal path is a directory.");
+            if (Directory.Exists(AppPaths.SetupStagingDirectory) || File.Exists(AppPaths.SetupStagingDirectory))
+                MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.SetupStagingDirectory);
+            return null;
+        }
         MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.SetupStagingDirectory);
-        if (!File.Exists(AppPaths.AgentInstallTransactionFile)) return null;
         var content = MachineStorageSecurity.ReadRestrictedFile(
             AppPaths.AgentInstallTransactionFile, MaximumJournalBytes);
         var journal = JsonSerializer.Deserialize<AgentInstallTransactionJournal>(content, JsonDefaults.Options)
