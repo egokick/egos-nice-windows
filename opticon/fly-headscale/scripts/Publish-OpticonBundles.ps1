@@ -796,19 +796,22 @@ $version = if ([string]::IsNullOrWhiteSpace($Version)) { Get-NextReleaseVersion 
 if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw "Version must be a stable major.minor.patch release." }
 if ($SkipBuild -and [string]::IsNullOrWhiteSpace($Version)) { throw "-SkipBuild requires an explicit -Version so an existing build is never misidentified." }
 if (-not $SkipBuild) {
-    $buildArguments = @(
-        '-Version', $version,
-        '-SigningProfile', $SigningProfile,
-        '-SourceReleaseCertificateThumbprint', $SourceReleaseCertificateThumbprint,
-        '-ProductCertificateThumbprint', $ProductCertificateThumbprint,
-        '-Rfc3161TimestampUrl', $Rfc3161TimestampUrl,
-        '-SignToolPath', $SignToolPath
-    )
+    # PowerShell array splatting is positional: strings such as '-Version'
+    # become the value of the first parameter instead of named arguments.
+    # Use a hashtable so the source builder receives the exact bound values.
+    $buildArguments = @{
+        Version = $version
+        SigningProfile = $SigningProfile
+        SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint
+        ProductCertificateThumbprint = $ProductCertificateThumbprint
+        Rfc3161TimestampUrl = $Rfc3161TimestampUrl
+        SignToolPath = $SignToolPath
+    }
     if ($isLegacyMigration) {
-        $buildArguments += @('-LegacyMigrationSignerThumbprint', $LegacyMigrationSignerThumbprint)
+        $buildArguments.LegacyMigrationSignerThumbprint = $LegacyMigrationSignerThumbprint
     }
     if ($SourceOnly) {
-        $buildArguments += '-SourceOnly'
+        $buildArguments.SourceOnly = $true
     }
     & (Join-Path $PSScriptRoot "Build-OpticonBundles.ps1") @buildArguments
 }
