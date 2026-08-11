@@ -95,6 +95,32 @@ public static class SourceBuildProvenance
     private static string ProvenanceFile => Path.Combine(ProvenanceDirectory, "source-build-v5.json");
     private static string ProvenanceLockFile => Path.Combine(ProvenanceDirectory, "source-build-v5.lock");
 
+    /// <summary>
+    /// Describes how the regenerable source-provenance store was recovered.
+    /// Unlike secret-bearing machine state, provenance can be discarded when
+    /// its writers cannot be trusted because the active authenticated source
+    /// attestation reconstructs it before any payload is used.
+    /// </summary>
+    public enum StoreRecoveryOutcome
+    {
+        Ready,
+        Normalized,
+        Rebuilt
+    }
+
+    /// <summary>
+    /// Ensures that provenance lives in a canonical, protected directory. A
+    /// safe-but-noncanonical ACL is normalized. If an untrusted principal was
+    /// able to mutate the store, no bytes from that store are parsed; it is
+    /// atomically quarantined by name and a new protected store is created.
+    /// </summary>
+    public static StoreRecoveryOutcome EnsureRecoverableStore()
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Source-build provenance requires Windows.");
+        return EnsureStoreDirectory();
+    }
+
     public static async Task ActivateForSetupAsync(
         string attestationPath,
         string invitePath,
@@ -894,10 +920,7 @@ public static class SourceBuildProvenance
         ValidateStore(store);
         EnsureStoreDirectory();
         if (File.Exists(ProvenanceFile))
-            RequireRestrictedSecurity(
-                new FileInfo(ProvenanceFile).GetAccessControl(
-                    AccessControlSections.Owner | AccessControlSections.Access),
-                isDirectory: false);
+            NormalizeOrQuarantineStoreFile(ProvenanceFile, "store");
 
         var temporary = ProvenanceFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
         var bytes = JsonSerializer.SerializeToUtf8Bytes(store, JsonDefaults.Options);
@@ -914,12 +937,11 @@ public static class SourceBuildProvenance
 
     private static InstalledSourceProvenance ReadProtectedStore()
     {
+        EnsureStoreDirectory();
         if (!File.Exists(ProvenanceFile)) return new InstalledSourceProvenance();
         RejectReparsePoints(ProvenanceDirectory);
-        var directorySecurity = new DirectoryInfo(ProvenanceDirectory).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
-        var fileSecurity = new FileInfo(ProvenanceFile).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
-        RequireRestrictedSecurity(directorySecurity, isDirectory: true);
-        RequireRestrictedSecurity(fileSecurity, isDirectory: false);
+        NormalizeOrQuarantineStoreFile(ProvenanceFile, "store");
+        if (!File.Exists(ProvenanceFile)) return new InstalledSourceProvenance();
         using var stream = new FileStream(
             ProvenanceFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
             4096, FileOptions.SequentialScan);
@@ -969,19 +991,48 @@ public static class SourceBuildProvenance
         ValidateFileSet(generation.Files);
     }
 
-    private static void EnsureStoreDirectory()
+    private static StoreRecoveryOutcome EnsureStoreDirectory()
     {
         var directorySecurity = CreateRestrictedDirectorySecurity();
         var directory = new DirectoryInfo(ProvenanceDirectory);
         if (!directory.Exists)
         {
+            if (File.Exists(ProvenanceDirectory))
+                throw new InvalidDataException("The machine source-build provenance directory path is a file.");
             try { directory.Create(directorySecurity); }
             catch (IOException) when (Directory.Exists(ProvenanceDirectory)) { }
+            RejectReparsePoints(ProvenanceDirectory);
+            RequireCanonicalSecurity(
+                directory.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access),
+                isDirectory: true, "The machine source-build provenance ACL");
+            return StoreRecoveryOutcome.Rebuilt;
         }
         RejectReparsePoints(ProvenanceDirectory);
-        RequireRestrictedSecurity(
+        var security = directory.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+        if (HasTrustedWritersSecurity(security, isDirectory: true))
+        {
+            if (IsCanonicalSecurity(security, isDirectory: true)) return StoreRecoveryOutcome.Ready;
+            directory.SetAccessControl(directorySecurity);
+            RequireCanonicalSecurity(
+                directory.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access),
+                isDirectory: true, "The machine source-build provenance ACL");
+            NormalizeExistingStoreFiles();
+            return StoreRecoveryOutcome.Normalized;
+        }
+
+        // Do not recursively inspect or delete a tree writable by an
+        // untrusted user. A rename moves only the already-proven directory
+        // entry, leaves every untrusted byte unconsumed, and lets the current
+        // signed source attestation create a fresh store at the canonical path.
+        var quarantined = ProvenanceDirectory + ".untrusted-" + Guid.NewGuid().ToString("N");
+        Directory.Move(ProvenanceDirectory, quarantined);
+        directory = new DirectoryInfo(ProvenanceDirectory);
+        directory.Create(directorySecurity);
+        RejectReparsePoints(ProvenanceDirectory);
+        RequireCanonicalSecurity(
             directory.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access),
-            isDirectory: true);
+            isDirectory: true, "The machine source-build provenance ACL");
+        return StoreRecoveryOutcome.Rebuilt;
     }
 
     private static FileStream AcquireStoreLease(CancellationToken cancellationToken)
@@ -995,6 +1046,9 @@ public static class SourceBuildProvenance
             {
                 if (Directory.Exists(ProvenanceLockFile))
                     throw new InvalidDataException("The machine source-build provenance lock is a directory.");
+
+                if (File.Exists(ProvenanceLockFile))
+                    NormalizeOrQuarantineStoreFile(ProvenanceLockFile, "lock");
 
                 if (!File.Exists(ProvenanceLockFile))
                 {
@@ -1042,8 +1096,47 @@ public static class SourceBuildProvenance
     {
         var security = new FileInfo(ProvenanceLockFile).GetAccessControl(
             AccessControlSections.Owner | AccessControlSections.Access);
-        RequireTrustedWritersSecurity(security, isDirectory: false,
-            "The source-build provenance lock");
+        RequireCanonicalSecurity(security, isDirectory: false,
+            allowUsersRead: false,
+            description: "The source-build provenance lock");
+    }
+
+    private static void NormalizeExistingStoreFiles()
+    {
+        if (File.Exists(ProvenanceFile)) NormalizeOrQuarantineStoreFile(ProvenanceFile, "store");
+        if (File.Exists(ProvenanceLockFile)) NormalizeOrQuarantineStoreFile(ProvenanceLockFile, "lock");
+    }
+
+    private static void NormalizeOrQuarantineStoreFile(string path, string description)
+    {
+        if (!File.Exists(path))
+        {
+            if (Directory.Exists(path))
+                throw new InvalidDataException($"The source-build provenance {description} path is a directory.");
+            return;
+        }
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException($"The source-build provenance {description} is a reparse point.");
+        var info = new FileInfo(path);
+        var security = info.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+        if (HasTrustedWritersSecurity(security, isDirectory: false))
+        {
+            if (!IsCanonicalSecurity(security, isDirectory: false))
+                info.SetAccessControl(description == "lock"
+                    ? CreateStoreLockSecurity()
+                    : CreateRestrictedFileSecurity());
+            RequireCanonicalSecurity(
+                info.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access),
+                isDirectory: false, allowUsersRead: description != "lock",
+                description: $"The source-build provenance {description} ACL");
+            return;
+        }
+
+        // The protected directory has already been proven safe, so moving a
+        // tainted regular file within it cannot cause a traversal. Never parse
+        // or overwrite the tainted bytes in place.
+        File.Move(path, path + ".untrusted-" + Guid.NewGuid().ToString("N"));
     }
 
     private static void ValidateFileSet(IEnumerable<InstalledSourceFile> files)
@@ -1117,10 +1210,59 @@ public static class SourceBuildProvenance
         return security;
     }
 
-    private static void RequireRestrictedSecurity(FileSystemSecurity security, bool isDirectory)
-    {
+    private static void RequireRestrictedSecurity(FileSystemSecurity security, bool isDirectory) =>
         RequireTrustedWritersSecurity(security, isDirectory,
             "The machine source-build provenance ACL");
+
+    private static void RequireCanonicalSecurity(
+        FileSystemSecurity security,
+        bool isDirectory,
+        string description) => RequireCanonicalSecurity(
+            security, isDirectory, allowUsersRead: true, description: description);
+
+    private static void RequireCanonicalSecurity(
+        FileSystemSecurity security,
+        bool isDirectory,
+        bool allowUsersRead,
+        string description)
+    {
+        if (!IsCanonicalSecurity(security, isDirectory, allowUsersRead))
+            throw new UnauthorizedAccessException($"{description} is not the canonical protected ACL.");
+    }
+
+    private static bool IsCanonicalSecurity(
+        FileSystemSecurity security,
+        bool isDirectory,
+        bool allowUsersRead = true)
+    {
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        if (owner is null || !owner.Equals(AdministratorsSid) || !security.AreAccessRulesProtected)
+            return false;
+        var inheritance = isDirectory
+            ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
+            : InheritanceFlags.None;
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
+            .OfType<FileSystemAccessRule>().ToArray();
+        var expected = allowUsersRead ? 3 : 2;
+        return rules.Length == expected
+               && rules.All(rule => !rule.IsInherited && rule.AccessControlType == AccessControlType.Allow)
+               && HasExactRule(rules, SystemSid, FileSystemRights.FullControl, inheritance)
+               && HasExactRule(rules, AdministratorsSid, FileSystemRights.FullControl, inheritance)
+               && (!allowUsersRead || HasExactRule(rules, UsersSid, FileSystemRights.ReadAndExecute, inheritance));
+    }
+
+    private static bool HasTrustedWritersSecurity(FileSystemSecurity security, bool isDirectory)
+    {
+        try
+        {
+            RequireTrustedWritersSecurity(security, isDirectory,
+                "The machine source-build provenance ACL");
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static void RequireTrustedWritersSecurity(

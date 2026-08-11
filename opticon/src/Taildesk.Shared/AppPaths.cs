@@ -50,6 +50,9 @@ public static class AppPaths
     public static string MachineInstallTransactionFile =>
         Path.Combine(SetupStagingDirectory, "machine-install-transaction.json");
 
+    public static string SetupResumeFile =>
+        Path.Combine(SetupStagingDirectory, "setup-resume.json");
+
     public static string GuardianInstallTransactionFile =>
         Path.Combine(SetupStagingDirectory, "guardian-install-transaction.json");
 

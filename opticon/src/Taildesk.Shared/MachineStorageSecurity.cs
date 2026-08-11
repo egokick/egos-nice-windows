@@ -165,6 +165,35 @@ public static class MachineStorageSecurity
         File.Delete(full);
     }
 
+    /// <summary>
+    /// Removes a malformed but ACL-protected journal from its active fixed
+    /// path without consuming or deleting its bytes. Recovery code may then
+    /// rebuild desired state from authenticated inputs while preserving the
+    /// original artifact for local diagnostics.
+    /// </summary>
+    public static string QuarantineRestrictedFile(string path, string label)
+    {
+        if (string.IsNullOrWhiteSpace(label)
+            || label.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
+            throw new ArgumentException("The protected quarantine label is invalid.", nameof(label));
+        var full = Path.GetFullPath(path);
+        var parent = Path.GetDirectoryName(full)
+                     ?? throw new InvalidOperationException("The protected file has no parent directory.");
+        RequireRestrictedDirectory(parent);
+        if (!File.Exists(full))
+        {
+            if (Directory.Exists(full))
+                throw new InvalidDataException("The protected file path is a directory.");
+            throw new FileNotFoundException("The protected file to quarantine is missing.", full);
+        }
+        RequireRestrictedFile(full);
+        var quarantined = Path.Combine(
+            parent, "." + Path.GetFileName(full) + "." + label + "." + Guid.NewGuid().ToString("N"));
+        File.Move(full, quarantined, overwrite: false);
+        RequireRestrictedFile(quarantined);
+        return quarantined;
+    }
+
     public static async Task WriteRestrictedFileAtomicAsync(
         string path,
         ReadOnlyMemory<byte> content,

@@ -30,6 +30,8 @@ public sealed class InstallCoordinator
     private const string ControllerInstallDirectoryValueName = "InstallDirectory";
     private const string ControllerInstallLockFileName = ".controller-install.lock";
     private const string AgentTaskName = "Taildesk Agent";
+    private const string AgentTaskOwnershipDescription =
+        "Runs the protected Opticon background agent at system startup.";
     private const string RouteKeeperTaskName = "Taildesk Fly Route";
     private const string ControllerUiTaskName = "Opticon Command Center";
     private const string FlyControllerIpv4 = "213.188.217.227";
@@ -39,20 +41,37 @@ public sealed class InstallCoordinator
     private readonly IProgress<InstallProgress> _progress;
     private readonly HttpClient _http;
     private readonly bool _allowTailscaleReauthentication;
-    private readonly InteractiveUserProfile _userProfile;
+    private readonly SetupResumeContext? _resumeContext;
+    // Resolve the profile during the named Ensure phase, not construction, so
+    // preflight can report profile problems together with other repairs.
+    private InteractiveUserProfile? _userProfile;
     private FileStream? _agentInstallLock;
     private AgentInstallTransactionJournal? _agentInstallTransaction;
     private MachineInstallTransactionJournal? _machineInstallTransaction;
     private bool _agentInstallCommitted;
     private bool _controllerTasksInstalled;
 
-    public InstallCoordinator(InvitePayload invite, string bundleDirectory, IProgress<InstallProgress> progress, bool allowTailscaleReauthentication = false)
+    public InstallCoordinator(
+        InvitePayload invite,
+        string bundleDirectory,
+        IProgress<InstallProgress> progress,
+        bool allowTailscaleReauthentication = false)
+        : this(invite, bundleDirectory, progress, allowTailscaleReauthentication, resumeContext: null)
+    {
+    }
+
+    internal InstallCoordinator(
+        InvitePayload invite,
+        string bundleDirectory,
+        IProgress<InstallProgress> progress,
+        bool allowTailscaleReauthentication,
+        SetupResumeContext? resumeContext = null)
     {
         _invite = invite;
         _bundleDirectory = Path.GetFullPath(bundleDirectory);
         _progress = progress;
         _allowTailscaleReauthentication = allowTailscaleReauthentication;
-        _userProfile = InteractiveUserProfile.Resolve();
+        _resumeContext = resumeContext;
         _http = DirectHttp.CreateClient(TimeSpan.FromMinutes(10));
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Taildesk-Setup/1.0");
     }
@@ -60,24 +79,46 @@ public sealed class InstallCoordinator
     public async Task InstallAsync(CancellationToken cancellationToken)
     {
         EnsureInviteIsValid();
-        MachineStorageSecurity.EnsureOpticonMachineState();
+        var preflight = await SetupPreflight.DiscoverElevatedAsync(
+            _invite, _bundleDirectory, cancellationToken);
+        ReportPreflight(preflight);
+        if (preflight.IsBlocked) throw new SetupPreflightBlockedException(preflight);
+
+        // This is deliberately after read-only discovery. Generic Taildesk
+        // state can contain secrets and remains fail-closed; regenerable
+        // source provenance has its own safe rebuild policy below.
+        await EnsureProtectedStorageAsync(cancellationToken);
         await AcquireAgentInstallLockAsync(cancellationToken);
         SourceInstallationBinding sourceBinding;
         var canResumeExistingSession = false;
+        AgentConfig? completedEnrollmentState = null;
         string? tempDirectory = null;
         try
         {
             sourceBinding = SourceBuildProvenance.RequireActiveInstallationBinding(_invite.InviteId);
-            _machineInstallTransaction = MachineInstallTransactionPersistence.Load();
+            _machineInstallTransaction = MachineInstallTransactionPersistence.LoadRecoverably(
+                out var corruptMachineJournalQuarantined);
+            if (corruptMachineJournalQuarantined)
+            {
+                _progress.Report(new InstallProgress(4,
+                    "A torn protected machine journal was quarantined; revalidating every component before roll-forward."));
+            }
             if (_machineInstallTransaction is not null)
             {
                 MachineInstallTransactionPersistence.RequireMatches(
                     _machineInstallTransaction, sourceBinding);
                 canResumeExistingSession = MachineInstallTransactionPersistence.RequiresNetworkRollForward(
-                    _machineInstallTransaction);
+                    _machineInstallTransaction)
+                    || _machineInstallTransaction.TailscaleReauthenticationApproved;
             }
 
-            var hasInterruptedAgentInstall = AgentInstallTransactionPersistence.Load() is not null;
+            var hasInterruptedAgentInstall = AgentInstallTransactionPersistence.LoadRecoverably(
+                out var corruptAgentJournalQuarantined) is not null;
+            if (corruptAgentJournalQuarantined)
+            {
+                _progress.Report(new InstallProgress(4,
+                    "A torn protected Agent journal was quarantined; the signed Agent generation will be revalidated and repaired."));
+            }
             if (!hasInterruptedAgentInstall && File.Exists(AppPaths.AgentConfigFile))
             {
                 var installedState = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
@@ -89,39 +130,9 @@ public sealed class InstallCoordinator
             tempDirectory = MachineStorageSecurity.CreateRestrictedChildDirectory(
                 AppPaths.SetupStagingDirectory, "install-");
             _progress.Report(new InstallProgress(4, "Checking the invitation and local payload…"));
-            var agentPayload = Path.Combine(_bundleDirectory, "Payload", "Agent");
-            var agentExecutable = Path.Combine(agentPayload, "Taildesk.Agent.exe");
-            if (!File.Exists(agentExecutable))
-            {
-                throw new FileNotFoundException(
-                    $"The invitation bundle is incomplete (Payload\\Agent is missing from {_bundleDirectory}).",
-                    agentExecutable);
-            }
-            await ProductSigning.VerifyAuthenticodeAsync(agentExecutable, cancellationToken);
-            var guardianPayload = Path.Combine(_bundleDirectory, "Payload", "UpdateGuardian");
-            var guardianExecutable = Path.Combine(guardianPayload, "Taildesk.UpdateGuardian.exe");
-            if (!File.Exists(guardianExecutable))
-            {
-                throw new FileNotFoundException(
-                    $"The invitation bundle is incomplete (Payload\\UpdateGuardian is missing from {_bundleDirectory}).",
-                    guardianExecutable);
-            }
-            await ProductSigning.VerifyAuthenticodeAsync(guardianExecutable, cancellationToken);
-            if (_invite.Role == DeviceRole.ControllerAndManaged)
-            {
-                var controllerPayload = Path.Combine(_bundleDirectory, "Payload", "Admin");
-                var controllerExecutable = Path.Combine(controllerPayload, "Opticon.exe");
-                var cliExecutable = Path.Combine(controllerPayload, "Cli", "opticon.exe");
-                if (!File.Exists(controllerExecutable) || !File.Exists(cliExecutable))
-                    throw new FileNotFoundException("This controller invite is missing its signed UI or CLI payload.");
-                await ProductSigning.VerifyAuthenticodeAsync(controllerExecutable, cancellationToken);
-                await ProductSigning.VerifyAuthenticodeAsync(cliExecutable, cancellationToken);
-                foreach (var executable in Directory.EnumerateFiles(
-                             controllerPayload, "*.exe", SearchOption.AllDirectories))
-                    await ProductSigning.VerifyAuthenticodeAsync(executable, cancellationToken);
-                var installedController = Path.Combine(AppPaths.InstallDirectory, "Admin");
-                RequireInstalledControllerProcessesClosed(installedController, installedController + ".previous");
-            }
+            var payload = await EnsurePayloadVerifiedAsync(cancellationToken);
+            var agentPayload = payload.AgentDirectory;
+            var guardianPayload = payload.GuardianDirectory;
 
             await RecoverAgentInstallTransactionAsync(agentPayload, cancellationToken);
             if (File.Exists(AppPaths.AgentConfigFile))
@@ -131,84 +142,59 @@ public sealed class InstallCoordinator
                 RequireSafeInvitationResume(recoveredState);
                 if (recoveredState.CompletedInviteId == _invite.InviteId)
                 {
-                    await CommitEnrollmentReceiptAsync(recoveredState, cancellationToken);
-                    await StartControllerTasksIfInstalledAsync(cancellationToken);
-                    _progress.Report(new InstallProgress(100, "This invitation is already installed and enrolled."));
-                    return;
+                    // A completed receipt is not a reason to skip component
+                    // verification. Treat it as a no-reenrollment repair run:
+                    // Guardian, network, remote access, firewall, task, and
+                    // Agent drift are still checked below.
+                    completedEnrollmentState = recoveredState;
+                    canResumeExistingSession = true;
                 }
                 canResumeExistingSession = canResumeExistingSession
                                            || recoveredState.PendingInviteId == _invite.InviteId;
             }
 
             await EnsureMachineInstallTransactionAsync(sourceBinding, cancellationToken);
+            if (corruptMachineJournalQuarantined)
+            {
+                await RecordEnsureOutcomeAsync(InstallerEnsureResult.Repaired(
+                    "EnsureMachineInstallRecoveryAsync",
+                    "The corrupt protected machine journal was quarantined and all machine phases will be revalidated.",
+                    "Reconstructed the installer recovery boundary from the authenticated invitation and source binding."),
+                    cancellationToken, "MachineInstallJournal");
+            }
+            if (corruptAgentJournalQuarantined)
+            {
+                await RecordEnsureOutcomeAsync(InstallerEnsureResult.Repaired(
+                    "EnsureAgentRecoveryAsync",
+                    "The corrupt protected Agent journal was quarantined and the Agent payload, task, and state will be revalidated.",
+                    "Reconstructed the Agent repair plan from the signed payload."),
+                    cancellationToken, "AgentInstallJournal");
+            }
+            await EnsureProtectedStorageAsync(cancellationToken);
+            var buildEnvironment = await EnsureBuildEnvironmentAsync(sourceBinding, cancellationToken);
+            await RecordEnsureOutcomeAsync(buildEnvironment, cancellationToken);
+            await RecordEnsureOutcomeAsync(payload.Result, cancellationToken);
+            await EnsureInteractiveUserProfileAsync(cancellationToken);
 
             // Prove or install the stable Guardian before changing recovery,
             // network, remote-access, enrollment, or Agent state. A compatible
             // signed Guardian remains pinned even when Setup itself is newer.
-            await InstallGuardianAsync(guardianPayload, cancellationToken);
+            await EnsureGuardianAsync(guardianPayload, cancellationToken);
             _progress.Report(new InstallProgress(7, "Checking the Windows OpenSSH recovery component…"));
-            await EnsureOpenSshServerCapabilityAsync(cancellationToken);
-            if (_invite.Role == DeviceRole.ControllerAndManaged)
-                await EnsureOpenSshClientCapabilityAsync(cancellationToken);
+            await EnsureOpenSshAsync(cancellationToken);
             var reuseJournalNetworkComponent = RequireMachineInstallTransaction().Phase
                                                >= MachineInstallTransactionPhase.NetworkComponentReady;
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.NetworkComponentInstallStarted, cancellationToken);
-            var installedNetworkComponent = await EnsureTailscaleAsync(
+            var tailscaleResult = await EnsureTailscaleInstalledAsync(
                 tempDirectory, reuseJournalNetworkComponent, cancellationToken);
+            var installedNetworkComponent = tailscaleResult.InstalledByOpticon;
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.NetworkComponentReady, cancellationToken);
             _progress.Report(new InstallProgress(28, "Joining the private Opticon network…"));
             var tailscale = FindTailscale();
-            var existing = await TryReadTailscaleStatusAsync(tailscale, cancellationToken);
-            LocalTailscaleSnapshot snapshot;
-            if (existing is { Online: true }
-                && ExistingSessionHasExpectedRole(existing)
-                && (canResumeExistingSession || ExistingSessionHasExpectedDeviceName(existing)))
-            {
-                _progress.Report(new InstallProgress(31, "This machine already has the expected Opticon network role."));
-                snapshot = existing;
-            }
-            else
-            {
-                if (existing is { Online: true } && !string.IsNullOrWhiteSpace(existing.Ip))
-                {
-                    if (!_allowTailscaleReauthentication
-                        && !MachineInstallTransactionPersistence.RequiresNetworkRollForward(
-                            RequireMachineInstallTransaction()))
-                    {
-                        throw new ExistingTailscaleSessionException("This machine is already connected to Tailscale. To consume this single-use invitation and enforce its exact tailnet and role, Opticon must reauthenticate it with the new invitation.");
-                    }
-                }
-
-                await AdvanceMachineInstallTransactionAsync(
-                    MachineInstallTransactionPhase.NetworkEnrollmentStarted, cancellationToken);
-                var up = await RunPrivilegedChildAsync(tailscale,
-                    TailscaleCommandLine.BuildEnrollmentArguments(
-                        _invite.HeadscaleLoginUrl, _invite.TailscaleAuthKey, SafeHostName(_invite.DeviceName)),
-                    TimeSpan.FromMinutes(2), cancellationToken);
-                EnsureSuccess(up, "Tailscale could not join the tailnet");
-                snapshot = await WaitForExpectedTailscaleSessionAsync(tailscale, cancellationToken);
-            }
-            if (!ExistingSessionHasExpectedRole(snapshot))
-            {
-                throw new InvalidOperationException("Tailscale joined, but the resulting tailnet or device tags do not exactly match this invitation.");
-            }
-            if (string.IsNullOrWhiteSpace(snapshot.Ip))
-            {
-                throw new InvalidOperationException("Tailscale joined, but did not assign an address.");
-            }
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.NetworkEnrolled, cancellationToken);
-
-            if (_invite.AdvertiseExitNode)
-            {
-                _progress.Report(new InstallProgress(38, "Enabling this machine as an exit node…"));
-                var advertise = await RunPrivilegedChildAsync(tailscale, ["set", "--advertise-exit-node"], TimeSpan.FromSeconds(30), cancellationToken);
-                EnsureSuccess(advertise, "Tailscale could not advertise the exit node");
-            }
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.NetworkPolicyApplied, cancellationToken);
+            var snapshot = await EnsureTailnetEnrollmentAsync(
+                tailscale, canResumeExistingSession, cancellationToken);
 
             var expectedRustDesk = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
@@ -225,24 +211,21 @@ public sealed class InstallCoordinator
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.RemoteComponentReady, cancellationToken);
             var rustDesk = rustDeskInstallation.Path;
-            await ConfigureFirewallAsync(snapshot.Ip, rustDesk, cancellationToken);
+            await EnsureFirewallPolicyAsync(snapshot.Ip, rustDesk, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.RemoteIsolationApplied, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.RemoteConfigurationStarted, cancellationToken);
-            await ConfigureRustDeskAsync(rustDesk, cancellationToken);
-            if (!await WaitForListeningExecutableAsync(21118, rustDesk, TimeSpan.FromSeconds(90), cancellationToken))
-            {
-                _progress.Report(new InstallProgress(66, "Repairing the RustDesk private listener?"));
-                await ConfigureRustDeskAsync(rustDesk, cancellationToken);
-                if (!await WaitForListeningExecutableAsync(21118, rustDesk, TimeSpan.FromSeconds(90), cancellationToken))
-                    throw new InvalidOperationException("RustDesk did not open its private direct-access listener on TCP 21118 after an automatic repair.");
-            }
+            await EnsureRustDeskListenerAsync(rustDesk, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.RemoteConfigured, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.AgentInstallStarted, cancellationToken);
-            await InstallAgentAsync(agentPayload, snapshot.Ip, cancellationToken);
+            if (completedEnrollmentState is null)
+                await EnsureAgentAsync(agentPayload, snapshot.Ip, cancellationToken);
+            else
+                await EnsureExistingAgentAsync(
+                    agentPayload, completedEnrollmentState, snapshot.Ip, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.AgentInstalled, cancellationToken);
             await AssertExactFirewallConfigurationAsync(snapshot.Ip, rustDesk, cancellationToken);
@@ -272,7 +255,7 @@ public sealed class InstallCoordinator
             _progress.Report(new InstallProgress(96, "Waiting for the command center to confirm enrollment…"));
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.EnrollmentWaitStarted, cancellationToken);
-            await WaitForEnrollmentAsync(cancellationToken);
+            await EnsureEnrollmentCommittedAsync(completedEnrollmentState, cancellationToken);
             await StartControllerTasksIfInstalledAsync(cancellationToken);
             _progress.Report(new InstallProgress(100, "Connected. This machine is ready."));
         }
@@ -300,6 +283,292 @@ public sealed class InstallCoordinator
         }
     }
 
+    /// <summary>
+    /// The source bootstrap owns the actual local build. At this point Setup
+    /// verifies the attested build binding again, which is the postcondition
+    /// required before any component can consume its payload.
+    /// </summary>
+    private Task<InstallerEnsureResult> EnsureBuildEnvironmentAsync(
+        SourceInstallationBinding sourceBinding,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var active = SourceBuildProvenance.RequireActiveInstallationBinding(_invite.InviteId);
+        if (active != sourceBinding)
+            throw new InvalidDataException("The active authenticated source build changed during installer preflight.");
+        return Task.FromResult(InstallerEnsureResult.Ready(
+            "EnsureBuildEnvironmentAsync",
+            "The authenticated source build and its isolated .NET 10 environment are bound to this invitation."));
+    }
+
+    private async Task<VerifiedPayload> EnsurePayloadVerifiedAsync(CancellationToken cancellationToken)
+    {
+        var agentDirectory = Path.Combine(_bundleDirectory, "Payload", "Agent");
+        var agent = Path.Combine(agentDirectory, "Taildesk.Agent.exe");
+        if (!File.Exists(agent))
+            throw new FileNotFoundException(
+                $"The invitation bundle is incomplete (Payload\\Agent is missing from {_bundleDirectory}).", agent);
+        await ProductSigning.VerifyAuthenticodeAsync(agent, cancellationToken);
+
+        var guardianDirectory = Path.Combine(_bundleDirectory, "Payload", "UpdateGuardian");
+        var guardian = Path.Combine(guardianDirectory, "Taildesk.UpdateGuardian.exe");
+        if (!File.Exists(guardian))
+            throw new FileNotFoundException(
+                $"The invitation bundle is incomplete (Payload\\UpdateGuardian is missing from {_bundleDirectory}).", guardian);
+        await ProductSigning.VerifyAuthenticodeAsync(guardian, cancellationToken);
+
+        if (_invite.Role == DeviceRole.ControllerAndManaged)
+        {
+            var controller = Path.Combine(_bundleDirectory, "Payload", "Admin");
+            var controllerExecutable = Path.Combine(controller, "Opticon.exe");
+            var cliExecutable = Path.Combine(controller, "Cli", "opticon.exe");
+            if (!File.Exists(controllerExecutable) || !File.Exists(cliExecutable))
+                throw new FileNotFoundException("This controller invite is missing its signed UI or CLI payload.");
+            await ProductSigning.VerifyAuthenticodeAsync(controllerExecutable, cancellationToken);
+            await ProductSigning.VerifyAuthenticodeAsync(cliExecutable, cancellationToken);
+            foreach (var executable in Directory.EnumerateFiles(controller, "*.exe", SearchOption.AllDirectories))
+                await ProductSigning.VerifyAuthenticodeAsync(executable, cancellationToken);
+            var installedController = Path.Combine(AppPaths.InstallDirectory, "Admin");
+            RequireInstalledControllerProcessesClosed(installedController, installedController + ".previous");
+        }
+
+        return new VerifiedPayload(
+            agentDirectory,
+            guardianDirectory,
+            InstallerEnsureResult.Ready(
+                "EnsurePayloadVerifiedAsync",
+                "Every invite payload executable required for this role has a valid pinned signature."));
+    }
+
+    private async Task<InstallerEnsureResult> EnsureProtectedStorageAsync(
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var hadMachineState = Directory.Exists(AppPaths.MachineDataDirectory);
+        var hadStaging = Directory.Exists(AppPaths.SetupStagingDirectory);
+        MachineStorageSecurity.EnsureOpticonMachineState();
+        var provenance = SourceBuildProvenance.EnsureRecoverableStore();
+        var repaired = !hadMachineState || !hadStaging
+                       || provenance is not SourceBuildProvenance.StoreRecoveryOutcome.Ready;
+        var result = repaired
+            ? InstallerEnsureResult.Repaired(
+                "EnsureProtectedStorageAsync",
+                "Taildesk staging and regenerable source provenance have canonical protected ACLs.",
+                provenance.ToString())
+            : InstallerEnsureResult.Ready(
+                "EnsureProtectedStorageAsync",
+                "Taildesk staging and source provenance have canonical protected ACLs.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken);
+        return result;
+    }
+
+    private async Task<InstallerEnsureResult> EnsureInteractiveUserProfileAsync(
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var previous = _userProfile;
+        _userProfile = InteractiveUserProfile.Resolve();
+        var result = previous is null
+            ? InstallerEnsureResult.Ready(
+                "EnsureInteractiveUserProfileAsync",
+                "The interactive user profile and permitted known-folder targets were resolved safely.")
+            : InstallerEnsureResult.Repaired(
+                "EnsureInteractiveUserProfileAsync",
+                "The interactive user profile and permitted known-folder targets were re-resolved safely.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken);
+        return result;
+    }
+
+    private async Task RecordEnsureOutcomeAsync(
+        InstallerEnsureResult result,
+        CancellationToken cancellationToken,
+        string? resourceChanged = null)
+    {
+        if (_machineInstallTransaction is null) return;
+        if (result.Outcome == InstallerEnsureOutcome.Blocked)
+        {
+            MachineInstallTransactionPersistence.RecordBlocked(
+                _machineInstallTransaction,
+                result.Operation,
+                result.Detail ?? "An external decision is required before this phase can continue.");
+            await MachineInstallTransactionPersistence.SaveAsync(_machineInstallTransaction, cancellationToken);
+            return;
+        }
+        MachineInstallTransactionPersistence.RecordVerifiedRepair(
+            _machineInstallTransaction,
+            result.Operation,
+            result.Outcome == InstallerEnsureOutcome.Repaired,
+            result.Postcondition,
+            resourceChanged);
+        await MachineInstallTransactionPersistence.SaveAsync(_machineInstallTransaction, cancellationToken);
+    }
+
+    private async Task RecordPreviousComponentVersionAsync(
+        string component,
+        string executable,
+        bool currentVersionIsReady,
+        CancellationToken cancellationToken)
+    {
+        if (currentVersionIsReady || _machineInstallTransaction is null || !File.Exists(executable))
+            return;
+        string? version;
+        try { version = FileVersionInfo.GetVersionInfo(executable).ProductVersion?.Trim(); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(version)) return;
+        MachineInstallTransactionPersistence.RecordPreviousComponentVersion(
+            _machineInstallTransaction, component, version);
+        await MachineInstallTransactionPersistence.SaveAsync(_machineInstallTransaction, cancellationToken);
+    }
+
+    private void ReportPreflight(InstallerPreflightReport report)
+    {
+        foreach (var finding in report.Findings)
+        {
+            var prefix = finding.Severity switch
+            {
+                InstallerPreflightSeverity.Blocked => "Blocked",
+                InstallerPreflightSeverity.Repair => "Planned repair",
+                _ => "Preflight"
+            };
+            _progress.Report(new InstallProgress(2, $"{prefix}: {finding.Area} — {finding.Detail}"));
+        }
+    }
+
+    private async Task<InstallerEnsureResult> EnsureGuardianAsync(
+        string guardianPayload,
+        CancellationToken cancellationToken)
+    {
+        var executable = Path.Combine(AppPaths.UpdateGuardianInstallDirectory, "Taildesk.UpdateGuardian.exe");
+        var wasReady = await IsGuardianReadyAsync(guardianPayload, cancellationToken);
+        await RecordPreviousComponentVersionAsync(
+            "UpdateGuardian", executable, wasReady, cancellationToken);
+        if (!wasReady)
+            await InstallGuardianAsync(guardianPayload, cancellationToken);
+        if (!await IsGuardianReadyAsync(guardianPayload, cancellationToken))
+            throw new InvalidDataException(
+                "The signed Update Guardian did not satisfy its executable and task postconditions after repair.");
+        var result = wasReady
+            ? InstallerEnsureResult.Ready(
+                "EnsureGuardianAsync",
+                "The signed Update Guardian is installed and compatible with the protected recovery path.")
+            : InstallerEnsureResult.Repaired(
+                "EnsureGuardianAsync",
+                "The signed Update Guardian is installed and compatible with the protected recovery path.",
+                "Repaired the Guardian payload or its SYSTEM recovery tasks.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken,
+            wasReady ? null : "UpdateGuardian");
+        return result;
+    }
+
+    private static async Task<bool> IsGuardianReadyAsync(
+        string source,
+        CancellationToken cancellationToken)
+    {
+        var directory = AppPaths.UpdateGuardianInstallDirectory;
+        var executable = Path.Combine(directory, "Taildesk.UpdateGuardian.exe");
+        if (!File.Exists(executable)) return false;
+        try
+        {
+            await ProductSigning.VerifyAuthenticodeAsync(executable, cancellationToken);
+            await RequireInstalledGuardianWatchdogCompatibilityAsync(
+                source, directory, cancellationToken);
+            return GuardianTaskMatches(
+                       await QueryTaskXmlAsync(
+                           RemoteAdministrationProtocol.GuardianTaskName, cancellationToken),
+                       executable, arguments: string.Empty, requiresBootTrigger: true)
+                   && GuardianTaskMatches(
+                       await QueryTaskXmlAsync(
+                           RemoteAdministrationProtocol.GuardianWatchdogTaskName, cancellationToken),
+                       executable, RemoteAdministrationProtocol.GuardianWatchdogArgument,
+                       requiresBootTrigger: false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private static bool GuardianTaskMatches(
+        string? xml,
+        string executable,
+        string arguments,
+        bool requiresBootTrigger)
+    {
+        if (string.IsNullOrWhiteSpace(xml)) return false;
+        try
+        {
+            var document = ParseTaskXml(xml);
+            XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+            var root = document.Root;
+            var actions = root?.Element(task + "Actions")?.Elements().ToArray() ?? [];
+            var principal = root?.Element(task + "Principals")?.Elements(task + "Principal").SingleOrDefault();
+            var triggers = root?.Element(task + "Triggers")?.Elements().ToArray() ?? [];
+            var exec = actions.SingleOrDefault();
+            return root?.Name == task + "Task"
+                   && exec?.Name == task + "Exec"
+                   && string.Equals(
+                       exec.Element(task + "Command")?.Value,
+                       Path.GetFullPath(executable), StringComparison.OrdinalIgnoreCase)
+                   && string.Equals(exec.Element(task + "Arguments")?.Value ?? string.Empty,
+                       arguments, StringComparison.Ordinal)
+                   && principal?.Element(task + "UserId")?.Value == "S-1-5-18"
+                   && principal.Element(task + "LogonType")?.Value == "ServiceAccount"
+                   && principal.Element(task + "RunLevel")?.Value == "HighestAvailable"
+                   && (!requiresBootTrigger || triggers.Any(trigger => trigger.Name == task + "BootTrigger"));
+        }
+        catch (Exception exception) when (exception is InvalidDataException or System.Xml.XmlException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<InstallerEnsureResult> EnsureOpenSshAsync(CancellationToken cancellationToken)
+    {
+        var openSshDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "OpenSSH");
+        var serverWasPresent = File.Exists(Path.Combine(openSshDirectory, "sshd.exe"));
+        var clientWasPresent = File.Exists(Path.Combine(openSshDirectory, "ssh.exe"));
+        try
+        {
+            await EnsureOpenSshServerCapabilityAsync(cancellationToken);
+            if (_invite.Role == DeviceRole.ControllerAndManaged)
+                await EnsureOpenSshClientCapabilityAsync(cancellationToken);
+        }
+        catch (OpenSshRebootRequiredException exception)
+        {
+            var journal = RequireMachineInstallTransaction();
+            MachineInstallTransactionPersistence.RecordRebootState(
+                journal, rebootPending: true, operation: "EnsureOpenSshAsync");
+            await MachineInstallTransactionPersistence.SaveAsync(journal, cancellationToken);
+            if (_resumeContext is null)
+                throw new SetupRebootRequiredException(
+                    exception.Message + " Restart Windows, then rerun the original protected Opticon installer.");
+            await SetupResumeCoordinator.ScheduleAsync(_resumeContext, cancellationToken);
+            throw new SetupRebootRequiredException(
+                exception.Message + " Setup saved its protected recovery state and will resume automatically after Windows restarts.");
+        }
+        if (_machineInstallTransaction is not null && _machineInstallTransaction.RebootPending)
+        {
+            MachineInstallTransactionPersistence.RecordRebootState(
+                _machineInstallTransaction, rebootPending: false, operation: "EnsureOpenSshAsync");
+            await MachineInstallTransactionPersistence.SaveAsync(_machineInstallTransaction, cancellationToken);
+        }
+        var repaired = !serverWasPresent || (_invite.Role == DeviceRole.ControllerAndManaged && !clientWasPresent);
+        var result = repaired
+            ? InstallerEnsureResult.Repaired(
+                "EnsureOpenSshAsync",
+                "The required Windows OpenSSH capability is installed and contained for Opticon recovery.",
+                "Installed a missing OpenSSH capability.")
+            : InstallerEnsureResult.Ready(
+                "EnsureOpenSshAsync",
+                "The required Windows OpenSSH capability is installed and contained for Opticon recovery.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken, repaired ? "OpenSSH" : null);
+        return result;
+    }
+
     internal static async Task EnsureOpenSshClientCapabilityAsync(CancellationToken cancellationToken)
     {
         var opensshDirectory = Path.Combine(
@@ -314,8 +583,13 @@ public sealed class InstallCoordinator
             cancellationToken);
         EnsureCapabilityCommandSucceeded(installed, "Windows could not install the OpenSSH Client capability");
         if (!File.Exists(ssh) || !File.Exists(sshKeygen))
+        {
+            if (installed.ExitCode == 3010)
+                throw new OpenSshRebootRequiredException(
+                    "Windows installed the OpenSSH Client capability and requires a restart before its binaries are available.");
             throw new InvalidOperationException(
                 "OpenSSH Client installation needs a Windows restart or capability repair before controller setup can continue.");
+        }
     }
 
     internal static async Task EnsureOpenSshServerCapabilityAsync(CancellationToken cancellationToken)    {
@@ -343,6 +617,7 @@ public sealed class InstallCoordinator
         // The journal precedes DISM so a cancelled/rebooted Setup can safely finish
         // containing only the capability installation that Opticon itself began.
         await WriteSetupJournalAsync(journalPath, "installing", cancellationToken);
+        var rebootRequired = false;
         if (!File.Exists(sshd) || !File.Exists(sshKeygen))
         {
             var installed = await InstallOpenSshCapabilityAsync(
@@ -350,10 +625,16 @@ public sealed class InstallCoordinator
                 "OpenSSH Server",
                 cancellationToken);
             EnsureCapabilityCommandSucceeded(installed, "Windows could not install the OpenSSH Server capability");
+            rebootRequired = installed.ExitCode == 3010;
         }
         if (!File.Exists(sshd) || !File.Exists(sshKeygen))
+        {
+            if (rebootRequired)
+                throw new OpenSshRebootRequiredException(
+                    "Windows installed the OpenSSH Server capability and requires a restart before its binaries are available.");
             throw new InvalidOperationException(
                 "OpenSSH Server installation needs a Windows restart or capability repair before Opticon setup can continue.");
+        }
 
         // Complete the one-time containment without request or UI cancellation. If
         // interrupted, the durable 'installing' journal makes the next Setup retry it.
@@ -441,7 +722,35 @@ public sealed class InstallCoordinator
             path, System.Text.Encoding.UTF8.GetBytes(value), cancellationToken);
     }
 
-    private async Task<bool> EnsureTailscaleAsync(
+    private async Task<TailscaleInstallation> EnsureTailscaleInstalledAsync(
+        string tempDirectory,
+        bool allowJournalOwnedReuse,
+        CancellationToken cancellationToken)
+    {
+        var installed = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe");
+        var artifact = DependencyArtifacts.Tailscale(RuntimeInformation.ProcessArchitecture);
+        var wasReady = File.Exists(installed)
+                       && (allowJournalOwnedReuse || OpticonComponentIntegration.IsManagedByOpticon("Private Network"))
+                       && await InstalledDependencyMatchesAsync(installed, artifact, runVersionCommand: true, cancellationToken);
+        await RecordPreviousComponentVersionAsync(
+            "Tailscale", installed, wasReady, cancellationToken);
+        var installedByOpticon = await EnsureTailscaleInstalledCoreAsync(
+            tempDirectory, allowJournalOwnedReuse, cancellationToken);
+        var result = wasReady
+            ? InstallerEnsureResult.Ready(
+                "EnsureTailscaleInstalledAsync",
+                $"Pinned Tailscale {artifact.Version} is installed and verified.")
+            : InstallerEnsureResult.Repaired(
+                "EnsureTailscaleInstalledAsync",
+                $"Pinned Tailscale {artifact.Version} is installed and verified.",
+                "Repaired or upgraded the private-network component.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken,
+            wasReady ? null : "Tailscale");
+        return new TailscaleInstallation(installedByOpticon, result);
+    }
+
+    private async Task<bool> EnsureTailscaleInstalledCoreAsync(
         string tempDirectory,
         bool allowJournalOwnedReuse,
         CancellationToken cancellationToken)
@@ -456,15 +765,22 @@ public sealed class InstallCoordinator
             return true;
         }
 
-        if (File.Exists(installed) || FindInstalledMsiProductCode(["Tailscale"]) is not null)
-        {
-            await RemoveStandaloneComponentAsync("Tailscale", ["Tailscale"], installed, cancellationToken);
-        }
-
         _progress.Report(new InstallProgress(10, $"Downloading Opticon's private-network component ({artifact.Version})…"));
         await using var installer = await DownloadVerifiedAsync(artifact, tempDirectory, cancellationToken);
-        _progress.Report(new InstallProgress(18, "Installing the Opticon private-network component…"));
+        _progress.Report(new InstallProgress(18, "Upgrading or repairing the Opticon private-network component…"));
+        var existingProductCode = FindInstalledMsiProductCode(["Tailscale"]);
         var result = await InstallVerifiedMsiAsync(installer, cancellationToken);
+        if (!result.Succeeded && result.ExitCode != 3010
+            && !string.IsNullOrWhiteSpace(existingProductCode)
+            && IsMsiUpgradeConflict(result))
+        {
+            // Prefer MSI upgrade/repair first. Only a positive MSI version
+            // conflict with a discovered product code may trigger replacement;
+            // an arbitrary standalone executable is never removed blindly.
+            await RemoveStandaloneComponentAsync(
+                "Tailscale", ["Tailscale"], installed, cancellationToken);
+            result = await InstallVerifiedMsiAsync(installer, cancellationToken);
+        }
         EnsureSuccess(result, "Tailscale installation failed");
         if (!File.Exists(installed)
             || !await InstalledDependencyMatchesAsync(installed, artifact, runVersionCommand: true, cancellationToken))
@@ -472,7 +788,152 @@ public sealed class InstallCoordinator
         return true;
     }
 
+    private async Task<LocalTailscaleSnapshot> EnsureTailnetEnrollmentAsync(
+        string tailscale,
+        bool canResumeExistingSession,
+        CancellationToken cancellationToken)
+    {
+        var journal = RequireMachineInstallTransaction();
+        var existing = await TryReadTailscaleStatusAsync(tailscale, cancellationToken);
+        var matchesRecordedNode = existing is not null
+                                  && !string.IsNullOrWhiteSpace(journal.TailscaleNodeIdentity)
+                                  && FixedAsciiEquals(existing.DeviceId, journal.TailscaleNodeIdentity);
+        var reusedEnrollment = existing is { Online: true }
+                               && ExistingSessionHasExpectedRole(existing)
+                               && (canResumeExistingSession
+                                   || matchesRecordedNode
+                                   || ExistingSessionHasExpectedDeviceName(existing));
+        var repaired = false;
+        LocalTailscaleSnapshot snapshot;
+        if (reusedEnrollment)
+        {
+            _progress.Report(new InstallProgress(31,
+                "The expected Opticon network identity is already present; verifying its node identity."));
+            snapshot = existing!;
+        }
+        else
+        {
+            if (existing is { Online: true } && !string.IsNullOrWhiteSpace(existing.Ip))
+            {
+                if (!_allowTailscaleReauthentication && !journal.TailscaleReauthenticationApproved)
+                {
+                    MachineInstallTransactionPersistence.RecordTailscaleDecision(
+                        journal, reauthenticationApproved: false);
+                    await MachineInstallTransactionPersistence.SaveAsync(journal, cancellationToken);
+                    await RecordEnsureOutcomeAsync(InstallerEnsureResult.Blocked(
+                        "EnsureTailnetEnrollmentAsync",
+                        "The existing Tailscale identity requires one explicit reauthentication decision."),
+                        cancellationToken);
+                    throw new ExistingTailscaleSessionException(
+                        "This machine is already connected to Tailscale. To consume this single-use invitation and enforce its exact tailnet and role, Opticon must reauthenticate it with the new invitation.");
+                }
+
+                if (_allowTailscaleReauthentication && !journal.TailscaleReauthenticationApproved)
+                {
+                    MachineInstallTransactionPersistence.RecordTailscaleDecision(
+                        journal, reauthenticationApproved: true);
+                    await MachineInstallTransactionPersistence.SaveAsync(journal, cancellationToken);
+                }
+            }
+
+            await AdvanceMachineInstallTransactionAsync(
+                MachineInstallTransactionPhase.NetworkEnrollmentStarted, cancellationToken);
+            var up = await RunPrivilegedChildAsync(tailscale,
+                TailscaleCommandLine.BuildEnrollmentArguments(
+                    _invite.HeadscaleLoginUrl, _invite.TailscaleAuthKey, SafeHostName(_invite.DeviceName)),
+                TimeSpan.FromMinutes(2), cancellationToken);
+            if (!up.Succeeded)
+            {
+                // `tailscale up` can lose its response after the daemon has
+                // accepted the key. Query the resulting local node before ever
+                // considering another enrollment attempt or key use.
+                var afterUncertainUp = await TryReadTailscaleStatusAsync(tailscale, cancellationToken);
+                if (afterUncertainUp is { Online: true }
+                    && ExistingSessionHasExpectedRole(afterUncertainUp)
+                    && !string.IsNullOrWhiteSpace(afterUncertainUp.Ip))
+                {
+                    snapshot = afterUncertainUp;
+                }
+                else
+                {
+                    EnsureSuccess(up, "Tailscale could not join the tailnet");
+                    throw new InvalidOperationException("Tailscale enrollment did not produce a queryable node identity.");
+                }
+            }
+            else
+            {
+                snapshot = await WaitForExpectedTailscaleSessionAsync(tailscale, cancellationToken);
+            }
+            repaired = true;
+        }
+
+        if (!ExistingSessionHasExpectedRole(snapshot))
+            throw new InvalidOperationException(
+                "Tailscale joined, but the resulting tailnet or device tags do not exactly match this invitation.");
+        if (string.IsNullOrWhiteSpace(snapshot.Ip) || string.IsNullOrWhiteSpace(snapshot.DeviceId))
+            throw new InvalidOperationException(
+                "Tailscale joined, but did not publish an address and stable node identity.");
+
+        MachineInstallTransactionPersistence.RecordTailscaleDecision(
+            journal,
+            journal.TailscaleReauthenticationApproved || _allowTailscaleReauthentication,
+            snapshot.DeviceId);
+        await MachineInstallTransactionPersistence.SaveAsync(journal, cancellationToken);
+        await AdvanceMachineInstallTransactionAsync(
+            MachineInstallTransactionPhase.NetworkEnrolled, cancellationToken);
+
+        if (_invite.AdvertiseExitNode)
+        {
+            _progress.Report(new InstallProgress(38, "Enabling this machine as an exit node…"));
+            var advertise = await RunPrivilegedChildAsync(
+                tailscale, ["set", "--advertise-exit-node"], TimeSpan.FromSeconds(30), cancellationToken);
+            EnsureSuccess(advertise, "Tailscale could not advertise the exit node");
+        }
+        await AdvanceMachineInstallTransactionAsync(
+            MachineInstallTransactionPhase.NetworkPolicyApplied, cancellationToken);
+
+        var result = repaired
+            ? InstallerEnsureResult.Repaired(
+                "EnsureTailnetEnrollmentAsync",
+                "The verified Tailscale node has the invitation's tailnet role, tags, address, and recorded node identity.",
+                "Joined or reconciled the private-network identity.")
+            : InstallerEnsureResult.Ready(
+                "EnsureTailnetEnrollmentAsync",
+                "The verified Tailscale node has the invitation's tailnet role, tags, address, and recorded node identity.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken,
+            repaired ? "TailnetEnrollment" : null);
+        return snapshot;
+    }
+
     private async Task<ComponentInstallation> EnsureRustDeskAsync(
+        string tempDirectory,
+        bool allowJournalOwnedReuse,
+        CancellationToken cancellationToken)
+    {
+        var installed = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RustDesk", "rustdesk.exe");
+        var artifact = DependencyArtifacts.RustDesk(RuntimeInformation.ProcessArchitecture);
+        var wasReady = File.Exists(installed)
+                       && (allowJournalOwnedReuse || OpticonComponentIntegration.IsManagedByOpticon("Remote Access"))
+                       && await InstalledDependencyMatchesAsync(installed, artifact, runVersionCommand: false, cancellationToken);
+        await RecordPreviousComponentVersionAsync(
+            "RustDesk", installed, wasReady, cancellationToken);
+        var installation = await EnsureRustDeskInstalledCoreAsync(
+            tempDirectory, allowJournalOwnedReuse, cancellationToken);
+        var result = wasReady
+            ? InstallerEnsureResult.Ready(
+                "EnsureRustDeskAsync",
+                $"Pinned RustDesk {artifact.Version} is installed and verified.")
+            : InstallerEnsureResult.Repaired(
+                "EnsureRustDeskAsync",
+                $"Pinned RustDesk {artifact.Version} is installed and verified.",
+                "Repaired or replaced the remote-access component.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken,
+            wasReady ? null : "RustDesk");
+        return installation;
+    }
+
+    private async Task<ComponentInstallation> EnsureRustDeskInstalledCoreAsync(
         string tempDirectory,
         bool allowJournalOwnedReuse,
         CancellationToken cancellationToken)
@@ -487,15 +948,19 @@ public sealed class InstallCoordinator
             return new ComponentInstallation(installed, true);
         }
 
-        if (File.Exists(installed) || FindInstalledMsiProductCode(["RustDesk", "RustDesk Remote Desktop"]) is not null)
-        {
-            await RemoveStandaloneComponentAsync("RustDesk", ["RustDesk", "RustDesk Remote Desktop"], installed, cancellationToken);
-        }
-
         _progress.Report(new InstallProgress(49, $"Downloading Opticon's remote-access component ({artifact.Version})…"));
         await using var installer = await DownloadVerifiedAsync(artifact, tempDirectory, cancellationToken);
-        _progress.Report(new InstallProgress(56, "Installing the Opticon remote-access component…"));
+        _progress.Report(new InstallProgress(56, "Upgrading or repairing the Opticon remote-access component…"));
+        var existingProductCode = FindInstalledMsiProductCode(["RustDesk", "RustDesk Remote Desktop"]);
         var install = await InstallVerifiedMsiAsync(installer, cancellationToken);
+        if (!install.Succeeded && install.ExitCode != 3010
+            && !string.IsNullOrWhiteSpace(existingProductCode)
+            && IsMsiUpgradeConflict(install))
+        {
+            await RemoveStandaloneComponentAsync(
+                "RustDesk", ["RustDesk", "RustDesk Remote Desktop"], installed, cancellationToken);
+            install = await InstallVerifiedMsiAsync(installer, cancellationToken);
+        }
         EnsureSuccess(install, "RustDesk installation failed");
 
         for (var attempt = 0; attempt < 20 && !File.Exists(installed); attempt++)
@@ -541,6 +1006,36 @@ public sealed class InstallCoordinator
         EnsureSuccess(automatic, "RustDesk could not be configured for automatic startup");
         var restart = await RunSystemToolAsync("sc.exe", ["start", "RustDesk"], TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(restart, "The private RustDesk service could not be restarted");
+    }
+
+    private async Task<InstallerEnsureResult> EnsureRustDeskListenerAsync(
+        string rustDesk,
+        CancellationToken cancellationToken)
+    {
+        await ConfigureRustDeskAsync(rustDesk, cancellationToken);
+        var repaired = false;
+        if (!await WaitForListeningExecutableAsync(
+                21118, rustDesk, TimeSpan.FromSeconds(90), cancellationToken))
+        {
+            repaired = true;
+            _progress.Report(new InstallProgress(66, "Repairing the RustDesk private listener…"));
+            await ConfigureRustDeskAsync(rustDesk, cancellationToken);
+            if (!await WaitForListeningExecutableAsync(
+                    21118, rustDesk, TimeSpan.FromSeconds(90), cancellationToken))
+                throw new InvalidOperationException(
+                    "RustDesk did not open its private direct-access listener on TCP 21118 after an automatic repair.");
+        }
+        var result = repaired
+            ? InstallerEnsureResult.Repaired(
+                "EnsureRustDeskAsync",
+                "The Opticon-owned RustDesk service is running with a verified private TCP 21118 listener.",
+                "Restarted and reconfigured the RustDesk service.")
+            : InstallerEnsureResult.Ready(
+                "EnsureRustDeskAsync",
+                "The Opticon-owned RustDesk service is running with a verified private TCP 21118 listener.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken,
+            repaired ? "RustDeskService" : null);
+        return result;
     }
 
     private async Task EnsureMachineInstallTransactionAsync(
@@ -594,8 +1089,77 @@ public sealed class InstallCoordinator
         _machineInstallTransaction = null;
     }
 
-    private async Task InstallAgentAsync(
-        string source, string tailscaleIp, CancellationToken cancellationToken)
+    private async Task<InstallerEnsureResult> EnsureAgentAsync(
+        string source,
+        string tailscaleIp,
+        CancellationToken cancellationToken)
+    {
+        if (await IsPendingAgentReadyAsync(source, tailscaleIp, cancellationToken))
+        {
+            var ready = InstallerEnsureResult.Ready(
+                "EnsureAgentAsync",
+                "The pending Agent payload, protected configuration, and exact SYSTEM scheduled task are verified.");
+            await RecordEnsureOutcomeAsync(ready, cancellationToken);
+            return ready;
+        }
+
+        await InstallAgentCoreAsync(source, tailscaleIp, cancellationToken);
+        await VerifyInstalledExecutableDirectoryAsync(AppPaths.AgentInstallDirectory, cancellationToken);
+        await RequireExactAgentTaskAsync(cancellationToken);
+        var result = InstallerEnsureResult.Repaired(
+            "EnsureAgentAsync",
+            "The Agent payload, protected configuration, and exact SYSTEM scheduled task are verified.",
+            "Atomically installed or repaired the pending Agent generation.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken, "TaildeskAgent");
+        return result;
+    }
+
+    private async Task<InstallerEnsureResult> EnsureExistingAgentAsync(
+        string source,
+        AgentConfig completedState,
+        string tailscaleIp,
+        CancellationToken cancellationToken)
+    {
+        if (!EnrollmentMatchesInvitation(completedState))
+            throw new InvalidDataException("The completed Agent configuration no longer matches this invitation.");
+
+        if (await IsCompletedAgentReadyAsync(source, completedState, tailscaleIp, cancellationToken))
+        {
+            var ready = InstallerEnsureResult.Ready(
+                "EnsureAgentAsync",
+                "The completed Agent payload, protected configuration, and exact SYSTEM task remain valid.");
+            await RecordEnsureOutcomeAsync(ready, cancellationToken);
+            return ready;
+        }
+
+        // A completed invitation is an idempotent enrollment identity, not an
+        // excuse to leave a broken Agent generation or task in place. Reuse
+        // the protected completed configuration so this repair does not spend
+        // another invitation or drop the existing device identity.
+        await InstallAgentCoreAsync(source, tailscaleIp, completedState, cancellationToken);
+        await VerifyPayloadDirectoryCopyAsync(
+            source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
+        await RequireExactAgentTaskAsync(cancellationToken);
+        var result = InstallerEnsureResult.Repaired(
+            "EnsureAgentAsync",
+            "The completed Agent payload, protected configuration, and exact SYSTEM task were repaired without re-enrollment.",
+            "Atomically promoted the current signed Agent generation and retained the completed invitation identity.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken);
+        return result;
+    }
+
+    private async Task InstallAgentCoreAsync(
+        string source,
+        string tailscaleIp,
+        CancellationToken cancellationToken) =>
+        await InstallAgentCoreAsync(
+            source, tailscaleIp, completedEnrollment: null, cancellationToken: cancellationToken);
+
+    private async Task InstallAgentCoreAsync(
+        string source,
+        string tailscaleIp,
+        AgentConfig? completedEnrollment,
+        CancellationToken cancellationToken)
     {
         _progress.Report(new InstallProgress(70, "Installing the Opticon background agent…"));
         var destination = AppPaths.AgentInstallDirectory;
@@ -693,11 +1257,13 @@ public sealed class InstallCoordinator
         }
 
         var roots = BuildSharedRoots(_invite.AllowedRoots);
+        // A known folder is optional shared content. Its absence must not
+        // prevent the recovery agent from converging; it can be added on a
+        // later repair run after the interactive user creates or restores it.
         if (roots.Count == 0)
-        {
-            throw new InvalidOperationException("None of the folders selected in this invitation exists in the signed-in user's profile.");
-        }
-        var config = new AgentConfig
+            _progress.Report(new InstallProgress(73,
+                "No requested user folders are present yet; installing the agent without shared folders."));
+        var config = completedEnrollment ?? new AgentConfig
         {
             DeviceName = _invite.DeviceName,
             Role = _invite.Role,
@@ -713,6 +1279,16 @@ public sealed class InstallCoordinator
             ExposeAllLocalVolumes = false,
             ControllerShortcutPaths = []
         };
+        if (completedEnrollment is not null)
+        {
+            config.BindAddress = tailscaleIp;
+            config.AdvertiseExitNode = _invite.AdvertiseExitNode;
+            config.SharedRoots = roots;
+            config.ExposeAllLocalVolumes = false;
+            config.PendingInviteId = null;
+            config.PendingInviteSecretProtected = string.Empty;
+            config.CompletedInviteId = _invite.InviteId;
+        }
         await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile).SaveAsync(config, cancellationToken);
 
         var agentExe = Path.Combine(destination, "Taildesk.Agent.exe");
@@ -721,6 +1297,63 @@ public sealed class InstallCoordinator
                             ?? throw new InvalidOperationException("The protected Agent transaction disappeared before task commit.");
         activeJournal.Phase = AgentInstallTransactionPhase.AgentTaskApplied;
         await AgentInstallTransactionPersistence.SaveAsync(activeJournal, cancellationToken);
+    }
+
+    private async Task<bool> IsPendingAgentReadyAsync(
+        string source,
+        string tailscaleIp,
+        CancellationToken cancellationToken)
+    {
+        if (_agentInstallTransaction is not null || !File.Exists(AppPaths.AgentConfigFile)) return false;
+        try
+        {
+            var state = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
+                .LoadAsync(cancellationToken);
+            if (state.PendingInviteId != _invite.InviteId
+                || !state.BindAddress.Equals(tailscaleIp, StringComparison.OrdinalIgnoreCase)
+                || !FixedAsciiEquals(state.AgentTokenHash, SecurityHelpers.HashToken(_invite.AgentToken)))
+                return false;
+            await VerifyPayloadDirectoryCopyAsync(
+                source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
+            await RequireExactAgentTaskAsync(cancellationToken);
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // The transaction path below revalidates every byte before it
+            // promotes a replacement. This probe merely decides Ready versus
+            // a safe repair attempt; it never adopts the failed state.
+            return false;
+        }
+    }
+
+    private async Task<bool> IsCompletedAgentReadyAsync(
+        string source,
+        AgentConfig completedState,
+        string tailscaleIp,
+        CancellationToken cancellationToken)
+    {
+        if (!completedState.BindAddress.Equals(tailscaleIp, StringComparison.OrdinalIgnoreCase))
+            return false;
+        try
+        {
+            await VerifyPayloadDirectoryCopyAsync(
+                source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
+            await RequireExactAgentTaskAsync(cancellationToken);
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task RequireExactAgentTaskAsync(CancellationToken cancellationToken)
+    {
+        var task = await QueryAgentTaskXmlAsync(cancellationToken)
+                   ?? throw new InvalidDataException("The Opticon Agent task is missing.");
+        RequireExactAgentTaskXml(
+            task, Path.Combine(AppPaths.AgentInstallDirectory, "Taildesk.Agent.exe"));
     }
 
     private async Task AcquireAgentInstallLockAsync(CancellationToken cancellationToken)
@@ -762,13 +1395,58 @@ public sealed class InstallCoordinator
         if (hadPreviousAgent)
         {
             if (xml is null)
-                throw new InvalidDataException("The existing Agent has no scheduled task to preserve transactionally.");
-            RequireExactAgentTaskXml(xml, Path.Combine(installedDirectory, "Taildesk.Agent.exe"));
-            return xml;
+            {
+                // A signed Agent directory without its task is a repairable
+                // partial installation. There is no task state to restore on
+                // rollback, so the replacement transaction safely records no
+                // previous task and recreates the exact Opticon-owned task.
+                return null;
+            }
+            try
+            {
+                RequireExactAgentTaskXml(xml, Path.Combine(installedDirectory, "Taildesk.Agent.exe"));
+                return xml;
+            }
+            catch (InvalidDataException) when (IsOpticonOwnedAgentTask(xml, installedDirectory))
+            {
+                // A recognizable legacy/drifted Opticon task is repaired by
+                // the replacement install below. It is intentionally not
+                // restored on rollback because its nonexact command is not a
+                // safe task contract to preserve.
+                return null;
+            }
         }
-        if (xml is not null)
-            throw new InvalidDataException("An orphaned Taildesk Agent task blocks first installation.");
+        if (xml is not null && !IsOpticonOwnedAgentTask(xml, installedDirectory))
+            throw new InvalidDataException(
+                "An unrelated Taildesk Agent task blocks installation; Opticon will not replace a task it does not own.");
         return null;
+    }
+
+    private static bool IsOpticonOwnedAgentTask(string xml, string installedDirectory)
+    {
+        try
+        {
+            var document = ParseTaskXml(xml);
+            XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+            var description = document.Root?.Element(task + "RegistrationInfo")?.Element(task + "Description")?.Value;
+            var command = document.Root?.Element(task + "Actions")?.Element(task + "Exec")?.Element(task + "Command")?.Value;
+            if (string.IsNullOrWhiteSpace(command)) return false;
+            var fullCommand = Path.GetFullPath(command);
+            var expectedCommand = Path.GetFullPath(Path.Combine(
+                installedDirectory, "Taildesk.Agent.exe"));
+            return string.Equals(description, AgentTaskOwnershipDescription, StringComparison.Ordinal)
+                ? IsPathWithinDirectory(fullCommand, AppPaths.InstallDirectory)
+                  || IsPathWithinDirectory(fullCommand, installedDirectory)
+                // Older Opticon tasks did not carry the ownership description.
+                // Only the exact fixed Agent executable is a safe legacy
+                // ownership marker; a same-named task that points elsewhere
+                // remains blocked as user-owned or ambiguous.
+                : fullCommand.Equals(expectedCommand, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is InvalidDataException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
     }
 
     private static async Task<string?> QueryAgentTaskXmlAsync(CancellationToken cancellationToken)
@@ -840,9 +1518,9 @@ public sealed class InstallCoordinator
         XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
         var document = new XDocument(
             new XDeclaration("1.0", "utf-8", null),
-            new XElement(task + "Task", new XAttribute("version", "1.4"),
+                new XElement(task + "Task", new XAttribute("version", "1.4"),
                 new XElement(task + "RegistrationInfo",
-                    new XElement(task + "Description", "Runs the protected Opticon background agent at system startup.")),
+                    new XElement(task + "Description", AgentTaskOwnershipDescription)),
                 new XElement(task + "Triggers",
                     new XElement(task + "BootTrigger", new XElement(task + "Enabled", "true"))),
                 new XElement(task + "Principals",
@@ -1658,40 +2336,72 @@ public sealed class InstallCoordinator
         await RequireFirewallProfilesSecureAsync(cancellationToken);
         _progress.Report(new InstallProgress(80, "Restricting inbound access to the Tailscale interface…"));
         var agent = Path.Combine(AppPaths.InstallDirectory, "Agent", "Taildesk.Agent.exe");
-        foreach (var rule in new[] { "Taildesk Agent (Tailscale only)", "RustDesk Direct (Tailscale only)", "RustDesk External IPv4 Block", "RustDesk External IPv6 Block" })
-        {
-            _ = await RunSystemToolAsync("netsh.exe", ["advfirewall", "firewall", "delete", "rule", $"name={rule}"], TimeSpan.FromSeconds(20), cancellationToken);
-        }
+        // The Opticon group is the ownership boundary.  Never delete all rules
+        // for a program: administrators may intentionally have their own
+        // RustDesk or Agent policy that must survive an Opticon repair.
         _ = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "delete", "rule", "name=all", "dir=in", $"program={rustDesk}"],
-            TimeSpan.FromSeconds(20), cancellationToken);
-        _ = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "delete", "rule", "name=all", "dir=out", $"program={rustDesk}"],
-            TimeSpan.FromSeconds(20), cancellationToken);
-        _ = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "delete", "rule", "name=all", "dir=in", $"program={agent}"],
+            ["advfirewall", "firewall", "delete", "rule", "group=Opticon"],
             TimeSpan.FromSeconds(20), cancellationToken);
 
         var agentRule = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=Taildesk Agent (Tailscale only)", "dir=in", "action=allow", "protocol=TCP", "localport=45831", $"localip={tailscaleIp}", "remoteip=100.64.0.0/10", $"program={agent}", "profile=any", "enable=yes"],
+            ["advfirewall", "firewall", "add", "rule", "name=Taildesk Agent (Tailscale only)", "group=Opticon", "dir=in", "action=allow", "protocol=TCP", "localport=45831", $"localip={tailscaleIp}", "remoteip=100.64.0.0/10", $"program={agent}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(agentRule, "Could not create the Opticon agent firewall rule");
 
         var rustDeskRule = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=RustDesk Direct (Tailscale only)", "dir=in", "action=allow", "protocol=TCP", "localport=21118", $"localip={tailscaleIp}", "remoteip=100.64.0.0/10", $"program={rustDesk}", "profile=any", "enable=yes"],
+            ["advfirewall", "firewall", "add", "rule", "name=RustDesk Direct (Tailscale only)", "group=Opticon", "dir=in", "action=allow", "protocol=TCP", "localport=21118", $"localip={tailscaleIp}", "remoteip=100.64.0.0/10", $"program={rustDesk}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(rustDeskRule, "Could not create the RustDesk firewall rule");
 
         var rustDeskExternalV4Block = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=RustDesk External IPv4 Block", "dir=out", "action=block", "remoteip=0.0.0.0-100.63.255.255,100.128.0.0-255.255.255.255", $"program={rustDesk}", "profile=any", "enable=yes"],
+            ["advfirewall", "firewall", "add", "rule", "name=RustDesk External IPv4 Block", "group=Opticon", "dir=out", "action=block", "remoteip=0.0.0.0-100.63.255.255,100.128.0.0-255.255.255.255", $"program={rustDesk}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(rustDeskExternalV4Block, "Could not block RustDesk from non-Tailscale IPv4 destinations");
 
         var rustDeskExternalV6Block = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=RustDesk External IPv6 Block", "dir=out", "action=block", "remoteip=::/1,8000::/1", $"program={rustDesk}", "profile=any", "enable=yes"],
+            ["advfirewall", "firewall", "add", "rule", "name=RustDesk External IPv6 Block", "group=Opticon", "dir=out", "action=block", "remoteip=::/1,8000::/1", $"program={rustDesk}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(rustDeskExternalV6Block, "Could not block RustDesk from external IPv6 destinations");
         await AssertExactFirewallConfigurationAsync(tailscaleIp, rustDesk, cancellationToken);
+    }
+
+    private async Task<InstallerEnsureResult> EnsureFirewallPolicyAsync(
+        string tailscaleIp,
+        string rustDesk,
+        CancellationToken cancellationToken)
+    {
+        var wasReady = await IsExactFirewallConfigurationAsync(
+            tailscaleIp, rustDesk, cancellationToken);
+        if (!wasReady)
+            await ConfigureFirewallAsync(tailscaleIp, rustDesk, cancellationToken);
+        await AssertExactFirewallConfigurationAsync(tailscaleIp, rustDesk, cancellationToken);
+        var result = wasReady
+            ? InstallerEnsureResult.Ready(
+                "EnsureFirewallPolicyAsync",
+                "Exactly the Opticon-owned firewall rules are present and restricted to the authenticated Tailscale identity.")
+            : InstallerEnsureResult.Repaired(
+                "EnsureFirewallPolicyAsync",
+                "Exactly the Opticon-owned firewall rules are present and restricted to the authenticated Tailscale identity.",
+                "Recreated the Opticon firewall rule group without touching user-owned rules.");
+        await RecordEnsureOutcomeAsync(result, cancellationToken,
+            wasReady ? null : "OpticonFirewallRules");
+        return result;
+    }
+
+    private static async Task<bool> IsExactFirewallConfigurationAsync(
+        string tailscaleIp,
+        string rustDesk,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await AssertExactFirewallConfigurationAsync(tailscaleIp, rustDesk, cancellationToken);
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return false;
+        }
     }
 
     private static async Task RequireFirewallProfilesSecureAsync(CancellationToken cancellationToken)
@@ -1720,16 +2430,16 @@ public sealed class InstallCoordinator
             AppPaths.InstallDirectory, "Agent", "Taildesk.Agent.exe"));
         const string script =
             "param([string]$ip,[string]$rust,[string]$agent);$ErrorActionPreference='Stop';" +
-            "function Check([string]$name,[string]$direction,[string]$action,[string]$program,[string]$protocol,[string]$port,[string]$remote){" +
+            "function Check([string]$name,[string]$direction,[string]$action,[string]$program,[string]$protocol,[string]$port,[string]$remote,[string]$local){" +
             "$rules=@(Get-NetFirewallRule -DisplayName $name -ErrorAction Stop);if($rules.Count -ne 1){throw ('Firewall rule count drifted: '+$name)};$r=$rules[0];" +
-            "if(-not $r.Enabled -or $r.Direction.ToString() -ne $direction -or $r.Action.ToString() -ne $action -or $r.Profile.ToString() -ne 'Any'){throw ('Firewall rule contract drifted: '+$name)};" +
+            "if(-not $r.Enabled -or $r.Direction.ToString() -ne $direction -or $r.Action.ToString() -ne $action -or $r.Profile.ToString() -ne 'Any' -or $r.Group -ne 'Opticon'){throw ('Firewall rule contract drifted: '+$name)};" +
             "$app=@(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r);if($app.Count -ne 1 -or -not $app[0].Program.Equals($program,[StringComparison]::OrdinalIgnoreCase)){throw ('Firewall application drifted: '+$name)};" +
             "$pf=@(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r);if($pf.Count -ne 1 -or $pf[0].Protocol.ToString() -ne $protocol -or ($port -and $pf[0].LocalPort.ToString() -ne $port)){throw ('Firewall port drifted: '+$name)};" +
-            "$af=@(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r);$actual=(@($af[0].RemoteAddress) -join ',');if($af.Count -ne 1 -or -not (($remote -split '\\|') -contains $actual)){throw ('Firewall address drifted: '+$name)}};" +
-            "Check 'Taildesk Agent (Tailscale only)' 'Inbound' 'Allow' $agent 'TCP' '45831' '100.64.0.0/10|100.64.0.0/255.192.0.0';" +
-            "Check 'RustDesk Direct (Tailscale only)' 'Inbound' 'Allow' $rust 'TCP' '21118' '100.64.0.0/10|100.64.0.0/255.192.0.0';" +
-            "Check 'RustDesk External IPv4 Block' 'Outbound' 'Block' $rust 'Any' '' '0.0.0.0-100.63.255.255,100.128.0.0-255.255.255.255';" +
-            "Check 'RustDesk External IPv6 Block' 'Outbound' 'Block' $rust 'Any' '' '::/1,8000::/1'";
+            "$af=@(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r);$actual=(@($af[0].RemoteAddress) -join ',');$actualLocal=(@($af[0].LocalAddress) -join ',');if($af.Count -ne 1 -or -not (($remote -split '\\|') -contains $actual) -or ($local -and $actualLocal -ne $local)){throw ('Firewall address drifted: '+$name)}};" +
+            "Check 'Taildesk Agent (Tailscale only)' 'Inbound' 'Allow' $agent 'TCP' '45831' '100.64.0.0/10|100.64.0.0/255.192.0.0' $ip;" +
+            "Check 'RustDesk Direct (Tailscale only)' 'Inbound' 'Allow' $rust 'TCP' '21118' '100.64.0.0/10|100.64.0.0/255.192.0.0' $ip;" +
+            "Check 'RustDesk External IPv4 Block' 'Outbound' 'Block' $rust 'Any' '' '0.0.0.0-100.63.255.255,100.128.0.0-255.255.255.255' '';" +
+            "Check 'RustDesk External IPv6 Block' 'Outbound' 'Block' $rust 'Any' '' '::/1,8000::/1' ''";
         var result = await RunSystemToolAsync(
             @"WindowsPowerShell\v1.0\powershell.exe",
             ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted", "-Command", script,
@@ -1792,7 +2502,7 @@ public sealed class InstallCoordinator
                     await MachineStorageSecurity.WriteUserBootstrapAsync(
                         AppPaths.ControllerBootstrapFile,
                         bootstrapBytes,
-                        _userProfile.Sid,
+                        RequireInteractiveUserProfile().Sid,
                         cancellationToken);
                     bootstrapWritten = true;
                     await EnsureControllerTasksAsync(destination, cancellationToken);
@@ -1815,7 +2525,7 @@ public sealed class InstallCoordinator
                 try
                 {
                     MachineStorageSecurity.DeleteUserBootstrap(
-                        AppPaths.ControllerBootstrapFile, _userProfile.Sid);
+                        AppPaths.ControllerBootstrapFile, RequireInteractiveUserProfile().Sid);
                 }
                 catch { }
             }
@@ -1830,7 +2540,8 @@ public sealed class InstallCoordinator
         await ProductSigning.VerifyAuthenticodeAsync(ui, cancellationToken);
         await ProductSigning.VerifyAuthenticodeAsync(routeKeeper, cancellationToken);
         var routeXml = BuildRouteKeeperTaskXml(routeKeeper);
-        var uiXml = BuildControllerUiTaskXml(ui, _userProfile.Sid, enabled: false);
+        var uiXml = BuildControllerUiTaskXml(
+            ui, RequireInteractiveUserProfile().Sid, enabled: false);
         await ImportTaskXmlAsync(RouteKeeperTaskName, routeXml, cancellationToken);
         await ImportTaskXmlAsync(ControllerUiTaskName, uiXml, cancellationToken);
         RequireExactRouteKeeperTaskXml(
@@ -1838,7 +2549,8 @@ public sealed class InstallCoordinator
             ?? throw new InvalidDataException("The RouteKeeper task was not retained."), routeKeeper);
         RequireExactControllerUiTaskXml(
             await QueryTaskXmlAsync(ControllerUiTaskName, cancellationToken)
-            ?? throw new InvalidDataException("The command-center task was not retained."), ui, _userProfile.Sid, false);
+            ?? throw new InvalidDataException("The command-center task was not retained."),
+            ui, RequireInteractiveUserProfile().Sid, false);
         _controllerTasksInstalled = true;
     }
 
@@ -1859,7 +2571,8 @@ public sealed class InstallCoordinator
             ?? throw new InvalidDataException("The RouteKeeper task disappeared before start."), routeKeeper);
         RequireExactControllerUiTaskXml(
             await QueryTaskXmlAsync(ControllerUiTaskName, cancellationToken)
-            ?? throw new InvalidDataException("The command-center task disappeared before start."), ui, _userProfile.Sid, true);
+            ?? throw new InvalidDataException("The command-center task disappeared before start."),
+            ui, RequireInteractiveUserProfile().Sid, true);
         foreach (var taskName in new[] { RouteKeeperTaskName, ControllerUiTaskName })
         {
             var start = await RunSystemToolAsync(
@@ -1999,7 +2712,7 @@ public sealed class InstallCoordinator
             throw new InvalidDataException("The protected controller bootstrap path is a directory.");
         if (!File.Exists(AppPaths.ControllerBootstrapFile)) return false;
         var bytes = MachineStorageSecurity.ReadUserBootstrap(
-            AppPaths.ControllerBootstrapFile, _userProfile.Sid, 64 * 1024);
+            AppPaths.ControllerBootstrapFile, RequireInteractiveUserProfile().Sid, 64 * 1024);
         var existing = JsonSerializer.Deserialize<AdminBootstrap>(bytes, JsonDefaults.Options)
                        ?? throw new InvalidDataException("The protected controller bootstrap is empty.");
         string token;
@@ -2025,7 +2738,7 @@ public sealed class InstallCoordinator
             return true;
 
         MachineStorageSecurity.DeleteUserBootstrap(
-            AppPaths.ControllerBootstrapFile, _userProfile.Sid);
+            AppPaths.ControllerBootstrapFile, RequireInteractiveUserProfile().Sid);
         return false;
     }
 
@@ -2563,6 +3276,29 @@ public sealed class InstallCoordinator
         throw new TimeoutException("The agent is installed and will keep retrying, but the command center did not confirm enrollment within two minutes. Make sure the Opticon command center is running and the private-network policy is active.");
     }
 
+    private async Task<InstallerEnsureResult> EnsureEnrollmentCommittedAsync(
+        AgentConfig? completedState,
+        CancellationToken cancellationToken)
+    {
+        if (completedState is not null)
+        {
+            // The coordinator and Agent use the invitation identity as an
+            // idempotency key. A lost response therefore reconciles by proving
+            // the exact completed local identity rather than spending another
+            // invitation key or rewriting network enrollment.
+            await CommitEnrollmentReceiptAsync(completedState, cancellationToken);
+            return InstallerEnsureResult.Ready(
+                "EnsureEnrollmentCommittedAsync",
+                "The already-accepted invitation identity was reconciled and its protected receipt was committed.");
+        }
+
+        await WaitForEnrollmentAsync(cancellationToken);
+        return InstallerEnsureResult.Repaired(
+            "EnsureEnrollmentCommittedAsync",
+            "The command center accepted the exact invitation identity and the protected enrollment receipt was committed.",
+            "Reconciled enrollment through the invitation's idempotent identity.");
+    }
+
     private bool EnrollmentMatchesInvitation(AgentConfig state)
     {
         var expectedTokenHash = SecurityHelpers.HashToken(_invite.AgentToken);
@@ -2616,6 +3352,16 @@ public sealed class InstallCoordinator
             || !FixedAsciiEquals(committed.AgentTokenHash, receipt.AgentTokenHash)
             || !FixedAsciiEquals(committed.AgentSha256, receipt.AgentSha256))
             throw new InvalidDataException("The protected enrollment success receipt did not verify after commit.");
+        if (_machineInstallTransaction is not null)
+        {
+            MachineInstallTransactionPersistence.RecordVerifiedRepair(
+                _machineInstallTransaction,
+                "EnsureEnrollmentCommittedAsync",
+                repaired: true,
+                "The protected receipt matches the exact invitation, Agent identity, executable version, and hash.",
+                "EnrollmentReceipt");
+            await MachineInstallTransactionPersistence.SaveAsync(_machineInstallTransaction, cancellationToken);
+        }
         await CompleteMachineInstallTransactionAsync(cancellationToken);
         SourceBuildProvenance.CommitActiveInstallation();
         _agentInstallCommitted = true;
@@ -3059,6 +3805,16 @@ public sealed class InstallCoordinator
         var match = Regex.Match(value ?? string.Empty, @"\{[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}");
         return match.Success ? match.Value : null;
     }
+
+    private static bool IsMsiUpgradeConflict(ProcessResult result)
+    {
+        // ERROR_PRODUCT_VERSION (1638) is the documented indication that the
+        // vendor's installed product refuses this MSI as an in-place upgrade.
+        // Do not treat generic MSI failures as permission to uninstall an
+        // existing component.
+        return result.ExitCode == 1638;
+    }
+
     private static async Task<bool> InstalledDependencyMatchesAsync(
         string executable,
         DependencyArtifact artifact,
@@ -3138,13 +3894,14 @@ public sealed class InstallCoordinator
         uint reserved);
     private Dictionary<string, string> BuildSharedRoots(IEnumerable<string> requested)
     {
+        var profile = RequireInteractiveUserProfile();
         var known = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["Desktop"] = _userProfile.Desktop,
-            ["Documents"] = _userProfile.Documents,
-            ["Downloads"] = _userProfile.Downloads,
-            ["Pictures"] = _userProfile.Pictures,
-            ["Videos"] = _userProfile.Videos
+            ["Desktop"] = profile.Desktop,
+            ["Documents"] = profile.Documents,
+            ["Downloads"] = profile.Downloads,
+            ["Pictures"] = profile.Pictures,
+            ["Videos"] = profile.Videos
         };
         return requested.Where(known.ContainsKey)
             .Select(name => new KeyValuePair<string, string>(
@@ -3152,6 +3909,10 @@ public sealed class InstallCoordinator
             .Where(pair => Directory.Exists(pair.Value))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
     }
+
+    private InteractiveUserProfile RequireInteractiveUserProfile() => _userProfile
+        ?? throw new InvalidOperationException(
+            "The interactive user profile was not verified before Agent configuration.");
 
     private static void CopyDirectory(string source, string destination)
     {
@@ -3322,4 +4083,9 @@ public sealed class InstallCoordinator
     }
 
     private sealed record ComponentInstallation(string Path, bool InstalledByOpticon);
+    private sealed record TailscaleInstallation(bool InstalledByOpticon, InstallerEnsureResult Result);
+    private sealed record VerifiedPayload(
+        string AgentDirectory,
+        string GuardianDirectory,
+        InstallerEnsureResult Result);
 }

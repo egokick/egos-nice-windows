@@ -63,6 +63,33 @@ public static class AgentInstallTransactionPersistence
         return journal;
     }
 
+    /// <summary>
+    /// Keeps a malformed journal out of the active path only after proving the
+    /// object is protected. The installer subsequently inspects Agent files,
+    /// config, and task state before either promoting a verified generation or
+    /// restoring the last valid transaction it can prove.
+    /// </summary>
+    public static AgentInstallTransactionJournal? LoadRecoverably(
+        out bool corruptJournalQuarantined)
+    {
+        corruptJournalQuarantined = false;
+        if (!File.Exists(AppPaths.AgentInstallTransactionFile))
+            return Load();
+        MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.SetupStagingDirectory);
+        MachineStorageSecurity.RequireRestrictedFile(AppPaths.AgentInstallTransactionFile);
+        try
+        {
+            return Load();
+        }
+        catch (Exception exception) when (exception is InvalidDataException or JsonException)
+        {
+            MachineStorageSecurity.QuarantineRestrictedFile(
+                AppPaths.AgentInstallTransactionFile, "corrupt");
+            corruptJournalQuarantined = true;
+            return null;
+        }
+    }
+
     public static async Task SaveAsync(
         AgentInstallTransactionJournal journal,
         CancellationToken cancellationToken = default)

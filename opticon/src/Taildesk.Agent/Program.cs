@@ -35,7 +35,7 @@ if (config.ExposeAllLocalVolumes)
     config.ExposeAllLocalVolumes = false;
     await configStore.SaveAsync(config);
 }
-if (string.IsNullOrWhiteSpace(config.AgentTokenHash) || config.SharedRoots.Count == 0)
+if (string.IsNullOrWhiteSpace(config.AgentTokenHash))
 {
     Console.Error.WriteLine($"Taildesk Agent is not configured. Expected {AppPaths.AgentConfigFile}.");
     return;

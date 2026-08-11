@@ -14,6 +14,8 @@ public partial class MainWindow : Window
     private bool _installationRunning;
     private bool _maintenanceMode;
     private bool _sourceAttestedAutomaticInstall;
+    private SetupResumeContext? _resumeContext;
+    private string? _sourceAttestationPath;
     private MaintenanceExpectedTarget? _maintenanceTarget;
     private string _logPath = string.Empty;
     private StreamWriter? _logWriter;
@@ -40,8 +42,15 @@ public partial class MainWindow : Window
         try
         {
             var arguments = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            if (arguments.Any(argument => argument.Equals("--resume", StringComparison.OrdinalIgnoreCase)))
+            {
+                _resumeContext = await SetupResumeCoordinator.LoadForCurrentProcessAsync(CancellationToken.None)
+                                 ?? throw new InvalidDataException(
+                                     "The protected Setup reboot continuation state is missing.");
+            }
             _sourceAttestedAutomaticInstall = arguments.Any(argument =>
-                argument.StartsWith("--source-attestation=", StringComparison.OrdinalIgnoreCase));
+                argument.StartsWith("--source-attestation=", StringComparison.OrdinalIgnoreCase))
+                                             || _resumeContext is not null;
             if (_sourceAttestedAutomaticInstall)
                 Environment.ExitCode = 1;
             AppendLog($"Opticon Setup {typeof(MainWindow).Assembly.GetName().Version} started.");
@@ -90,15 +99,20 @@ public partial class MainWindow : Window
             finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(signedEnvelope); }
             var sourceAttestationArgument = arguments.FirstOrDefault(value =>
                 value.StartsWith("--source-attestation=", StringComparison.OrdinalIgnoreCase));
+            _sourceAttestationPath = sourceAttestationArgument is null
+                ? _resumeContext?.SourceAttestationPath
+                : sourceAttestationArgument[21..].Trim('"');
+            if (_resumeContext is not null && _resumeContext.InviteId != _invite.InviteId)
+                throw new InvalidDataException("The protected reboot continuation belongs to a different invitation.");
             if (_invite.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion)
                 throw new InvalidDataException(
                     "This legacy invitation is retained for history only and cannot install software. Ask for a new source-build invitation.");
             if (_invite.SchemaVersion == InvitationPolicy.HostedLinkSchemaVersion)
             {
-                if (sourceAttestationArgument is null)
+                if (string.IsNullOrWhiteSpace(_sourceAttestationPath))
                     throw new InvalidDataException("This source-build invitation requires an elevated build attestation.");
                 await SourceBuildProvenance.ActivateForSetupAsync(
-                    sourceAttestationArgument[21..].Trim('"'), _invitePath, _invite, AppContext.BaseDirectory);
+                    _sourceAttestationPath, _invitePath, _invite, AppContext.BaseDirectory);
                 AppendLog($"Authenticated local source build {_invite.ReleaseVersion} was reverified after elevation.");
             }
             else if (sourceAttestationArgument is not null)
@@ -159,8 +173,12 @@ public partial class MainWindow : Window
             }
             else
             {
-                var installer = new InstallCoordinator(_invite!, AppContext.BaseDirectory, progress);
+                var installer = new InstallCoordinator(
+                    _invite!, AppContext.BaseDirectory, progress,
+                    allowTailscaleReauthentication: false,
+                    resumeContext: GetContinuationContext());
                 await installer.InstallAsync(_cancellation.Token);
+                await ClearResumeContinuationAsync();
                 MarkAutomaticInstallSucceeded();
                 StatusText.Text = "Connected. This machine is ready.";
             }
@@ -174,6 +192,19 @@ public partial class MainWindow : Window
                 try { File.Delete(_invitePath); } catch { }
             }
         }
+        catch (SetupRebootRequiredException exception)
+        {
+            // Do not roll back authenticated source provenance here: the
+            // protected journal and scheduled task are the deliberate recovery
+            // mechanism for a Windows capability reboot.
+            Environment.ExitCode = 3010;
+            StatusText.Text = "Windows restart required. Setup will resume automatically after restart.";
+            AppendLog("REBOOT REQUIRED: " + exception.Message);
+            InstallButton.Content = "Close";
+            InstallButton.IsEnabled = true;
+            InstallButton.Click -= InstallButton_Click;
+            InstallButton.Click += (_, _) => Close();
+        }
         catch (ExistingTailscaleSessionException exception)
         {
             AppendLog("NOTICE: " + exception.Message);
@@ -184,8 +215,12 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var installer = new InstallCoordinator(_invite!, AppContext.BaseDirectory, progress, allowTailscaleReauthentication: true);
+                    var installer = new InstallCoordinator(
+                        _invite!, AppContext.BaseDirectory, progress,
+                        allowTailscaleReauthentication: true,
+                        resumeContext: GetContinuationContext());
                     await installer.InstallAsync(_cancellation.Token);
+                    await ClearResumeContinuationAsync();
                     MarkAutomaticInstallSucceeded();
                     AppendLog("Setup finished successfully.");
                     InstallProgress.Value = 100;
@@ -235,8 +270,47 @@ public partial class MainWindow : Window
             Environment.ExitCode = 0;
     }
 
+    private async Task ClearResumeContinuationAsync()
+    {
+        if (_resumeContext is null) return;
+        try
+        {
+            await SetupResumeCoordinator.ClearAsync(CancellationToken.None);
+            _resumeContext = null;
+        }
+        catch (Exception exception)
+        {
+            // Enrollment is already committed. Treat task cleanup as a
+            // recoverable maintenance action rather than rolling back a valid
+            // enrollment or source provenance.
+            AppendLog("WARNING: completed Setup could not remove its reboot continuation: " + exception.Message);
+        }
+    }
+
+    private SetupResumeContext? GetContinuationContext()
+    {
+        if (_resumeContext is not null) return _resumeContext;
+        if (!_sourceAttestedAutomaticInstall || _invite is null
+            || string.IsNullOrWhiteSpace(_sourceAttestationPath)
+            || string.IsNullOrWhiteSpace(_invitePath)
+            || string.IsNullOrWhiteSpace(_hostedFragmentKey)
+            || string.IsNullOrWhiteSpace(Environment.ProcessPath))
+            return null;
+        return new SetupResumeContext(
+            _invite.InviteId,
+            Path.GetFullPath(_invitePath),
+            Path.GetFullPath(_sourceAttestationPath),
+            Path.GetFullPath(Environment.ProcessPath),
+            _hostedFragmentKey);
+    }
+
     private string ResolveInvitePath()
     {
+        if (_resumeContext is not null)
+        {
+            _hostedFragmentKey = _resumeContext.InviteKey;
+            return _resumeContext.InvitePath;
+        }
         var arguments = Environment.GetCommandLineArgs();
         var hosted = arguments.FirstOrDefault(value => value.StartsWith("--hosted-invite=", StringComparison.OrdinalIgnoreCase));
         var hostedPath = hosted is null

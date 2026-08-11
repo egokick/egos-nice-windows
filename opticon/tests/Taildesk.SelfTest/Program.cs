@@ -29,6 +29,7 @@ var tests = new (string Name, Action Body)[]
     ("process runner supports commands with inherited standard handles", TestProcessRunnerWithoutCapture),
     ("process runner applies its deadline to inherited output handles", TestProcessRunnerStreamDeadline),
     ("machine install crash recovery is exact-source bound and roll-forward only", TestMachineInstallCrashRecovery),
+    ("installer convergence records verified repairs and plans every discovered repair", TestInstallerConvergenceContracts),
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
     ("RustDesk virtual-display privacy is opt-in", TestRustDeskVirtualDisplayDefault),
     ("RustDesk remote sessions pass the saved password to the native connection command", TestRustDeskRemoteSessionLaunch),
@@ -154,7 +155,7 @@ static void TestMachineInstallCrashRecovery()
     var journalStart = installer.IndexOf(
         "await EnsureMachineInstallTransactionAsync(sourceBinding", StringComparison.Ordinal);
     var tailscaleMutation = installer.IndexOf(
-        "var installedNetworkComponent = await EnsureTailscaleAsync", StringComparison.Ordinal);
+        "var tailscaleResult = await EnsureTailscaleInstalledAsync", StringComparison.Ordinal);
     var enrollmentJournal = installer.IndexOf(
         "MachineInstallTransactionPhase.NetworkEnrollmentStarted", StringComparison.Ordinal);
     var enrollmentMutation = installer.IndexOf(
@@ -181,6 +182,114 @@ static void TestMachineInstallCrashRecovery()
     Assert(provenance.Contains("MachineInstallTransactionPersistence.Load() is not null", StringComparison.Ordinal)
            && provenance.Contains("pending source trust was preserved for roll-forward recovery", StringComparison.Ordinal),
         "source provenance can still be discarded while external machine effects require recovery");
+}
+
+static void TestInstallerConvergenceContracts()
+{
+    var ready = InstallerEnsureResult.Ready("EnsureGuardianAsync", "Guardian verified.");
+    var repaired = InstallerEnsureResult.Repaired("EnsureAgentAsync", "Agent verified.", "Promoted generation.");
+    var blocked = InstallerEnsureResult.Blocked("EnsureTailnetEnrollmentAsync", "Reauthentication required.");
+    Assert(ready.Outcome == InstallerEnsureOutcome.Ready
+           && repaired.Outcome == InstallerEnsureOutcome.Repaired
+           && blocked.Outcome == InstallerEnsureOutcome.Blocked
+           && string.IsNullOrEmpty(blocked.Postcondition),
+        "installer ensure operations do not expose the Ready/Repaired/Blocked contract");
+
+    var report = new InstallerPreflightReport();
+    report.Add(new InstallerPreflightFinding(
+        InstallerPreflightScope.Unelevated,
+        InstallerPreflightSeverity.Repair,
+        "SDK",
+        "Pinned SDK is absent.",
+        "Install pinned .NET SDK."));
+    report.Add(new InstallerPreflightFinding(
+        InstallerPreflightScope.Elevated,
+        InstallerPreflightSeverity.Repair,
+        "OpenSSH",
+        "Capability is absent.",
+        "Install OpenSSH capability."));
+    report.Add(new InstallerPreflightFinding(
+        InstallerPreflightScope.Elevated,
+        InstallerPreflightSeverity.Blocked,
+        "Firewall",
+        "Policy disables Windows Firewall."));
+    Assert(report.IsBlocked
+           && report.RepairPlan().SequenceEqual(
+               ["Install pinned .NET SDK.", "Install OpenSSH capability."], StringComparer.Ordinal),
+        "preflight did not retain every discovered repair and blocked condition");
+
+    var binding = new SourceInstallationBinding(
+        new string('a', 32), Guid.NewGuid(), new string('b', 64),
+        new string('c', 64), new string('d', 64));
+    var journal = MachineInstallTransactionPersistence.Create(binding);
+    MachineInstallTransactionPersistence.RecordVerifiedRepair(
+        journal, "EnsureProtectedStorageAsync", repaired: true,
+        "Protected storage is canonical.", "SetupStaging");
+    MachineInstallTransactionPersistence.RecordPreviousComponentVersion(
+        journal, "Tailscale", "1.82.5");
+    MachineInstallTransactionPersistence.RecordTailscaleDecision(
+        journal, reauthenticationApproved: true, nodeIdentity: "node-42");
+    MachineInstallTransactionPersistence.RecordRebootState(
+        journal, rebootPending: true, operation: "EnsureOpenSshAsync");
+    var recovered = JsonSerializer.Deserialize<MachineInstallTransactionJournal>(
+                        JsonSerializer.Serialize(journal, JsonDefaults.Options), JsonDefaults.Options)
+                    ?? throw new InvalidOperationException("convergence journal did not deserialize");
+    MachineInstallTransactionPersistence.RequireMatches(recovered, binding);
+    Assert(recovered.SchemaVersion == 2
+           && recovered.RepairsAttempted.Contains("EnsureProtectedStorageAsync", StringComparer.Ordinal)
+           && recovered.ResourcesChangedByOpticon.Contains("SetupStaging", StringComparer.Ordinal)
+           && recovered.PreviousComponentVersions["Tailscale"] == "1.82.5"
+           && recovered.TailscaleReauthenticationApproved
+           && recovered.TailscaleNodeIdentity == "node-42"
+           && recovered.RebootPending
+           && recovered.CurrentOperation == "EnsureOpenSshAsync",
+        "the protected convergence journal lost repair, ownership, version, node, or reboot state");
+
+    var installer = ReadSource("src", "Taildesk.Setup", "InstallerServices.cs");
+    var bootstrap = ReadSource("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
+    var provenance = ReadSource("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
+    var resume = ReadSource("src", "Taildesk.Setup", "SetupResumeCoordinator.cs");
+    var profile = ReadSource("src", "Taildesk.Setup", "InteractiveUserProfile.cs");
+    var agent = ReadSource("src", "Taildesk.Agent", "Program.cs");
+    foreach (var operation in new[]
+             {
+                 "EnsureBuildEnvironmentAsync", "EnsureProtectedStorageAsync",
+                 "EnsureInteractiveUserProfileAsync", "EnsurePayloadVerifiedAsync",
+                 "EnsureGuardianAsync", "EnsureOpenSshAsync",
+                 "EnsureTailscaleInstalledAsync", "EnsureTailnetEnrollmentAsync",
+                 "EnsureFirewallPolicyAsync", "EnsureRustDeskAsync",
+                 "EnsureAgentAsync", "EnsureEnrollmentCommittedAsync"
+             })
+        Assert(installer.Contains(operation, StringComparison.Ordinal),
+            $"convergent Setup phase is missing: {operation}");
+    Assert(installer.Contains("MachineInstallTransactionPersistence.RecordTailscaleDecision", StringComparison.Ordinal)
+           && installer.Contains("TryReadTailscaleStatusAsync", StringComparison.Ordinal)
+           && installer.Contains("IsOpticonOwnedAgentTask", StringComparison.Ordinal)
+           && installer.Contains("group=Opticon", StringComparison.Ordinal)
+           && !installer.Contains("\"name=all\", $\"program={rustDesk}\"", StringComparison.Ordinal)
+           && installer.Contains("IsExactFirewallConfigurationAsync", StringComparison.Ordinal),
+        "installer does not retain the required Tailscale, task, or owned-firewall convergence behavior");
+    Assert(bootstrap.Contains("DependencyArtifacts.DotNetSdk", StringComparison.Ordinal)
+           && bootstrap.Contains("InstallPinnedSdkAsync", StringComparison.Ordinal)
+           && bootstrap.Contains("CompatibleSdkIsReadyAsync", StringComparison.Ordinal),
+        "missing .NET SDK repair is not pinned and automatically reverified");
+    Assert(provenance.Contains("EnsureRecoverableStore", StringComparison.Ordinal)
+           && provenance.Contains("StoreRecoveryOutcome.Normalized", StringComparison.Ordinal)
+           && provenance.Contains(".untrusted-", StringComparison.Ordinal),
+        "regenerable source provenance does not normalize safe ACL drift or quarantine tainted bytes");
+    Assert(resume.Contains("MachineJsonFileStore<SetupResumeState>", StringComparison.Ordinal)
+           && resume.Contains("SecretProtector.Protect", StringComparison.Ordinal)
+           && resume.Contains("--resume", StringComparison.Ordinal)
+           && resume.Contains("BootTrigger", StringComparison.Ordinal)
+           && resume.Contains("LogonTrigger", StringComparison.Ordinal)
+           && !resume.Contains("new XElement(task + \"Arguments\", context.InviteKey)", StringComparison.Ordinal),
+        "reboot continuation does not keep invite secrets out of task arguments or retry after logon");
+    Assert(profile.Contains("ResolveFinalDirectoryTarget", StringComparison.Ordinal)
+           && profile.Contains("WTSGetActiveConsoleSessionId", StringComparison.Ordinal)
+           && profile.Contains("return full;", StringComparison.Ordinal),
+        "interactive profile resolution does not support missing folders, redirects, and reboot resume");
+    Assert(!agent.Contains("config.SharedRoots.Count == 0", StringComparison.Ordinal),
+        "an Agent with no optional shared folders still exits instead of providing remote recovery");
 }
 
 static void TestScheduledTransferCron()
@@ -644,11 +753,13 @@ static void TestRustDeskInstallerProfiles()
         "RustDesk profiles are not hardened through held no-follow handles or still use a name-wide process kill");
     var configureIndex = source.IndexOf("await ConfigureRustDeskAsync(rustDesk", StringComparison.Ordinal);
     var firewallIndex = source.IndexOf("await ConfigureFirewallAsync(snapshot.Ip, expectedRustDesk", StringComparison.Ordinal);
-    var listenerIndex = source.IndexOf("WaitForListeningExecutableAsync(", StringComparison.Ordinal);
+    var listenerIndex = source.IndexOf("WaitForListeningExecutableAsync(", configureIndex, StringComparison.Ordinal);
     Assert(firewallIndex >= 0 && configureIndex > firewallIndex && listenerIndex > configureIndex
            && source.Contains("RequireFirewallProfilesSecureAsync", StringComparison.Ordinal)
            && source.Contains("DefaultInboundAction.ToString() -ne 'Block'", StringComparison.Ordinal)
-           && source.Contains("AssertExactFirewallConfigurationAsync", StringComparison.Ordinal),
+           && source.Contains("AssertExactFirewallConfigurationAsync", StringComparison.Ordinal)
+           && source.Contains("group=Opticon", StringComparison.Ordinal)
+           && source.Contains("IsExactFirewallConfigurationAsync", StringComparison.Ordinal),
         "RustDesk can start before exact firewall isolation and enabled default-block profiles are verified");
     Assert(source.Contains("InstalledDependencyMatchesAsync", StringComparison.Ordinal)
            && source.Contains("RequireFixedProgramFilesExecutable", StringComparison.Ordinal)
@@ -1270,7 +1381,8 @@ static void TestReleaseDistributionDesign()
            && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal)
            && setupWindow.Contains("Plaintext and legacy local invitation files are no longer accepted", StringComparison.Ordinal)
            && !setupWindow.Contains("DeserializeAsync<InvitePayload>", StringComparison.Ordinal)
-           && setupWindow.Contains("new InstallCoordinator(_invite!, AppContext.BaseDirectory", StringComparison.Ordinal)
+           && setupWindow.Contains("new InstallCoordinator(", StringComparison.Ordinal)
+           && setupWindow.Contains("_invite!, AppContext.BaseDirectory", StringComparison.Ordinal)
            && !setupWindow.Contains("new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)", StringComparison.Ordinal)
            && setupWindow.Contains("Environment.ExitCode = 1", StringComparison.Ordinal)
            && setupWindow.Contains("MarkAutomaticInstallSucceeded", StringComparison.Ordinal)
@@ -1699,15 +1811,17 @@ static void TestFileBrowserContract()
     var agentProgram = ReadSource("src", "Taildesk.Agent", "Program.cs");
     var legacyExposureMigration = agentProgram.IndexOf("if (config.ExposeAllLocalVolumes)", StringComparison.Ordinal);
     var legacyExposureSave = agentProgram.IndexOf("await configStore.SaveAsync(config)", StringComparison.Ordinal);
-    var configuredRootsCheck = agentProgram.IndexOf("config.SharedRoots.Count == 0", StringComparison.Ordinal);
+    var configuredAgentCheck = agentProgram.IndexOf(
+        "if (string.IsNullOrWhiteSpace(config.AgentTokenHash))", StringComparison.Ordinal);
     Assert(agentConfig.Contains("ExposeAllLocalVolumes", StringComparison.Ordinal)
            && agentProgram.Contains("config.ExposeAllLocalVolumes = false", StringComparison.Ordinal)
            && agentProgram.Contains("new PathGuard(config.SharedRoots)", StringComparison.Ordinal)
            && !agentProgram.Contains("new PathGuard(config.SharedRoots, config.ExposeAllLocalVolumes)", StringComparison.Ordinal)
            && legacyExposureMigration >= 0
            && legacyExposureSave > legacyExposureMigration
-           && configuredRootsCheck > legacyExposureSave,
-        "the Agent must durably retire legacy all-volume access before fail-closed configuration validation");
+           && configuredAgentCheck > legacyExposureSave
+           && !agentProgram.Contains("config.SharedRoots.Count == 0", StringComparison.Ordinal),
+        "the Agent must durably retire legacy all-volume access while allowing a no-folder recovery configuration");
 }
 
 static void TestDeviceRenameContract()

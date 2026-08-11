@@ -1,7 +1,10 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
+using Taildesk.Shared;
 
 namespace Taildesk.Setup;
 
@@ -17,6 +20,14 @@ public sealed class InteractiveUserProfile
     public static InteractiveUserProfile Resolve()
     {
         var sessionId = checked((uint)Process.GetCurrentProcess().SessionId);
+        // Reboot continuation runs as SYSTEM at startup. Resolve the active
+        // interactive session rather than Session 0 so a resumed installer
+        // continues to use the same user's known-folder policy.
+        if (sessionId == 0)
+        {
+            var active = WTSGetActiveConsoleSessionId();
+            if (active != uint.MaxValue) sessionId = active;
+        }
         var user = QuerySession(sessionId, WtsInfoClass.UserName);
         var domain = QuerySession(sessionId, WtsInfoClass.DomainName);
         if (string.IsNullOrWhiteSpace(user))
@@ -101,11 +112,25 @@ public sealed class InteractiveUserProfile
                 throw new InvalidDataException(
                     $"The selected user's {valueName} path contains an unresolved environment variable.");
             var full = Path.GetFullPath(expanded);
-            if (!full.StartsWith(profile + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            if (!Directory.Exists(full))
+            {
+                // A missing standard known folder is optional shared content.
+                // It remains absent from AgentConfig instead of blocking the
+                // device enrollment, regardless of whether Windows normally
+                // puts it below the profile root or redirects it elsewhere.
+                return full;
+            }
+
+            // Windows Known Folders can legitimately be redirected (including
+            // OneDrive Files On-Demand). Resolve the final directory object
+            // rather than rejecting every reparse point, then enforce the same
+            // no-system-root policy used by the SYSTEM Agent.
+            var final = ResolveFinalDirectoryTarget(full);
+            _ = PathGuard.ValidateRemoteFileRoot(final);
+            if (!IsWithin(final, profile) && !IsOwnedBy(final, identifier))
                 throw new InvalidDataException(
-                    $"The selected user's {valueName} path escaped the trusted ProfileList root.");
-            RequireNoReparseTraversal(profile, full);
-            return full;
+                    $"The selected user's redirected {valueName} folder is not owned by the interactive user.");
+            return final;
         }
 
         return new InteractiveUserProfile
@@ -145,6 +170,62 @@ public sealed class InteractiveUserProfile
         }
     }
 
+    private static bool IsWithin(string path, string root)
+    {
+        path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        return path.Equals(root, StringComparison.OrdinalIgnoreCase)
+               || path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsOwnedBy(string path, SecurityIdentifier expectedOwner)
+    {
+        var security = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Owner);
+        return security.GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner
+               && owner.Equals(expectedOwner);
+    }
+
+    private static string ResolveFinalDirectoryTarget(string path)
+    {
+        const uint fileShareRead = 0x00000001;
+        const uint fileShareWrite = 0x00000002;
+        const uint fileShareDelete = 0x00000004;
+        const uint openExisting = 3;
+        const uint fileFlagBackupSemantics = 0x02000000;
+        using var handle = CreateFile(
+            path,
+            0,
+            fileShareRead | fileShareWrite | fileShareDelete,
+            IntPtr.Zero,
+            openExisting,
+            fileFlagBackupSemantics,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+            throw new System.ComponentModel.Win32Exception(
+                Marshal.GetLastWin32Error(), "Windows could not resolve the final known-folder target.");
+
+        var length = 512u;
+        while (length <= 32 * 1024)
+        {
+            var buffer = new System.Text.StringBuilder(checked((int)length));
+            var written = GetFinalPathNameByHandle(handle, buffer, length, 0);
+            if (written == 0)
+                throw new System.ComponentModel.Win32Exception(
+                    Marshal.GetLastWin32Error(), "Windows could not read the final known-folder target.");
+            if (written < length)
+            {
+                var value = buffer.ToString();
+                if (value.StartsWith("\\\\?\\UNC\\", StringComparison.OrdinalIgnoreCase))
+                    value = "\\\\" + value[8..];
+                else if (value.StartsWith("\\\\?\\", StringComparison.OrdinalIgnoreCase))
+                    value = value[4..];
+                return Path.TrimEndingDirectorySeparator(Path.GetFullPath(value));
+            }
+            length = checked(written + 1);
+        }
+        throw new InvalidDataException("The final known-folder target path is unexpectedly long.");
+    }
+
     private static string QuerySession(uint sessionId, WtsInfoClass infoClass)
     {
         if (!WTSQuerySessionInformation(
@@ -172,4 +253,24 @@ public sealed class InteractiveUserProfile
 
     [DllImport("wtsapi32.dll")]
     private static extern void WTSFreeMemory(IntPtr memory);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(
+        SafeFileHandle handle,
+        System.Text.StringBuilder path,
+        uint pathLength,
+        uint flags);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint WTSGetActiveConsoleSessionId();
 }

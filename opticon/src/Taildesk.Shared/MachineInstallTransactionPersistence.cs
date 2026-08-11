@@ -31,7 +31,13 @@ public enum MachineInstallTransactionPhase
 
 public sealed class MachineInstallTransactionJournal
 {
-    public int SchemaVersion { get; set; } = 1;
+    /// <summary>
+    /// Schema 2 turns the original coarse roll-forward marker into the Setup
+    /// recovery record.  The specialized Agent and Guardian journals continue
+    /// to own their respective atomic swaps; this journal records the desired
+    /// machine state and decisions that must survive a relaunch or reboot.
+    /// </summary>
+    public int SchemaVersion { get; set; } = 2;
     public Guid OperationId { get; set; }
     public Guid InviteId { get; set; }
     public string SourceTransactionId { get; set; } = string.Empty;
@@ -39,6 +45,17 @@ public sealed class MachineInstallTransactionJournal
     public string SourceSha256 { get; set; } = string.Empty;
     public string SourceManifestSha256 { get; set; } = string.Empty;
     public MachineInstallTransactionPhase Phase { get; set; }
+
+    public string CurrentOperation { get; set; } = "DiscoverState";
+    public string LastVerifiedPostcondition { get; set; } = string.Empty;
+    public List<string> RepairsAttempted { get; set; } = [];
+    public List<string> ResourcesChangedByOpticon { get; set; } = [];
+    public Dictionary<string, string> PreviousComponentVersions { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+    public string TailscaleNodeIdentity { get; set; } = string.Empty;
+    public bool TailscaleReauthenticationApproved { get; set; }
+    public bool RebootPending { get; set; }
+    public string PendingUserDecision { get; set; } = string.Empty;
 }
 
 public static class MachineInstallTransactionPersistence
@@ -76,8 +93,36 @@ public static class MachineInstallTransactionPersistence
             AppPaths.MachineInstallTransactionFile, MaximumJournalBytes);
         var journal = JsonSerializer.Deserialize<MachineInstallTransactionJournal>(content, JsonDefaults.Options)
                       ?? throw new InvalidDataException("The protected machine-install journal is empty.");
+        UpgradeLegacyJournal(journal);
         Validate(journal);
         return journal;
+    }
+
+    /// <summary>
+    /// A torn or malformed journal is not trusted as a transaction boundary.
+    /// Once its fixed path and ACL are proven protected, quarantine it and let
+    /// Setup reconstruct desired state from the authenticated source binding.
+    /// ACL/path failures are deliberately not recovered here.
+    /// </summary>
+    public static MachineInstallTransactionJournal? LoadRecoverably(
+        out bool corruptJournalQuarantined)
+    {
+        corruptJournalQuarantined = false;
+        if (!File.Exists(AppPaths.MachineInstallTransactionFile))
+            return Load();
+        MachineStorageSecurity.RequireRestrictedDirectory(AppPaths.SetupStagingDirectory);
+        MachineStorageSecurity.RequireRestrictedFile(AppPaths.MachineInstallTransactionFile);
+        try
+        {
+            return Load();
+        }
+        catch (Exception exception) when (exception is InvalidDataException or JsonException)
+        {
+            MachineStorageSecurity.QuarantineRestrictedFile(
+                AppPaths.MachineInstallTransactionFile, "corrupt");
+            corruptJournalQuarantined = true;
+            return null;
+        }
     }
 
     public static async Task SaveAsync(
@@ -124,6 +169,84 @@ public static class MachineInstallTransactionPersistence
         Validate(journal);
     }
 
+    /// <summary>
+    /// Records a repair only after the repair's postcondition has been checked.
+    /// It is intentionally append-only so a resumed installation can explain
+    /// what it changed without trusting that a previous phase is still healthy.
+    /// </summary>
+    public static void RecordVerifiedRepair(
+        MachineInstallTransactionJournal journal,
+        string operation,
+        bool repaired,
+        string postcondition,
+        string? resourceChanged = null)
+    {
+        ArgumentNullException.ThrowIfNull(journal);
+        RequireShortText(operation, nameof(operation));
+        RequireShortText(postcondition, nameof(postcondition));
+        if (resourceChanged is not null) RequireShortText(resourceChanged, nameof(resourceChanged));
+        UpgradeLegacyJournal(journal);
+        if (repaired) AddDistinct(journal.RepairsAttempted, operation);
+        if (resourceChanged is not null) AddDistinct(journal.ResourcesChangedByOpticon, resourceChanged);
+        journal.CurrentOperation = operation;
+        journal.LastVerifiedPostcondition = postcondition;
+        Validate(journal);
+    }
+
+    public static void RecordPreviousComponentVersion(
+        MachineInstallTransactionJournal journal,
+        string component,
+        string version)
+    {
+        ArgumentNullException.ThrowIfNull(journal);
+        RequireShortText(component, nameof(component));
+        RequireShortText(version, nameof(version));
+        UpgradeLegacyJournal(journal);
+        journal.PreviousComponentVersions[component] = version;
+        Validate(journal);
+    }
+
+    public static void RecordTailscaleDecision(
+        MachineInstallTransactionJournal journal,
+        bool reauthenticationApproved,
+        string? nodeIdentity = null)
+    {
+        ArgumentNullException.ThrowIfNull(journal);
+        if (nodeIdentity is not null) RequireShortText(nodeIdentity, nameof(nodeIdentity));
+        UpgradeLegacyJournal(journal);
+        journal.TailscaleReauthenticationApproved = reauthenticationApproved;
+        if (nodeIdentity is not null) journal.TailscaleNodeIdentity = nodeIdentity;
+        journal.PendingUserDecision = reauthenticationApproved ? string.Empty : "TailscaleReauthentication";
+        Validate(journal);
+    }
+
+    public static void RecordBlocked(
+        MachineInstallTransactionJournal journal,
+        string operation,
+        string detail)
+    {
+        ArgumentNullException.ThrowIfNull(journal);
+        RequireShortText(operation, nameof(operation));
+        RequireShortText(detail, nameof(detail));
+        UpgradeLegacyJournal(journal);
+        journal.CurrentOperation = operation;
+        journal.PendingUserDecision = detail;
+        Validate(journal);
+    }
+
+    public static void RecordRebootState(
+        MachineInstallTransactionJournal journal,
+        bool rebootPending,
+        string? operation = null)
+    {
+        ArgumentNullException.ThrowIfNull(journal);
+        if (operation is not null) RequireShortText(operation, nameof(operation));
+        UpgradeLegacyJournal(journal);
+        journal.RebootPending = rebootPending;
+        if (operation is not null) journal.CurrentOperation = operation;
+        Validate(journal);
+    }
+
     public static bool RequiresNetworkRollForward(MachineInstallTransactionJournal journal)
     {
         Validate(journal);
@@ -132,16 +255,58 @@ public static class MachineInstallTransactionPersistence
 
     private static void Validate(MachineInstallTransactionJournal journal)
     {
-        if (journal.SchemaVersion != 1
+        UpgradeLegacyJournal(journal);
+        if (journal.SchemaVersion != 2
             || journal.OperationId == Guid.Empty
             || journal.InviteId == Guid.Empty
             || !TransactionPattern.IsMatch(journal.SourceTransactionId)
             || !Sha256Pattern.IsMatch(journal.InviteCiphertextSha256)
             || !Sha256Pattern.IsMatch(journal.SourceSha256)
             || !Sha256Pattern.IsMatch(journal.SourceManifestSha256)
-            || !Enum.IsDefined(journal.Phase))
+            || !Enum.IsDefined(journal.Phase)
+            || !IsShortTextOrEmpty(journal.CurrentOperation)
+            || !IsShortTextOrEmpty(journal.LastVerifiedPostcondition)
+            || !IsShortTextOrEmpty(journal.TailscaleNodeIdentity)
+            || !IsShortTextOrEmpty(journal.PendingUserDecision)
+            || journal.RepairsAttempted is null
+            || journal.ResourcesChangedByOpticon is null
+            || journal.PreviousComponentVersions is null
+            || journal.RepairsAttempted.Count > 64
+            || journal.ResourcesChangedByOpticon.Count > 128
+            || journal.PreviousComponentVersions.Count > 32
+            || journal.RepairsAttempted.Any(item => !IsShortTextOrEmpty(item))
+            || journal.ResourcesChangedByOpticon.Any(item => !IsShortTextOrEmpty(item))
+            || journal.PreviousComponentVersions.Any(pair => !IsShortTextOrEmpty(pair.Key) || !IsShortTextOrEmpty(pair.Value)))
             throw new InvalidDataException("The protected machine-install journal is invalid.");
     }
+
+    private static void UpgradeLegacyJournal(MachineInstallTransactionJournal journal)
+    {
+        if (journal.SchemaVersion == 1)
+            journal.SchemaVersion = 2;
+        journal.CurrentOperation ??= string.Empty;
+        journal.LastVerifiedPostcondition ??= string.Empty;
+        journal.RepairsAttempted ??= [];
+        journal.ResourcesChangedByOpticon ??= [];
+        journal.PreviousComponentVersions ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        journal.TailscaleNodeIdentity ??= string.Empty;
+        journal.PendingUserDecision ??= string.Empty;
+    }
+
+    private static void AddDistinct(List<string> values, string value)
+    {
+        if (!values.Contains(value, StringComparer.Ordinal)) values.Add(value);
+    }
+
+    private static void RequireShortText(string value, string parameterName)
+    {
+        if (!IsShortTextOrEmpty(value) || string.IsNullOrWhiteSpace(value))
+            throw new ArgumentException("The recovery journal value is invalid.", parameterName);
+    }
+
+    private static bool IsShortTextOrEmpty(string? value) => value is not null
+        && value.Length <= 512
+        && value.All(character => !char.IsControl(character));
 
     private static void ValidateBinding(SourceInstallationBinding binding)
     {

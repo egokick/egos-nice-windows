@@ -3,7 +3,7 @@ param(
     [string]$StackName = 'opticon-release-distribution',
     [string]$Region = 'us-east-1',
     [string]$ArtifactDirectory = '',
-    [string]$Version = '1.2.13',
+    [string]$Version = '1.2.14',
     [string]$ControlOrigin = 'https://taildesk-egokick-control.fly.dev',
     [ValidateSet('Production', 'OwnerManaged')]
     [string]$SigningProfile = 'Production',

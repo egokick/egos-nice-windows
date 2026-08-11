@@ -83,7 +83,7 @@ internal static class SourceBootstrapInstaller
         };
         if (!invite.TargetRuntimes.Contains(targetRuntime, StringComparer.Ordinal))
             throw new PlatformNotSupportedException("The signed source release does not support this Windows architecture.");
-        var dotnet = await RequireSdkAsync(invite.SdkVersion, directory);
+        var dotnet = await RequireSdkAsync(invite.SdkVersion, directory, report);
 
         report($"Building Opticon {invite.ReleaseVersion} locally with an approved .NET 10 SDK...");
         var installer = Path.Combine(sourceDirectory, "Install-OpticonFromSource.ps1");
@@ -291,7 +291,10 @@ internal static class SourceBootstrapInstaller
         return manifest;
     }
 
-    private static async Task<string> RequireSdkAsync(string sdkPolicy, string protectedRoot)
+    private static async Task<string> RequireSdkAsync(
+        string sdkPolicy,
+        string protectedRoot,
+        Action<string> report)
     {
         var programFiles = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
         var dotnet = Path.GetFullPath(Path.Combine(programFiles, "dotnet", "dotnet.exe"));
@@ -299,9 +302,24 @@ internal static class SourceBootstrapInstaller
                 StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The fixed .NET SDK host escaped Program Files.");
         HostedBootstrapper.RequireNoReparseTraversal(programFiles, dotnet);
+        var attemptedAutomaticRepair = false;
         while (true)
         {
             if (await CompatibleSdkIsReadyAsync(protectedRoot, dotnet)) return dotnet;
+            if (!attemptedAutomaticRepair)
+            {
+                attemptedAutomaticRepair = true;
+                var artifact = DependencyArtifacts.DotNetSdk(RuntimeInformation.OSArchitecture);
+                report($"Installing the pinned stable .NET SDK {artifact.Version} required for this Opticon source build…");
+                await InstallPinnedSdkAsync(artifact, protectedRoot);
+                report("The .NET SDK installer completed; rechecking the isolated Opticon build environment…");
+                for (var attempt = 0; attempt < 40; attempt++)
+                {
+                    if (await CompatibleSdkIsReadyAsync(protectedRoot, dotnet)) return dotnet;
+                    await Task.Delay(TimeSpan.FromSeconds(3));
+                }
+                continue;
+            }
             const string sdkUrl = "https://dotnet.microsoft.com/en-us/download/dotnet/10.0";
             if (!SdkRequirementDialog.Show(
                     sdkPolicy,
@@ -309,6 +327,72 @@ internal static class SourceBootstrapInstaller
                     cancellationToken => CompatibleSdkIsReadyAsync(
                         protectedRoot, dotnet, cancellationToken)))
                 throw new OperationCanceledException($"A stable .NET SDK matching {sdkPolicy} is required.");
+        }
+    }
+
+    private static async Task InstallPinnedSdkAsync(
+        DotNetSdkArtifact artifact,
+        string protectedRoot)
+    {
+        if (!Regex.IsMatch(artifact.Version, "^10\\.[0-9]+\\.[0-9]+$")
+            || !Regex.IsMatch(artifact.FileName, "^dotnet-sdk-10\\.[0-9]+\\.[0-9]+-win-(?:x64|arm64)\\.exe$")
+            || !Regex.IsMatch(artifact.Sha512, "^[a-f0-9]{128}$")
+            || !Uri.TryCreate(artifact.Url, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps || uri.Port != 443
+            || !uri.Host.Equals("builds.dotnet.microsoft.com", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The pinned .NET SDK repair artifact is invalid.");
+
+        var destination = Path.Combine(protectedRoot, artifact.FileName);
+        if (File.Exists(destination))
+        {
+            HostedBootstrapper.RequireNoReparseTraversal(protectedRoot, destination);
+            try { File.Delete(destination); } catch (Exception exception)
+            {
+                throw new IOException("A previous protected .NET SDK repair download could not be replaced.", exception);
+            }
+        }
+        try
+        {
+            using var client = DirectHttp.CreateClient(TimeSpan.FromMinutes(30));
+            using var response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            if (response.Content.Headers.ContentEncoding.Count != 0
+                || response.Content.Headers.ContentLength is > 1024L * 1024 * 1024)
+                throw new InvalidDataException("The pinned .NET SDK download has invalid transport metadata.");
+            await using var source = await response.Content.ReadAsStreamAsync();
+            await using var target = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                128 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA512);
+            var buffer = new byte[128 * 1024];
+            long total = 0;
+            while (true)
+            {
+                var read = await source.ReadAsync(buffer);
+                if (read == 0) break;
+                total = checked(total + read);
+                if (total > 1024L * 1024 * 1024)
+                    throw new InvalidDataException("The pinned .NET SDK download exceeded its size limit.");
+                hash.AppendData(buffer, 0, read);
+                await target.WriteAsync(buffer.AsMemory(0, read));
+            }
+            await target.FlushAsync();
+            target.Flush(flushToDisk: true);
+            if (!CryptographicOperations.FixedTimeEquals(
+                    hash.GetHashAndReset(), Convert.FromHexString(artifact.Sha512)))
+                throw new InvalidDataException("The pinned .NET SDK installer digest did not match its release pin.");
+
+            var install = await ProcessRunner.RunAsync(
+                destination,
+                ["/install", "/quiet", "/norestart"],
+                TimeSpan.FromMinutes(20));
+            if (!install.Succeeded && install.ExitCode != 3010)
+                throw new InvalidOperationException(
+                    "The pinned .NET SDK installer failed: " +
+                    (install.StandardError + " " + install.StandardOutput).Trim());
+        }
+        finally
+        {
+            try { if (File.Exists(destination)) File.Delete(destination); } catch { }
         }
     }
 
