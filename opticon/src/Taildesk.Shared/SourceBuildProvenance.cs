@@ -928,7 +928,7 @@ public static class SourceBuildProvenance
             || !Regex.IsMatch(generation.ReleaseVersion, "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$")
             || !Sha256Pattern.IsMatch(generation.SourceSha256)
             || !Sha256Pattern.IsMatch(generation.SourceManifestSha256)
-            || generation.SdkVersion != "10.0.302"
+            || generation.SdkVersion != DotNetSdkPolicy.SignedPolicy
             || generation.RuntimeVersion != "10.0.10"
             || generation.TargetRuntime is not ("win-x64" or "win-arm64")
             || generation.Files.Count is < 1 or > 512)

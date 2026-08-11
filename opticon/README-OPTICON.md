@@ -57,7 +57,7 @@ Run `opticon help` for add/edit, enable/disable, remove, custom `--cron`, time-z
 
 1. Opticon asks Headscale for a tagged, single-use pre-authentication key.
 2. It signs the personalized enrollment material, encrypts it with a random key, and copies a single-use URL with a default 14-day expiry to the clipboard. The decryption key is in the URL fragment, which browsers do not send to Fly.
-3. The recipient opens the URL. Current Edge or Chrome downloads the exact versioned source archive and signed bootstrap from CloudFront, verifies both sizes and SHA-256 hashes with WebCrypto, and gives the bootstrap an invite-bearing `Install-Opticon-<id>--<key>--<bootstrap-sha256>.exe` filename. The recipient keeps both files together, opens the signed bootstrap, and approves UAC. It rechecks its own production signature and hash, verifies the encrypted signed invitation and RSA-PSS source manifest, then builds the requested x64 or ARM64 payload locally with exact .NET SDK 10.0.302 and runtime 10.0.10.
+3. The recipient opens the URL. Current Edge or Chrome downloads the exact versioned source archive and signed bootstrap from CloudFront, verifies both sizes and SHA-256 hashes with WebCrypto, and gives the bootstrap an invite-bearing `Install-Opticon-<id>--<key>--<bootstrap-sha256>.exe` filename. The recipient keeps both files together, opens the signed bootstrap, and approves UAC. It rechecks its own production signature and hash, verifies the encrypted signed invitation and RSA-PSS source manifest, then builds the requested x64 or ARM64 self-contained payload locally with any stable .NET 10 SDK (`10.*.*`) and the signed offline runtime packs.
 4. The new agent calls the laptop coordinator through its stable Tailscale address. The coordinator consumes the invitation, records the device, and supplies the final device-specific credentials.
 5. Normal remote-control, file, and media traffic goes directly between peers when NAT traversal succeeds. If it cannot, the encrypted WireGuard traffic is relayed through the private DERP endpoint on Fly.
 
@@ -190,7 +190,7 @@ For an owner-controlled fleet without a public publisher identity, use the expli
 Windows shows **Unknown Publisher** at the initial UAC boundary, while exact hashes,
 signer pins, the RSA-PSS source manifest, and the RFC 3161 timestamp remain mandatory.
 
-Hosted invitations pin the exact bootstrap and source archive by version, size, SHA-256, signing profile, release key, product signer, SDK/runtime, and architecture. The recipient verifies and builds that source locally with .NET SDK 10.0.302, receives a clear prompt when it is missing, and Setup automatically consumes the encrypted one-time invitation to join the private mesh.
+Hosted invitations pin the exact bootstrap and source archive by version, size, SHA-256, signing profile, release key, product signer, stable .NET 10 SDK policy, offline output runtime packs, and target runtime. The recipient verifies and builds that source locally with any stable .NET 10 SDK (`10.*.*`), receives a clear prompt when none is present, and Setup automatically consumes the encrypted one-time invitation to join the private mesh.
 
 Developer packages require explicit separate development certificates and `-BuildProfile Developer -SkipTargetReleaseDeployment`; they are named `DEV-UNTRUSTED` and are intentionally non-publishable.
 

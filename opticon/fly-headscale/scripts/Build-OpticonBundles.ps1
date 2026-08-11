@@ -4,7 +4,7 @@ param(
     [string]$Runtime = "win-x64",
     [ValidateSet("Production", "OwnerManaged")]
     [string]$SigningProfile = "Production",
-    [string]$Version = "1.2.9",
+    [string]$Version = "1.2.10",
     [string]$MinimumGuardianVersion = "1.1.2",
     # SourceOnly is the v2 release path: it produces exactly one signed source
     # archive and deliberately emits no standalone bundle/bootstrap artifact.
@@ -1029,7 +1029,7 @@ $propsSettings.Indent = $true
 $propsWriter = [Xml.XmlWriter]::Create((Join-Path $sourceStage 'Directory.Build.props'), $propsSettings)
 try { $sourceProps.Save($propsWriter) } finally { $propsWriter.Dispose() }
 Copy-Item -LiteralPath (Join-Path $repo 'source-package\Directory.Build.targets') -Destination (Join-Path $sourceStage 'Directory.Build.targets')
-$sourceGlobalJson = [ordered]@{ sdk = [ordered]@{ version = '10.0.302'; rollForward = 'disable'; allowPrerelease = $false } }
+$sourceGlobalJson = [ordered]@{ sdk = [ordered]@{ version = '10.0.100'; rollForward = 'latestMinor'; allowPrerelease = $false } }
 [IO.File]::WriteAllText((Join-Path $sourceStage 'global.json'), ($sourceGlobalJson | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath (Join-Path $repo 'source-package\Install-OpticonFromSource.ps1') -Destination (Join-Path $sourceStage 'Install-OpticonFromSource.ps1')
 Copy-Item -LiteralPath (Join-Path $repo 'source-package\Build-OpticonUpdateFromSource.ps1') -Destination (Join-Path $sourceStage 'Build-OpticonUpdateFromSource.ps1')
@@ -1115,7 +1115,7 @@ $sourceManifest = [pscustomobject][ordered]@{
     sourceReleaseCertificateBase64 = $sourceReleaseCertificateBase64
     productSignerThumbprint = $ProductCertificateThumbprint
     productSigningCertificateBase64 = $productSigningCertificateBase64
-    sdkVersion = '10.0.302'
+    sdkVersion = '10.*.*'
     runtimeVersion = '10.0.10'
     targetRuntimes = @('win-x64', 'win-arm64')
     files = $sourceFiles
@@ -1157,7 +1157,7 @@ $sourceRecord = [pscustomobject][ordered]@{
     file = $sourceFileName
     size = $sourceInfo.Length
     sha256 = (Get-FileHash -LiteralPath $sourceTemporary -Algorithm SHA256).Hash.ToLowerInvariant()
-    sdkVersion = '10.0.302'
+    sdkVersion = '10.*.*'
     runtimeVersion = '10.0.10'
     targetRuntimes = @('win-x64', 'win-arm64')
     sourceManifestSha256 = $sourceManifestHash

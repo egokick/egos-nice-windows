@@ -32,7 +32,7 @@ Invitation URLs contain a high-entropy identifier and a separate fragment decryp
 
 Elevated source verification, build state, and redacted setup diagnostics stay in ACL-protected machine storage rather than user-writable profile paths. Invitation fragment keys are redacted from arguments, exceptions, and persisted diagnostics.
 
-The invitation page requires a current browser with WebCrypto SHA-256. There is no unsigned compatibility script or length-only fallback. If the exact .NET SDK 10.0.302 or matching host architecture is missing, Setup shows the fixed official Microsoft SDK URL and offers Copy URL, Retry, or Exit; elevated code never opens a browser or executes an unpinned SDK installer. The isolated build disables user MSBuild imports and online package sources, then Setup installs the attested output and automatically consumes the one-time invitation to join the private Headscale mesh.
+The invitation page requires a current browser with WebCrypto SHA-256. There is no unsigned compatibility script or length-only fallback. If no stable .NET 10 SDK (`10.*.*`) is installed, Setup shows the fixed official Microsoft .NET 10 URL and keeps checking until one is available; elevated code never opens a browser or executes an SDK installer. The isolated offline build disables user MSBuild imports and online package sources, produces self-contained attested output, then Setup automatically consumes the one-time invitation to join the private Headscale mesh.
 
 ## Private remote-session boundary
 
@@ -171,7 +171,7 @@ page and bootstrap still enforce exact bootstrap/source hashes, signer pins, the
 RSA-PSS source manifest, and an RFC 3161 timestamp. This profile must not be
 represented as publicly trusted software.
 
-Hosted invitations no longer carry prebuilt Agent binaries. The invitation pins the exact bootstrap and source archive by version, filename, size, SHA-256, signing profile, source-release key, product signer, SDK, runtime, and target architecture. The recipient verifies and builds that source locally with .NET SDK 10.0.302, after an explicit install prompt if the exact SDK is absent, and Setup then enrolls the device into the private mesh using the encrypted one-time invitation.
+Hosted invitations no longer carry prebuilt Agent binaries. The invitation pins the exact bootstrap and source archive by version, filename, size, SHA-256, signing profile, source-release key, product signer, stable .NET 10 SDK policy, output runtime pack, and target runtime. The recipient verifies and builds that source locally with any stable .NET 10 SDK (`10.*.*`), after an explicit install prompt if none is present, and Setup then enrolls the device into the private mesh using the encrypted one-time invitation.
 
 Developer packages require explicit, separate development certificates plus `-BuildProfile Developer -SkipTargetReleaseDeployment`; their filename contains `DEV-UNTRUSTED` and they cannot be published. A skipped production build does not make that version available through **Update Opticon**.
 

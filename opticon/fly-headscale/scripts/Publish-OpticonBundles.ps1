@@ -520,7 +520,7 @@ function Assert-OpticonSourceArchive {
     Assert-ProductionArtifactTrust -Artifact $Record
     if ([long]$Record.size -lt 1024 -or [long]$Record.size -gt 256MB -or
         (Get-Item -LiteralPath $Path).Length -ne [long]$Record.size -or
-        [string]$Record.sdkVersion -ne '10.0.302' -or [string]$Record.runtimeVersion -ne '10.0.10' -or
+        [string]$Record.sdkVersion -ne '10.*.*' -or [string]$Record.runtimeVersion -ne '10.0.10' -or
         [string]$Record.sourceManifestKeyId -ne $SourceReleaseCertificateThumbprint -or
         [string]$Record.productSignerThumbprint -ne $ProductCertificateThumbprint -or
         @($Record.targetRuntimes).Count -ne 2 -or [string]$Record.targetRuntimes[0] -ne 'win-x64' -or

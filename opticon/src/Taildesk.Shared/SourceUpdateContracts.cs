@@ -9,7 +9,7 @@ public static class SourceUpdateProtocol
 {
     public const int Version = 1;
     public const string MinimumGuardianVersion = "1.2.0";
-    public const string RequiredSdkVersion = "10.0.302";
+    public const string RequiredSdkVersion = DotNetSdkPolicy.SignedPolicy;
     public const string RequiredRuntimeVersion = "10.0.10";
     public const string SourceBuildScriptName = "Build-OpticonUpdateFromSource.ps1";
 }

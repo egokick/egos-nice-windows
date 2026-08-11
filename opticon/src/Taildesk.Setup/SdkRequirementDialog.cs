@@ -8,15 +8,14 @@ namespace Taildesk.Setup;
 internal static class SdkRequirementDialog
 {
     internal static bool Show(
-        string version,
-        string architecture,
+        string sdkPolicy,
         string url,
         Func<CancellationToken, Task<bool>> exactSdkIsReadyAsync)
     {
         ArgumentNullException.ThrowIfNull(exactSdkIsReadyAsync);
         var window = new Window
         {
-            Title = "Opticon SDK required",
+            Title = ".NET 10 SDK required",
             Width = 720,
             Height = 330,
             MinWidth = 600,
@@ -29,14 +28,14 @@ internal static class SdkRequirementDialog
         var panel = new StackPanel { Margin = new Thickness(24) };
         panel.Children.Add(new TextBlock
         {
-            Text = $"Opticon requires exact .NET SDK {version} and its .NET {version[..version.LastIndexOf('.')]} runtimes for Windows {architecture}.",
+            Text = $"Opticon requires a stable .NET SDK matching {sdkPolicy}.",
             FontSize = 18,
             FontWeight = FontWeights.SemiBold,
             TextWrapping = TextWrapping.Wrap
         });
         panel.Children.Add(new TextBlock
         {
-            Text = "Copy the official Microsoft URL below and install the SDK outside this elevated Setup window. Keep this window open: Setup will detect the exact SDK and resume automatically.",
+            Text = "Copy the official Microsoft URL below and install a stable .NET 10 SDK outside this elevated Setup window. Keep this window open: Setup will detect it and resume automatically.",
             Margin = new Thickness(0, 12, 0, 8),
             TextWrapping = TextWrapping.Wrap
         });
@@ -55,7 +54,7 @@ internal static class SdkRequirementDialog
         {
             Margin = new Thickness(0, 8, 0, 0),
             Foreground = Brushes.DimGray,
-            Text = "Waiting for the exact SDK, runtimes, and Windows architecture..."
+            Text = "Waiting for a stable .NET 10 SDK..."
         };
         panel.Children.Add(status);
 
@@ -77,18 +76,18 @@ internal static class SdkRequirementDialog
             if (checking || lifetime.IsCancellationRequested) return;
             checking = true;
             retry.IsEnabled = false;
-            status.Text = "Checking the exact SDK, runtimes, and Windows architecture...";
+            status.Text = "Checking for a stable .NET 10 SDK...";
             try
             {
                 if (await exactSdkIsReadyAsync(lifetime.Token))
                 {
                     timer.Stop();
-                    status.Text = "The exact SDK is ready. Resuming Opticon Setup...";
+                    status.Text = "A compatible .NET 10 SDK is ready. Resuming Opticon Setup...";
                     if (window.IsVisible) window.DialogResult = true;
                 }
                 else
                 {
-                    status.Text = "The exact SDK is not ready yet. Finish its installer; Opticon will keep checking automatically.";
+                    status.Text = "A compatible .NET 10 SDK is not ready yet. Finish its installer; Opticon will keep checking automatically.";
                 }
             }
             catch (OperationCanceledException) when (lifetime.IsCancellationRequested)

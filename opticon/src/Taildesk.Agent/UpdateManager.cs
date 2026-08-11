@@ -269,7 +269,7 @@ public sealed class UpdateManager
             await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: cancellationToken);
             var manifest = await SourceUpdatePackageVerifier.VerifyAndExtractAsync(
                 archivePath, sourceDirectory, request, cancellationToken);
-            journal.Message = $"Building Agent and Guardian locally with exact .NET SDK {request.SdkVersion}; the installed Agent remains untouched.";
+            journal.Message = $"Building Agent and Guardian locally with an approved .NET 10 SDK ({request.SdkVersion}); the installed Agent remains untouched.";
             await UpdateJournalPersistence.SaveAsync(journal, cancellationToken: cancellationToken);
             await _sourceBuild.BuildAsync(
                 manifest, request, operationDirectory, sourceDirectory, archivePath,

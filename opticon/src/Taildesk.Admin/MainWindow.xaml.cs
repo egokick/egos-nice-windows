@@ -586,7 +586,7 @@ public partial class MainWindow : Window
             reason + "\n\n" +
             "The legacy copied PowerShell/UAC maintenance bootstrap has been retired because a same-user process could race its verified files before elevation. " +
             "No command was copied or started. Create a fresh hosted source-build invitation for this device instead; " +
-            "the invitation pins the source and bootstrap hashes, builds under the exact .NET SDK, and installs through protected machine storage.",
+            "the invitation pins the source and bootstrap hashes, builds under a stable .NET 10 SDK, and installs through protected machine storage.",
             "Use a signed source-build invitation",
             MessageBoxButton.OK,
             MessageBoxImage.Warning);

@@ -1,6 +1,4 @@
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Text.RegularExpressions;
 using Taildesk.Shared;
 
 namespace Taildesk.Agent;
@@ -13,13 +11,6 @@ namespace Taildesk.Agent;
 /// </summary>
 internal sealed class SourceUpdateBuildRunner
 {
-    private static readonly Regex ArchitecturePattern = new(
-        "^\\s*Architecture:\\s*(x64|arm64)\\s*$",
-        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
-    private static readonly Regex RidPattern = new(
-        "^\\s*RID:\\s*(win-(?:x64|arm64))\\s*$",
-        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
-
     public async Task BuildAsync(
         SourceArchiveManifest manifest,
         SourceUpdateRequest request,
@@ -48,7 +39,7 @@ internal sealed class SourceUpdateBuildRunner
             throw new InvalidDataException("The protected source build attestation path is already occupied.");
 
         await VerifyBuildScriptAsync(manifest, sourceRoot, cancellationToken);
-        var dotnet = await RequireExactSdkAsync(request, operationRoot, cancellationToken);
+        var dotnet = await RequireCompatibleSdkAsync(request, operationRoot, cancellationToken);
         var environment = BuildSanitizedEnvironment(operationRoot, dotnet);
         var powershell = RequireSystemPowerShell();
         var script = SourceUpdatePackageVerifier.ExpectedBuildScriptPath(sourceRoot);
@@ -105,7 +96,7 @@ internal sealed class SourceUpdateBuildRunner
             throw new InvalidDataException("The extracted source-update build entrypoint hash changed.");
     }
 
-    private static async Task<string> RequireExactSdkAsync(
+    private static async Task<string> RequireCompatibleSdkAsync(
         SourceUpdateRequest request,
         string protectedRoot,
         CancellationToken cancellationToken)
@@ -115,40 +106,14 @@ internal sealed class SourceUpdateBuildRunner
         RequireChild(programFiles, dotnet, "fixed .NET SDK host");
         RequireNoReparseTraversal(programFiles, dotnet);
         if (!File.Exists(dotnet))
-            throw new FileNotFoundException($"Exact .NET SDK {request.SdkVersion} is required but dotnet.exe is missing.", dotnet);
+            throw new FileNotFoundException($"A .NET SDK matching {request.SdkVersion} is required but dotnet.exe is missing.", dotnet);
         var environment = BuildSanitizedEnvironment(protectedRoot, dotnet);
         var sdks = await ProcessRunner.RunAsync(dotnet, ["--list-sdks"], TimeSpan.FromSeconds(30),
             cancellationToken, environment: environment, clearEnvironment: true);
-        var runtimes = await ProcessRunner.RunAsync(dotnet, ["--list-runtimes"], TimeSpan.FromSeconds(30),
-            cancellationToken, environment: environment, clearEnvironment: true);
-        var info = await ProcessRunner.RunAsync(dotnet, ["--info"], TimeSpan.FromSeconds(30),
-            cancellationToken, environment: environment, clearEnvironment: true);
-        if (!sdks.Succeeded || !runtimes.Succeeded || !info.Succeeded
-            || !sdks.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                .Any(line => line.StartsWith(request.SdkVersion + " ", StringComparison.Ordinal))
-            || !RequiredRuntimesPresent(runtimes.StandardOutput, request.RuntimeVersion)
-            || !SdkHostMatchesTarget(info.StandardOutput, request.TargetRuntime))
+        if (!sdks.Succeeded || !DotNetSdkPolicy.InventoryContainsAcceptedSdk(sdks.StandardOutput))
             throw new InvalidOperationException(
-                $"Exact .NET SDK {request.SdkVersion} and native runtime {request.RuntimeVersion} for {request.TargetRuntime} are required for a source update.");
+                $"A stable .NET SDK matching {request.SdkVersion} is required for a source update.");
         return dotnet;
-    }
-
-    private static bool RequiredRuntimesPresent(string output, string version)
-    {
-        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return new[] { "Microsoft.NETCore.App", "Microsoft.WindowsDesktop.App", "Microsoft.AspNetCore.App" }
-            .All(runtime => lines.Any(line => line.StartsWith(runtime + " " + version + " ", StringComparison.Ordinal)));
-    }
-
-    private static bool SdkHostMatchesTarget(string output, string targetRuntime)
-    {
-        var expectedArchitecture = targetRuntime == "win-arm64" ? "arm64" : "x64";
-        var architectures = ArchitecturePattern.Matches(output)
-            .Select(match => match.Groups[1].Value.ToLowerInvariant()).Distinct(StringComparer.Ordinal).ToArray();
-        var rids = RidPattern.Matches(output)
-            .Select(match => match.Groups[1].Value.ToLowerInvariant()).Distinct(StringComparer.Ordinal).ToArray();
-        return architectures.Length == 1 && architectures[0] == expectedArchitecture
-               && rids.Length == 1 && rids[0] == targetRuntime;
     }
 
     private static IReadOnlyDictionary<string, string?> BuildSanitizedEnvironment(string protectedRoot, string dotnet)

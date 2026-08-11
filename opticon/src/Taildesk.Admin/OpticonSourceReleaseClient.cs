@@ -20,7 +20,7 @@ public sealed record OpticonSourceRelease(
 
 public sealed class OpticonSourceReleaseClient
 {
-    public const string SupportedSdkVersion = "10.0.302";
+    public const string SupportedSdkVersion = DotNetSdkPolicy.SignedPolicy;
     public const string SupportedRuntimeVersion = "10.0.10";
     public const string SourceInstallProtocol = "source-v1";
     private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(45));

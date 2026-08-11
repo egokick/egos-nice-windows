@@ -39,7 +39,7 @@ const (
 	maxBundleChunk            = 4 << 20
 	maxAdminBody              = 1 << 20
 	maxBootstrapArtifactBytes = 128 << 20
-	pinnedSDKVersion          = "10.0.302"
+	pinnedSDKVersion          = "10.*.*"
 	pinnedRuntimeVersion      = "10.0.10"
 	sourceOnlyManifestSchema  = 2
 	sourceInstallProtocol     = "source-v1"
@@ -1008,6 +1008,9 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		now := time.Now()
+		if g.now != nil {
+			now = g.now()
+		}
 		sourceOnly := invite.InstallProtocol == sourceInstallProtocol
 		legacyBootstrap := invite.InstallProtocol == ""
 		if strings.TrimSpace(invite.DeviceName) == "" || (invite.Role != "ManagedOnly" && invite.Role != "ControllerAndManaged") ||
@@ -1549,7 +1552,7 @@ func (g *gateway) sourceOnlyInvitationLandingSecure(w http.ResponseWriter, r *ht
 		return
 	}
 	launcherPath := invitePublicPrefix + url.PathEscape(publicID) + "/launcher"
-	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}.download{display:inline-block;background:#52d39a;color:#08130e;text-decoration:none;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px}.disabled{pointer-events:none;opacity:.45}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Opticon <code>%s</code> is ready to build and install.</p><p><a id="install" class="download" href="%s">Download signed installer</a></p><p id="status" class="muted">Download the installer, then double-click it. Windows will ask for administrator approval. No ZIP extraction or invitation paste is needed.</p><p class="muted">The signed installer downloads a private source link valid for 30 minutes, then verifies the invitation, source SHA-256, signed manifest, and exact .NET SDK before building.</p><p class="muted">Source SHA-256: <code>%s</code><br>Requires exact .NET SDK <code>%s</code>. Invitation expires <code>%s</code>.</p><script>const key=location.hash.slice(1),install=document.getElementById('install'),status=document.getElementById('status');if(!/^[A-Za-z0-9_-]{43}$/.test(key)){install.removeAttribute('href');install.classList.add('disabled');status.textContent='This invitation link is incomplete. Ask the command center for a new link.'}else{install.download='Install-Opticon-%s--'+key+'--%s.exe'}</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(source.Version), html.EscapeString(launcherPath), html.EscapeString(strings.ToLower(source.SHA256)), html.EscapeString(source.SDKVersion), invite.ExpiresAt.Local().Format(time.RFC1123), publicID, strings.ToLower(source.SourceLauncherSHA256))
+	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}.download{display:inline-block;background:#52d39a;color:#08130e;text-decoration:none;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px}.disabled{pointer-events:none;opacity:.45}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Opticon <code>%s</code> is ready to build and install.</p><p><a id="install" class="download" href="%s">Download signed installer</a></p><p id="status" class="muted">Download the installer, then double-click it. Windows will ask for administrator approval. No ZIP extraction or invitation paste is needed.</p><p class="muted">The signed installer downloads a private source link valid for 30 minutes, then verifies the invitation, source SHA-256, signed manifest, and approved .NET 10 SDK before building.</p><p class="muted">Source SHA-256: <code>%s</code><br>Requires a stable .NET SDK matching <code>%s</code>. Invitation expires <code>%s</code>.</p><script>const key=location.hash.slice(1),install=document.getElementById('install'),status=document.getElementById('status');if(!/^[A-Za-z0-9_-]{43}$/.test(key)){install.removeAttribute('href');install.classList.add('disabled');status.textContent='This invitation link is incomplete. Ask the command center for a new link.'}else{install.download='Install-Opticon-%s--'+key+'--%s.exe'}</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(source.Version), html.EscapeString(launcherPath), html.EscapeString(strings.ToLower(source.SHA256)), html.EscapeString(source.SDKVersion), invite.ExpiresAt.Local().Format(time.RFC1123), publicID, strings.ToLower(source.SourceLauncherSHA256))
 	_, _ = io.WriteString(w, page)
 }
 

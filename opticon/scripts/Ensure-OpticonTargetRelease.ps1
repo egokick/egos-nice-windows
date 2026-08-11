@@ -79,7 +79,7 @@ function Test-CompleteRelease($Manifest, [string]$ReleaseVersion) {
         $artifact.file -ne "opticon-source-$ReleaseVersion.zip" -or [long]$artifact.size -le 0 -or
         [string]$artifact.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
         [string]$artifact.sourceManifestSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
-        [string]$artifact.sdkVersion -ne '10.0.302' -or [string]$artifact.runtimeVersion -ne '10.0.10' -or
+        [string]$artifact.sdkVersion -ne '10.*.*' -or [string]$artifact.runtimeVersion -ne '10.0.10' -or
         @($artifact.targetRuntimes).Count -ne 2 -or [string]$artifact.targetRuntimes[0] -ne 'win-x64' -or
         [string]$artifact.targetRuntimes[1] -ne 'win-arm64') {
         return $false

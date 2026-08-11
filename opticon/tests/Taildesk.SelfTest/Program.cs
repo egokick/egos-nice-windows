@@ -765,10 +765,20 @@ static void TestRemoteUpdatePollingRecovery()
 static void TestSourceUpdateRuntime()
 {
     Assert(SourceUpdateProtocol.Version == 1
-           && SourceUpdateProtocol.RequiredSdkVersion == "10.0.302"
+           && SourceUpdateProtocol.RequiredSdkVersion == DotNetSdkPolicy.SignedPolicy
+           && DotNetSdkPolicy.SignedPolicy == "10.*.*"
            && SourceUpdateProtocol.RequiredRuntimeVersion == "10.0.10"
            && SourceUpdateProtocol.MinimumGuardianVersion == "1.2.0",
-        "the source update protocol no longer pins its SDK, runtime, and Guardian floor");
+        "the source update protocol no longer pins its SDK family, output runtime, and Guardian floor");
+    Assert(DotNetSdkPolicy.IsAcceptedVersion("10.0.100")
+           && DotNetSdkPolicy.IsAcceptedVersion("10.0.302")
+           && DotNetSdkPolicy.IsAcceptedVersion("10.7.900")
+           && !DotNetSdkPolicy.IsAcceptedVersion("9.0.999")
+           && !DotNetSdkPolicy.IsAcceptedVersion("11.0.100")
+           && !DotNetSdkPolicy.IsAcceptedVersion("10.0.100-preview.1")
+           && DotNetSdkPolicy.InventoryContainsAcceptedSdk("9.0.999 [x]\n10.0.302 [y]")
+           && !DotNetSdkPolicy.InventoryContainsAcceptedSdk("9.0.999 [x]\n11.0.100 [y]"),
+        "the stable .NET 10 SDK wildcard policy accepted an invalid major or rejected a valid 10.x SDK");
 
     var journal = new UpdateJournal
     {
@@ -1226,15 +1236,16 @@ static void TestReleaseDistributionDesign()
            && sourceInstaller.Contains("nodeReuse:false", StringComparison.Ordinal)
            && sourceInstaller.Contains("ValidateSet('win-x64', 'win-arm64')", StringComparison.Ordinal)
             && sourceBootstrap.Contains("Architecture.Arm64 => \"win-arm64\"", StringComparison.Ordinal)
-            && sourceBootstrap.Contains("SdkHostMatchesTarget", StringComparison.Ordinal)
-            && sourceInstaller.Contains("$DotnetPath --info", StringComparison.Ordinal)
-            && sourceInstaller.Contains("RID:\\s*", StringComparison.Ordinal)
-           && sourceBootstrap.Contains("MSBUILDDISABLENODEREUSE", StringComparison.Ordinal)
-           && sourceInstaller.Contains("--no-restore", StringComparison.Ordinal)
-           && sourceInstaller.Contains("--self-contained', 'false", StringComparison.Ordinal)
-           && sourceInstaller.Contains("ValidateSet('Production','OwnerManaged')", StringComparison.Ordinal)
-           && sourceInstaller.Contains("Microsoft.WindowsDesktop.App", StringComparison.Ordinal)
-           && sourceNuget.Contains("opticon-offline", StringComparison.Ordinal)
+             && sourceBootstrap.Contains("DotNetSdkPolicy.InventoryContainsAcceptedSdk", StringComparison.Ordinal)
+             && !sourceInstaller.Contains("$DotnetPath --list-runtimes", StringComparison.Ordinal)
+             && !sourceInstaller.Contains("$DotnetPath --info", StringComparison.Ordinal)
+            && sourceBootstrap.Contains("MSBUILDDISABLENODEREUSE", StringComparison.Ordinal)
+            && sourceInstaller.Contains("--no-restore", StringComparison.Ordinal)
+            && sourceInstaller.Contains("--self-contained', 'true", StringComparison.Ordinal)
+            && sourceInstaller.Contains("'10.*.*'", StringComparison.Ordinal)
+            && sourceInstaller.Contains("'latestMinor'", StringComparison.Ordinal)
+            && sourceInstaller.Contains("ValidateSet('Production','OwnerManaged')", StringComparison.Ordinal)
+            && sourceNuget.Contains("opticon-offline", StringComparison.Ordinal)
            && sourceNuget.Contains("./packages", StringComparison.Ordinal)
            && builder.Contains("$offlinePackageDirectory", StringComparison.Ordinal)
            && builder.Contains("microsoft.aspnetcore.app.runtime.win-x64", StringComparison.Ordinal)
@@ -1243,15 +1254,16 @@ static void TestReleaseDistributionDesign()
            && builder.Contains("microsoft.windows.sdk.net.ref", StringComparison.Ordinal)
            && sourceInstaller.Contains("$setupExitCode -ne 0", StringComparison.Ordinal),
         "the elevated source build does not isolate MSBuild/PowerShell, carry its signed offline feed, or propagate Setup failure");
-    Assert(sourceBootstrap.Contains("ExactSdkIsReadyAsync", StringComparison.Ordinal)
-            && sourceBootstrap.Contains("cancellationToken => ExactSdkIsReadyAsync", StringComparison.Ordinal)
-            && sdkRequirementDialog.Contains("Setup will detect the exact SDK and resume automatically", StringComparison.Ordinal)
+    Assert(sourceBootstrap.Contains("CompatibleSdkIsReadyAsync", StringComparison.Ordinal)
+            && sourceBootstrap.Contains("cancellationToken => CompatibleSdkIsReadyAsync", StringComparison.Ordinal)
+            && sdkRequirementDialog.Contains("Setup will detect it and resume automatically", StringComparison.Ordinal)
+            && sdkRequirementDialog.Contains("stable .NET SDK matching", StringComparison.Ordinal)
             && sdkRequirementDialog.Contains("DispatcherTimer", StringComparison.Ordinal)
             && sdkRequirementDialog.Contains("TimeSpan.FromSeconds(3)", StringComparison.Ordinal)
             && sdkRequirementDialog.Contains("Content = \"Check now\"", StringComparison.Ordinal)
             && sdkRequirementDialog.Contains("window.DialogResult = true", StringComparison.Ordinal)
             && !sdkRequirementDialog.Contains("Content = \"Retry\"", StringComparison.Ordinal),
-        "the exact SDK prerequisite must resume automatically without turning a completed SDK install into Setup failure");
+        "the .NET 10 SDK prerequisite must resume automatically without turning a completed SDK install into Setup failure");
     Assert(sourceProvenance.Contains("public int SchemaVersion { get; set; } = 5", StringComparison.Ordinal)
             && sourceProvenance.Contains("List<InstalledSourceGeneration> Installed", StringComparison.Ordinal)
             && sourceProvenance.Contains("InstalledSourceGeneration? Pending", StringComparison.Ordinal)

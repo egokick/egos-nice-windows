@@ -34,7 +34,7 @@ if ($SourceVersion -notmatch '^[1-9][0-9]*\.[0-9]+\.[0-9]+$' -or
     $SourceManifestKeyId -eq 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
     $ProductSignerThumbprint -eq 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
     $ProductSignerThumbprint -eq $SourceManifestKeyId -or
-    $SdkVersion -ne '10.0.302' -or $RuntimeVersion -ne '10.0.10') {
+    $SdkVersion -ne '10.*.*' -or $RuntimeVersion -ne '10.0.10') {
     throw 'The source build pins are invalid or unsupported.'
 }
 try {
@@ -63,32 +63,20 @@ if ((Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash.ToLowerInv
 }
 
 $globalJson = Get-Content -Raw -LiteralPath (Join-Path $SourceRoot 'global.json') | ConvertFrom-Json
-if ([string]$globalJson.sdk.version -ne $SdkVersion -or [string]$globalJson.sdk.rollForward -ne 'disable') {
-    throw 'The authenticated source global.json does not enforce the invitation SDK pin.'
+if ([string]$globalJson.sdk.version -ne '10.0.100' -or
+    [string]$globalJson.sdk.rollForward -ne 'latestMinor' -or
+    [bool]$globalJson.sdk.allowPrerelease) {
+    throw 'The authenticated source global.json does not enforce the stable .NET 10 SDK policy.'
 }
 $installedSdks = & $DotnetPath --list-sdks
-if ($LASTEXITCODE -ne 0 -or -not ($installedSdks | Where-Object { $_ -match ('^' + [regex]::Escape($SdkVersion) + '\s') })) {
-    throw "Exact .NET SDK $SdkVersion is not installed."
-}
-$installedRuntimes = & $DotnetPath --list-runtimes
-if ($LASTEXITCODE -ne 0) { throw 'The exact .NET runtime inventory could not be read.' }
-foreach ($runtime in @('Microsoft.NETCore.App', 'Microsoft.WindowsDesktop.App', 'Microsoft.AspNetCore.App')) {
-    if (-not ($installedRuntimes | Where-Object { $_ -match ('^' + [regex]::Escape($runtime) + '\s+' + [regex]::Escape($RuntimeVersion) + '\s') })) {
-        throw "Exact runtime $runtime $RuntimeVersion is not installed with the supported SDK."
-    }
-}
-$expectedHostArchitecture = if ($TargetRuntime -eq 'win-arm64') { 'arm64' } else { 'x64' }
-$dotnetInfo = (& $DotnetPath --info | Out-String)
-$hostArchitectureMatches = $dotnetInfo -match ('(?mi)^\s*Architecture:\s*' + [regex]::Escape($expectedHostArchitecture) + '\s*$')
-$hostRidMatches = $dotnetInfo -match ('(?mi)^\s*RID:\s*' + [regex]::Escape($TargetRuntime) + '\s*$')
-if ($LASTEXITCODE -ne 0 -or -not $hostArchitectureMatches -or -not $hostRidMatches) {
-    throw "The fixed dotnet host architecture/RID does not exactly match $TargetRuntime. Install the native $expectedHostArchitecture SDK."
+if ($LASTEXITCODE -ne 0 -or -not ($installedSdks | Where-Object { $_ -match '^10\.[0-9]+\.[0-9]+\s' })) {
+    throw "A stable .NET SDK matching $SdkVersion is not installed."
 }
 Push-Location $SourceRoot
 try {
     $selectedSdk = (& $DotnetPath --version).Trim()
-    if ($LASTEXITCODE -ne 0 -or $selectedSdk -ne $SdkVersion) {
-        throw "global.json selected SDK '$selectedSdk', not exact SDK '$SdkVersion'."
+    if ($LASTEXITCODE -ne 0 -or $selectedSdk -notmatch '^10\.[0-9]+\.[0-9]+$') {
+        throw "global.json selected SDK '$selectedSdk', which does not match $SdkVersion."
     }
 
     $handoffRoot = Split-Path $SourceRoot -Parent
@@ -128,7 +116,7 @@ try {
     )
 
     $publishCommon = @(
-        'publish', '-c', 'Release', '-r', $TargetRuntime, '--self-contained', 'false', '--no-restore',
+        'publish', '-c', 'Release', '-r', $TargetRuntime, '--self-contained', 'true', '--no-restore',
         '-p:PublishSingleFile=true', '-p:IncludeNativeLibrariesForSelfExtract=true',
         '-p:DebugType=None', '-p:DebugSymbols=false',
         '-p:EnableWindowsTargeting=true',

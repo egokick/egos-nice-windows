@@ -11,7 +11,7 @@ OPTICON COMMAND CENTER
    its recipient is ready. The invitation is personalized, single use, and
    expires automatically.
 5. The recipient opens the invitation page, downloads the exact signed bootstrap
-   and hash-pinned source archive, and builds it with .NET SDK 10.0.302. Setup
+   and hash-pinned source archive, and builds it with any stable .NET 10 SDK (10.*.*). Setup
    prompts clearly if the exact SDK/runtime is missing.
 
 Never run a loose PowerShell installer, use ExecutionPolicy Bypass, or install a

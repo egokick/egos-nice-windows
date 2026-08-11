@@ -83,9 +83,9 @@ internal static class SourceBootstrapInstaller
         };
         if (!invite.TargetRuntimes.Contains(targetRuntime, StringComparer.Ordinal))
             throw new PlatformNotSupportedException("The signed source release does not support this Windows architecture.");
-        var dotnet = await RequireSdkAsync(invite.SdkVersion, directory, targetRuntime);
+        var dotnet = await RequireSdkAsync(invite.SdkVersion, directory);
 
-        report($"Building Opticon {invite.ReleaseVersion} locally with .NET SDK {invite.SdkVersion}...");
+        report($"Building Opticon {invite.ReleaseVersion} locally with an approved .NET 10 SDK...");
         var installer = Path.Combine(sourceDirectory, "Install-OpticonFromSource.ps1");
         var result = await ProcessRunner.RunAsync(
             Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -120,7 +120,7 @@ internal static class SourceBootstrapInstaller
             || invite.SigningProfile != BuildSigningTrust.ProfileName
             || !BuildSigningTrust.IsPublishable
             || invite.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
-            || invite.SdkVersion != "10.0.302" || invite.RuntimeVersion != "10.0.10"
+            || invite.SdkVersion != DotNetSdkPolicy.SignedPolicy || invite.RuntimeVersion != "10.0.10"
             || !invite.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal))
             throw new InvalidDataException("The signed invitation has invalid or unsupported source-build pins.");
     }
@@ -291,7 +291,7 @@ internal static class SourceBootstrapInstaller
         return manifest;
     }
 
-    private static async Task<string> RequireSdkAsync(string version, string protectedRoot, string targetRuntime)
+    private static async Task<string> RequireSdkAsync(string sdkPolicy, string protectedRoot)
     {
         var programFiles = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
         var dotnet = Path.GetFullPath(Path.Combine(programFiles, "dotnet", "dotnet.exe"));
@@ -301,23 +301,19 @@ internal static class SourceBootstrapInstaller
         HostedBootstrapper.RequireNoReparseTraversal(programFiles, dotnet);
         while (true)
         {
-            if (await ExactSdkIsReadyAsync(version, protectedRoot, targetRuntime, dotnet)) return dotnet;
-            var architecture = targetRuntime == "win-arm64" ? "arm64" : "x64";
-            var sdkUrl = $"https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/sdk-{version}-windows-{architecture}-installer";
+            if (await CompatibleSdkIsReadyAsync(protectedRoot, dotnet)) return dotnet;
+            const string sdkUrl = "https://dotnet.microsoft.com/en-us/download/dotnet/10.0";
             if (!SdkRequirementDialog.Show(
-                    version,
-                    architecture,
+                    sdkPolicy,
                     sdkUrl,
-                    cancellationToken => ExactSdkIsReadyAsync(
-                        version, protectedRoot, targetRuntime, dotnet, cancellationToken)))
-                throw new OperationCanceledException($"Exact .NET SDK {version} is required.");
+                    cancellationToken => CompatibleSdkIsReadyAsync(
+                        protectedRoot, dotnet, cancellationToken)))
+                throw new OperationCanceledException($"A stable .NET SDK matching {sdkPolicy} is required.");
         }
     }
 
-    private static async Task<bool> ExactSdkIsReadyAsync(
-        string version,
+    private static async Task<bool> CompatibleSdkIsReadyAsync(
         string protectedRoot,
-        string targetRuntime,
         string dotnet,
         CancellationToken cancellationToken = default)
     {
@@ -325,39 +321,7 @@ internal static class SourceBootstrapInstaller
         var environment = BuildSanitizedEnvironment(protectedRoot, dotnet);
         var sdks = await ProcessRunner.RunAsync(dotnet, ["--list-sdks"], TimeSpan.FromSeconds(30),
             cancellationToken, environment: environment, clearEnvironment: true);
-        var runtimes = await ProcessRunner.RunAsync(dotnet, ["--list-runtimes"], TimeSpan.FromSeconds(30),
-            cancellationToken, environment: environment, clearEnvironment: true);
-        var host = await ProcessRunner.RunAsync(dotnet, ["--info"], TimeSpan.FromSeconds(30),
-            cancellationToken, environment: environment, clearEnvironment: true);
-        return sdks.Succeeded && runtimes.Succeeded && host.Succeeded
-               && sdks.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                   .Any(line => line.StartsWith(version + " ", StringComparison.Ordinal))
-               && RequiredRuntimesPresent(runtimes.StandardOutput, "10.0.10")
-               && SdkHostMatchesTarget(host.StandardOutput, targetRuntime);
-    }
-
-    private static bool RequiredRuntimesPresent(string output, string version)
-    {
-        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return new[] { "Microsoft.NETCore.App", "Microsoft.WindowsDesktop.App", "Microsoft.AspNetCore.App" }
-            .All(runtime => lines.Any(line => line.StartsWith(runtime + " " + version + " ", StringComparison.Ordinal)));
-    }
-
-    private static bool SdkHostMatchesTarget(string output, string targetRuntime)
-    {
-        var expectedArchitecture = targetRuntime == "win-arm64" ? "arm64" : "x64";
-        var architecture = Regex.Matches(
-                output, "^\\s*Architecture:\\s*(x64|arm64)\\s*$",
-                RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)
-            .Select(match => match.Groups[1].Value.ToLowerInvariant()).Distinct(StringComparer.Ordinal).ToArray();
-        var rids = Regex.Matches(
-                output, "^\\s*RID:\\s*(win-(?:x64|arm64))\\s*$",
-                RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)
-            .Select(match => match.Groups[1].Value.ToLowerInvariant()).Distinct(StringComparer.Ordinal).ToArray();
-        return architecture.Length == 1
-               && architecture[0] == expectedArchitecture
-               && rids.Length == 1
-               && rids[0] == targetRuntime;
+        return sdks.Succeeded && DotNetSdkPolicy.InventoryContainsAcceptedSdk(sdks.StandardOutput);
     }
 
     private static bool CertificateBytesMatch(string base64, X509Certificate2 expected)

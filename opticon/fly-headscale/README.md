@@ -21,7 +21,7 @@ bytes under an invitation-bound filename. The user only downloads and opens
 that installer: it recovers the fragment locally, requests the 30-minute S3
 source URL itself, and verifies the signed schema-6 invitation, its
 own byte identity, the exact RSA-PSS-authenticated source archive, and then
-builds locally with .NET SDK 10.0.302 and runtime 10.0.10. Hosted ciphertext expires after
+builds self-contained output locally with any stable .NET 10 SDK (`10.*.*`) and signed offline runtime packs. Hosted ciphertext expires after
 14 days by default and is removed on manual expiration or successful enrollment.
 The command center can extend an active invitation without changing its URL;
 it rotates the one-use Headscale key and replaces the signed encrypted envelope.

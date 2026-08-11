@@ -4,7 +4,7 @@
     <WindowsSdkPackageVersion>10.0.19041.57</WindowsSdkPackageVersion>
     <OpticonRuntimeVersion>10.0.10</OpticonRuntimeVersion>
     <TargetLatestRuntimePatch>true</TargetLatestRuntimePatch>
-    <Version>1.2.9</Version>
+    <Version>1.2.10</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
