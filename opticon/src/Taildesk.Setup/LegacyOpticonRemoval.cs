@@ -9,14 +9,12 @@ namespace Taildesk.Setup;
 
 /// <summary>
 /// Removes any existing Opticon generation from its two fixed product roots
-/// before a source-only clean install. It asks for a typed destructive
-/// confirmation and remains handle-bound and fail-closed for links, junctions,
-/// path swaps, or filesystem objects that cannot be pinned safely.
+/// before a source-only clean install. The verified, device-bound invitation
+/// authorizes replacement; cleanup remains handle-bound and fail-closed for
+/// links, junctions, path swaps, or objects that cannot be pinned safely.
 /// </summary>
 internal static class LegacyOpticonRemoval
 {
-    internal const string ConfirmationPhrase = "REMOVE EXISTING OPTICON";
-
     // Handles stay open for every validated node until handle-based deletion,
     // so keep this deliberately low rather than exhausting the machine on a
     // corrupted existing tree.
@@ -58,8 +56,7 @@ internal static class LegacyOpticonRemoval
     /// <summary>
     /// Runs only from the verified source launcher, after that launcher has
     /// matched the signed source archive.  No deletion begins until every
-    /// present task and both recognized roots have passed preflight and the
-    /// operator types the confirmation phrase.
+    /// present task and both fixed roots have passed preflight.
     /// </summary>
     internal static async Task RemoveLegacyInstallationIfPresentAsync(Action<string> report)
     {
@@ -67,14 +64,11 @@ internal static class LegacyOpticonRemoval
         var plan = await CreatePlanAsync();
         if (plan is null) return;
 
-        report("An existing Opticon installation was detected. Waiting for explicit removal confirmation...");
-        if (!LegacyOpticonRemovalPrompt.Confirm(plan))
-            throw new OperationCanceledException(
-                "Existing Opticon removal was canceled. No Opticon, Tailscale, or RustDesk state was changed.");
+        report("An existing Opticon installation was detected. The verified invitation authorizes its automatic replacement.");
 
-        // Re-run every non-mutating proof immediately after the user makes the
-        // destructive choice.  A changed task/root is a hard stop, not an
-        // invitation to remove whatever now occupies a familiar name.
+        // Re-run every non-mutating proof immediately before cleanup. A changed
+        // task/root is a hard stop, not authorization to remove whatever now
+        // occupies a familiar name.
         plan = await CreatePlanAsync()
                ?? throw new InvalidOperationException("The existing Opticon installation disappeared before removal.");
 

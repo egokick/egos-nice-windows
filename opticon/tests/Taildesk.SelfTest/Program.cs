@@ -1040,7 +1040,6 @@ static void TestReleaseDistributionDesign()
     var hostedBootstrap = Read("src", "Taildesk.Setup", "HostedBootstrap.cs");
     var sourceBootstrap = Read("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
     var legacyRemoval = Read("src", "Taildesk.Setup", "LegacyOpticonRemoval.cs");
-    var legacyRemovalPrompt = Read("src", "Taildesk.Setup", "LegacyOpticonRemovalPrompt.cs");
     var sourceInstaller = Read("source-package", "Install-OpticonFromSource.ps1");
     var sourceNuget = Read("source-package", "NuGet.Config");
     var sourceProvenance = Read("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
@@ -1148,7 +1147,9 @@ static void TestReleaseDistributionDesign()
            && setupWindow.Contains("private-key-redacted", StringComparison.Ordinal)
            && setupWindow.Contains("DetailsExpander.IsExpanded = true", StringComparison.Ordinal),
          "source-only launcher handoff, archive pinning, or redacted persistent Setup diagnostics regressed");
-    Assert(legacyRemoval.Contains("ConfirmationPhrase = \"REMOVE EXISTING OPTICON\"", StringComparison.Ordinal)
+    Assert(legacyRemoval.Contains("The verified invitation authorizes its automatic replacement", StringComparison.Ordinal)
+           && !legacyRemoval.Contains("LegacyOpticonRemovalPrompt", StringComparison.Ordinal)
+           && !File.Exists(Path.Combine(root!.FullName, "src", "Taildesk.Setup", "LegacyOpticonRemovalPrompt.cs"))
            && legacyRemoval.Contains("QueryTaskIfPresentAsync", StringComparison.Ordinal)
            && !legacyRemoval.Contains("RequireTaskOwnsExactExecutable", StringComparison.Ordinal)
            && legacyRemoval.Contains("RequireRegularDirectoryTree", StringComparison.Ordinal)
@@ -1174,12 +1175,8 @@ static void TestReleaseDistributionDesign()
            && !legacyRemoval.Contains("TailscaleCli", StringComparison.Ordinal)
            && !legacyRemoval.Contains("sc.exe", StringComparison.OrdinalIgnoreCase)
            && !legacyRemoval.Contains("netsh", StringComparison.OrdinalIgnoreCase)
-           && legacyRemovalPrompt.Contains("Remove existing Opticon", StringComparison.Ordinal)
-           && legacyRemovalPrompt.Contains("regardless of installed Opticon version", StringComparison.Ordinal)
-           && legacyRemovalPrompt.Contains("IsDefault = true", StringComparison.Ordinal)
-           && legacyRemovalPrompt.Contains("LegacyOpticonRemoval.ConfirmationPhrase", StringComparison.Ordinal)
-           && legacyRemovalPrompt.Contains("Tailscale and RustDesk are deliberately preserved", StringComparison.Ordinal),
-        "existing-version removal must be signed-launcher gated, typed-confirmed, fixed-task/path bounded, and leave Tailscale/RustDesk untouched");
+           && legacyRemoval.Contains("Tailscale and RustDesk were left unchanged", StringComparison.Ordinal),
+        "existing-version replacement must be signed-launcher authorized, automatic, fixed-task/path bounded, and leave Tailscale/RustDesk untouched");
     Assert(gateway.Contains("serveInvitationSourceLauncher", StringComparison.Ordinal)
            && gateway.Contains("validSourceLauncherMetadata", StringComparison.Ordinal)
            && gateway.Contains("No ZIP extraction or invitation paste is needed", StringComparison.Ordinal)
