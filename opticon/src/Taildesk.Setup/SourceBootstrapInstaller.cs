@@ -301,26 +301,39 @@ internal static class SourceBootstrapInstaller
         HostedBootstrapper.RequireNoReparseTraversal(programFiles, dotnet);
         while (true)
         {
-            if (File.Exists(dotnet))
-            {
-                var environment = BuildSanitizedEnvironment(protectedRoot, dotnet);
-                var result = await ProcessRunner.RunAsync(dotnet, ["--list-sdks"], TimeSpan.FromSeconds(30),
-                    environment: environment, clearEnvironment: true);
-                var runtimes = await ProcessRunner.RunAsync(dotnet, ["--list-runtimes"], TimeSpan.FromSeconds(30),
-                    environment: environment, clearEnvironment: true);
-                var host = await ProcessRunner.RunAsync(dotnet, ["--info"], TimeSpan.FromSeconds(30),
-                    environment: environment, clearEnvironment: true);
-                if (result.Succeeded && runtimes.Succeeded && host.Succeeded
-                    && result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                        .Any(line => line.StartsWith(version + " ", StringComparison.Ordinal))
-                    && RequiredRuntimesPresent(runtimes.StandardOutput, "10.0.10")
-                    && SdkHostMatchesTarget(host.StandardOutput, targetRuntime)) return dotnet;
-            }
+            if (await ExactSdkIsReadyAsync(version, protectedRoot, targetRuntime, dotnet)) return dotnet;
             var architecture = targetRuntime == "win-arm64" ? "arm64" : "x64";
             var sdkUrl = $"https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/sdk-{version}-windows-{architecture}-installer";
-            if (!SdkRequirementDialog.Show(version, architecture, sdkUrl))
+            if (!SdkRequirementDialog.Show(
+                    version,
+                    architecture,
+                    sdkUrl,
+                    cancellationToken => ExactSdkIsReadyAsync(
+                        version, protectedRoot, targetRuntime, dotnet, cancellationToken)))
                 throw new OperationCanceledException($"Exact .NET SDK {version} is required.");
         }
+    }
+
+    private static async Task<bool> ExactSdkIsReadyAsync(
+        string version,
+        string protectedRoot,
+        string targetRuntime,
+        string dotnet,
+        CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(dotnet)) return false;
+        var environment = BuildSanitizedEnvironment(protectedRoot, dotnet);
+        var sdks = await ProcessRunner.RunAsync(dotnet, ["--list-sdks"], TimeSpan.FromSeconds(30),
+            cancellationToken, environment: environment, clearEnvironment: true);
+        var runtimes = await ProcessRunner.RunAsync(dotnet, ["--list-runtimes"], TimeSpan.FromSeconds(30),
+            cancellationToken, environment: environment, clearEnvironment: true);
+        var host = await ProcessRunner.RunAsync(dotnet, ["--info"], TimeSpan.FromSeconds(30),
+            cancellationToken, environment: environment, clearEnvironment: true);
+        return sdks.Succeeded && runtimes.Succeeded && host.Succeeded
+               && sdks.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                   .Any(line => line.StartsWith(version + " ", StringComparison.Ordinal))
+               && RequiredRuntimesPresent(runtimes.StandardOutput, "10.0.10")
+               && SdkHostMatchesTarget(host.StandardOutput, targetRuntime);
     }
 
     private static bool RequiredRuntimesPresent(string output, string version)

@@ -1,13 +1,19 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace Taildesk.Setup;
 
 internal static class SdkRequirementDialog
 {
-    internal static bool Show(string version, string architecture, string url)
+    internal static bool Show(
+        string version,
+        string architecture,
+        string url,
+        Func<CancellationToken, Task<bool>> exactSdkIsReadyAsync)
     {
+        ArgumentNullException.ThrowIfNull(exactSdkIsReadyAsync);
         var window = new Window
         {
             Title = "Opticon SDK required",
@@ -30,7 +36,7 @@ internal static class SdkRequirementDialog
         });
         panel.Children.Add(new TextBlock
         {
-            Text = "Copy the official Microsoft URL below, install the SDK outside this elevated Setup window, then return and choose Retry.",
+            Text = "Copy the official Microsoft URL below and install the SDK outside this elevated Setup window. Keep this window open: Setup will detect the exact SDK and resume automatically.",
             Margin = new Thickness(0, 12, 0, 8),
             TextWrapping = TextWrapping.Wrap
         });
@@ -49,7 +55,7 @@ internal static class SdkRequirementDialog
         {
             Margin = new Thickness(0, 8, 0, 0),
             Foreground = Brushes.DimGray,
-            Text = "Setup will not open the URL or run an SDK installer while elevated."
+            Text = "Waiting for the exact SDK, runtimes, and Windows architecture..."
         };
         panel.Children.Add(status);
 
@@ -60,8 +66,45 @@ internal static class SdkRequirementDialog
             Margin = new Thickness(0, 20, 0, 0)
         };
         var copy = new Button { Content = "Copy URL", MinWidth = 100, Margin = new Thickness(0, 0, 10, 0), Padding = new Thickness(12, 6, 12, 6) };
-        var retry = new Button { Content = "Retry", MinWidth = 100, Margin = new Thickness(0, 0, 10, 0), Padding = new Thickness(12, 6, 12, 6), IsDefault = true };
+        var retry = new Button { Content = "Check now", MinWidth = 100, Margin = new Thickness(0, 0, 10, 0), Padding = new Thickness(12, 6, 12, 6), IsDefault = true };
         var exit = new Button { Content = "Exit Setup", MinWidth = 100, Padding = new Thickness(12, 6, 12, 6), IsCancel = true };
+        var lifetime = new CancellationTokenSource();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        var checking = false;
+
+        async Task CheckAsync()
+        {
+            if (checking || lifetime.IsCancellationRequested) return;
+            checking = true;
+            retry.IsEnabled = false;
+            status.Text = "Checking the exact SDK, runtimes, and Windows architecture...";
+            try
+            {
+                if (await exactSdkIsReadyAsync(lifetime.Token))
+                {
+                    timer.Stop();
+                    status.Text = "The exact SDK is ready. Resuming Opticon Setup...";
+                    if (window.IsVisible) window.DialogResult = true;
+                }
+                else
+                {
+                    status.Text = "The exact SDK is not ready yet. Finish its installer; Opticon will keep checking automatically.";
+                }
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+            {
+            }
+            catch (Exception exception)
+            {
+                status.Text = "The SDK check could not complete yet: " + exception.Message;
+            }
+            finally
+            {
+                checking = false;
+                if (!lifetime.IsCancellationRequested) retry.IsEnabled = true;
+            }
+        }
+
         copy.Click += (_, _) =>
         {
             try
@@ -76,8 +119,9 @@ internal static class SdkRequirementDialog
                 urlBox.SelectAll();
             }
         };
-        retry.Click += (_, _) => window.DialogResult = true;
+        retry.Click += async (_, _) => await CheckAsync();
         exit.Click += (_, _) => window.DialogResult = false;
+        timer.Tick += async (_, _) => await CheckAsync();
         buttons.Children.Add(copy);
         buttons.Children.Add(retry);
         buttons.Children.Add(exit);
@@ -87,7 +131,23 @@ internal static class SdkRequirementDialog
         {
             urlBox.Focus();
             urlBox.SelectAll();
+            timer.Start();
+            _ = CheckAsync();
         };
-        return window.ShowDialog() == true;
+        window.Closed += (_, _) =>
+        {
+            timer.Stop();
+            lifetime.Cancel();
+        };
+        try
+        {
+            return window.ShowDialog() == true;
+        }
+        finally
+        {
+            timer.Stop();
+            lifetime.Cancel();
+            lifetime.Dispose();
+        }
     }
 }

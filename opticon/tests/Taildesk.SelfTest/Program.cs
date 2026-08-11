@@ -1039,6 +1039,7 @@ static void TestReleaseDistributionDesign()
     var agent = Read("src", "Taildesk.Agent", "UpdateManager.cs");
     var hostedBootstrap = Read("src", "Taildesk.Setup", "HostedBootstrap.cs");
     var sourceBootstrap = Read("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
+    var sdkRequirementDialog = Read("src", "Taildesk.Setup", "SdkRequirementDialog.cs");
     var legacyRemoval = Read("src", "Taildesk.Setup", "LegacyOpticonRemoval.cs");
     var setupPrivilege = Read("src", "Taildesk.Setup", "ScopedProcessPrivilege.cs");
     var sourceInstaller = Read("source-package", "Install-OpticonFromSource.ps1");
@@ -1242,6 +1243,15 @@ static void TestReleaseDistributionDesign()
            && builder.Contains("microsoft.windows.sdk.net.ref", StringComparison.Ordinal)
            && sourceInstaller.Contains("$setupExitCode -ne 0", StringComparison.Ordinal),
         "the elevated source build does not isolate MSBuild/PowerShell, carry its signed offline feed, or propagate Setup failure");
+    Assert(sourceBootstrap.Contains("ExactSdkIsReadyAsync", StringComparison.Ordinal)
+            && sourceBootstrap.Contains("cancellationToken => ExactSdkIsReadyAsync", StringComparison.Ordinal)
+            && sdkRequirementDialog.Contains("Setup will detect the exact SDK and resume automatically", StringComparison.Ordinal)
+            && sdkRequirementDialog.Contains("DispatcherTimer", StringComparison.Ordinal)
+            && sdkRequirementDialog.Contains("TimeSpan.FromSeconds(3)", StringComparison.Ordinal)
+            && sdkRequirementDialog.Contains("Content = \"Check now\"", StringComparison.Ordinal)
+            && sdkRequirementDialog.Contains("window.DialogResult = true", StringComparison.Ordinal)
+            && !sdkRequirementDialog.Contains("Content = \"Retry\"", StringComparison.Ordinal),
+        "the exact SDK prerequisite must resume automatically without turning a completed SDK install into Setup failure");
     Assert(sourceProvenance.Contains("public int SchemaVersion { get; set; } = 5", StringComparison.Ordinal)
             && sourceProvenance.Contains("List<InstalledSourceGeneration> Installed", StringComparison.Ordinal)
             && sourceProvenance.Contains("InstalledSourceGeneration? Pending", StringComparison.Ordinal)
