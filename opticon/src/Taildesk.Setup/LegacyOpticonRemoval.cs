@@ -20,7 +20,6 @@ internal static class LegacyOpticonRemoval
     // corrupted existing tree.
     private const int MaximumTreeEntries = 4_096;
     private const uint WriteDac = 0x00040000;
-    private const uint WriteOwner = 0x00080000;
     private const uint Delete = 0x00010000;
     private const uint FileListDirectory = 0x00000001;
     private const uint FileReadAttributes = 0x00000080;
@@ -34,7 +33,6 @@ internal static class LegacyOpticonRemoval
     private const uint FileAttributeDirectory = 0x00000010;
     private const uint FileAttributeReparsePoint = 0x00000400;
     private const uint SeFileObject = 1;
-    private const uint OwnerSecurityInformation = 0x00000001;
     private const uint DaclSecurityInformation = 0x00000004;
     private const uint ProtectedDaclSecurityInformation = 0x80000000;
     private const int FileDispositionInformationClass = 4;
@@ -198,7 +196,7 @@ internal static class LegacyOpticonRemoval
         try
         {
             var root = OpenPinnedEntry(directory, directory: true, depth: 0);
-            SealDirectoryDacl(root.Handle);
+            SealDirectoryDacl(root);
             RequirePathStillHasIdentity(root);
             tree.Add(root);
             PinDirectoryChildren(tree, root);
@@ -226,11 +224,11 @@ internal static class LegacyOpticonRemoval
                 if (entry.IsDirectory)
                 {
                     // A file does not need its ACL changed. Reopen a verified
-                    // directory with the additional WRITE_DAC/WRITE_OWNER
-                    // rights required to seal it through that handle.
+                    // directory with the additional WRITE_DAC right required
+                    // to seal it through that handle.
                     entry.Dispose();
                     entry = OpenPinnedEntry(path, directory: true, depth: parent.Depth + 1);
-                    SealDirectoryDacl(entry.Handle);
+                    SealDirectoryDacl(entry);
                     RequirePathStillHasIdentity(entry);
                     tree.Add(entry);
                     PinDirectoryChildren(tree, entry);
@@ -256,7 +254,7 @@ internal static class LegacyOpticonRemoval
         // needed to identify, seal, and delete the exact pinned node.
         var desiredAccess = Delete | FileReadAttributes | Synchronize;
         if (directory == true)
-            desiredAccess |= WriteDac | WriteOwner | FileListDirectory;
+            desiredAccess |= WriteDac | FileListDirectory;
         var handle = CreateFile(
             path,
             desiredAccess,
@@ -353,7 +351,7 @@ internal static class LegacyOpticonRemoval
         return information;
     }
 
-    private static void SealDirectoryDacl(SafeFileHandle handle)
+    private static void SealDirectoryDacl(PinnedEntry entry)
     {
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
@@ -365,29 +363,34 @@ internal static class LegacyOpticonRemoval
             (int)FileSystemRights.FullControl, administrators, isCallback: false, opaque: null));
         var daclBytes = new byte[dacl.BinaryLength];
         dacl.GetBinaryForm(daclBytes, 0);
-        var ownerBytes = new byte[administrators.BinaryLength];
-        administrators.GetBinaryForm(ownerBytes, 0);
         var daclBuffer = Marshal.AllocHGlobal(daclBytes.Length);
-        var ownerBuffer = Marshal.AllocHGlobal(ownerBytes.Length);
         try
         {
             Marshal.Copy(daclBytes, 0, daclBuffer, daclBytes.Length);
-            Marshal.Copy(ownerBytes, 0, ownerBuffer, ownerBytes.Length);
+            // Retain the existing owner. Replacement needs only to protect a
+            // SYSTEM/Administrators DACL while the tree is pinned. Asking
+            // SetSecurityInfo to transfer ownership as well is unnecessary
+            // and can return ERROR_ACCESS_DENIED on an otherwise writable
+            // protected root even when SeRestorePrivilege is enabled.
+            const uint securityInformation = DaclSecurityInformation | ProtectedDaclSecurityInformation;
             var result = SetSecurityInfo(
-                handle,
+                entry.Handle,
                 SeFileObject,
-                OwnerSecurityInformation | DaclSecurityInformation | ProtectedDaclSecurityInformation,
-                ownerBuffer,
+                securityInformation,
+                IntPtr.Zero,
                 IntPtr.Zero,
                 daclBuffer,
                 IntPtr.Zero);
             if (result != 0)
                 throw new UnauthorizedAccessException(
-                    $"Could not seal the existing Opticon directory ACL (Win32 error {result}).");
+                    $"Could not seal the existing Opticon directory ACL at " +
+                    $"'{DescribeCleanupPath(entry.Path)}' with security information " +
+                    $"0x{securityInformation:X8} using handle access " +
+                    $"0x{(Delete | FileReadAttributes | Synchronize | WriteDac | FileListDirectory):X8} " +
+                    $"(Win32 error {result}).");
         }
         finally
         {
-            Marshal.FreeHGlobal(ownerBuffer);
             Marshal.FreeHGlobal(daclBuffer);
         }
     }
