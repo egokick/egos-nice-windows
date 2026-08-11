@@ -355,7 +355,12 @@ internal static class LegacyOpticonRemoval
     {
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        var inheritance = AceFlags.ContainerInherit | AceFlags.ObjectInherit;
+        // SetSecurityInfo propagates inheritable ACEs to existing descendants.
+        // Protected legacy descendants can reject that implicit path-based
+        // propagation even though this exact pinned directory handle grants
+        // WRITE_DAC. Cleanup seals every directory explicitly through its own
+        // no-reparse handle, so these ACEs must apply to this directory only.
+        var inheritance = AceFlags.None;
         var dacl = new RawAcl(revision: 2, capacity: 2);
         dacl.InsertAce(0, new CommonAce(inheritance, AceQualifier.AccessAllowed,
             (int)FileSystemRights.FullControl, system, isCallback: false, opaque: null));

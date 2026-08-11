@@ -4,7 +4,7 @@ param(
     [string]$Runtime = 'win-x64',
     [ValidateSet('Production', 'OwnerManaged')]
     [string]$SigningProfile = 'Production',
-    [string]$Version = '1.2.8',
+    [string]$Version = '1.2.9',
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
     [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
