@@ -61,7 +61,7 @@ internal static class Program
         string? staging = null;
         try
         {
-            var controllerOnlyRepair = ParseArguments(args);
+            var options = ParseArguments(args);
             var executable = Path.GetFullPath(Environment.ProcessPath
                 ?? throw new InvalidOperationException("Windows did not provide the installer path."));
             if (!Path.GetFileName(executable).Equals(WrapperName, StringComparison.Ordinal))
@@ -78,15 +78,18 @@ internal static class Program
             await CopyVerifiedPayloadAsync(packageRoot, staging, manifest);
             var installer = await ExtractInstallerAsync(staging);
             var exitCode = await RunInstallerAsync(
-                installer, staging, manifest.DevelopmentOnly, controllerOnlyRepair);
+                installer, staging, manifest.DevelopmentOnly, options.ControllerOnlyRepair);
             if (exitCode != 0)
                 throw new InvalidOperationException($"The protected Opticon installer returned {exitCode}.");
 
-            MessageBox.Show(
-                controllerOnlyRepair
-                    ? "The Opticon command center repair completed successfully."
-                    : "The Opticon command center was installed successfully.",
-                "Opticon", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!options.QuietSuccess)
+            {
+                MessageBox.Show(
+                    options.ControllerOnlyRepair
+                        ? "The Opticon command center repair completed successfully."
+                        : "The Opticon command center was installed successfully.",
+                    "Opticon", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
             return 0;
         }
         catch (Exception exception)
@@ -106,13 +109,20 @@ internal static class Program
         }
     }
 
-    private static bool ParseArguments(IReadOnlyList<string> args)
+    private static InstallerOptions ParseArguments(IReadOnlyList<string> args)
     {
-        if (args.Count == 0) return false;
+        if (args.Count == 0) return new InstallerOptions(false, false);
         if (args.Count == 1 && args[0].Equals("--controller-only-repair", StringComparison.Ordinal))
-            return true;
-        throw new ArgumentException("Only --controller-only-repair is supported.");
+            return new InstallerOptions(true, false);
+        if (args.Count == 2
+            && args[0].Equals("--controller-only-repair", StringComparison.Ordinal)
+            && args[1].Equals("--quiet-success", StringComparison.Ordinal))
+            return new InstallerOptions(true, true);
+        throw new ArgumentException(
+            "Only --controller-only-repair, optionally followed by --quiet-success, is supported.");
     }
+
+    private readonly record struct InstallerOptions(bool ControllerOnlyRepair, bool QuietSuccess);
 
     private static void ValidatePackageRoot(string packageRoot)
     {

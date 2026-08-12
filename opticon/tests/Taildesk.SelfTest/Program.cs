@@ -2467,11 +2467,14 @@ static void TestOpenSshRecoveryDesign()
            && incrementalRebuild.Contains("Assert-OwnerManagedInstaller", StringComparison.Ordinal)
            && incrementalRebuild.Contains("Install-Opticon.exe", StringComparison.Ordinal)
            && incrementalRebuild.Contains("--controller-only-repair", StringComparison.Ordinal)
+           && incrementalRebuild.Contains("--quiet-success", StringComparison.Ordinal)
+           && commandCenterInstallerSource.Contains("if (!options.QuietSuccess)", StringComparison.Ordinal)
+           && commandCenterInstallerSource.Contains("return new InstallerOptions(true, true)", StringComparison.Ordinal)
            && !incrementalRebuild.Contains("Install-Opticon.ps1", StringComparison.Ordinal)
            && !incrementalRebuild.Contains("ExecutionPolicy', 'Bypass", StringComparison.Ordinal)
            && sourceLauncher.Contains("ExecutionPolicy RemoteSigned", StringComparison.Ordinal)
            && !sourceLauncher.Contains("ExecutionPolicy Bypass", StringComparison.Ordinal),
-        "source-triggered controller rebuilds must use PowerShell 7 and the signed OwnerManaged package without a loose elevated script");
+        "source-triggered controller rebuilds must use PowerShell 7 and a non-blocking signed OwnerManaged package without a loose elevated script");
     var agentUpdateDownload = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");
     Assert(agentUpdateDownload.Contains("UseProxy = false", StringComparison.Ordinal)
            && agentUpdateDownload.Contains("Last error:", StringComparison.Ordinal),

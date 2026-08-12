@@ -243,7 +243,7 @@ try {
         Request-InstalledOpticonShutdown -InstalledPath $installedOpticon
     }
     $updater = Start-Process -FilePath $transactionalInstaller -Verb RunAs -Wait -PassThru `
-        -ArgumentList '--controller-only-repair' -WorkingDirectory $packageDirectory
+        -ArgumentList '--controller-only-repair', '--quiet-success' -WorkingDirectory $packageDirectory
     if ($updater.ExitCode -ne 0) {
         throw "The signed Opticon command-center repair returned exit code $($updater.ExitCode)."
     }
