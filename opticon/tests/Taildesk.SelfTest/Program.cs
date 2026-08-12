@@ -1575,15 +1575,18 @@ static void TestReleaseDeploymentSurface()
            && window.Contains("Files currently deployed for invitation creation", StringComparison.Ordinal)
            && window.Contains("SHA-256", StringComparison.Ordinal)
            && window.Contains("DeployReleaseButtonText", StringComparison.Ordinal)
-           && window.Contains("ReleaseWorkspaceText", StringComparison.Ordinal),
-        "the Command Center release page must display the deployed version and immutable invitation files alongside its deployment control");
+           && !window.Contains("ReleaseWorkspaceText", StringComparison.Ordinal)
+           && !window.Contains("Source workspace", StringComparison.Ordinal)
+           && !window.Contains("Save workspace", StringComparison.Ordinal),
+        "the Command Center release page must display the deployed version and immutable invitation files without exposing a source-workspace choice");
     Assert(viewModel.Contains("Deployed version {preflight.DeployedVersion} already matches this Command Center", StringComparison.Ordinal)
            && viewModel.Contains("CanDeployRelease", StringComparison.Ordinal)
            && viewModel.Contains("RefreshReleaseDeploymentAsync", StringComparison.Ordinal)
            && viewModel.Contains("PrepareReleaseDeploymentAsync", StringComparison.Ordinal)
            && viewModel.Contains("DeployReleaseAsync", StringComparison.Ordinal)
-           && viewModel.Contains("ReleaseWorkspacePath", StringComparison.Ordinal),
-        "the release view-model must show an already-matching release and expose a fresh deployment plan");
+           && !viewModel.Contains("ReleaseWorkspacePath", StringComparison.Ordinal)
+           && !viewModel.Contains("SaveReleaseWorkspaceAsync", StringComparison.Ordinal),
+        "the release view-model must show an already-matching release and expose a fresh automatic deployment plan");
 
     var preflightIndex = windowCode.IndexOf("PrepareReleaseDeploymentAsync", StringComparison.Ordinal);
     var confirmationIndex = windowCode.IndexOf("MessageBox.Show(prompt", StringComparison.Ordinal);
@@ -1592,7 +1595,7 @@ static void TestReleaseDeploymentSurface()
            && windowCode.Contains("MessageBoxButton.YesNo", StringComparison.Ordinal)
            && windowCode.Contains("MessageBoxResult.No", StringComparison.Ordinal),
         "release deployment must read the authoritative plan, ask one default-No Yes/No question, then mutate state only after consent");
-    var prerequisiteIndex = viewModel.IndexOf("ValidatePublisherPrerequisites(OpticonVersion, releaseWorkspace)", StringComparison.Ordinal);
+    var prerequisiteIndex = viewModel.IndexOf("ResolvePublisherPrerequisitesAsync(OpticonVersion", StringComparison.Ordinal);
     var readinessIndex = viewModel.IndexOf("VerifyPublisherReadinessAsync", StringComparison.Ordinal);
     var stageIndex = viewModel.IndexOf("StageAsync(OpticonVersion", StringComparison.Ordinal);
     var acquireIndex = viewModel.IndexOf("AcquireLeaseAsync", StringComparison.Ordinal);
@@ -1616,13 +1619,28 @@ static void TestReleaseDeploymentSurface()
            && hostedClient.Contains("TailscaleKeyId", StringComparison.Ordinal)
            && invitationService.Contains("authKey.Id", StringComparison.Ordinal)
            && invitationService.Contains("replacementKey.Id", StringComparison.Ordinal)
-           && config.Contains("ReleaseWorkspacePath", StringComparison.Ordinal)
+           && !config.Contains("ReleaseWorkspacePath", StringComparison.Ordinal)
            && config.Contains("ReleaseDeploymentLeaseProtected", StringComparison.Ordinal),
-        "new hosted invitations must retain only a non-secret key identity while a protected local lease supports safe deployment recovery");
+        "new hosted invitations must retain only a non-secret key identity while a protected local lease supports safe deployment recovery without persisting a source path");
     Assert(service.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
-           && service.Contains("ProcessRunner.RunAsync", StringComparison.Ordinal)
-           && service.Contains("VerifyPublisherReadinessAsync", StringComparison.Ordinal)
-           && service.Contains("FindPowerShell7", StringComparison.Ordinal)
+            && service.Contains("ProcessRunner.RunAsync", StringComparison.Ordinal)
+            && service.Contains("VerifyPublisherReadinessAsync", StringComparison.Ordinal)
+            && service.Contains("ResolvePublisherPrerequisitesAsync", StringComparison.Ordinal)
+            && service.Contains("EnumerateAutomaticWorkspaceCandidates", StringComparison.Ordinal)
+            && service.Contains("ExpectedGitRemote", StringComparison.Ordinal)
+            && service.Contains("FindGit", StringComparison.Ordinal)
+            && service.Contains("VerifyTrustedWorkspaceAsync", StringComparison.Ordinal)
+            && service.Contains("VerifyStagedPublisherAsync", StringComparison.Ordinal)
+            && service.Contains("SourceCommit", StringComparison.Ordinal)
+            && service.Contains("ReleaseScriptSha256", StringComparison.Ordinal)
+            && service.Contains("BundlePublisherSha256", StringComparison.Ordinal)
+            && service.Contains("GitEnvironment", StringComparison.Ordinal)
+            && service.Contains("PublisherEnvironment", StringComparison.Ordinal)
+            && !service.Contains("OPTICON_RELEASE_WORKSPACE", StringComparison.Ordinal)
+            && !service.Contains("ResolveWorkspace(", StringComparison.Ordinal)
+            && !windowCode.Contains("ReleaseWorkspaceText", StringComparison.Ordinal)
+            && !windowCode.Contains("SaveReleaseWorkspace_Click", StringComparison.Ordinal)
+            && service.Contains("FindPowerShell7", StringComparison.Ordinal)
            && service.Contains("version.FileMinorPart >= 1", StringComparison.Ordinal)
            && service.Contains("StageAsync", StringComparison.Ordinal)
            && service.Contains("-StageOnly", StringComparison.Ordinal)

@@ -26,10 +26,6 @@ public sealed class AdminConfig
     public string InviteOutputDirectory { get; set; } = PrivateStorage.InviteDirectory;
     public string RustDeskPath { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RustDesk", "rustdesk.exe");
-    // The release page delegates publishing to the checked-in, audited source
-    // pipeline. This is deliberately a workspace location, never a place to
-    // save AWS credentials or signing keys.
-    public string ReleaseWorkspacePath { get; set; } = string.Empty;
     // A short-lived gateway lease is DPAPI-protected so a Command Center can
     // resume a confirmed deployment after interruption. It is cleared only
     // after live-manifest verification or before any invitation is revoked.

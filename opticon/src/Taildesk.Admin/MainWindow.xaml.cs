@@ -512,9 +512,6 @@ public partial class MainWindow : Window
     private async void RefreshReleaseDeployment_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(() => _viewModel.RefreshReleaseDeploymentAsync());
 
-    private async void SaveReleaseWorkspace_Click(object sender, RoutedEventArgs e) =>
-        await RunAsync(() => _viewModel.SaveReleaseWorkspaceAsync(ReleaseWorkspaceText.Text));
-
     private async void DeployRelease_Click(object sender, RoutedEventArgs e)
     {
         if (!_viewModel.CanDeployRelease) return;
@@ -525,7 +522,7 @@ public partial class MainWindow : Window
             // before any prompt, local cancellation, build, S3 upload, or
             // manifest publication so an unseen gateway invitation cannot be
             // bypassed by a stale UI list.
-            plan = await _viewModel.PrepareReleaseDeploymentAsync(ReleaseWorkspaceText.Text);
+            plan = await _viewModel.PrepareReleaseDeploymentAsync();
         }
         catch (Exception exception)
         {
@@ -536,7 +533,7 @@ public partial class MainWindow : Window
         if (plan.AlreadyDeployed) return;
         // A protected local lease means the operator already chose Yes before
         // this Command Center was interrupted. Resume that exact decision;
-            // otherwise show the one early default-No confirmation before any
+        // otherwise show the one early default-No confirmation before any
             // lease, key revocation, build, S3 upload, or manifest mutation.
         var resuming = plan.DeploymentBlocked && _viewModel.CanResumeReleaseDeployment;
         if (plan.RequiresInvitationRemoval && !resuming)
@@ -567,7 +564,7 @@ public partial class MainWindow : Window
                 return;
         }
 
-        await RunAsync(() => _viewModel.DeployReleaseAsync(plan, ReleaseWorkspaceText.Text));
+        await RunAsync(() => _viewModel.DeployReleaseAsync(plan));
     }
 
     private async void SaveSettings_Click(object sender, RoutedEventArgs e)
@@ -634,9 +631,8 @@ public partial class MainWindow : Window
         CoordinatorIpText.Text = _viewModel.Config.CoordinatorBindAddress;
         InviteFolderText.Text = _viewModel.Config.InviteOutputDirectory;
         RustDeskPathText.Text = _viewModel.Config.RustDeskPath;
-        ReleaseWorkspaceText.Text = ReleaseDeploymentService.FindWorkspaceCandidate(_viewModel.Config);
         var editable = _viewModel.Config.Mode == AdminMode.Primary;
-        TailnetText.IsEnabled = OAuthIdText.IsEnabled = OAuthSecretText.IsEnabled = CoordinatorIpText.IsEnabled = ReleaseWorkspaceText.IsEnabled = editable;
+        TailnetText.IsEnabled = OAuthIdText.IsEnabled = OAuthSecretText.IsEnabled = CoordinatorIpText.IsEnabled = editable;
     }
 
     private Task RunMaintenanceBootstrapAsync(

@@ -82,7 +82,10 @@ public sealed class ReleaseDeploymentService
 {
     private const string ReleaseScriptRelativePath = "scripts\\Ensure-OpticonTargetRelease.ps1";
     private const string PublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonSourceRelease.ps1";
+    private const string BundlePublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonBundles.ps1";
     private const string TimestampUrl = "http://timestamp.digicert.com";
+    private const string ExpectedWorkspaceDirectoryName = "opticon";
+    private const string ExpectedGitRemote = "https://github.com/egokick/egos-nice-windows.git";
     private readonly AdminState _state;
     private readonly HostedInviteClient _hostedInvites;
 
@@ -277,19 +280,22 @@ public sealed class ReleaseDeploymentService
     /// </summary>
     public async Task StageAsync(
         string targetVersion,
-        string configuredWorkspace,
+        ReleasePublisherPrerequisites prerequisites,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
-        var prerequisites = ValidatePublisherPrerequisites(normalizedTarget, configuredWorkspace);
+        ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
+        await VerifyTrustedWorkspaceAsync(
+            prerequisites.Workspace, normalizedTarget, prerequisites.SourceCommit, refreshOrigin: true, cancellationToken);
         progress?.Report($"Staging and verifying immutable source release {normalizedTarget}…");
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
             PublisherArguments(prerequisites, normalizedTarget).Append("-StageOnly").ToArray(),
             TimeSpan.FromMinutes(45),
-            cancellationToken);
+            cancellationToken,
+            environment: PublisherEnvironment(prerequisites));
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The Opticon source archive could not be staged and verified. " + DescribePublisherFailure(result));
@@ -298,28 +304,28 @@ public sealed class ReleaseDeploymentService
 
     public async Task PublishAsync(
         string targetVersion,
-        string configuredWorkspace,
+        ReleasePublisherPrerequisites prerequisites,
         ReleaseDeploymentLease lease,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
-        var prerequisites = ValidatePublisherPrerequisites(normalizedTarget, configuredWorkspace);
+        ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
+        await VerifyStagedPublisherAsync(prerequisites, normalizedTarget, cancellationToken);
         ArgumentNullException.ThrowIfNull(lease);
         if (!IsLeaseToken(lease.LeaseToken))
             throw new InvalidDataException("A valid release deployment lease is required before the invite manifest can change.");
 
         progress?.Report($"Committing staged source release {normalizedTarget} to the invite manifest…");
+        var environment = PublisherEnvironment(prerequisites);
+        environment["OPTICON_RELEASE_LEASE_TOKEN"] = lease.LeaseToken;
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
             PublisherArguments(prerequisites, normalizedTarget).Append("-CommitStaged").ToArray(),
             TimeSpan.FromMinutes(45),
             cancellationToken,
-            environment: new Dictionary<string, string?>
-            {
-                ["OPTICON_RELEASE_LEASE_TOKEN"] = lease.LeaseToken
-            });
+            environment: environment);
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The verified Opticon staged-release commit did not complete. " + DescribePublisherFailure(result));
@@ -328,77 +334,152 @@ public sealed class ReleaseDeploymentService
 
     public async Task VerifyPublisherReadinessAsync(
         string targetVersion,
-        string configuredWorkspace,
+        ReleasePublisherPrerequisites prerequisites,
         CancellationToken cancellationToken = default)
     {
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
-        var prerequisites = ValidatePublisherPrerequisites(normalizedTarget, configuredWorkspace);
+        ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
+        await VerifyTrustedWorkspaceAsync(
+            prerequisites.Workspace, normalizedTarget, prerequisites.SourceCommit, refreshOrigin: true, cancellationToken);
         var arguments = PublisherArguments(prerequisites, normalizedTarget).Append("-CheckOnly").ToArray();
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
             arguments,
             TimeSpan.FromMinutes(5),
-            cancellationToken);
+            cancellationToken,
+            environment: PublisherEnvironment(prerequisites));
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The verified Opticon publisher is not ready. " + DescribePublisherFailure(result));
     }
 
-    public ReleasePublisherPrerequisites ValidatePublisherPrerequisites(string targetVersion, string configuredWorkspace)
+    /// <summary>
+    /// Finds the canonical local Opticon source checkout eligible to publish
+    /// this Command Center's exact version. The UI never accepts a user supplied
+    /// path: a candidate must have the expected layout, no reparse-backed
+    /// critical paths, the official origin, a clean main checkout, and an
+    /// origin/main HEAD equal to the local HEAD.
+    /// </summary>
+    public async Task<ReleasePublisherPrerequisites> ResolvePublisherPrerequisitesAsync(
+        string targetVersion,
+        CancellationToken cancellationToken = default)
     {
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
-        var workspace = ResolveWorkspace(string.IsNullOrWhiteSpace(configuredWorkspace)
-            ? _state.Config.ReleaseWorkspacePath
-            : configuredWorkspace);
-        var sourceVersion = ReadWorkspaceVersion(workspace);
-        if (!string.Equals(sourceVersion, normalizedTarget, StringComparison.Ordinal))
+        var matches = new List<(string Workspace, string Commit)>();
+        foreach (var candidate in EnumerateAutomaticWorkspaceCandidates())
+        {
+            if (!HasReleaseLayout(candidate)) continue;
+            try
+            {
+                if (!string.Equals(ReadWorkspaceVersion(candidate), normalizedTarget, StringComparison.Ordinal))
+                    continue;
+                var commit = await VerifyTrustedWorkspaceAsync(
+                    candidate, normalizedTarget, expectedCommit: null, refreshOrigin: true, cancellationToken);
+                matches.Add((candidate, commit));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                // A source-looking folder is never enough to trust. Keep
+                // evaluating the bounded candidates, then fail closed below.
+            }
+        }
+
+        if (matches.Count == 0)
             throw new InvalidOperationException(
-                $"The trusted source workspace is version {sourceVersion}, but this Command Center is {normalizedTarget}. " +
-                "Build and open the matching Command Center before publishing invitations.");
+                $"No verified local Opticon publisher matching Command Center {normalizedTarget} was found automatically. " +
+                "No invitation or release file was changed.");
+        // The standard checkout is deterministic and wins when present. Other
+        // bounded candidates are transition fallbacks only; if the canonical
+        // location is absent, ambiguity fails closed below.
+        var canonical = GetCanonicalWorkspacePath();
+        var canonicalMatch = matches.SingleOrDefault(match => SamePath(match.Workspace, canonical));
+        if (!string.IsNullOrEmpty(canonicalMatch.Workspace))
+            return CreatePublisherPrerequisites(canonicalMatch.Workspace, canonicalMatch.Commit);
+
+        if (matches.Count != 1)
+            throw new InvalidOperationException(
+                "More than one verified local Opticon publisher was found automatically. " +
+                "No invitation or release file was changed.");
+
+        return CreatePublisherPrerequisites(matches[0].Workspace, matches[0].Commit);
+    }
+
+    private ReleasePublisherPrerequisites CreatePublisherPrerequisites(string workspace, string sourceCommit)
+    {
+        var git = FindGit();
         return new ReleasePublisherPrerequisites(
             workspace,
             RequireRegularFile(Path.Combine(workspace, ReleaseScriptRelativePath), "Opticon target release script"),
             FindPowerShell7(),
+            git,
             FindSignTool(),
-            RequireControlOrigin(_state.Config.HeadscaleControlUrl));
+            RequireControlOrigin(_state.Config.HeadscaleControlUrl),
+            sourceCommit,
+            GetFileSha256(Path.Combine(workspace, ReleaseScriptRelativePath)),
+            GetFileSha256(Path.Combine(workspace, PublisherRelativePath)),
+            GetFileSha256(Path.Combine(workspace, BundlePublisherRelativePath)));
     }
 
-    public static string FindWorkspaceCandidate(AdminConfig config)
+    private static IEnumerable<string> EnumerateAutomaticWorkspaceCandidates()
     {
-        ArgumentNullException.ThrowIfNull(config);
-        var configured = config.ReleaseWorkspacePath?.Trim() ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(configured)) return configured;
-
-        var environment = Environment.GetEnvironmentVariable("OPTICON_RELEASE_WORKSPACE")?.Trim() ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(environment)) return environment;
-
-        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        IEnumerable<string> Candidates()
         {
-            var directory = new DirectoryInfo(start);
-            for (var depth = 0; directory is not null && depth < 12; depth++, directory = directory.Parent)
+            var driveRoot = Path.GetPathRoot(Environment.SystemDirectory)
+                ?? Path.GetPathRoot(Environment.CurrentDirectory)
+                ?? @"C:\\";
+            var sourceRoot = Path.Combine(driveRoot, "source");
+            yield return GetCanonicalWorkspacePath();
+
+            // Developers normally keep checked-out repositories immediately
+            // below C:\\source. This is deliberately one directory deep rather
+            // than a recursive disk search; every candidate is subsequently
+            // proven against the official Git remote before use.
+            string[] repositories;
+            try { repositories = Directory.EnumerateDirectories(sourceRoot, "*", SearchOption.TopDirectoryOnly).ToArray(); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
-                if (HasReleaseLayout(directory.FullName)) return directory.FullName;
+                // The canonical candidate or another bounded location may still
+                // be available; inaccessible folders are not trusted guesses.
+                repositories = [];
+            }
+            foreach (var repository in repositories)
+                yield return Path.Combine(repository, ExpectedWorkspaceDirectoryName);
+
+            foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
+            {
+                DirectoryInfo? directory;
+                try { directory = new DirectoryInfo(Path.GetFullPath(start)); }
+                catch (Exception) { continue; }
+                for (var depth = 0; directory is not null && depth < 12; depth++, directory = directory.Parent)
+                {
+                    if (string.Equals(directory.Name, ExpectedWorkspaceDirectoryName, StringComparison.OrdinalIgnoreCase))
+                        yield return directory.FullName;
+                }
             }
         }
-        return string.Empty;
+
+        foreach (var candidate in Candidates())
+        {
+            string fullPath;
+            try { fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidate)); }
+            catch (Exception) { continue; }
+            if (seen.Add(fullPath)) yield return fullPath;
+        }
     }
 
-    public static string ResolveWorkspace(string configuredWorkspace)
+    private static string GetCanonicalWorkspacePath()
     {
-        var candidate = string.IsNullOrWhiteSpace(configuredWorkspace)
-            ? FindWorkspaceCandidate(new AdminConfig())
-            : configuredWorkspace.Trim();
-        if (string.IsNullOrWhiteSpace(candidate))
-            throw new InvalidOperationException(
-                "Choose the trusted Opticon source workspace before publishing. It must contain scripts\\Ensure-OpticonTargetRelease.ps1.");
-        var workspace = Path.GetFullPath(Environment.ExpandEnvironmentVariables(candidate));
-        if (!HasReleaseLayout(workspace))
-            throw new InvalidOperationException(
-                "The release workspace must be the Opticon source root containing Directory.Build.props, " +
-                "scripts\\Ensure-OpticonTargetRelease.ps1, and fly-headscale\\scripts\\Publish-OpticonSourceRelease.ps1.");
-        return workspace;
+        var driveRoot = Path.GetPathRoot(Environment.SystemDirectory)
+            ?? Path.GetPathRoot(Environment.CurrentDirectory)
+            ?? @"C:\\";
+        return Path.Combine(driveRoot, "source", "egos-nice-windows", ExpectedWorkspaceDirectoryName);
     }
 
     public static string ReadWorkspaceVersion(string workspace)
@@ -415,6 +496,215 @@ public sealed class ReleaseDeploymentService
         {
             throw new InvalidDataException("The Opticon source version file is not valid XML.", exception);
         }
+    }
+
+    private static async Task<string> VerifyTrustedWorkspaceAsync(
+        string workspace,
+        string targetVersion,
+        string? expectedCommit,
+        bool refreshOrigin,
+        CancellationToken cancellationToken)
+    {
+        var safeWorkspace = RequireRegularDirectory(workspace, "Opticon source workspace");
+        if (!string.Equals(Path.GetFileName(safeWorkspace), ExpectedWorkspaceDirectoryName, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The automatic Opticon publisher candidate is not the opticon source directory.");
+
+        var repository = Directory.GetParent(safeWorkspace)?.FullName
+            ?? throw new InvalidDataException("The automatic Opticon publisher candidate has no repository root.");
+        repository = RequireRegularDirectory(repository, "Opticon source repository root");
+        RequireRegularFile(Path.Combine(safeWorkspace, "Directory.Build.props"), "Opticon source version file");
+        RequireRegularFile(Path.Combine(safeWorkspace, "Taildesk.sln"), "Opticon solution file");
+        RequireRegularDirectory(Path.Combine(safeWorkspace, "scripts"), "Opticon source scripts directory");
+        RequireRegularDirectory(Path.Combine(safeWorkspace, "fly-headscale"), "Opticon gateway source directory");
+        RequireRegularDirectory(Path.Combine(safeWorkspace, "fly-headscale", "scripts"), "Opticon publisher scripts directory");
+        RequireRegularFile(Path.Combine(safeWorkspace, ReleaseScriptRelativePath), "Opticon target release script");
+        RequireRegularFile(Path.Combine(safeWorkspace, PublisherRelativePath), "Opticon source publisher script");
+        RequireRegularFile(Path.Combine(safeWorkspace, BundlePublisherRelativePath), "Opticon source bundle publisher script");
+
+        if (!string.Equals(ReadWorkspaceVersion(safeWorkspace), targetVersion, StringComparison.Ordinal))
+            throw new InvalidDataException("The automatic Opticon publisher candidate does not match this Command Center version.");
+
+        var git = FindGit();
+        var topLevel = await ReadGitValueAsync(git, safeWorkspace, ["rev-parse", "--show-toplevel"], cancellationToken);
+        if (!SamePath(topLevel, repository))
+            throw new InvalidDataException("The automatic Opticon publisher candidate is not rooted in its expected Git repository.");
+
+        var remote = await ReadGitValueAsync(git, safeWorkspace, ["remote", "get-url", "origin"], cancellationToken);
+        if (!string.Equals(remote.Trim().TrimEnd('/'), ExpectedGitRemote, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The automatic Opticon publisher candidate does not use the official Opticon Git origin.");
+
+        var branch = await ReadGitValueAsync(git, safeWorkspace, ["symbolic-ref", "--quiet", "--short", "HEAD"], cancellationToken);
+        if (!string.Equals(branch, "main", StringComparison.Ordinal))
+            throw new InvalidDataException("The automatic Opticon publisher candidate is not on the main branch.");
+
+        var status = await ReadGitValueAsync(git, safeWorkspace, ["status", "--porcelain", "--untracked-files=all"], cancellationToken);
+        if (!string.IsNullOrWhiteSpace(status))
+            throw new InvalidDataException("The automatic Opticon publisher candidate has uncommitted source changes.");
+
+        if (refreshOrigin)
+            await RunGitCommandAsync(git, safeWorkspace,
+                ["fetch", "--quiet", "--no-tags", ExpectedGitRemote, "refs/heads/main:refs/remotes/origin/main"], cancellationToken);
+        var head = await ReadGitValueAsync(git, safeWorkspace, ["rev-parse", "HEAD"], cancellationToken);
+        var originMain = await ReadGitValueAsync(git, safeWorkspace, ["rev-parse", "refs/remotes/origin/main"], cancellationToken);
+        if (!string.Equals(head, originMain, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The automatic Opticon publisher candidate is not synchronized with origin/main.");
+        if (expectedCommit is not null && !string.Equals(head, expectedCommit, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The automatic Opticon publisher source changed after it was selected.");
+        return head;
+    }
+
+    private static async Task VerifyStagedPublisherAsync(
+        ReleasePublisherPrerequisites prerequisites,
+        string targetVersion,
+        CancellationToken cancellationToken)
+    {
+        // This runs after the release lease may have removed invitations. It
+        // deliberately performs no fetch/network synchronization: the exact
+        // publisher selected before staging must remain byte-for-byte intact.
+        ValidatePublisherPrerequisites(prerequisites, targetVersion);
+        var workspace = prerequisites.Workspace;
+        if (!string.Equals(GetFileSha256(Path.Combine(workspace, ReleaseScriptRelativePath)), prerequisites.ReleaseScriptSha256, StringComparison.Ordinal)
+            || !string.Equals(GetFileSha256(Path.Combine(workspace, PublisherRelativePath)), prerequisites.SourcePublisherSha256, StringComparison.Ordinal)
+            || !string.Equals(GetFileSha256(Path.Combine(workspace, BundlePublisherRelativePath)), prerequisites.BundlePublisherSha256, StringComparison.Ordinal))
+            throw new InvalidDataException("The verified Opticon publisher changed after the source archive was staged.");
+
+        var git = FindGit();
+        var head = await ReadGitValueAsync(git, workspace, ["rev-parse", "HEAD"], cancellationToken);
+        if (!string.Equals(head, prerequisites.SourceCommit, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The verified Opticon publisher commit changed after the source archive was staged.");
+        var status = await ReadGitValueAsync(git, workspace, ["status", "--porcelain", "--untracked-files=all"], cancellationToken);
+        if (!string.IsNullOrWhiteSpace(status))
+            throw new InvalidDataException("The verified Opticon publisher has source changes after the source archive was staged.");
+    }
+
+    private static void ValidatePublisherPrerequisites(ReleasePublisherPrerequisites prerequisites, string targetVersion)
+    {
+        ArgumentNullException.ThrowIfNull(prerequisites);
+        var workspace = RequireRegularDirectory(prerequisites.Workspace, "Opticon source workspace");
+        if (!SamePath(workspace, prerequisites.Workspace)
+            || !string.Equals(ReadWorkspaceVersion(workspace), targetVersion, StringComparison.Ordinal))
+            throw new InvalidDataException("The automatic Opticon publisher changed after it was verified.");
+        if (!SamePath(RequireRegularFile(Path.Combine(workspace, ReleaseScriptRelativePath), "Opticon target release script"), prerequisites.Script))
+            throw new InvalidDataException("The automatic Opticon target release script changed after it was verified.");
+        _ = RequireRegularFile(prerequisites.PowerShell, "PowerShell 7");
+        if (!SamePath(RequireRegularFile(prerequisites.Git, "Git"), FindGit()))
+            throw new InvalidDataException("The fixed Git executable changed after the Opticon publisher was selected.");
+        _ = RequireRegularFile(prerequisites.SignTool, "Windows SignTool");
+        if (!IsGitCommit(prerequisites.SourceCommit)
+            || !IsSha256(prerequisites.ReleaseScriptSha256)
+            || !IsSha256(prerequisites.SourcePublisherSha256)
+            || !IsSha256(prerequisites.BundlePublisherSha256))
+            throw new InvalidDataException("The automatic Opticon publisher integrity record is invalid.");
+    }
+
+    private static async Task<string> ReadGitValueAsync(
+        string git,
+        string workspace,
+        IReadOnlyList<string> command,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunGitAsync(git, workspace, command, cancellationToken);
+        if (!result.Succeeded)
+            throw new InvalidDataException("The automatic Opticon publisher candidate could not be verified with Git. " + DescribeGitFailure(result));
+        return result.StandardOutput.Trim();
+    }
+
+    private static async Task RunGitCommandAsync(
+        string git,
+        string workspace,
+        IReadOnlyList<string> command,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunGitAsync(git, workspace, command, cancellationToken);
+        if (!result.Succeeded)
+            throw new InvalidDataException("The automatic Opticon publisher candidate could not be synchronized with Git. " + DescribeGitFailure(result));
+    }
+
+    private static Task<ProcessResult> RunGitAsync(
+        string git,
+        string workspace,
+        IReadOnlyList<string> command,
+        CancellationToken cancellationToken)
+    {
+        var repository = Directory.GetParent(workspace)?.FullName
+            ?? throw new InvalidDataException("The automatic Opticon publisher candidate has no repository root.");
+        var trustedRepository = Path.GetFullPath(repository).Replace('\\', '/');
+        var arguments = new List<string>
+        {
+            "-c", $"safe.directory={trustedRepository}",
+            "-c", "core.hooksPath=NUL",
+            "-c", "core.fsmonitor=false",
+            "-c", "credential.helper=",
+            "-C", workspace
+        };
+        arguments.AddRange(command);
+        return ProcessRunner.RunAsync(
+            git,
+            arguments,
+            TimeSpan.FromMinutes(2),
+            cancellationToken,
+            environment: GitEnvironment());
+    }
+
+    private static IReadOnlyDictionary<string, string?> GitEnvironment() => new Dictionary<string, string?>
+    {
+        ["GIT_DIR"] = null,
+        ["GIT_WORK_TREE"] = null,
+        ["GIT_INDEX_FILE"] = null,
+        ["GIT_PREFIX"] = null,
+        ["GIT_CONFIG_COUNT"] = "0",
+        ["GIT_CONFIG_GLOBAL"] = "NUL",
+        ["GIT_CONFIG_SYSTEM"] = "NUL",
+        ["GIT_CONFIG_NOSYSTEM"] = "1",
+        ["GIT_TERMINAL_PROMPT"] = "0",
+        ["GIT_ASKPASS"] = null,
+        ["SSH_ASKPASS"] = null
+    };
+
+    private static Dictionary<string, string?> PublisherEnvironment(ReleasePublisherPrerequisites prerequisites)
+    {
+        var environment = new Dictionary<string, string?>(GitEnvironment(), StringComparer.OrdinalIgnoreCase);
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var system32 = Path.Combine(windows, "System32");
+        environment["PATH"] = string.Join(Path.PathSeparator, Path.GetDirectoryName(prerequisites.Git), system32);
+        environment["PATHEXT"] = ".COM;.EXE";
+        return environment;
+    }
+
+    private static string FindGit()
+    {
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var gitRoot = Path.GetFullPath(Path.Combine(programFiles, "Git"));
+        foreach (var candidate in new[]
+                 {
+                     Path.Combine(gitRoot, "cmd", "git.exe"),
+                     Path.Combine(gitRoot, "bin", "git.exe")
+                 })
+        {
+            try
+            {
+                var git = RequireRegularFile(candidate, "Git");
+                if (IsChildPath(git, gitRoot)) return git;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                // Try the other fixed Program Files Git path. Never use PATH.
+            }
+        }
+        throw new FileNotFoundException("Git is required under Program Files\\Git to verify the automatic Opticon publisher.", gitRoot);
+    }
+
+    private static bool SamePath(string left, string right) =>
+        string.Equals(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsChildPath(string path, string root)
+    {
+        var normalizedRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)) + Path.DirectorySeparatorChar;
+        var normalizedPath = Path.GetFullPath(path);
+        return normalizedPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase);
     }
 
     public static IReadOnlyList<DeployedReleaseArtifactRow> ToArtifactRows(ArtifactManifestDto manifest)
@@ -493,6 +783,7 @@ public sealed class ReleaseDeploymentService
         {
             return Directory.Exists(root)
                    && File.Exists(Path.Combine(root, "Directory.Build.props"))
+                   && File.Exists(Path.Combine(root, "Taildesk.sln"))
                    && File.Exists(Path.Combine(root, ReleaseScriptRelativePath))
                    && File.Exists(Path.Combine(root, PublisherRelativePath));
         }
@@ -508,6 +799,15 @@ public sealed class ReleaseDeploymentService
         if (!File.Exists(fullPath)
             || (File.GetAttributes(fullPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
             throw new FileNotFoundException($"The {description} is unavailable or unsafe.", fullPath);
+        return fullPath;
+    }
+
+    private static string RequireRegularDirectory(string path, string description)
+    {
+        var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        if (!Directory.Exists(fullPath)
+            || (File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
+            throw new DirectoryNotFoundException($"The {description} is unavailable or unsafe: {fullPath}");
         return fullPath;
     }
 
@@ -637,6 +937,14 @@ public sealed class ReleaseDeploymentService
 
     private static bool IsSha256(string? value) => value is { Length: 64 } && value.All(Uri.IsHexDigit);
 
+    private static bool IsGitCommit(string? value) => value is { Length: 40 } && value.All(Uri.IsHexDigit);
+
+    private static string GetFileSha256(string path)
+    {
+        var safePath = RequireRegularFile(path, "Opticon publisher file");
+        return Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(safePath))).ToLowerInvariant();
+    }
+
     private static bool IsLeaseToken(string? value) => value is { Length: 43 }
         && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
@@ -678,11 +986,27 @@ public sealed class ReleaseDeploymentService
             ? $"Publisher exit code: {result.ExitCode}."
             : $"Publisher exit code: {result.ExitCode}. {detail}";
     }
+
+    private static string DescribeGitFailure(ProcessResult result)
+    {
+        var detail = string.Join(Environment.NewLine, new[] { result.StandardError, result.StandardOutput }
+                .Where(value => !string.IsNullOrWhiteSpace(value)))
+            .Trim();
+        if (detail.Length > 500) detail = detail[^500..];
+        return string.IsNullOrWhiteSpace(detail)
+            ? $"Git exit code: {result.ExitCode}."
+            : $"Git exit code: {result.ExitCode}. {detail}";
+    }
 }
 
 public sealed record ReleasePublisherPrerequisites(
     string Workspace,
     string Script,
     string PowerShell,
+    string Git,
     string SignTool,
-    string ControlOrigin);
+    string ControlOrigin,
+    string SourceCommit,
+    string ReleaseScriptSha256,
+    string SourcePublisherSha256,
+    string BundlePublisherSha256);

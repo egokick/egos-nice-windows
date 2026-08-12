@@ -102,10 +102,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     : _releasePreflight?.TargetIsOlder == true
                         ? $"Deployed version {_releasePreflight.DeployedVersion} is newer"
             : $"Deploy {OpticonVersion} for invitations";
-    public string ReleaseWorkspaceHint => string.IsNullOrWhiteSpace(Config.ReleaseWorkspacePath)
-        ? "Choose the trusted Opticon source workspace before deploying. No AWS credentials are stored here."
-        : $"Trusted release workspace: {Config.ReleaseWorkspacePath}";
-
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         ReplaceInvites();
@@ -742,7 +738,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// Yes but before the deployment lease or any remote mutation.
     /// </summary>
     public async Task<ReleaseDeploymentPreflight> PrepareReleaseDeploymentAsync(
-        string releaseWorkspace,
         CancellationToken cancellationToken = default)
     {
         RequirePrimary();
@@ -789,7 +784,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public async Task DeployReleaseAsync(
         ReleaseDeploymentPreflight confirmedPlan,
-        string releaseWorkspace,
         CancellationToken cancellationToken = default)
     {
         RequirePrimary();
@@ -809,14 +803,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // decision. Repeat readiness immediately before acquiring the
             // lease so revoked invitations are never the first evidence of a
             // missing signer, AWS identity, git sync, or gateway credential.
-            var prerequisites = _releaseDeployment.ValidatePublisherPrerequisites(OpticonVersion, releaseWorkspace);
-            await _releaseDeployment.VerifyPublisherReadinessAsync(OpticonVersion, prerequisites.Workspace, cancellationToken);
-            if (!string.Equals(Config.ReleaseWorkspacePath, prerequisites.Workspace, StringComparison.OrdinalIgnoreCase))
-            {
-                Config.ReleaseWorkspacePath = prerequisites.Workspace;
-                await _state.SaveAsync(cancellationToken);
-                Changed(nameof(ReleaseWorkspaceHint));
-            }
+            var prerequisites = await _releaseDeployment.ResolvePublisherPrerequisitesAsync(OpticonVersion, cancellationToken);
+            await _releaseDeployment.VerifyPublisherReadinessAsync(OpticonVersion, prerequisites, cancellationToken);
 
             var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
             ApplyReleasePreflight(preflight);
@@ -850,7 +838,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // live manifest and invitations untouched. Never acquire the
                 // cancellation lease until the immutable archive is verified.
                 var stageProgress = new Progress<string>(message => Status = message);
-                await _releaseDeployment.StageAsync(OpticonVersion, prerequisites.Workspace, stageProgress, cancellationToken);
+                await _releaseDeployment.StageAsync(OpticonVersion, prerequisites, stageProgress, cancellationToken);
 
                 preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
                 ApplyReleasePreflight(preflight);
@@ -893,7 +881,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
 
             var progress = new Progress<string>(message => Status = message);
-            await _releaseDeployment.PublishAsync(OpticonVersion, prerequisites.Workspace, lease, progress, cancellationToken);
+            await _releaseDeployment.PublishAsync(OpticonVersion, prerequisites, lease, progress, cancellationToken);
             var verified = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
             ApplyReleasePreflight(verified);
             if (!verified.AlreadyDeployed)
@@ -923,21 +911,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ReleaseDeploymentBusy = false;
             _releaseDeploymentGate.Release();
         }
-    }
-
-    public async Task SaveReleaseWorkspaceAsync(string releaseWorkspace, CancellationToken cancellationToken = default)
-    {
-        RequirePrimary();
-        var workspace = ReleaseDeploymentService.ResolveWorkspace(releaseWorkspace);
-        var sourceVersion = ReleaseDeploymentService.ReadWorkspaceVersion(workspace);
-        if (!string.Equals(sourceVersion, OpticonVersion, StringComparison.Ordinal))
-            throw new InvalidOperationException(
-                $"The trusted source workspace is version {sourceVersion}, but this Command Center is {OpticonVersion}.");
-        Config.ReleaseWorkspacePath = workspace;
-        await _state.SaveAsync(cancellationToken);
-        Changed(nameof(ReleaseWorkspaceHint));
-        Status = "Trusted Opticon release workspace saved";
-        Log($"Saved trusted Opticon release workspace: {workspace}");
     }
 
     public async Task SavePrimarySettingsAsync(string headscaleApiUrl, string headscaleUserId, string? apiKey, string bindAddress,
