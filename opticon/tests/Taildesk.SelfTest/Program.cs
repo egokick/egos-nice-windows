@@ -1330,6 +1330,7 @@ static void TestReleaseDistributionDesign()
     var gateway = Read("fly-headscale", "gateway", "main.go");
     var client = Read("src", "Taildesk.Admin", "OpticonReleaseClient.cs");
     var sourceClient = Read("src", "Taildesk.Admin", "OpticonSourceReleaseClient.cs");
+    var releaseDeployment = Read("src", "Taildesk.Admin", "ReleaseDeploymentService.cs");
     var agent = Read("src", "Taildesk.Agent", "UpdateManager.cs");
     var hostedBootstrap = Read("src", "Taildesk.Setup", "HostedBootstrap.cs");
     var sourceBootstrap = Read("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
@@ -1371,8 +1372,10 @@ static void TestReleaseDistributionDesign()
            && publisher.Contains("sha256=$hash", StringComparison.Ordinal)
            && publisher.Contains("--checksum-mode", StringComparison.Ordinal)
            && publisher.Contains("Add-Type -AssemblyName System.Net.Http", StringComparison.Ordinal)
-           && publisher.Contains("max_concurrent_requests = 20", StringComparison.Ordinal)
-           && publisher.Contains("multipart_threshold = 5GB", StringComparison.Ordinal)
+            && publisher.Contains("max_concurrent_requests = 20", StringComparison.Ordinal)
+            && publisher.Contains("multipart_threshold = 5GB", StringComparison.Ordinal)
+            && publisher.Contains("[ValidateRange(1, 3)][int]$MaximumAttempts = 1", StringComparison.Ordinal)
+            && publisher.Contains("Invoke-AwsCli -MaximumAttempts 3 -Arguments @('s3api', 'put-object'", StringComparison.Ordinal)
            && publisher.Contains("Invoke-CloudFrontVerification", StringComparison.Ordinal)
            && publisher.Contains("FullStreamVerified", StringComparison.Ordinal)
            && publisher.Contains("Publish-ManifestAtomically", StringComparison.Ordinal)
@@ -1390,7 +1393,12 @@ static void TestReleaseDistributionDesign()
            && !publisher.Contains("$LASTEXITCODE -ne 0", StringComparison.Ordinal)
            && !publisher.Contains("flyctl deploy", StringComparison.Ordinal)
            && publisher.Contains("Refusing to overwrite immutable", StringComparison.Ordinal),
-        "publisher no longer enforces immutable S3 upload, bounded CloudFront readback, and atomic manifest publication");
+         "publisher no longer enforces immutable S3 upload, bounded CloudFront readback, and atomic manifest publication");
+    Assert(releaseDeployment.Contains("CleanPublisherOutput(result.StandardError)", StringComparison.Ordinal)
+           && releaseDeployment.Contains("Publisher error:", StringComparison.Ordinal)
+           && releaseDeployment.Contains("Recent publisher output:", StringComparison.Ordinal)
+           && releaseDeployment.Contains("TailPublisherOutput", StringComparison.Ordinal),
+        "release deployment failures must preserve sanitized stderr before bounded recent publisher output");
     Assert(gateway.Contains("validCloudFrontDownloadURL", StringComparison.Ordinal)
            && gateway.Contains("sourceForInvite", StringComparison.Ordinal)
            && gateway.Contains("validSourceArtifact", StringComparison.Ordinal)

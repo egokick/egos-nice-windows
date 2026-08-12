@@ -161,7 +161,7 @@ $awsHome = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::
 $script:AwsConfigFile = Join-Path $awsHome 'config'
 $awsCredentialsFile = Join-Path $awsHome 'credentials'
 
-function Invoke-AwsCli {
+function Invoke-AwsCliOnce {
     param([Parameter(Mandatory)][string[]]$Arguments)
     $windows = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
     $system32 = Join-Path $windows 'System32'
@@ -204,6 +204,21 @@ function Invoke-AwsCli {
             Error = $stderrTask.GetAwaiter().GetResult()
         }
     } finally { $process.Dispose() }
+}
+
+function Invoke-AwsCli {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [ValidateRange(1, 3)][int]$MaximumAttempts = 1
+    )
+    $result = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        $result = Invoke-AwsCliOnce -Arguments $Arguments
+        if ($result.ExitCode -eq 0 -or $attempt -eq $MaximumAttempts) { return $result }
+        Write-Warning "AWS CLI operation failed on attempt $attempt of $MaximumAttempts; retrying the identical request."
+        Start-Sleep -Seconds ([Math]::Pow(2, $attempt - 1))
+    }
+    return $result
 }
 
 function Assert-ProductionArtifactTrust {
@@ -1630,7 +1645,7 @@ try {
         } finally { $ErrorActionPreference = $savedPreference }
         if ($objectExists) {
             if ($ForceRedeploy -and $StageOnly -and $isStagedSourceArchive) {
-                $putResult = Invoke-AwsCli -Arguments @('s3api', 'put-object', '--bucket', $bucket, '--key', $key,
+                $putResult = Invoke-AwsCli -MaximumAttempts 3 -Arguments @('s3api', 'put-object', '--bucket', $bucket, '--key', $key,
                     '--body', $path, '--content-type', $contentType, '--cache-control', 'no-cache',
                     '--server-side-encryption', 'AES256', '--checksum-algorithm', 'SHA256', '--metadata', $objectMetadata,
                     '--output', 'json')
@@ -1651,7 +1666,7 @@ try {
             # overwriting an immutable filename after both callers observed a
             # missing object.  On the losing path, re-read and accept only the
             # exact same immutable bytes below.
-            $putResult = Invoke-AwsCli -Arguments @('s3api', 'put-object', '--bucket', $bucket, '--key', $key,
+            $putResult = Invoke-AwsCli -MaximumAttempts 3 -Arguments @('s3api', 'put-object', '--bucket', $bucket, '--key', $key,
                 '--body', $path, '--content-type', $contentType, '--cache-control', 'public, max-age=31536000, immutable',
                 '--server-side-encryption', 'AES256', '--checksum-algorithm', 'SHA256', '--metadata', $objectMetadata,
                 '--if-none-match', '*', '--output', 'json')

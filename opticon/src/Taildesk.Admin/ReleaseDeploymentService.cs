@@ -969,14 +969,30 @@ public sealed class ReleaseDeploymentService
 
     private static string DescribePublisherFailure(ProcessResult result)
     {
-        var detail = string.Join(Environment.NewLine, new[] { result.StandardError, result.StandardOutput }
-            .Where(value => !string.IsNullOrWhiteSpace(value)))
-            .Trim();
-        if (detail.Length > 1600) detail = detail[^1600..];
+        var error = TailPublisherOutput(CleanPublisherOutput(result.StandardError), 900);
+        var output = TailPublisherOutput(
+            CleanPublisherOutput(result.StandardOutput), string.IsNullOrEmpty(error) ? 1500 : 500);
+        var detail = string.Join(Environment.NewLine, new[]
+        {
+            string.IsNullOrEmpty(error) ? "" : "Publisher error:" + Environment.NewLine + error,
+            string.IsNullOrEmpty(output) ? "" : "Recent publisher output:" + Environment.NewLine + output
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
         return string.IsNullOrWhiteSpace(detail)
             ? $"Publisher exit code: {result.ExitCode}."
             : $"Publisher exit code: {result.ExitCode}. {detail}";
     }
+
+    private static string CleanPublisherOutput(string value)
+    {
+        var withoutAnsi = System.Text.RegularExpressions.Regex.Replace(
+            value ?? string.Empty, "\u001B\\[[0-?]*[ -/]*[@-~]", string.Empty);
+        return new string(withoutAnsi
+            .Where(character => character is '\r' or '\n' or '\t' || !char.IsControl(character))
+            .ToArray()).Trim();
+    }
+
+    private static string TailPublisherOutput(string value, int maximumLength) =>
+        value.Length <= maximumLength ? value : value[^maximumLength..];
 
 }
 
