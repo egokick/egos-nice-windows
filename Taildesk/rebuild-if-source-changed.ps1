@@ -188,7 +188,7 @@ $installedOpticon = Get-InstalledOpticonPath
 $sourceFingerprint = Get-OpticonSourceFingerprint -SourceRoot $SourceRoot
 $controllerInstallationReady = Test-ControllerInstallationReady
 $cacheDirectory = Join-Path $env:LOCALAPPDATA 'Opticon\BuildCache'
-$cachePath = Join-Path $cacheDirectory 'controller-source-v1.json'
+$cachePath = Join-Path $cacheDirectory 'controller-source-v2.json'
 $installedHash = if ($null -ne $installedOpticon) {
     (Get-FileHash -LiteralPath $installedOpticon -Algorithm SHA256).Hash.ToLowerInvariant()
 } else { '' }
@@ -197,7 +197,7 @@ $cached = if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
 } else { $null }
 if ($null -ne $installedOpticon -and
     $null -ne $cached -and
-    [int]$cached.schemaVersion -eq 1 -and
+    [int]$cached.schemaVersion -eq 2 -and
     [string]$cached.sourceFingerprint -eq $sourceFingerprint -and
     [string]$cached.installedSha256 -eq $installedHash -and
     [string]$cached.installedPath -eq [IO.Path]::GetFullPath($installedOpticon) -and
@@ -220,7 +220,8 @@ try {
         -CodeSigningCertificateThumbprint $OwnerManagedProductSigner `
         -SourceReleaseSigningCertificateThumbprint $OwnerManagedSourceSigner `
         -TimestampServer $Rfc3161TimestampUrl `
-        -SkipTargetReleaseDeployment
+        -SkipTargetReleaseDeployment `
+        -Incremental
 } catch {
     throw "Opticon build failed before installation. $($_.Exception.Message)"
 }
@@ -256,7 +257,7 @@ if ($null -eq $installedOpticon -or -not (Test-ControllerInstallationReady)) {
 }
 $installedHash = (Get-FileHash -LiteralPath $installedOpticon -Algorithm SHA256).Hash.ToLowerInvariant()
 $cache = [pscustomobject][ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     sourceFingerprint = $sourceFingerprint
     installedPath = [IO.Path]::GetFullPath($installedOpticon)
     installedSha256 = $installedHash

@@ -107,6 +107,25 @@ app.MapPost("/api/finance/refresh", async (
     return Results.Json(result);
 });
 
+app.MapPost("/api/finance/accounts/{id}/refresh", async (
+    string id,
+    CodexFinanceRefreshLauncher launcher,
+    FinanceStore store,
+    FinanceRefreshCoordinator refresher,
+    CancellationToken cancellationToken) =>
+{
+    var state = await store.GetStateAsync(refresher.Status, cancellationToken);
+    var account = state.Current.Accounts.FirstOrDefault(candidate =>
+        string.Equals(candidate.Id, id, StringComparison.OrdinalIgnoreCase));
+    if (account is null)
+    {
+        return Results.NotFound(new { error = "Account not found." });
+    }
+
+    var result = launcher.StartAccounts(new[] { account });
+    return Results.Json(result);
+});
+
 app.MapPost("/api/finance/transactions/refresh", async (
     CodexFinanceRefreshLauncher launcher,
     FinanceStore store,
@@ -186,10 +205,26 @@ app.MapPost("/api/finance/accounts/{id}/values", async (
     var result = await store.UpdateAccountValuesAsync(id, request, cancellationToken);
     return result.Status switch
     {
-        FinanceAccountValuesUpdateStatus.Updated => Results.Json(result.Account),
+        FinanceAccountValuesUpdateStatus.Updated => Results.Json(new
+        {
+            account = result.Account,
+            completionToken = result.CompletionToken
+        }),
         FinanceAccountValuesUpdateStatus.NotFound => Results.NotFound(new { error = result.Error }),
         _ => Results.BadRequest(new { error = result.Error })
     };
+});
+
+app.MapPost("/api/finance/accounts/{id}/refresh-complete", async (
+    string id,
+    FinanceAccountRefreshCompletionRequest request,
+    FinanceStore store,
+    CancellationToken cancellationToken) =>
+{
+    var account = await store.CompleteAccountRefreshAsync(id, request.CompletionToken, cancellationToken);
+    return account is null
+        ? Results.BadRequest(new { error = "No matching verified account-value update is pending." })
+        : Results.Json(account);
 });
 
 app.MapPut("/api/finance/accounts/{id}/notes", async (
@@ -1287,6 +1322,7 @@ public sealed class FinanceStore
     private static readonly JsonSerializerOptions LineJson = new(JsonSerializerDefaults.Web);
     private static readonly JsonSerializerOptions IndentedJson = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly Dictionary<string, PendingAccountRefresh> _pendingAccountRefreshes = new(StringComparer.OrdinalIgnoreCase);
     private readonly FinanceSettings _settings;
     private readonly FinanceCurrencyService _currencies;
     private readonly FinanceTaxProfileService _taxProfiles;
@@ -1662,6 +1698,7 @@ public sealed class FinanceStore
             }
 
             var current = accounts[index];
+            _pendingAccountRefreshes.Remove(current.Id);
             var validationError = ValidateCompleteAccountValues(current, request);
             if (validationError is not null)
             {
@@ -1691,13 +1728,52 @@ public sealed class FinanceStore
             };
             accounts[index] = updated;
             await SaveUserAccountsAsync(accounts, cancellationToken);
+            var completionToken = Guid.NewGuid().ToString("N");
+            _pendingAccountRefreshes[current.Id] = new PendingAccountRefresh(completionToken, updated);
+            return FinanceAccountValuesUpdateResult.Updated(ToFinanceAccount(updated.ToConfig()), completionToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<FinanceAccountSnapshot?> CompleteAccountRefreshAsync(
+        string id,
+        string? completionToken,
+        CancellationToken cancellationToken)
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            if (string.IsNullOrWhiteSpace(completionToken)
+                || !_pendingAccountRefreshes.TryGetValue(id, out var pending)
+                || !string.Equals(pending.CompletionToken, completionToken, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var accounts = LoadUserAccounts().ToList();
+            var index = accounts.FindIndex(account => string.Equals(account.Id, id, StringComparison.OrdinalIgnoreCase));
+            if (index < 0 || accounts[index] != pending.Account)
+            {
+                _pendingAccountRefreshes.Remove(id);
+                return null;
+            }
+
+            var completedAtUtc = DateTimeOffset.UtcNow;
+            var completed = accounts[index] with { LastUpdatedUtc = completedAtUtc };
+            accounts[index] = completed;
+            await SaveUserAccountsAsync(accounts, cancellationToken);
+            _pendingAccountRefreshes.Remove(id);
+
             var snapshot = BuildSnapshot("assisted", persistable: true);
             await AppendJsonLineAsync(_snapshotsPath, snapshot, cancellationToken);
             await AppendJsonLineAsync(
                 _logPath,
-                new FinanceRefreshLog(DateTimeOffset.UtcNow, "ok", "Finance values updated from an assisted account check.", "assisted"),
+                new FinanceRefreshLog(completedAtUtc, "ok", "Verified finance values updated from an assisted account check.", "assisted"),
                 cancellationToken);
-            return FinanceAccountValuesUpdateResult.Updated(ToFinanceAccount(updated.ToConfig()));
+            return ToFinanceAccount(completed.ToConfig());
         }
         finally
         {
@@ -2702,7 +2778,8 @@ public sealed class FinanceStore
             status,
             message,
             config.CollectorNotes,
-            config.Currency);
+            config.Currency,
+            config.LastUpdatedUtc);
     }
 
     private FinanceSnapshot ConvertSnapshotToMaster(
@@ -4673,7 +4750,8 @@ public sealed record FinanceAccountConfig(
     bool? MinimumPaymentMet,
     string Collector,
     string? CollectorNotes,
-    string Currency);
+    string Currency,
+    DateTimeOffset? LastUpdatedUtc = null);
 
 public sealed record UserFinanceAccountRecord(
     string Id,
@@ -4693,10 +4771,11 @@ public sealed record UserFinanceAccountRecord(
     bool? MinimumPaymentMet,
     string Collector,
     string? CollectorNotes,
-    string? Currency)
+    string? Currency,
+    DateTimeOffset? LastUpdatedUtc = null)
 {
     public FinanceAccountConfig ToConfig() =>
-        new(Id, Name, Kind, Institution, LoginUrl, CashBalance, BalanceOwed, CreditLimit, CreditAvailable, AprPercent, PromotionalAprPercent, PromotionalAprEndsOn, MinimumPayment, PaymentDueDate, MinimumPaymentMet, Collector, CollectorNotes, FinanceCurrencyService.NormalizeAccountCurrency(Currency, Name));
+        new(Id, Name, Kind, Institution, LoginUrl, CashBalance, BalanceOwed, CreditLimit, CreditAvailable, AprPercent, PromotionalAprPercent, PromotionalAprEndsOn, MinimumPayment, PaymentDueDate, MinimumPaymentMet, Collector, CollectorNotes, FinanceCurrencyService.NormalizeAccountCurrency(Currency, Name), LastUpdatedUtc);
 }
 
 public sealed record FinanceAccountSnapshot(
@@ -4722,7 +4801,8 @@ public sealed record FinanceAccountSnapshot(
     string Status,
     string? Message,
     string? CollectorNotes,
-    string? Currency);
+    string? Currency,
+    DateTimeOffset? LastUpdatedUtc = null);
 
 public sealed record FinanceSnapshot(
     DateTimeOffset SampledAtUtc,
@@ -5127,6 +5207,9 @@ public sealed record FinanceAccountValuesRequest(
     [property: JsonRequired] bool? MinimumPaymentMet,
     [property: JsonRequired] string? CollectorNotes);
 
+public sealed record FinanceAccountRefreshCompletionRequest(
+    [property: JsonRequired] string? CompletionToken);
+
 public sealed record FinanceAccountCredentialRequest(string? Username, string? Password);
 
 public sealed record FinanceAccountCredentialResult(
@@ -5148,17 +5231,22 @@ public enum FinanceAccountValuesUpdateStatus
 public sealed record FinanceAccountValuesUpdateResult(
     FinanceAccountValuesUpdateStatus Status,
     FinanceAccountSnapshot? Account,
+    string? CompletionToken,
     string? Error)
 {
-    public static FinanceAccountValuesUpdateResult Updated(FinanceAccountSnapshot account) =>
-        new(FinanceAccountValuesUpdateStatus.Updated, account, null);
+    public static FinanceAccountValuesUpdateResult Updated(FinanceAccountSnapshot account, string completionToken) =>
+        new(FinanceAccountValuesUpdateStatus.Updated, account, completionToken, null);
 
     public static FinanceAccountValuesUpdateResult Invalid(string error) =>
-        new(FinanceAccountValuesUpdateStatus.Invalid, null, error);
+        new(FinanceAccountValuesUpdateStatus.Invalid, null, null, error);
 
     public static FinanceAccountValuesUpdateResult NotFound() =>
-        new(FinanceAccountValuesUpdateStatus.NotFound, null, "Account not found or is read-only.");
+        new(FinanceAccountValuesUpdateStatus.NotFound, null, null, "Account not found or is read-only.");
 }
+
+public sealed record PendingAccountRefresh(
+    string CompletionToken,
+    UserFinanceAccountRecord Account);
 
 public sealed record FinanceAccountNotesRequest(string? CollectorNotes);
 

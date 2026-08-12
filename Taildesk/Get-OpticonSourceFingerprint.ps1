@@ -7,18 +7,12 @@ function Get-OpticonSourceFingerprint {
     $relativeInputs = @(
         'src',
         'assets',
-        'tests',
         'installer',
-        'docs',
         'Taildesk.sln',
         'Directory.Build.props',
         'Directory.Build.targets',
         'Directory.Packages.props',
-        'build.ps1',
-        'README-OPTICON.md',
-        'config\headscale-policy.hujson',
-        'scripts\Install-TaildeskFlyRouteTask.ps1',
-        'scripts\Set-TaildeskFlyBypassRoute.ps1'
+        'build.ps1'
     )
     $files = @{}
     foreach ($relativeInput in $relativeInputs) {

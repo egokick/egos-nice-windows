@@ -2,6 +2,7 @@ const financeSeriesStorageKey = "finance:visibleSeries:v2";
 const legacyFinanceSeriesStorageKey = "finance:visibleSeries";
 
 const financeDayMilliseconds = 24 * 60 * 60 * 1000;
+const staleAccountMilliseconds = 3 * financeDayMilliseconds;
 const defaultHistoryMonths = 3;
 const defaultProjectionDays = 14;
 const projectionHorizonMonths = 3;
@@ -971,7 +972,7 @@ financeEls.recurringTransactionForm.addEventListener("submit", async event => {
 });
 async function startFinanceWorkflow(button, endpoint, workflowName, startedMessage) {
   button.disabled = true;
-  const originalLabel = button.textContent;
+  const originalContent = button.innerHTML;
   button.textContent = "Starting Codex...";
   try {
     const result = await fetchJson(endpoint, { method: "POST" });
@@ -989,7 +990,7 @@ async function startFinanceWorkflow(button, endpoint, workflowName, startedMessa
     financeEls.alert.textContent = `Codex ${workflowName} refresh could not be started: ${error.message || error}`;
   } finally {
     button.disabled = false;
-    button.textContent = originalLabel;
+    button.innerHTML = originalContent;
   }
 }
 financeEls.showAccountForm.addEventListener("click", () => {
@@ -1922,6 +1923,7 @@ function renderRefreshAlert(data) {
 
 function renderTables(data) {
   const accounts = data.current.accounts || [];
+  const renderedAt = Date.now();
   const creditLoans = accounts
     .filter(account => account.kind === "credit_card" || account.kind === "loan")
     .sort((left, right) => compareNullableNumbersDescending(left.balanceOwed, right.balanceOwed));
@@ -1934,10 +1936,12 @@ function renderTables(data) {
   financeEls.accountRows.textContent = "";
 
   if (creditLoans.length === 0) {
-    financeEls.cardRows.append(emptyRow(10, "No credit cards or loans configured yet."));
+    financeEls.cardRows.append(emptyRow(11, "No credit cards or loans configured yet."));
   } else {
     for (const card of creditLoans) {
       const row = document.createElement("tr");
+      const updateInfo = accountUpdateInfo(card.lastUpdatedUtc, renderedAt);
+      row.classList.toggle("account-update-stale", updateInfo.isStale);
       row.append(
         accountCell(card),
         currencySelectCell(card),
@@ -1951,22 +1955,26 @@ function renderTables(data) {
         aprCell(card),
         interestPreviewCell(card, data.currency),
         textCell(card.utilizationPercent === null ? "--" : `${card.utilizationPercent}%`),
+        lastUpdatedCell(card, updateInfo),
       );
       financeEls.cardRows.append(row);
     }
   }
 
   if (sortedAccounts.length === 0) {
-    financeEls.accountRows.append(emptyRow(4, "No accounts configured yet."));
+    financeEls.accountRows.append(emptyRow(5, "No accounts configured yet."));
   } else {
     for (const account of sortedAccounts) {
       const row = document.createElement("tr");
+      const updateInfo = accountUpdateInfo(account.lastUpdatedUtc, renderedAt);
       row.classList.toggle("is-selected", !financeState.transactionFilters.scopeAll && account.id === financeState.selectedTransactionAccountId);
+      row.classList.toggle("account-update-stale", updateInfo.isStale);
       row.append(
         accountCell(account, true),
         textCell(account.kind.replaceAll("_", " ")),
         moneyCell(account.cashBalance, data.currency),
-        currencySelectCell(account)
+        currencySelectCell(account),
+        lastUpdatedCell(account, updateInfo)
       );
       financeEls.accountRows.append(row);
     }
@@ -2551,6 +2559,75 @@ function renderAprEditorPreview() {
   } else {
     financeEls.aprEditorSchedule.textContent = `${formatAprPercent(regularApr)} regular APR`;
   }
+}
+
+function accountUpdateInfo(lastUpdatedUtc, now = Date.now()) {
+  const updatedAt = lastUpdatedUtc ? Date.parse(lastUpdatedUtc) : Number.NaN;
+  if (!Number.isFinite(updatedAt)) {
+    return { ageText: "Never", isStale: true, updatedAt: null };
+  }
+
+  const elapsed = Math.max(0, now - updatedAt);
+  if (elapsed >= financeDayMilliseconds) {
+    const days = Math.floor(elapsed / financeDayMilliseconds);
+    return {
+      ageText: `${days} day${days === 1 ? "" : "s"}`,
+      isStale: elapsed > staleAccountMilliseconds,
+      updatedAt: lastUpdatedUtc
+    };
+  }
+
+  const hourMilliseconds = 60 * 60 * 1000;
+  if (elapsed >= hourMilliseconds) {
+    const hours = Math.floor(elapsed / hourMilliseconds);
+    return {
+      ageText: `${hours} hour${hours === 1 ? "" : "s"}`,
+      isStale: false,
+      updatedAt: lastUpdatedUtc
+    };
+  }
+
+  const minutes = Math.floor(elapsed / (60 * 1000));
+  return {
+    ageText: `${minutes} minute${minutes === 1 ? "" : "s"}`,
+    isStale: false,
+    updatedAt: lastUpdatedUtc
+  };
+}
+
+function lastUpdatedCell(account, updateInfo) {
+  const cell = document.createElement("td");
+  cell.className = "last-updated-cell";
+  if (!updateInfo.isStale) {
+    cell.textContent = updateInfo.ageText;
+    cell.title = `Last updated ${formatDateTime(updateInfo.updatedAt)}`;
+    return cell;
+  }
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "account-refresh-trigger";
+  button.title = "Update Account";
+  button.setAttribute("aria-label", `Update ${account.name}; last updated ${updateInfo.ageText.toLowerCase()}`);
+
+  const age = document.createElement("span");
+  age.className = "last-updated-age";
+  age.textContent = updateInfo.ageText;
+  const action = document.createElement("span");
+  action.className = "last-updated-action";
+  action.textContent = "Update Account";
+  button.append(age, action);
+  button.addEventListener("click", event => {
+    event.stopPropagation();
+    void startFinanceWorkflow(
+      button,
+      `/api/finance/accounts/${encodeURIComponent(account.id)}/refresh`,
+      `${account.name} account values`,
+      `A Codex session has opened to update only ${account.name}.`
+    );
+  });
+  cell.append(button);
+  return cell;
 }
 
 function setAprEditorStatus(message, isError = false) {

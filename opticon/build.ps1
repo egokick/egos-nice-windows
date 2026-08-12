@@ -8,7 +8,8 @@ param(
     [string]$SourceReleaseSigningCertificateThumbprint,
     [ValidateSet('http://timestamp.digicert.com')]
     [string]$TimestampServer = 'http://timestamp.digicert.com',
-    [switch]$SkipTargetReleaseDeployment
+    [switch]$SkipTargetReleaseDeployment,
+    [switch]$Incremental
 )
 
 Set-StrictMode -Version Latest
@@ -111,6 +112,7 @@ function Get-RequiredDotNet {
         throw "A stable .NET SDK matching $SdkPolicy is required. Install it from https://dotnet.microsoft.com/download/dotnet/10.0"
     }
     Assert-NoReparseTraversal -Root $programFiles -Path $acceptedSdk[0].FullName
+    $script:dotnetSdkVersion = $acceptedSdk[0].Name
     return $dotnet
 }
 
@@ -397,6 +399,146 @@ function Invoke-SignTool {
     }
 }
 
+function Get-OpticonProjectInputFingerprint {
+    param(
+        [Parameter(Mandatory)][string]$ProjectName,
+        [Parameter(Mandatory)][string]$BuildIdentity
+    )
+
+    $files = @{}
+    $visitedProjects = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+
+    function Add-ProjectInputs {
+        param([Parameter(Mandatory)][string]$ProjectFile)
+
+        $projectPath = [IO.Path]::GetFullPath($ProjectFile)
+        if (-not $visitedProjects.Add($projectPath)) { return }
+        if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) {
+            throw "An Opticon project reference is missing: $projectPath"
+        }
+
+        $projectDirectory = Split-Path -Parent $projectPath
+        foreach ($candidate in Get-ChildItem -LiteralPath $projectDirectory -File -Recurse -Force |
+                Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' }) {
+            $files[$candidate.FullName] = $candidate
+        }
+
+        $projectXml = [xml][IO.File]::ReadAllText($projectPath)
+        foreach ($reference in @($projectXml.SelectNodes('//*[local-name()="ProjectReference"]'))) {
+            $include = $reference.GetAttribute('Include')
+            if (-not [string]::IsNullOrWhiteSpace($include)) {
+                Add-ProjectInputs -ProjectFile (Join-Path $projectDirectory $include)
+            }
+        }
+
+        # SDK projects can consume files above their project directory (icons,
+        # embedded installer scripts, and similar declared inputs). Include each
+        # exact external file without making unrelated repository folders dirty
+        # every component fingerprint.
+        foreach ($node in @($projectXml.SelectNodes('//*[@Include] | //*[local-name()="ApplicationIcon"]'))) {
+            $include = if ($node.HasAttribute('Include')) {
+                $node.GetAttribute('Include')
+            } else {
+                $node.InnerText
+            }
+            if ([string]::IsNullOrWhiteSpace($include) -or $include.IndexOfAny(@('*', '?')) -ge 0) {
+                continue
+            }
+            $declaredPath = [IO.Path]::GetFullPath((Join-Path $projectDirectory $include))
+            if (Test-Path -LiteralPath $declaredPath -PathType Leaf) {
+                $files[$declaredPath] = Get-Item -LiteralPath $declaredPath -Force
+            }
+        }
+    }
+
+    Add-ProjectInputs -ProjectFile (Join-Path $repo "src\$ProjectName\$ProjectName.csproj")
+    foreach ($commonName in @(
+            'Directory.Build.props',
+            'Directory.Build.targets',
+            'Directory.Packages.props',
+            'build.ps1')) {
+        $commonPath = Join-Path $repo $commonName
+        if (Test-Path -LiteralPath $commonPath -PathType Leaf) {
+            $files[$commonPath] = Get-Item -LiteralPath $commonPath -Force
+        }
+    }
+
+    $rootPrefix = [IO.Path]::TrimEndingDirectorySeparator($repo) + [IO.Path]::DirectorySeparatorChar
+    $records = @("build-identity`0$BuildIdentity")
+    foreach ($file in @($files.Values | Sort-Object -Property FullName)) {
+        $fullPath = [IO.Path]::GetFullPath($file.FullName)
+        if (-not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "An Opticon component input escaped the source root: $fullPath"
+        }
+        $relative = $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
+        $hash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $records += "$relative`0$($file.Length)`0$hash"
+    }
+
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($records -join "`n"))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-ReusableOpticonPublish {
+    param(
+        [Parameter(Mandatory)][string]$ProjectName,
+        [Parameter(Mandatory)][string]$ExpectedExecutable,
+        [Parameter(Mandatory)][string]$OutputDirectory,
+        [Parameter(Mandatory)][string]$InputFingerprint
+    )
+
+    if (-not $Incremental) { return $null }
+    $cachePath = Join-Path $script:componentCacheRoot "$ProjectName.json"
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) { return $null }
+    try {
+        $cached = Get-Content -Raw -LiteralPath $cachePath | ConvertFrom-Json
+        $output = Join-Path $OutputDirectory $ExpectedExecutable
+        $files = @(Get-ChildItem -LiteralPath $OutputDirectory -File -Recurse -ErrorAction Stop)
+        if ([int]$cached.schemaVersion -ne 1 -or
+            [string]$cached.inputFingerprint -ne $InputFingerprint -or
+            [string]$cached.executableName -cne $ExpectedExecutable -or
+            $files.Count -ne 1 -or
+            -not (Test-Path -LiteralPath $output -PathType Leaf)) {
+            return $null
+        }
+        $actualHash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ([string]$cached.outputSha256 -ne $actualHash) { return $null }
+        return [IO.Path]::GetFullPath($output)
+    } catch {
+        return $null
+    }
+}
+
+function Save-OpticonPublishCache {
+    param(
+        [Parameter(Mandatory)][string]$ProjectName,
+        [Parameter(Mandatory)][string]$ExecutablePath,
+        [Parameter(Mandatory)][string]$InputFingerprint
+    )
+
+    if (-not $Incremental) { return }
+    $null = [IO.Directory]::CreateDirectory($script:componentCacheRoot)
+    $cachePath = Join-Path $script:componentCacheRoot "$ProjectName.json"
+    $temporary = "$cachePath.new"
+    $record = [ordered]@{
+        schemaVersion = 1
+        inputFingerprint = $InputFingerprint
+        executableName = [IO.Path]::GetFileName($ExecutablePath)
+        outputSha256 = (Get-FileHash -LiteralPath $ExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    [IO.File]::WriteAllText(
+        $temporary,
+        ($record | ConvertTo-Json),
+        [Text.UTF8Encoding]::new($false))
+    [IO.File]::Move($temporary, $cachePath, $true)
+}
+
 function Publish-OpticonProject {
     param(
         [Parameter(Mandatory)][string]$ProjectName,
@@ -409,24 +551,24 @@ function Publish-OpticonProject {
     }
     $null = [IO.Directory]::CreateDirectory($OutputDirectory)
     $componentArtifacts = Join-Path $script:workspace "component-artifacts\$ProjectName"
-    Invoke-DotNet -Arguments (@(
+    $restoreArguments = @(
         'restore', $projectFile,
         '-r', $Runtime,
         '--configfile', $script:nugetConfig,
         '--packages', $script:packageCache,
-        '--no-cache',
-        '--force',
-        '--force-evaluate',
         '--disable-parallel',
         '--artifacts-path', $componentArtifacts
-    ) + $script:msbuildTrustArguments)
-    Invoke-DotNet -Arguments (@(
+    )
+    if (-not $Incremental) {
+        $restoreArguments += @('--no-cache', '--force', '--force-evaluate')
+    }
+    Invoke-DotNet -Arguments ($restoreArguments + $script:msbuildTrustArguments)
+    $publishArguments = @(
         'publish', $projectFile,
         '-c', 'Release',
         '-r', $Runtime,
         '--self-contained', 'true',
         '--no-restore',
-        '-t:Rebuild',
         '--nologo',
         '-o', $OutputDirectory,
         '--artifacts-path', $componentArtifacts,
@@ -438,7 +580,9 @@ function Publish-OpticonProject {
         '-p:EnableWindowsTargeting=true',
         '-p:IncludeSourceRevisionInInformationalVersion=false',
         '-p:ContinuousIntegrationBuild=true'
-    ) + $script:msbuildTrustArguments)
+    )
+    if (-not $Incremental) { $publishArguments += '-t:Rebuild' }
+    Invoke-DotNet -Arguments ($publishArguments + $script:msbuildTrustArguments)
     if ($ProjectName -eq 'Taildesk.Cli') {
         $referencedAdminRuntimeConfig = Join-Path $OutputDirectory 'Opticon.runtimeconfig.json'
         if (Test-Path -LiteralPath $referencedAdminRuntimeConfig -PathType Leaf) {
@@ -541,8 +685,16 @@ function New-ReproducibleZip {
 }
 
 $packageBuildLock = Enter-OpticonPackageBuildLock -Path $packageLockPath
-$workspace = Join-Path $artifacts ('b-' + [Guid]::NewGuid().ToString('N'))
+$workspace = if ($Incremental) {
+    Join-Path $artifacts "incremental-$($BuildProfile.ToLowerInvariant())-$Runtime"
+} else {
+    Join-Path $artifacts ('b-' + [Guid]::NewGuid().ToString('N'))
+}
 try {
+    if ($Incremental -and
+        ($BuildProfile -ne 'OwnerManaged' -or -not $SkipTargetReleaseDeployment)) {
+        throw 'Incremental component reuse is restricted to local OwnerManaged builds with target deployment disabled.'
+    }
     if ($BuildProfile -eq 'Developer' -and -not $SkipTargetReleaseDeployment) {
         throw 'Developer artifacts are intentionally non-publishable; pass -SkipTargetReleaseDeployment explicitly.'
     }
@@ -596,6 +748,12 @@ try {
     $buildLocalAppData = Join-Path $buildUserProfile 'AppData\Local'
     $nugetPluginsCache = Join-Path $workspace 'nuget-plugins-cache'
     $userExtensions = Join-Path $workspace 'empty-msbuild-user-extensions'
+    $componentCacheRoot = Join-Path $workspace 'component-cache'
+    if ($Incremental -and (Test-Path -LiteralPath $stage)) {
+        # Packaging and signatures are always recreated. Only isolated build and
+        # unsigned publish outputs are eligible for local reuse.
+        Remove-OpticonBuildDirectory -Path $stage
+    }
     foreach ($directory in @(
             $sdkRoot, $stage, $publishRoot, $solutionArtifacts, $packageCache, $nugetHttpCache,
             $cliHome, $buildTemp, $userExtensions, $buildUserProfile,
@@ -656,26 +814,29 @@ try {
     Push-Location $sdkRoot
     try {
         Invoke-DotNet -Arguments @('--version')
-        Invoke-DotNet -Arguments (@(
+        $solutionRestoreArguments = @(
             'restore', $solutionPath,
             '--configfile', $nugetConfig,
             '--packages', $packageCache,
-            '--no-cache',
-            '--force',
-            '--force-evaluate',
             '--disable-parallel',
             '--artifacts-path', $solutionArtifacts
-        ) + $msbuildTrustArguments)
+        )
+        if (-not $Incremental) {
+            $solutionRestoreArguments += @('--no-cache', '--force', '--force-evaluate')
+        }
+        Invoke-DotNet -Arguments ($solutionRestoreArguments + $msbuildTrustArguments)
         try {
             try {
-                Invoke-DotNet -Arguments (@(
-                    'build', $solutionPath, '-c', 'Release', '-t:Rebuild', '--nologo',
+                $solutionBuildArguments = @(
+                    'build', $solutionPath, '-c', 'Release', '--nologo',
                     '--no-restore',
                     '--artifacts-path', $solutionArtifacts,
                     '-p:EnableWindowsTargeting=true',
                     '-p:IncludeSourceRevisionInInformationalVersion=false',
                     '-p:ContinuousIntegrationBuild=true'
-                ) + $msbuildTrustArguments)
+                )
+                if (-not $Incremental) { $solutionBuildArguments += '-t:Rebuild' }
+                Invoke-DotNet -Arguments ($solutionBuildArguments + $msbuildTrustArguments)
             } catch {
                 throw "The Opticon solution build failed. $($_.Exception.Message)"
             }
@@ -691,6 +852,12 @@ try {
             }
 
             $published = @{}
+            $componentBuildIdentity = [string]::Join('|', @(
+                $BuildProfile,
+                $Runtime,
+                $script:dotnetSdkVersion,
+                $productThumbprint,
+                $sourceThumbprint))
             foreach ($declaration in @(
                     @('Taildesk.Agent', 'Taildesk.Agent.exe', 'Agent'),
                     @('Taildesk.Admin', 'Opticon.exe', 'Admin'),
@@ -700,21 +867,38 @@ try {
                     @('Taildesk.RouteKeeper', 'Taildesk.RouteKeeper.exe', 'RouteKeeper'),
                     @('Taildesk.CommandCenterInstaller', 'Install-Opticon.exe', 'CommandCenterInstaller'))) {
                 $outputDirectory = Join-Path $publishRoot $declaration[2]
-                $published[$declaration[2]] = Publish-OpticonProject -ProjectName $declaration[0] -ExpectedExecutable $declaration[1] -OutputDirectory $outputDirectory
+                $inputFingerprint = if ($Incremental) {
+                    Get-OpticonProjectInputFingerprint `
+                        -ProjectName $declaration[0] `
+                        -BuildIdentity $componentBuildIdentity
+                } else { '' }
+                $reused = Get-ReusableOpticonPublish `
+                    -ProjectName $declaration[0] `
+                    -ExpectedExecutable $declaration[1] `
+                    -OutputDirectory $outputDirectory `
+                    -InputFingerprint $inputFingerprint
+                if ($null -ne $reused) {
+                    Write-Host "Reusing unchanged $($declaration[0]) publish output." -ForegroundColor DarkGray
+                    $published[$declaration[2]] = $reused
+                    continue
+                }
+                if ($Incremental -and (Test-Path -LiteralPath $outputDirectory)) {
+                    Remove-OpticonBuildDirectory -Path $outputDirectory
+                }
+                $published[$declaration[2]] = Publish-OpticonProject `
+                    -ProjectName $declaration[0] `
+                    -ExpectedExecutable $declaration[1] `
+                    -OutputDirectory $outputDirectory
+                Save-OpticonPublishCache `
+                    -ProjectName $declaration[0] `
+                    -ExecutablePath $published[$declaration[2]] `
+                    -InputFingerprint $inputFingerprint
             }
         } finally {
             # All dotnet children run in the generated exact-SDK directory.
         }
     } finally {
         Pop-Location
-    }
-
-    $cliCommand = Join-Path (Split-Path $published.Cli -Parent) 'opticon.exe'
-    [IO.File]::Move($published.Cli, $cliCommand)
-    $published.Cli = $cliCommand
-    $cliFiles = @(Get-ChildItem -LiteralPath (Split-Path $cliCommand -Parent) -File)
-    if ($cliFiles.Count -ne 1 -or $cliFiles[0].Name -ne 'opticon.exe') {
-        throw 'The clean CLI publish must contain only the signed opticon.exe single-file app.'
     }
 
     $payload = [ordered]@{
@@ -804,7 +988,7 @@ try {
     Write-Host "Built $zip" -ForegroundColor Green
 } finally {
     if ($null -ne $sourceRsa) { $sourceRsa.Dispose() }
-    Remove-OpticonBuildDirectory -Path $workspace
+    if (-not $Incremental) { Remove-OpticonBuildDirectory -Path $workspace }
     $packageBuildLock.Dispose()
 }
 

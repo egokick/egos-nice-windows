@@ -1227,11 +1227,11 @@
 }
 
 .credit-loans-table {
-  min-width: 1080px;
+  min-width: 1200px;
 }
 
 .accounts-table {
-  min-width: 340px;
+  min-width: 500px;
 }
 
 .finance-table th,
@@ -1291,6 +1291,72 @@
 .accounts-table tbody tr.is-selected {
   background: var(--finance-credit-soft);
   box-shadow: inset 3px 0 0 var(--finance-credit);
+}
+
+.finance-table tbody tr.account-update-stale,
+.finance-table tbody tr.account-update-stale:hover,
+.accounts-table tbody tr.is-selected.account-update-stale {
+  background: #51181d;
+  box-shadow: inset 4px 0 0 #ef7777;
+  color: #fff7f5;
+}
+
+.finance-table tbody tr.account-update-stale:hover {
+  background: #611d23;
+}
+
+.finance-table tbody tr.account-update-stale .account-name,
+.finance-table tbody tr.account-update-stale .account-name span,
+.finance-table tbody tr.account-update-stale .apr-detail-trigger,
+.finance-table tbody tr.account-update-stale .interest-preview-trigger,
+.finance-table tbody tr.account-update-stale .transaction-account-trigger {
+  color: #fff7f5;
+}
+
+.last-updated-cell {
+  min-width: 118px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.account-refresh-trigger {
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  padding: 4px 0;
+  text-align: left;
+}
+
+.last-updated-action {
+  display: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.account-refresh-trigger:hover .last-updated-age,
+.account-refresh-trigger:focus-visible .last-updated-age {
+  display: none;
+}
+
+.account-refresh-trigger:hover .last-updated-action,
+.account-refresh-trigger:focus-visible .last-updated-action {
+  display: inline;
+}
+
+.account-refresh-trigger:focus-visible {
+  outline: 2px solid #ffb0ae;
+  outline-offset: 3px;
+}
+
+.account-refresh-trigger:disabled {
+  cursor: progress;
+  opacity: 0.75;
 }
 
 .account-currency-cell {
@@ -2777,7 +2843,7 @@
 }
 @media (max-width: 480px) {
   .accounts-table {
-    min-width: 0;
+    min-width: 500px;
     table-layout: fixed;
   }
 
@@ -2787,18 +2853,22 @@
   }
 
   .accounts-table th:nth-child(1) {
-    width: 40%;
+    width: 32%;
   }
 
   .accounts-table th:nth-child(2) {
-    width: 18%;
+    width: 14%;
   }
 
   .accounts-table th:nth-child(3) {
-    width: 22%;
+    width: 18%;
   }
 
   .accounts-table th:nth-child(4) {
+    width: 16%;
+  }
+
+  .accounts-table th:nth-child(5) {
     width: 20%;
   }
 
