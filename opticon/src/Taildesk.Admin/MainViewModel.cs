@@ -127,6 +127,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (_disableAllClientValidation == value) return;
             _disableAllClientValidation = value;
+            foreach (var option in ClientValidationOptions)
+                option.Enabled = !value;
             Changed();
         }
     }

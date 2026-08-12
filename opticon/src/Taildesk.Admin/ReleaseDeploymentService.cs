@@ -372,8 +372,9 @@ public sealed class ReleaseDeploymentService
     /// Finds the canonical local Opticon source checkout eligible to publish
     /// this Command Center's exact version. The UI never accepts a user supplied
     /// path: a candidate must have the expected layout, no reparse-backed
-    /// critical paths, the official origin, a clean main checkout, and an
-    /// origin/main HEAD equal to the local HEAD.
+    /// critical paths, the official origin, and a clean main checkout. When
+    /// local main is a clean fast-forward of origin/main, one-click deployment
+    /// synchronizes that exact commit automatically before selecting it.
     /// </summary>
     public async Task<ReleasePublisherPrerequisites> ResolvePublisherPrerequisitesAsync(
         string targetVersion,
@@ -381,6 +382,8 @@ public sealed class ReleaseDeploymentService
     {
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
+        var canonical = GetCanonicalWorkspacePath();
+        Exception? canonicalFailure = null;
         var matches = new List<(string Workspace, string Commit)>();
         foreach (var candidate in EnumerateAutomaticWorkspaceCandidates())
         {
@@ -397,21 +400,28 @@ public sealed class ReleaseDeploymentService
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception exception)
             {
                 // A source-looking folder is never enough to trust. Keep
                 // evaluating the bounded candidates, then fail closed below.
+                if (SamePath(candidate, canonical)) canonicalFailure = exception;
             }
         }
 
         if (matches.Count == 0)
+        {
+            if (canonicalFailure is not null)
+                throw new InvalidOperationException(
+                    "The canonical Opticon publisher could not be prepared automatically. " +
+                    canonicalFailure.GetBaseException().Message +
+                    " No invitation or release file was changed.", canonicalFailure);
             throw new InvalidOperationException(
                 $"No verified local Opticon publisher matching Command Center {normalizedTarget} was found automatically. " +
                 "No invitation or release file was changed.");
+        }
         // The standard checkout is deterministic and wins when present. Other
         // bounded candidates are transition fallbacks only; if the canonical
         // location is absent, ambiguity fails closed below.
-        var canonical = GetCanonicalWorkspacePath();
         var canonicalMatch = matches.SingleOrDefault(match => SamePath(match.Workspace, canonical));
         if (!string.IsNullOrEmpty(canonicalMatch.Workspace))
             return CreatePublisherPrerequisites(canonicalMatch.Workspace, canonicalMatch.Commit);
@@ -551,7 +561,8 @@ public sealed class ReleaseDeploymentService
         if (!string.Equals(branch, "main", StringComparison.Ordinal))
             throw new InvalidDataException("The automatic Opticon publisher candidate is not on the main branch.");
 
-        var status = await ReadGitValueAsync(git, safeWorkspace, ["status", "--porcelain", "--untracked-files=all"], cancellationToken);
+        var status = await ReadGitValueAsync(git, safeWorkspace,
+            ["status", "--porcelain", "--untracked-files=all", "--", "."], cancellationToken);
         if (!string.IsNullOrWhiteSpace(status))
             throw new InvalidDataException("The automatic Opticon publisher candidate has uncommitted source changes.");
 
@@ -561,7 +572,22 @@ public sealed class ReleaseDeploymentService
         var head = await ReadGitValueAsync(git, safeWorkspace, ["rev-parse", "HEAD"], cancellationToken);
         var originMain = await ReadGitValueAsync(git, safeWorkspace, ["rev-parse", "refs/remotes/origin/main"], cancellationToken);
         if (!string.Equals(head, originMain, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("The automatic Opticon publisher candidate is not synchronized with origin/main.");
+        {
+            var mergeBase = await ReadGitValueAsync(
+                git, safeWorkspace, ["merge-base", head, originMain], cancellationToken);
+            if (!string.Equals(mergeBase, originMain, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    "The automatic Opticon publisher cannot synchronize because local main and origin/main have diverged.");
+            await RunGitCommandAsync(git, safeWorkspace,
+                ["push", "--porcelain", ExpectedGitRemote, $"{head}:refs/heads/main"], cancellationToken);
+            await RunGitCommandAsync(git, safeWorkspace,
+                ["fetch", "--quiet", "--no-tags", ExpectedGitRemote, "refs/heads/main:refs/remotes/origin/main"], cancellationToken);
+            originMain = await ReadGitValueAsync(
+                git, safeWorkspace, ["rev-parse", "refs/remotes/origin/main"], cancellationToken);
+            if (!string.Equals(head, originMain, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    "The automatic Opticon publisher push completed without synchronizing origin/main to the selected commit.");
+        }
         if (expectedCommit is not null && !string.Equals(head, expectedCommit, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The automatic Opticon publisher source changed after it was selected.");
         return head;
@@ -586,7 +612,8 @@ public sealed class ReleaseDeploymentService
         var head = await ReadGitValueAsync(git, workspace, ["rev-parse", "HEAD"], cancellationToken);
         if (!string.Equals(head, prerequisites.SourceCommit, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The verified Opticon publisher commit changed after the source archive was staged.");
-        var status = await ReadGitValueAsync(git, workspace, ["status", "--porcelain", "--untracked-files=all"], cancellationToken);
+        var status = await ReadGitValueAsync(git, workspace,
+            ["status", "--porcelain", "--untracked-files=all", "--", "."], cancellationToken);
         if (!string.IsNullOrWhiteSpace(status))
             throw new InvalidDataException("The verified Opticon publisher has source changes after the source archive was staged.");
     }
@@ -648,7 +675,9 @@ public sealed class ReleaseDeploymentService
             "-c", $"safe.directory={trustedRepository}",
             "-c", "core.hooksPath=NUL",
             "-c", "core.fsmonitor=false",
-            "-c", "credential.helper=",
+            "-c", command.Count != 0 && command[0].Equals("push", StringComparison.Ordinal)
+                ? "credential.helper=manager"
+                : "credential.helper=",
             "-C", workspace
         };
         arguments.AddRange(command);

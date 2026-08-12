@@ -1618,6 +1618,7 @@ static void TestReleaseDeploymentSurface()
     Assert(viewModel.Contains("Deployed version {preflight.DeployedVersion} already matches this Command Center", StringComparison.Ordinal)
            && viewModel.Contains("CanDeployRelease", StringComparison.Ordinal)
            && viewModel.Contains("SelectedClientValidationPolicy", StringComparison.Ordinal)
+           && viewModel.Contains("option.Enabled = !value", StringComparison.Ordinal)
            && viewModel.Contains("forceRedeploy: true", StringComparison.Ordinal)
            && viewModel.Contains("RefreshReleaseDeploymentAsync", StringComparison.Ordinal)
            && viewModel.Contains("PrepareReleaseDeploymentAsync", StringComparison.Ordinal)
@@ -2938,8 +2939,9 @@ static void TestOpenSshRecoveryDesign()
            && targetReleaseCheck.Contains("opticon-source-$ReleaseVersion.zip", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("status --porcelain", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("refs/remotes/origin/main", StringComparison.Ordinal)
+           && targetReleaseCheck.Contains("push --porcelain origin", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("DeploymentRequired", StringComparison.Ordinal),
-        "operator builds must deploy missing target releases only from clean synchronized main while CI opts out explicitly");
+        "operator builds must automatically synchronize clean fast-forward main before deploying while CI opts out explicitly");
     const string packageBuildLock = ".opticon-package-build.lock";
     const string acquirePackageBuildLock = "$packageBuildLock = Enter-OpticonPackageBuildLock";
     const string firstStandaloneBuildInvocation = "Invoke-DotNet -Arguments @('--version')";
