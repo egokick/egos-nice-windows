@@ -100,46 +100,6 @@ function Test-CompleteRelease($Manifest, [string]$ReleaseVersion) {
         $download.AbsolutePath -eq "/opticon/releases/$ReleaseVersion/$($artifact.file)"
 }
 
-function Assert-ReleaseSourceIsPublishable {
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        throw 'Git is required to prove that an automatic Opticon release is reproducible.'
-    }
-    $changes = @(& git -C $opticonRoot status --porcelain --untracked-files=normal -- .)
-    if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the Opticon Git worktree.' }
-    if ($changes.Count -ne 0) {
-        throw 'Target deployment is required, but the worktree is not clean. Commit and push the release source, then build again.'
-    }
-    $branch = [string](& git -C $opticonRoot symbolic-ref --short HEAD)
-    if ($LASTEXITCODE -ne 0 -or $branch.Trim() -ne 'main') {
-        throw 'Automatic Opticon target deployment is allowed only from the main branch.'
-    }
-    $originUrl = ([string](& git -C $opticonRoot remote get-url origin)).Trim().TrimEnd('/')
-    if ($LASTEXITCODE -ne 0 -or
-        -not $originUrl.Equals('https://github.com/egokick/egos-nice-windows.git', [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Automatic Opticon target deployment requires the official Git origin.'
-    }
-    & git -C $opticonRoot fetch --quiet origin main
-    if ($LASTEXITCODE -ne 0) { throw 'Could not refresh origin/main before target deployment.' }
-    $head = ([string](& git -C $opticonRoot rev-parse HEAD)).Trim()
-    $originMain = ([string](& git -C $opticonRoot rev-parse refs/remotes/origin/main)).Trim()
-    if ($LASTEXITCODE -ne 0) { throw 'Could not compare local main with origin/main.' }
-    if ($head -ne $originMain) {
-        $mergeBase = ([string](& git -C $opticonRoot merge-base $head $originMain)).Trim()
-        if ($LASTEXITCODE -ne 0 -or $mergeBase -ne $originMain) {
-            throw 'Local main and origin/main have diverged; automatic release synchronization is not safe.'
-        }
-        & git -C $opticonRoot push --porcelain origin "${head}:refs/heads/main"
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Could not automatically push the clean committed Opticon main branch before deployment.'
-        }
-        & git -C $opticonRoot fetch --quiet origin main
-        $originMain = ([string](& git -C $opticonRoot rev-parse refs/remotes/origin/main)).Trim()
-        if ($LASTEXITCODE -ne 0 -or $head -ne $originMain) {
-            throw 'The automatic push did not synchronize origin/main to the selected Opticon commit.'
-        }
-    }
-}
-
 if ([string]::IsNullOrWhiteSpace($Version)) { $Version = Get-SourceVersion }
 Assert-StableVersion $Version
 if ($StageOnly -and $CommitStaged) {
@@ -170,7 +130,6 @@ if ($CheckOnly) {
     if ($null -ne $manifestReadFailure) {
         throw "The live Opticon release manifest is unavailable: $($manifestReadFailure.Exception.Message)"
     }
-    Assert-ReleaseSourceIsPublishable
     if ([string]::IsNullOrWhiteSpace($SourceReleaseCertificateThumbprint) -or
         [string]::IsNullOrWhiteSpace($ProductCertificateThumbprint) -or
         [string]::IsNullOrWhiteSpace($Rfc3161TimestampUrl) -or
@@ -196,12 +155,9 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
 
 # StageOnly proves the exact checked-in source before producing the immutable
 # receipt/archive. CommitStaged consumes that receipt after invitation
-# cancellation, so it must not introduce a fresh mutable Git/fetch dependency
+# cancellation, so it must not introduce a fresh mutable source dependency
 # at the irreversible point. The publisher still independently revalidates the
 # signed archive, S3 object, CloudFront bytes, and leased manifest commit.
-if (-not $CommitStaged) {
-    Assert-ReleaseSourceIsPublishable
-}
 if ([string]::IsNullOrWhiteSpace($SourceReleaseCertificateThumbprint) -or
     [string]::IsNullOrWhiteSpace($ProductCertificateThumbprint) -or
     [string]::IsNullOrWhiteSpace($Rfc3161TimestampUrl) -or

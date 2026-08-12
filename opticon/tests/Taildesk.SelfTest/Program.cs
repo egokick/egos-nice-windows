@@ -1694,15 +1694,13 @@ static void TestReleaseDeploymentSurface()
             && service.Contains("VerifyPublisherReadinessAsync", StringComparison.Ordinal)
             && service.Contains("ResolvePublisherPrerequisitesAsync", StringComparison.Ordinal)
             && service.Contains("EnumerateAutomaticWorkspaceCandidates", StringComparison.Ordinal)
-            && service.Contains("ExpectedGitRemote", StringComparison.Ordinal)
-            && service.Contains("FindGit", StringComparison.Ordinal)
-            && service.Contains("VerifyTrustedWorkspaceAsync", StringComparison.Ordinal)
+            && service.Contains("VerifyPublisherWorkspace", StringComparison.Ordinal)
             && service.Contains("VerifyStagedPublisherAsync", StringComparison.Ordinal)
-            && service.Contains("SourceCommit", StringComparison.Ordinal)
             && service.Contains("ReleaseScriptSha256", StringComparison.Ordinal)
             && service.Contains("BundlePublisherSha256", StringComparison.Ordinal)
-            && service.Contains("GitEnvironment", StringComparison.Ordinal)
             && service.Contains("PublisherEnvironment", StringComparison.Ordinal)
+            && !service.Contains("FindGit", StringComparison.Ordinal)
+            && !service.Contains("ExpectedGitRemote", StringComparison.Ordinal)
             && !service.Contains("OPTICON_RELEASE_WORKSPACE", StringComparison.Ordinal)
             && !service.Contains("ResolveWorkspace(", StringComparison.Ordinal)
             && !windowCode.Contains("ReleaseWorkspaceText", StringComparison.Ordinal)
@@ -1736,9 +1734,9 @@ static void TestReleaseDeploymentSurface()
            && bundlePublisher.Contains(powerShell71Guard, StringComparison.Ordinal)
            && sourceBuilder.Contains(powerShell71Guard, StringComparison.Ordinal)
            && bundleBuilder.Contains(powerShell71Guard, StringComparison.Ordinal)
-           && ensureRelease.Contains("if (-not $CommitStaged)", StringComparison.Ordinal)
-           && ensureRelease.Contains("CommitStaged consumes that receipt", StringComparison.Ordinal),
-        "all supported release entrypoints must require the publisher-compatible PowerShell runtime, while staged commit must not add a fresh Git dependency after invitation removal");
+           && ensureRelease.Contains("CommitStaged consumes that receipt", StringComparison.Ordinal)
+           && !ensureRelease.Contains("Assert-ReleaseSourceIsPublishable", StringComparison.Ordinal),
+        "all supported release entrypoints must require the publisher-compatible PowerShell runtime without adding a Git prerequisite after invitation removal");
 
     var summaryStart = gateway.IndexOf("type releaseInvitationSummary", StringComparison.Ordinal);
     var summaryEnd = gateway.IndexOf("type releasePreflightResponse", StringComparison.Ordinal);
@@ -2970,11 +2968,11 @@ static void TestOpenSshRecoveryDesign()
            && targetReleaseCheck.Contains("schemaVersion -ne 2", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("OpticonSource", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("opticon-source-$ReleaseVersion.zip", StringComparison.Ordinal)
-           && targetReleaseCheck.Contains("status --porcelain", StringComparison.Ordinal)
-           && targetReleaseCheck.Contains("refs/remotes/origin/main", StringComparison.Ordinal)
-           && targetReleaseCheck.Contains("push --porcelain origin", StringComparison.Ordinal)
+           && !targetReleaseCheck.Contains("status --porcelain", StringComparison.Ordinal)
+           && !targetReleaseCheck.Contains("refs/remotes/origin/main", StringComparison.Ordinal)
+           && !targetReleaseCheck.Contains("push --porcelain origin", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("DeploymentRequired", StringComparison.Ordinal),
-        "operator builds must automatically synchronize clean fast-forward main before deploying while CI opts out explicitly");
+        "operator target deployment must verify release state without requiring source-control synchronization");
     const string packageBuildLock = ".opticon-package-build.lock";
     const string acquirePackageBuildLock = "$packageBuildLock = Enter-OpticonPackageBuildLock";
     const string firstStandaloneBuildInvocation = "Invoke-DotNet -Arguments @('--version')";
