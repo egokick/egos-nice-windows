@@ -1328,7 +1328,7 @@ func TestReleaseLeaseDoesNotTreatLegacyJournalAsUncancelled(t *testing.T) {
 	}
 }
 
-func TestReleasePreflightBlocksKeylessLegacyInvitation(t *testing.T) {
+func TestReleasePreflightAllowsExplicitKeylessLegacyLinkAbandonment(t *testing.T) {
 	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "")
 	preflightBody := []byte(`{"targetVersion":"1.2.2"}`)
 	preflightResult := httptest.NewRecorder()
@@ -1340,18 +1340,25 @@ func TestReleasePreflightBlocksKeylessLegacyInvitation(t *testing.T) {
 	if err := json.Unmarshal(preflightResult.Body.Bytes(), &preflight); err != nil {
 		t.Fatal(err)
 	}
-	if !preflight.RequiresInvitationRemoval || !preflight.CancellationBlocked || len(preflight.BlockingInvitations) != 1 ||
+	if !preflight.RequiresInvitationRemoval || preflight.CancellationBlocked || len(preflight.BlockingInvitations) != 1 ||
 		preflight.BlockingInvitations[0].CanRevoke || preflight.BlockingInvitations[0].BlockedReason == "" {
-		t.Fatalf("keyless legacy invitation was not fail-closed: %+v", preflight)
+		t.Fatalf("keyless legacy invitation did not produce an explicit abandonment warning: %+v", preflight)
 	}
-	acquireBody, _ := json.Marshal(releaseAcquireRequest{TargetVersion: "1.2.2", DeploymentRevision: preflight.DeploymentRevision, LeaseToken: strings.Repeat("c", 43)})
+	leaseToken := strings.Repeat("c", 43)
+	acquireBody, _ := json.Marshal(releaseAcquireRequest{TargetVersion: "1.2.2", DeploymentRevision: preflight.DeploymentRevision, LeaseToken: leaseToken})
 	acquireResult := httptest.NewRecorder()
 	g.ServeHTTP(acquireResult, signedRouteRequest(secret, http.MethodPost, releaseAcquirePath, "release-legacy-confirm-nonce-01", acquireBody))
-	if acquireResult.Code != http.StatusConflict {
+	if acquireResult.Code != http.StatusCreated {
 		t.Fatalf("keyless legacy acquisition returned %d: %s", acquireResult.Code, acquireResult.Body.String())
 	}
-	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); err != nil {
-		t.Fatalf("keyless legacy invitation was removed despite unsafe cancellation: %v", err)
+	cancellationBody, _ := json.Marshal(releaseCancellationRequest{TargetVersion: "1.2.2", LeaseToken: leaseToken})
+	cancellationResult := httptest.NewRecorder()
+	g.ServeHTTP(cancellationResult, signedRouteRequest(secret, http.MethodPost, releaseRevokeActivePath, "release-legacy-abandon-nonce-01", cancellationBody))
+	if cancellationResult.Code != http.StatusOK {
+		t.Fatalf("keyless legacy abandonment returned %d: %s", cancellationResult.Code, cancellationResult.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); !os.IsNotExist(err) {
+		t.Fatalf("keyless legacy hosted link remained after confirmed abandonment: %v", err)
 	}
 }
 

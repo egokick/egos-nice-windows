@@ -1690,8 +1690,9 @@ static void TestReleaseDeploymentSurface()
            && summaryStart >= 0 && summaryEnd > summaryStart
            && !gateway[summaryStart..summaryEnd].Contains("Ciphertext           []byte", StringComparison.Ordinal)
            && revokeKeyIndex >= 0 && removeIndex > revokeKeyIndex
-           && gateway.Contains("an active legacy invitation has no safely revocable network key identity", StringComparison.Ordinal),
-        "the gateway must redact invitation secrets, journal a revision-bound lease, revoke network keys before links, and fail closed for legacy records");
+           && gateway.Contains("the key may remain usable until the invitation expires", StringComparison.Ordinal)
+           && gateway.Contains("strings.TrimSpace(invite.TailscaleKeyID) != \"\"", StringComparison.Ordinal),
+        "the gateway must redact invitation secrets, journal a revision-bound lease, revoke known network keys before links, and explicitly warn before abandoning a keyless legacy link");
 }
 
 static void TestTailnetSshPolicy()

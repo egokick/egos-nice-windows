@@ -538,16 +538,6 @@ public partial class MainWindow : Window
         var resuming = plan.DeploymentBlocked && _viewModel.CanResumeReleaseDeployment;
         if (plan.RequiresInvitationRemoval && !resuming)
         {
-            if (plan.CancellationBlocked)
-            {
-                var blocked = plan.BlockingInvitations.FirstOrDefault(item => !item.CanRevoke);
-                ShowError(new InvalidOperationException(
-                    blocked is null || string.IsNullOrWhiteSpace(blocked.BlockedReason)
-                        ? "An active legacy invitation must be reconciled before a new source release can be deployed."
-                        : blocked.BlockedReason));
-                return;
-            }
-
             var names = plan.BlockingInvitations
                 .Select(item => string.IsNullOrWhiteSpace(item.DeviceName) ? "unnamed machine" : item.DeviceName)
                 .Take(5)
@@ -555,10 +545,14 @@ public partial class MainWindow : Window
             var nameText = string.Join(", ", names);
             if (plan.BlockingInvitations.Count > names.Length)
                 nameText += $" and {plan.BlockingInvitations.Count - names.Length} more";
+            var legacy = plan.BlockingInvitations.Where(item => !item.CanRevoke).ToArray();
+            var removalDetail = legacy.Length == 0
+                ? "Each affected one-use network key is revoked before its hosted link is removed."
+                : $"{legacy.Length} legacy invitation(s) do not retain a network key identity. Their hosted links will be deleted, but a recipient that already extracted a key may still use it until the invitation expires (latest: {legacy.Max(item => item.ExpiresAt).LocalDateTime:g}).";
             var prompt =
                 $"Deploy Opticon {plan.TargetVersion} for new invitations?\n\n" +
-                $"A replacement archive is staged and verified first. It then revokes and removes {plan.BlockingInvitations.Count} active invitation(s): {nameText}.\n\n" +
-                "Each affected one-use network key is revoked before its hosted link is removed. This cannot be undone.";
+                $"A replacement archive is staged and verified first. It then removes {plan.BlockingInvitations.Count} active hosted invitation(s): {nameText}.\n\n" +
+                removalDetail + " This cannot be undone.";
             if (MessageBox.Show(prompt, "Remove active invitations?", MessageBoxButton.YesNo,
                     MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
                 return;

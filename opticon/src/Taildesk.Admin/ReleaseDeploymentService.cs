@@ -114,10 +114,6 @@ public sealed class ReleaseDeploymentService
         ArgumentNullException.ThrowIfNull(preflight);
         if (preflight.AlreadyDeployed || preflight.TargetIsOlder || preflight.DeploymentBlocked)
             throw new InvalidOperationException("The live release state cannot be acquired for deployment.");
-        if (preflight.CancellationBlocked)
-            throw new InvalidOperationException(
-                "An active legacy invitation does not retain a safely revocable network key identity. " +
-                "It must be reconciled before a new source release can replace it.");
         if (!IsSha256(preflight.DeploymentRevision) || !IsLeaseToken(leaseToken))
             throw new InvalidDataException("The gateway did not provide a release deployment snapshot token.");
         var lease = await _hostedInvites.AcquireReleaseLeaseAsync(
@@ -189,10 +185,6 @@ public sealed class ReleaseDeploymentService
         ArgumentNullException.ThrowIfNull(lease);
         if (!preflight.RequiresInvitationRemoval && !preflight.DeploymentBlocked)
             return new ReleaseCancellationResponse();
-        if (preflight.CancellationBlocked)
-            throw new InvalidOperationException(
-                "An active legacy invitation does not retain a safely revocable network key identity. " +
-                "It must be reconciled before a new source release can replace it.");
         if (!IsLeaseToken(lease.LeaseToken))
             throw new InvalidDataException("The gateway did not provide a valid release deployment lease.");
         return await _hostedInvites.RevokeActiveReleaseInvitationsAsync(
@@ -768,8 +760,11 @@ public sealed class ReleaseDeploymentService
         {
             if (preflight.BlockingInvitations.Count == 0)
                 throw new InvalidDataException("The Opticon release gateway preflight omitted its active invitation snapshot.");
-            if (preflight.CancellationBlocked != preflight.BlockingInvitations.Any(item => !item.CanRevoke))
-                throw new InvalidDataException("The Opticon release gateway preflight has inconsistent invitation-revocation state.");
+            if (preflight.CancellationBlocked)
+                throw new InvalidDataException("The Opticon release gateway returned an obsolete blocked cancellation plan.");
+            if (preflight.BlockingInvitations.Any(item =>
+                    !item.CanRevoke && string.IsNullOrWhiteSpace(item.BlockedReason)))
+                throw new InvalidDataException("The Opticon release gateway omitted the legacy invitation abandonment warning.");
         }
         else if (preflight.BlockingInvitations.Count != 0)
         {

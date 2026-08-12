@@ -1196,8 +1196,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                         ? $"A confirmed Opticon deployment is paused until {preflight.LeaseExpiresAt.LocalDateTime:g}; click Deploy to resume it."
                         : preflight.DeploymentBlockedReason
                 : preflight.RequiresInvitationRemoval
-                    ? preflight.CancellationBlocked
-                        ? $"Deployment requires {preflight.BlockingInvitations.Count} invitation removal(s), but a legacy invitation must be reconciled first."
+                    ? preflight.BlockingInvitations.Any(item => !item.CanRevoke)
+                        ? $"Deployment requires removing {preflight.BlockingInvitations.Count} active invitation(s); legacy hosted links can be abandoned after confirmation."
                         : $"Deployment requires removing {preflight.BlockingInvitations.Count} active invitation(s) before the manifest can change."
                     : $"Deployed version {preflight.DeployedVersion}; {OpticonVersion} is ready to publish for new invitations.";
         Changed(nameof(CanDeployRelease));

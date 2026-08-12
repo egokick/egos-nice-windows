@@ -1175,8 +1175,12 @@ func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time) (re
 			CanRevoke:       canRevoke,
 		}
 		if !canRevoke {
-			summary.BlockedReason = "This pre-existing invitation does not retain a safely revocable network key identity."
-			response.CancellationBlocked = true
+			// Records written before the key-identity field was introduced can
+			// still be abandoned explicitly. Deleting the encrypted hosted record
+			// makes the link unusable, but a recipient that already extracted its
+			// one-use key may retain access until the recorded expiry. The command
+			// center surfaces that distinction in its default-No confirmation.
+			summary.BlockedReason = "Its hosted link can be removed, but its network key identity is unavailable and the key may remain usable until the invitation expires."
 		}
 		response.BlockingInvitations = append(response.BlockingInvitations, summary)
 	}
@@ -1300,8 +1304,8 @@ func validStoredReleaseLease(lease releaseLease) bool {
 	}
 	ids := make(map[string]struct{}, len(lease.Invitations))
 	for _, invite := range lease.Invitations {
-		if !inviteHashPattern.MatchString(invite.IDHash) || strings.TrimSpace(invite.TailscaleKeyID) == "" ||
-			len(invite.TailscaleKeyID) > 512 || strings.ContainsAny(invite.TailscaleKeyID, "\r\n") {
+		if !inviteHashPattern.MatchString(invite.IDHash) || len(invite.TailscaleKeyID) > 512 ||
+			strings.ContainsAny(invite.TailscaleKeyID, "\r\n") {
 			return false
 		}
 		if _, exists := ids[invite.IDHash]; exists {
@@ -1387,10 +1391,6 @@ func (g *gateway) acquireReleaseLease(targetVersion, revision, token string, now
 	if !hmac.Equal([]byte(revision), []byte(preflight.DeploymentRevision)) {
 		return releaseLease{}, fmt.Errorf("%w: active invitation state changed; refresh before confirming removal", errReleaseLeaseConflict)
 	}
-	if preflight.CancellationBlocked {
-		return releaseLease{}, fmt.Errorf("%w: an active legacy invitation has no safely revocable network key identity", errReleaseLeaseConflict)
-	}
-
 	active, err := g.activeReleaseInvites(now)
 	if err != nil {
 		return releaseLease{}, err
@@ -1403,9 +1403,6 @@ func (g *gateway) acquireReleaseLease(targetVersion, revision, token string, now
 	}
 	items := make([]releaseLeaseInvite, 0, len(active))
 	for _, item := range active {
-		if strings.TrimSpace(item.Invite.TailscaleKeyID) == "" {
-			return releaseLease{}, fmt.Errorf("%w: an active legacy invitation has no safely revocable network key identity", errReleaseLeaseConflict)
-		}
 		items = append(items, releaseLeaseInvite{IDHash: item.IDHash, TailscaleKeyID: item.Invite.TailscaleKeyID})
 	}
 	lease := releaseLease{
@@ -1501,13 +1498,19 @@ func (g *gateway) revokeLeaseInvitations(targetVersion, token string, now time.T
 	// Bound revocations so even the largest supported transaction completes
 	// well inside the two-hour lease while every key still finishes before any
 	// hosted link is deleted. A retry is safe because Headscale 404 is accepted.
+	revocable := make([]releaseLeaseInvite, 0, len(lease.Invitations))
+	for _, invite := range lease.Invitations {
+		if strings.TrimSpace(invite.TailscaleKeyID) != "" {
+			revocable = append(revocable, invite)
+		}
+	}
 	workers := maxParallelKeyRevocations
-	if len(lease.Invitations) < workers {
-		workers = len(lease.Invitations)
+	if len(revocable) < workers {
+		workers = len(revocable)
 	}
 	if workers > 0 {
 		jobs := make(chan releaseLeaseInvite)
-		errs := make(chan error, len(lease.Invitations))
+		errs := make(chan error, len(revocable))
 		var wait sync.WaitGroup
 		for worker := 0; worker < workers; worker++ {
 			wait.Add(1)
@@ -1520,7 +1523,7 @@ func (g *gateway) revokeLeaseInvitations(targetVersion, token string, now time.T
 				}
 			}()
 		}
-		for _, invite := range lease.Invitations {
+		for _, invite := range revocable {
 			jobs <- invite
 		}
 		close(jobs)
