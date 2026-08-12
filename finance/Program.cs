@@ -30,6 +30,12 @@ using FormsContextMenuStrip = System.Windows.Forms.ContextMenuStrip;
 using FormsNotifyIcon = System.Windows.Forms.NotifyIcon;
 using FormsToolStripMenuItem = System.Windows.Forms.ToolStripMenuItem;
 
+if (CodexFinanceRefreshWorker.IsWorkerInvocation(args))
+{
+    Environment.ExitCode = await CodexFinanceRefreshWorker.RunAsync(args);
+    return;
+}
+
 const string FinanceListenUrl = "http://127.0.0.1:5137";
 const string FinanceBrowserUrl = "http://finance.local:5137";
 Directory.SetCurrentDirectory(FinanceRuntime.ResolveRuntimeWorkingDirectory(args));
@@ -211,7 +217,11 @@ app.MapPost("/api/finance/accounts/{id}/values", async (
         FinanceAccountValuesUpdateStatus.Updated => Results.Json(new
         {
             account = result.Account,
-            completionToken = result.CompletionToken
+            completionToken = result.CompletionToken,
+            valuesChanged = result.ValuesChanged,
+            changedFields = result.ChangedFields,
+            observedAtUtc = result.ObservedAtUtc,
+            sourceHost = result.SourceHost
         }),
         FinanceAccountValuesUpdateStatus.NotFound => Results.NotFound(new { error = result.Error }),
         _ => Results.BadRequest(new { error = result.Error })
@@ -222,12 +232,17 @@ app.MapPost("/api/finance/accounts/{id}/refresh-complete", async (
     string id,
     FinanceAccountRefreshCompletionRequest request,
     FinanceStore store,
+    CodexFinanceRefreshLauncher launcher,
     CancellationToken cancellationToken) =>
 {
     var account = await store.CompleteAccountRefreshAsync(id, request.CompletionToken, cancellationToken);
-    return account is null
-        ? Results.BadRequest(new { error = "No matching verified account-value update is pending." })
-        : Results.Json(account);
+    if (account is null)
+    {
+        return Results.BadRequest(new { error = "No matching verified account-value update is pending." });
+    }
+
+    launcher.MarkAccountRefreshCompleted(id);
+    return Results.Json(account);
 });
 
 app.MapPut("/api/finance/accounts/{id}/notes", async (
@@ -1760,11 +1775,29 @@ public sealed class FinanceStore
                 MinimumPaymentMet = request.MinimumPaymentMet,
                 CollectorNotes = collectorNotes
             };
-            accounts[index] = updated;
-            await SaveUserAccountsAsync(accounts, cancellationToken);
+            var changedFields = GetTrackedAccountValueChanges(current, updated);
+            if (changedFields.Count == 0 && request.UnchangedValuesConfirmed is not true)
+            {
+                return FinanceAccountValuesUpdateResult.Invalid(
+                    "All tracked values match the stored snapshot. Re-read every required value from a fresh institution-page DOM snapshot, then repeat this request with unchangedValuesConfirmed=true only if the live values are still identical.");
+            }
+
+            var observedAtUtc = request.ObservedAtUtc!.Value;
+            var sourceUri = new Uri(request.SourceUrl!, UriKind.Absolute);
             var completionToken = Guid.NewGuid().ToString("N");
-            _pendingAccountRefreshes[current.Id] = new PendingAccountRefresh(completionToken, updated);
-            return FinanceAccountValuesUpdateResult.Updated(ToFinanceAccount(updated.ToConfig()), completionToken);
+            _pendingAccountRefreshes[current.Id] = new PendingAccountRefresh(
+                completionToken,
+                current,
+                updated,
+                observedAtUtc,
+                sourceUri.Host,
+                changedFields);
+            return FinanceAccountValuesUpdateResult.Updated(
+                ToFinanceAccount(updated.ToConfig()),
+                completionToken,
+                changedFields,
+                observedAtUtc,
+                sourceUri.Host);
         }
         finally
         {
@@ -1789,14 +1822,14 @@ public sealed class FinanceStore
 
             var accounts = LoadUserAccounts().ToList();
             var index = accounts.FindIndex(account => string.Equals(account.Id, id, StringComparison.OrdinalIgnoreCase));
-            if (index < 0 || accounts[index] != pending.Account)
+            if (index < 0 || accounts[index] != pending.OriginalAccount)
             {
                 _pendingAccountRefreshes.Remove(id);
                 return null;
             }
 
             var completedAtUtc = DateTimeOffset.UtcNow;
-            var completed = accounts[index] with { LastUpdatedUtc = completedAtUtc };
+            var completed = pending.Account with { LastUpdatedUtc = completedAtUtc };
             accounts[index] = completed;
             await SaveUserAccountsAsync(accounts, cancellationToken);
             _pendingAccountRefreshes.Remove(id);
@@ -1805,7 +1838,13 @@ public sealed class FinanceStore
             await AppendJsonLineAsync(_snapshotsPath, snapshot, cancellationToken);
             await AppendJsonLineAsync(
                 _logPath,
-                new FinanceRefreshLog(completedAtUtc, "ok", $"Verified finance values updated for {completed.Name}.", "assisted"),
+                new FinanceRefreshLog(
+                    completedAtUtc,
+                    "ok",
+                    pending.ChangedFields.Count == 0
+                        ? $"Verified fresh finance values for {completed.Name}; no tracked values changed (observed {pending.ObservedAtUtc:O} at {pending.SourceHost})."
+                        : $"Verified fresh finance values for {completed.Name}; changed: {string.Join(", ", pending.ChangedFields)} (observed {pending.ObservedAtUtc:O} at {pending.SourceHost}).",
+                    "assisted"),
                 cancellationToken);
             return ToFinanceAccount(completed.ToConfig());
         }
@@ -2813,7 +2852,12 @@ public sealed class FinanceStore
             message,
             config.CollectorNotes,
             config.Currency,
-            config.LastUpdatedUtc);
+            config.LastUpdatedUtc,
+            config.CashBalance,
+            config.BalanceOwed,
+            config.CreditLimit,
+            config.CreditAvailable,
+            config.MinimumPayment);
     }
 
     private FinanceSnapshot ConvertSnapshotToMaster(
@@ -2830,6 +2874,11 @@ public sealed class FinanceStore
                 account.Name);
             return account with
             {
+                NativeCashBalance = account.NativeCashBalance ?? account.CashBalance,
+                NativeBalanceOwed = account.NativeBalanceOwed ?? account.BalanceOwed,
+                NativeCreditLimit = account.NativeCreditLimit ?? account.CreditLimit,
+                NativeCreditAvailable = account.NativeCreditAvailable ?? account.CreditAvailable,
+                NativeMinimumPayment = account.NativeMinimumPayment ?? account.MinimumPayment,
                 CashBalance = ConvertNullable(account.CashBalance, sourceCurrency, masterCurrency),
                 BalanceOwed = ConvertNullable(account.BalanceOwed, sourceCurrency, masterCurrency),
                 CreditLimit = ConvertNullable(account.CreditLimit, sourceCurrency, masterCurrency),
@@ -3530,6 +3579,19 @@ public sealed class FinanceStore
         UserFinanceAccountRecord account,
         FinanceAccountValuesRequest request)
     {
+        var now = DateTimeOffset.UtcNow;
+        if (request.FreshObservationConfirmed is not true
+            || request.ObservedAtUtc is not { } observedAtUtc
+            || observedAtUtc < now.AddMinutes(-30)
+            || observedAtUtc > now.AddMinutes(2)
+            || string.IsNullOrWhiteSpace(request.SourceUrl)
+            || !Uri.TryCreate(request.SourceUrl, UriKind.Absolute, out var sourceUri)
+            || !string.Equals(sourceUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(sourceUri.Host))
+        {
+            return "A refresh requires freshObservationConfirmed=true, an observedAtUtc time from the last 30 minutes, and the directly observed institution page's HTTPS sourceUrl.";
+        }
+
         if (request.CreditLimit is < 0
             || request.CreditAvailable is < 0
             || request.AprPercent is < 0
@@ -3573,6 +3635,22 @@ public sealed class FinanceStore
                && request.CreditAvailable is null
             ? "A complete account refresh requires at least one current balance value."
             : null;
+    }
+
+    private static IReadOnlyList<string> GetTrackedAccountValueChanges(
+        UserFinanceAccountRecord before,
+        UserFinanceAccountRecord after)
+    {
+        var changed = new List<string>();
+        if (before.CashBalance != after.CashBalance) changed.Add("cash balance");
+        if (before.BalanceOwed != after.BalanceOwed) changed.Add("balance owed");
+        if (before.CreditLimit != after.CreditLimit) changed.Add("credit limit");
+        if (before.CreditAvailable != after.CreditAvailable) changed.Add("credit available");
+        if (before.AprPercent != after.AprPercent) changed.Add("APR");
+        if (before.MinimumPayment != after.MinimumPayment) changed.Add("minimum payment");
+        if (before.PaymentDueDate != after.PaymentDueDate) changed.Add("payment due date");
+        if (before.MinimumPaymentMet != after.MinimumPaymentMet) changed.Add("minimum-payment status");
+        return changed;
     }
 
     private static string? CleanFinanceText(string? value)
@@ -4150,6 +4228,7 @@ public sealed class CodexFinanceRefreshLauncher
 
     private readonly object _sync = new();
     private readonly Dictionary<string, Process> _processes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _completionMarkers = new(StringComparer.OrdinalIgnoreCase);
     private readonly FinanceCredentialLeaseStore _credentialLeases;
     private readonly FinanceStore _store;
     private readonly string _diagnosticsDirectory;
@@ -4175,6 +4254,26 @@ public sealed class CodexFinanceRefreshLauncher
                 _sequenceActive || _processes.Count > 0,
                 _processes.Count,
                 _sequenceActive ? "A Codex finance refresh is running." : "No Codex finance refresh is running.");
+        }
+    }
+
+    public void MarkAccountRefreshCompleted(string accountId)
+    {
+        lock (_sync)
+        {
+            if (!_completionMarkers.TryGetValue(accountId, out var markerPath))
+            {
+                return;
+            }
+
+            try
+            {
+                File.WriteAllText(markerPath, DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture), Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Could not write the Codex completion marker for '{accountId}': {ex.Message}");
+            }
         }
     }
 
@@ -4338,7 +4437,7 @@ public sealed class CodexFinanceRefreshLauncher
                 firstHandle = StartProcess(plan);
                 firstPlan = plan;
                 firstPlanIndex = index;
-                _processes[plan.ProcessKey] = firstHandle.Process;
+                RegisterProcessLocked(plan, firstHandle);
                 launches[plan.Order] = new CodexAccountLaunchResult(
                     plan.AccountId,
                     plan.AccountName,
@@ -4437,17 +4536,7 @@ public sealed class CodexFinanceRefreshLauncher
             loginUrl = account.LoginUrl,
             currency = account.Currency,
             collector = account.Collector,
-            collectorNotes = account.CollectorNotes,
-            currentValues = new
-            {
-                cashBalance = account.CashBalance,
-                balanceOwed = account.BalanceOwed,
-                creditLimit = account.CreditLimit,
-                creditAvailable = account.CreditAvailable,
-                minimumPayment = account.MinimumPayment,
-                paymentDueDate = account.PaymentDueDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                minimumPaymentMet = account.MinimumPaymentMet
-            }
+            collectorNotes = account.CollectorNotes
         };
 
         return string.Concat(
@@ -4507,6 +4596,7 @@ public sealed class CodexFinanceRefreshLauncher
                 Guid.NewGuid().ToString("N"),
                 ".txt");
             var finalMessagePath = Path.Combine(_diagnosticsDirectory, diagnosticName);
+            var completionMarkerPath = Path.ChangeExtension(finalMessagePath, ".complete");
             var prompt = plan.Prompt;
             if (!string.IsNullOrWhiteSpace(plan.LoginUrl))
             {
@@ -4516,12 +4606,24 @@ public sealed class CodexFinanceRefreshLauncher
 
             process = new Process
             {
-                StartInfo = BuildStartInfo(plan.RepositoryRoot, prompt, finalMessagePath),
+                StartInfo = BuildWorkerStartInfo(
+                    plan.RepositoryRoot,
+                    plan.AccountId,
+                    plan.AccountName,
+                    startedAtUtc,
+                    prompt,
+                    finalMessagePath,
+                    completionMarkerPath),
                 EnableRaisingEvents = true
             };
             if (process.Start())
             {
-                return new CodexProcessHandle(process, leaseToken, startedAtUtc, finalMessagePath);
+                return new CodexProcessHandle(
+                    process,
+                    leaseToken,
+                    startedAtUtc,
+                    finalMessagePath,
+                    completionMarkerPath);
             }
 
             throw new InvalidOperationException("Codex could not be started.");
@@ -4563,7 +4665,47 @@ public sealed class CodexFinanceRefreshLauncher
             "and excessive retries. A different foreground tab or application is not a blocker.");
     }
 
-    private static ProcessStartInfo BuildStartInfo(
+    private static ProcessStartInfo BuildWorkerStartInfo(
+        string repositoryRoot,
+        string accountId,
+        string accountName,
+        DateTimeOffset startedAtUtc,
+        string prompt,
+        string finalMessagePath,
+        string completionMarkerPath)
+    {
+        var executablePath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(executablePath))
+        {
+            throw new InvalidOperationException("The finance executable path could not be resolved.");
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            WorkingDirectory = repositoryRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add(CodexFinanceRefreshWorker.WorkerArgument);
+        startInfo.ArgumentList.Add("--repository-root");
+        startInfo.ArgumentList.Add(repositoryRoot);
+        startInfo.ArgumentList.Add("--account-id");
+        startInfo.ArgumentList.Add(accountId);
+        startInfo.ArgumentList.Add("--account-name");
+        startInfo.ArgumentList.Add(accountName);
+        startInfo.ArgumentList.Add("--started-at-utc");
+        startInfo.ArgumentList.Add(startedAtUtc.ToString("O", CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("--final-message");
+        startInfo.ArgumentList.Add(finalMessagePath);
+        startInfo.ArgumentList.Add("--completion-marker");
+        startInfo.ArgumentList.Add(completionMarkerPath);
+        startInfo.ArgumentList.Add("--prompt");
+        startInfo.ArgumentList.Add(prompt);
+        return startInfo;
+    }
+
+    internal static ProcessStartInfo BuildCodexStartInfo(
         string repositoryRoot,
         string prompt,
         string finalMessagePath)
@@ -4633,7 +4775,7 @@ public sealed class CodexFinanceRefreshLauncher
                     handle = StartProcess(plan);
                     lock (_sync)
                     {
-                        _processes[plan.ProcessKey] = handle.Process;
+                        RegisterProcessLocked(plan, handle);
                     }
                 }
                 catch (Exception ex)
@@ -4704,9 +4846,34 @@ public sealed class CodexFinanceRefreshLauncher
                 {
                     _processes.Remove(plan.ProcessKey);
                 }
+
+                if (_completionMarkers.TryGetValue(plan.AccountId, out var trackedMarker)
+                    && string.Equals(trackedMarker, handle.CompletionMarkerPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    _completionMarkers.Remove(plan.AccountId);
+                }
             }
 
+            TryDeleteFile(handle.CompletionMarkerPath);
             process.Dispose();
+        }
+    }
+
+    private void RegisterProcessLocked(CodexLaunchPlan plan, CodexProcessHandle handle)
+    {
+        _processes[plan.ProcessKey] = handle.Process;
+        _completionMarkers[plan.AccountId] = handle.CompletionMarkerPath;
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch
+        {
+            // Diagnostic cleanup must not affect refresh completion.
         }
     }
 
@@ -4787,10 +4954,11 @@ public sealed class CodexFinanceRefreshLauncher
         Process Process,
         string? CredentialLeaseToken,
         DateTimeOffset StartedAtUtc,
-        string FinalMessagePath);
-    private sealed record CodexLaunchCommand(string FileName, string? ScriptPath);
+        string FinalMessagePath,
+        string CompletionMarkerPath);
+    internal sealed record CodexLaunchCommand(string FileName, string? ScriptPath);
 
-    private static CodexLaunchCommand ResolveCodexCommand()
+    internal static CodexLaunchCommand ResolveCodexCommand()
     {
         var configured = Environment.GetEnvironmentVariable("CODEX_CLI_PATH");
         if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
@@ -4866,6 +5034,185 @@ public sealed class CodexFinanceRefreshLauncher
 
         return startDirectory;
     }
+}
+
+public static class CodexFinanceRefreshWorker
+{
+    public const string WorkerArgument = "--finance-codex-worker";
+
+    public static bool IsWorkerInvocation(string[] args) =>
+        args.Any(argument => string.Equals(argument, WorkerArgument, StringComparison.OrdinalIgnoreCase));
+
+    public static async Task<int> RunAsync(string[] args)
+    {
+        var repositoryRoot = ReadArgument(args, "--repository-root");
+        var accountId = ReadArgument(args, "--account-id");
+        var accountName = ReadArgument(args, "--account-name");
+        var startedAtText = ReadArgument(args, "--started-at-utc");
+        var finalMessagePath = ReadArgument(args, "--final-message");
+        var completionMarkerPath = ReadArgument(args, "--completion-marker");
+        var prompt = ReadArgument(args, "--prompt");
+        if (repositoryRoot is null
+            || accountId is null
+            || accountName is null
+            || !DateTimeOffset.TryParse(startedAtText, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var startedAtUtc)
+            || finalMessagePath is null
+            || completionMarkerPath is null
+            || prompt is null)
+        {
+            return 2;
+        }
+
+        AllocateReviewConsole(accountName);
+        Console.WriteLine($"Codex finance refresh: {accountName}");
+        Console.WriteLine("This window closes automatically only after the account update is verified and committed.");
+        Console.WriteLine();
+
+        int exitCode;
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = CodexFinanceRefreshLauncher.BuildCodexStartInfo(
+                    repositoryRoot,
+                    prompt,
+                    finalMessagePath)
+            };
+            if (!process.Start())
+            {
+                throw new InvalidOperationException("Codex could not be started.");
+            }
+
+            await process.WaitForExitAsync();
+            exitCode = process.ExitCode;
+        }
+        catch (Exception ex)
+        {
+            exitCode = 1;
+            Console.Error.WriteLine($"Codex launch failed: {ex.Message}");
+        }
+
+        if (File.Exists(completionMarkerPath)
+            || await WasAccountCommittedAsync(accountId, startedAtUtc))
+        {
+            return exitCode;
+        }
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("ACCOUNT UPDATE WAS NOT COMMITTED");
+        Console.ResetColor();
+        Console.WriteLine($"{accountName} remains stale. This window is being kept open for review.");
+        Console.WriteLine();
+
+        var finalMessage = ReadSanitizedFinalMessage(finalMessagePath, prompt);
+        Console.WriteLine(finalMessage ?? "Codex ended without a final explanation. Review the output above for the last successful step or error.");
+        Console.WriteLine();
+        Console.WriteLine($"Saved diagnostic: {finalMessagePath}");
+        Console.WriteLine("Press Enter to close this window after you finish reviewing it.");
+        Console.ReadLine();
+        return exitCode == 0 ? 1 : exitCode;
+    }
+
+    private static string? ReadArgument(string[] args, string name)
+    {
+        for (var index = 0; index < args.Length - 1; index++)
+        {
+            if (string.Equals(args[index], name, StringComparison.OrdinalIgnoreCase))
+            {
+                return args[index + 1];
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ReadSanitizedFinalMessage(string path, string prompt)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var message = File.ReadAllText(path, Encoding.UTF8).Trim();
+            var leaseMatch = Regex.Match(prompt, @"- Lease token: `([^`]+)`", RegexOptions.CultureInvariant);
+            if (leaseMatch.Success)
+            {
+                message = message.Replace(leaseMatch.Groups[1].Value, "[REDACTED]", StringComparison.Ordinal);
+            }
+
+            return string.IsNullOrWhiteSpace(message) ? null : message;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<bool> WasAccountCommittedAsync(string accountId, DateTimeOffset startedAtUtc)
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var response = await client.GetAsync("http://127.0.0.1:5137/api/finance/state");
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            using var document = await JsonDocument.ParseAsync(stream);
+            if (!document.RootElement.TryGetProperty("current", out var current)
+                || !current.TryGetProperty("accounts", out var accounts))
+            {
+                return false;
+            }
+
+            foreach (var account in accounts.EnumerateArray())
+            {
+                if (!account.TryGetProperty("id", out var idElement)
+                    || !string.Equals(idElement.GetString(), accountId, StringComparison.OrdinalIgnoreCase)
+                    || !account.TryGetProperty("lastUpdatedUtc", out var updatedElement)
+                    || updatedElement.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                return DateTimeOffset.TryParse(
+                           updatedElement.GetString(),
+                           CultureInfo.InvariantCulture,
+                           DateTimeStyles.RoundtripKind,
+                           out var updatedAtUtc)
+                       && updatedAtUtc >= startedAtUtc;
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void AllocateReviewConsole(string accountName)
+    {
+        if (AllocConsole())
+        {
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), Encoding.UTF8) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError(), Encoding.UTF8) { AutoFlush = true });
+            Console.SetIn(new StreamReader(Console.OpenStandardInput(), Encoding.UTF8));
+        }
+
+        SetConsoleTitle($"Finance refresh - {accountName}");
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AllocConsole();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetConsoleTitle(string title);
 }
 
 public static class EnvFile
@@ -4967,7 +5314,12 @@ public sealed record FinanceAccountSnapshot(
     string? Message,
     string? CollectorNotes,
     string? Currency,
-    DateTimeOffset? LastUpdatedUtc = null);
+    DateTimeOffset? LastUpdatedUtc = null,
+    decimal? NativeCashBalance = null,
+    decimal? NativeBalanceOwed = null,
+    decimal? NativeCreditLimit = null,
+    decimal? NativeCreditAvailable = null,
+    decimal? NativeMinimumPayment = null);
 
 public sealed record FinanceSnapshot(
     DateTimeOffset SampledAtUtc,
@@ -5375,7 +5727,11 @@ public sealed record FinanceAccountValuesRequest(
     [property: JsonRequired] decimal? MinimumPayment,
     [property: JsonRequired] DateOnly? PaymentDueDate,
     [property: JsonRequired] bool? MinimumPaymentMet,
-    [property: JsonRequired] string? CollectorNotes);
+    [property: JsonRequired] string? CollectorNotes,
+    [property: JsonRequired] DateTimeOffset? ObservedAtUtc,
+    [property: JsonRequired] string? SourceUrl,
+    [property: JsonRequired] bool? FreshObservationConfirmed,
+    [property: JsonRequired] bool? UnchangedValuesConfirmed);
 
 public sealed record FinanceAccountRefreshCompletionRequest(
     [property: JsonRequired] string? CompletionToken);
@@ -5402,21 +5758,42 @@ public sealed record FinanceAccountValuesUpdateResult(
     FinanceAccountValuesUpdateStatus Status,
     FinanceAccountSnapshot? Account,
     string? CompletionToken,
+    bool? ValuesChanged,
+    IReadOnlyList<string>? ChangedFields,
+    DateTimeOffset? ObservedAtUtc,
+    string? SourceHost,
     string? Error)
 {
-    public static FinanceAccountValuesUpdateResult Updated(FinanceAccountSnapshot account, string completionToken) =>
-        new(FinanceAccountValuesUpdateStatus.Updated, account, completionToken, null);
+    public static FinanceAccountValuesUpdateResult Updated(
+        FinanceAccountSnapshot account,
+        string completionToken,
+        IReadOnlyList<string> changedFields,
+        DateTimeOffset observedAtUtc,
+        string sourceHost) =>
+        new(
+            FinanceAccountValuesUpdateStatus.Updated,
+            account,
+            completionToken,
+            changedFields.Count > 0,
+            changedFields,
+            observedAtUtc,
+            sourceHost,
+            null);
 
     public static FinanceAccountValuesUpdateResult Invalid(string error) =>
-        new(FinanceAccountValuesUpdateStatus.Invalid, null, null, error);
+        new(FinanceAccountValuesUpdateStatus.Invalid, null, null, null, null, null, null, error);
 
     public static FinanceAccountValuesUpdateResult NotFound() =>
-        new(FinanceAccountValuesUpdateStatus.NotFound, null, null, "Account not found or is read-only.");
+        new(FinanceAccountValuesUpdateStatus.NotFound, null, null, null, null, null, null, "Account not found or is read-only.");
 }
 
 public sealed record PendingAccountRefresh(
     string CompletionToken,
-    UserFinanceAccountRecord Account);
+    UserFinanceAccountRecord OriginalAccount,
+    UserFinanceAccountRecord Account,
+    DateTimeOffset ObservedAtUtc,
+    string SourceHost,
+    IReadOnlyList<string> ChangedFields);
 
 public sealed record FinanceAccountNotesRequest(string? CollectorNotes);
 

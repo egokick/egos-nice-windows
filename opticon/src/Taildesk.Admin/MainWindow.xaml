@@ -360,6 +360,8 @@
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                 <TextBlock Text="This Command Center" Style="{StaticResource LabelText}" VerticalAlignment="Center" />
@@ -371,6 +373,52 @@
                                     <Button Content="Refresh live release" Click="RefreshReleaseDeployment_Click" IsEnabled="{Binding IsPrimary}" />
                                     <Button Margin="8,0,0,0" Content="{Binding DeployReleaseButtonText}" Style="{StaticResource PrimaryButton}"
                                             IsEnabled="{Binding CanDeployRelease}" Click="DeployRelease_Click" />
+                                </StackPanel>
+                                <ItemsControl Grid.Row="4" Grid.ColumnSpan="2" Margin="0,16,0,0" ItemsSource="{Binding ReleaseDeploymentSteps}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Margin="0,3,0,3" Padding="10,7" Background="#11161C" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Status}" Value="RUNNING"><Setter Property="BorderBrush" Value="#58A6FF" /></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="COMPLETE"><Setter Property="BorderBrush" Value="#3FB950" /></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="FAILED"><Setter Property="BorderBrush" Value="#FF7B72" /><Setter Property="Background" Value="#2A1719" /></DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="155" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Status}" FontFamily="Cascadia Mono,Consolas" FontWeight="SemiBold">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding Status}" Value="RUNNING"><Setter Property="Foreground" Value="#58A6FF" /></DataTrigger>
+                                                                    <DataTrigger Binding="{Binding Status}" Value="COMPLETE"><Setter Property="Foreground" Value="#7EE787" /></DataTrigger>
+                                                                    <DataTrigger Binding="{Binding Status}" Value="FAILED"><Setter Property="Foreground" Value="#FF7B72" /></DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                    <StackPanel Grid.Column="1">
+                                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                                                        <TextBlock Text="{Binding Detail}" Margin="0,2,0,0" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <StackPanel Grid.Row="5" Grid.ColumnSpan="2" Margin="0,10,0,0">
+                                    <Button Content="{Binding ReleaseDeploymentLogsToggleText}" Click="ToggleReleaseDeploymentLogs_Click" HorizontalAlignment="Left" />
+                                    <ListBox Margin="0,7,0,0" ItemsSource="{Binding ReleaseDeploymentLogLines}" MaxHeight="190"
+                                             Background="#0D0F12" BorderBrush="{StaticResource BorderBrush}" Foreground="#C8D0D8"
+                                             FontFamily="Cascadia Mono,Consolas" FontSize="11">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="4,2" /></DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
                                 </StackPanel>
                             </Grid>
                         </Border>

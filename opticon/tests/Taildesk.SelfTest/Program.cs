@@ -1680,11 +1680,13 @@ static void TestReleaseDeploymentSurface()
     var publishIndex = viewModel.IndexOf("PublishAsync(OpticonVersion", StringComparison.Ordinal);
     Assert(prerequisiteIndex >= 0 && readinessIndex > prerequisiteIndex && stageIndex > readinessIndex && acquireIndex > stageIndex
            && revokeIndex > acquireIndex && publishIndex > revokeIndex
-           && viewModel.Contains("Active invitation state changed after confirmation", StringComparison.Ordinal)
-           && viewModel.Contains("Active invitation state changed while the replacement archive was staged", StringComparison.Ordinal)
+           && viewModel.Contains("active invitations changed after confirmation; continuing with the latest gateway snapshot", StringComparison.Ordinal)
+           && viewModel.Contains("ReleaseDeploymentSteps", StringComparison.Ordinal)
+           && viewModel.Contains("ReleaseDeploymentLogLines", StringComparison.Ordinal)
+           && viewModel.Contains("FailReleaseDeploymentStep", StringComparison.Ordinal)
            && viewModel.Contains("RecoveryMatchesLiveLease", StringComparison.Ordinal)
            && viewModel.Contains("PrepareAsync(OpticonVersion", StringComparison.Ordinal),
-        "the immutable archive must be staged before the revision-bound lease and invitation removal, then a staged commit must follow post-removal revalidation");
+        "the immutable archive must be staged before the latest revision-bound lease and invitation removal, with visible progress and failure details");
 
     Assert(hostedClient.Contains("ReleasePreflightPath", StringComparison.Ordinal)
            && hostedClient.Contains("ReleaseAcquirePath", StringComparison.Ordinal)

@@ -523,6 +523,9 @@ public partial class MainWindow : Window
     private async void RefreshReleaseDeployment_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(() => _viewModel.RefreshReleaseDeploymentAsync());
 
+    private void ToggleReleaseDeploymentLogs_Click(object sender, RoutedEventArgs e) =>
+        _viewModel.ReleaseDeploymentLogsExpanded = !_viewModel.ReleaseDeploymentLogsExpanded;
+
     private async void DeployRelease_Click(object sender, RoutedEventArgs e)
     {
         if (!_viewModel.CanDeployRelease) return;

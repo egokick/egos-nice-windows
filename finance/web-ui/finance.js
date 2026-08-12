@@ -1320,6 +1320,7 @@ function showAddAccountForm() {
 }
 
 function showEditAccountForm(account) {
+  account = nativeAccountValues(account);
   financeEls.accountForm.reset();
   document.querySelector("#accountId").value = account.id;
   document.querySelector("#accountName").value = account.name || "";
@@ -1967,23 +1968,25 @@ function renderTables(data) {
     financeEls.cardRows.append(emptyRow(11, "No credit cards or loans configured yet."));
   } else {
     for (const card of creditLoans) {
+      const displayCard = nativeAccountValues(card);
+      const displayCurrency = displayCard.currency || data.currency;
       const row = document.createElement("tr");
       const updateInfo = accountUpdateInfo(card.lastUpdatedUtc, renderedAt);
       row.classList.toggle("account-update-stale", updateInfo.isStale);
       row.append(
-        accountCell(card),
-        currencySelectCell(card),
-        moneyCell(card.balanceOwed, data.currency),
-        moneyCell(card.minimumPayment, data.currency),
-        textCell(card.paymentDueDate || "--"),
-        textCell(card.minimumPaymentMet === null || card.minimumPaymentMet === undefined
+        accountCell(displayCard),
+        currencySelectCell(displayCard),
+        moneyCell(displayCard.balanceOwed, displayCurrency),
+        moneyCell(displayCard.minimumPayment, displayCurrency),
+        textCell(displayCard.paymentDueDate || "--"),
+        textCell(displayCard.minimumPaymentMet === null || displayCard.minimumPaymentMet === undefined
           ? "--"
-          : card.minimumPaymentMet ? "Paid" : "Outstanding"),
-        moneyCell(card.creditAvailable, data.currency),
-        aprCell(card),
-        interestPreviewCell(card, data.currency),
-        textCell(card.utilizationPercent === null ? "--" : `${card.utilizationPercent}%`),
-        lastUpdatedCell(card, updateInfo),
+          : displayCard.minimumPaymentMet ? "Paid" : "Outstanding"),
+        moneyCell(displayCard.creditAvailable, displayCurrency),
+        aprCell(displayCard),
+        interestPreviewCell(displayCard, displayCurrency),
+        textCell(displayCard.utilizationPercent === null ? "--" : `${displayCard.utilizationPercent}%`),
+        lastUpdatedCell(displayCard, updateInfo),
       );
       financeEls.cardRows.append(row);
     }
@@ -1993,20 +1996,33 @@ function renderTables(data) {
     financeEls.accountRows.append(emptyRow(5, "No accounts configured yet."));
   } else {
     for (const account of sortedAccounts) {
+      const displayAccount = nativeAccountValues(account);
+      const displayCurrency = displayAccount.currency || data.currency;
       const row = document.createElement("tr");
       const updateInfo = accountUpdateInfo(account.lastUpdatedUtc, renderedAt);
       row.classList.toggle("is-selected", !financeState.transactionFilters.scopeAll && account.id === financeState.selectedTransactionAccountId);
       row.classList.toggle("account-update-stale", updateInfo.isStale);
       row.append(
-        accountCell(account, true),
-        textCell(account.kind.replaceAll("_", " ")),
-        moneyCell(account.cashBalance, data.currency),
-        currencySelectCell(account),
-        lastUpdatedCell(account, updateInfo)
+        accountCell(displayAccount, true),
+        textCell(displayAccount.kind.replaceAll("_", " ")),
+        moneyCell(displayAccount.cashBalance, displayCurrency),
+        currencySelectCell(displayAccount),
+        lastUpdatedCell(displayAccount, updateInfo)
       );
       financeEls.accountRows.append(row);
     }
   }
+}
+
+function nativeAccountValues(account) {
+  return {
+    ...account,
+    cashBalance: account.nativeCashBalance ?? account.cashBalance,
+    balanceOwed: account.nativeBalanceOwed ?? account.balanceOwed,
+    creditLimit: account.nativeCreditLimit ?? account.creditLimit,
+    creditAvailable: account.nativeCreditAvailable ?? account.creditAvailable,
+    minimumPayment: account.nativeMinimumPayment ?? account.minimumPayment
+  };
 }
 
 function populateRecurringAccountSelect() {
@@ -2626,16 +2642,13 @@ function accountUpdateInfo(lastUpdatedUtc, now = Date.now()) {
 function lastUpdatedCell(account, updateInfo) {
   const cell = document.createElement("td");
   cell.className = "last-updated-cell";
-  if (!updateInfo.isStale) {
-    cell.textContent = updateInfo.ageText;
-    cell.title = `Last updated ${formatDateTime(updateInfo.updatedAt)}`;
-    return cell;
-  }
 
   const button = document.createElement("button");
   button.type = "button";
   button.className = "account-refresh-trigger";
-  button.title = "Update Account";
+  button.title = updateInfo.updatedAt
+    ? `Update Account (last updated ${formatDateTime(updateInfo.updatedAt)})`
+    : "Update Account (never updated)";
   button.setAttribute("aria-label", `Update ${account.name}; last updated ${updateInfo.ageText.toLowerCase()}`);
 
   const age = document.createElement("span");

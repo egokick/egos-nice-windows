@@ -357,6 +357,7 @@ public sealed class ReleaseDeploymentService
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The Opticon source archive could not be staged and verified. " + DescribePublisherFailure(result));
+        ReportPublisherOutput(progress, result);
         await DeployGatewayForStagedReleaseAsync(normalizedTarget, prerequisites, progress, cancellationToken);
         progress?.Report($"Immutable source release {normalizedTarget} is staged and verified.");
     }
@@ -390,6 +391,7 @@ public sealed class ReleaseDeploymentService
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The verified Opticon staged-release commit did not complete. " + DescribePublisherFailure(result));
+        ReportPublisherOutput(progress, result);
         progress?.Report($"Source release {normalizedTarget} was committed and verified.");
     }
 
@@ -1012,6 +1014,14 @@ public sealed class ReleaseDeploymentService
         return string.IsNullOrWhiteSpace(detail)
             ? $"Publisher exit code: {result.ExitCode}."
             : $"Publisher exit code: {result.ExitCode}. {detail}";
+    }
+
+    private static void ReportPublisherOutput(IProgress<string>? progress, ProcessResult result)
+    {
+        if (progress is null) return;
+        var output = TailPublisherOutput(CleanPublisherOutput(result.StandardOutput), 4_000);
+        foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            progress.Report("[log] " + line);
     }
 
     private static string CleanPublisherOutput(string value)
