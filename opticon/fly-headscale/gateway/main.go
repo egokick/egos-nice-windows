@@ -520,7 +520,8 @@ type releaseCancellationRequest struct {
 }
 
 type releaseReleaseRequest struct {
-	LeaseToken string `json:"leaseToken"`
+	LeaseToken       string `json:"leaseToken"`
+	AbandonUnstarted bool   `json:"abandonUnstarted,omitempty"`
 }
 
 type releaseFinalizeRequest struct {
@@ -1012,11 +1013,13 @@ func (g *gateway) releaseRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request releaseReleaseRequest
-	if json.Unmarshal(body, &request) != nil || !validReleaseLeaseToken(request.LeaseToken) {
+	if json.Unmarshal(body, &request) != nil ||
+		(request.AbandonUnstarted && request.LeaseToken != "") ||
+		(!request.AbandonUnstarted && !validReleaseLeaseToken(request.LeaseToken)) {
 		http.Error(w, "invalid release lease release", http.StatusBadRequest)
 		return
 	}
-	if err := g.releaseUncancelledLease(request.LeaseToken, g.currentTime()); err != nil {
+	if err := g.releaseUncancelledLease(request.LeaseToken, request.AbandonUnstarted, g.currentTime()); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -1421,14 +1424,15 @@ func (g *gateway) acquireReleaseLease(targetVersion, revision, token string, now
 	return lease, nil
 }
 
-func (g *gateway) releaseUncancelledLease(token string, now time.Time) error {
+func (g *gateway) releaseUncancelledLease(token string, abandonUnstarted bool, now time.Time) error {
 	g.releaseMu.Lock()
 	defer g.releaseMu.Unlock()
 	lease, err := g.readReleaseLeaseLocked(now)
 	if err != nil {
 		return err
 	}
-	if lease == nil || !hmac.Equal([]byte(lease.TokenSHA256), []byte(releaseLeaseTokenHash(token))) {
+	if lease == nil || (!abandonUnstarted &&
+		!hmac.Equal([]byte(lease.TokenSHA256), []byte(releaseLeaseTokenHash(token)))) {
 		return errReleaseLeaseConflict
 	}
 	// A v1 journal did not have a durable cancellation boundary. Treat every

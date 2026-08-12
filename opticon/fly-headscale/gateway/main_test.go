@@ -1250,6 +1250,29 @@ func TestReleaseLeaseCanBeReleasedBeforeCancellationStarts(t *testing.T) {
 	}
 }
 
+func TestReleaseLeaseCanBeAdministrativelyAbandonedOnlyBeforeCancellationStarts(t *testing.T) {
+	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "lost-token-key")
+	preflight, err := g.buildReleasePreflight("1.2.2", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.acquireReleaseLease("1.2.2", preflight.DeploymentRevision, strings.Repeat("u", 43), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(releaseReleaseRequest{AbandonUnstarted: true})
+	result := httptest.NewRecorder()
+	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPost, releaseReleasePath, "release-lost-token-nonce-0123", body))
+	if result.Code != http.StatusNoContent {
+		t.Fatalf("authenticated untouched-lease abandonment returned %d: %s", result.Code, result.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); err != nil {
+		t.Fatalf("abandoning an untouched lost-token lease changed its invitation: %v", err)
+	}
+	if current, err := g.currentReleaseLease(time.Now()); err != nil || current != nil {
+		t.Fatalf("abandoned untouched lease remained durable: %+v (%v)", current, err)
+	}
+}
+
 func TestReleaseLeaseCannotBeReleasedAfterCancellationStarts(t *testing.T) {
 	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "release-after-cancel-key")
 	persistedBeforeRevocation := make(chan bool, 1)
@@ -1288,6 +1311,12 @@ func TestReleaseLeaseCannotBeReleasedAfterCancellationStarts(t *testing.T) {
 	if release.Code != http.StatusConflict {
 		t.Fatalf("started cancellation lease was released: %d %s", release.Code, release.Body.String())
 	}
+	forceBody, _ := json.Marshal(releaseReleaseRequest{AbandonUnstarted: true})
+	forceRelease := httptest.NewRecorder()
+	g.ServeHTTP(forceRelease, signedRouteRequest(secret, http.MethodPost, releaseReleasePath, "release-started-force-nonce-012", forceBody))
+	if forceRelease.Code != http.StatusConflict {
+		t.Fatalf("administrative recovery released a started cancellation: %d %s", forceRelease.Code, forceRelease.Body.String())
+	}
 	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); err != nil {
 		t.Fatalf("failed revocation removed the hosted invitation: %v", err)
 	}
@@ -1320,7 +1349,7 @@ func TestReleaseLeaseDoesNotTreatLegacyJournalAsUncancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.releaseUncancelledLease(token, time.Now()); !errors.Is(err, errReleaseLeaseConflict) {
+	if err := g.releaseUncancelledLease(token, false, time.Now()); !errors.Is(err, errReleaseLeaseConflict) {
 		t.Fatalf("legacy non-empty lease was treated as safely untouched: %v", err)
 	}
 	if _, err := os.Stat(g.releaseLeasePath()); err != nil {
