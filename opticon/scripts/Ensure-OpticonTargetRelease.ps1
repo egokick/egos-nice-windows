@@ -143,8 +143,6 @@ if ($CheckOnly) {
         -ProductCertificateThumbprint $ProductCertificateThumbprint `
         -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath `
         -ClientInstallValidationBase64 $ClientInstallValidationBase64 -ForceRedeploy:$ForceRedeploy -CheckOnly
-    $publisherExitCode = $LASTEXITCODE
-    if ($publisherExitCode -ne 0) { throw "Opticon target readiness check for $Version failed." }
     Write-Host "Opticon target release $Version passed non-mutating publisher readiness checks." -ForegroundColor Green
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false; Ready = $true }
     return
@@ -185,10 +183,6 @@ if ($StageOnly) {
     Write-Host "Opticon target release $Version is absent, incomplete, or unservable; publishing the one source archive now." -ForegroundColor Yellow
 }
 & $publisher @publisherArguments
-if ($LASTEXITCODE -ne 0) {
-    $operation = if ($StageOnly) { 'Staging' } elseif ($CommitStaged) { 'Committing the staged' } else { 'Publishing' }
-    throw "$operation Opticon target release $Version failed."
-}
 if ($StageOnly) {
     Write-Host "Opticon target release $Version is staged and fully verified; its live invitation manifest is unchanged." -ForegroundColor Green
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false; Staged = $true }

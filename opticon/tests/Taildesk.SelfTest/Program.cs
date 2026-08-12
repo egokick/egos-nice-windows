@@ -2988,8 +2988,9 @@ static void TestOpenSshRecoveryDesign()
            && !targetReleaseCheck.Contains("status --porcelain", StringComparison.Ordinal)
            && !targetReleaseCheck.Contains("refs/remotes/origin/main", StringComparison.Ordinal)
            && !targetReleaseCheck.Contains("push --porcelain origin", StringComparison.Ordinal)
+           && !targetReleaseCheck.Contains("$LASTEXITCODE", StringComparison.Ordinal)
            && targetReleaseCheck.Contains("DeploymentRequired", StringComparison.Ordinal),
-        "operator target deployment must verify release state without requiring source-control synchronization");
+        "operator target deployment must use PowerShell failure semantics without stale native exit codes or source-control synchronization");
     const string packageBuildLock = ".opticon-package-build.lock";
     const string acquirePackageBuildLock = "$packageBuildLock = Enter-OpticonPackageBuildLock";
     const string firstStandaloneBuildInvocation = "Invoke-DotNet -Arguments @('--version')";
