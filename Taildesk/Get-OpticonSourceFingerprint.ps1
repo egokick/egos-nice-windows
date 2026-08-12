@@ -6,8 +6,8 @@ function Get-OpticonSourceFingerprint {
     $rootPrefix = $root + [IO.Path]::DirectorySeparatorChar
     $relativeInputs = @(
         'src',
-        'assets',
-        'installer',
+        'assets\opticon.ico',
+        'installer\Install-CommandCenter.ps1',
         'Taildesk.sln',
         'Directory.Build.props',
         'Directory.Build.targets',

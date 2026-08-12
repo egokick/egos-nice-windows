@@ -904,6 +904,23 @@ public sealed class ReleaseDeploymentService
         var windowsApps = Path.Combine(programFiles, "WindowsApps");
         try
         {
+            // WindowsApps normally denies directory enumeration to an
+            // unelevated desktop process. Resolve packages registered for the
+            // current user first so an official Store/MSIX installation remains
+            // usable without granting Opticon access to the package repository.
+            var packageManager = new Windows.Management.Deployment.PackageManager();
+            candidates.AddRange(packageManager.FindPackagesForUser(string.Empty)
+                .Where(package => string.Equals(package.Id.Name, "Microsoft.PowerShell", StringComparison.Ordinal)
+                    && string.Equals(package.Id.PublisherId, "8wekyb3d8bbwe", StringComparison.OrdinalIgnoreCase)
+                    && package.Id.Architecture.ToString().Equals(architecture, StringComparison.OrdinalIgnoreCase))
+                .Select(package => Path.Combine(package.InstalledPath, "pwsh.exe")));
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or COMException)
+        {
+            // Fall back to the fixed conventional and package-repository paths.
+        }
+        try
+        {
             if (Directory.Exists(windowsApps))
             {
                 candidates.AddRange(Directory.EnumerateDirectories(
