@@ -840,10 +840,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Obtains a fresh, gateway-authoritative, no-side-effect deployment plan.
-    /// The caller can therefore ask for the active-invitation decision as soon
-    /// as the Deploy button is clicked; publisher readiness is verified after
-    /// Yes but before the deployment lease or any remote mutation.
+    /// Obtains a fresh, gateway-authoritative deployment plan. If the live
+    /// gateway predates this Command Center's release protocol, the explicit
+    /// Redeploy click first converges that operational prerequisite, waits for
+    /// health, and then re-reads the authoritative invitation plan. No invite,
+    /// release manifest, or release artifact changes before confirmation.
     /// </summary>
     public async Task<ReleaseDeploymentPreflight> PrepareReleaseDeploymentAsync(
         CancellationToken cancellationToken = default)
@@ -856,6 +857,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             Status = "Preparing the invite release deployment…";
             var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy: true, cancellationToken);
+            if (preflight.GatewayReleaseProtocol < ReleaseDeploymentService.RequiredGatewayReleaseProtocol)
+            {
+                var progress = new Progress<string>(message => Status = message);
+                preflight = await _releaseDeployment.EnsureGatewayCompatibilityAsync(
+                    OpticonVersion, preflight, progress, cancellationToken);
+            }
             preflight.OperatorValidationPolicy = SelectedClientValidationPolicy;
             ApplyReleasePreflight(preflight);
             if (preflight.TargetIsOlder)

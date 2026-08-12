@@ -747,7 +747,7 @@ func TestForcedSameVersionSourcePublicationRequiresAndUsesForceLease(t *testing.
 		adminSecret: secret, nonces: make(map[string]time.Time)}
 
 	preflight, err := g.buildReleasePreflight("1.2.1", time.Now(), true)
-	if err != nil || preflight.AlreadyDeployed || !preflight.ForceRedeploy {
+	if err != nil || preflight.GatewayReleaseProtocol != releaseProtocolVersion || preflight.AlreadyDeployed || !preflight.ForceRedeploy {
 		t.Fatalf("forced same-version preflight was not publishable: %+v, %v", preflight, err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
@@ -1098,7 +1098,8 @@ func TestReleasePreflightRedactsActiveInvitationSecrets(t *testing.T) {
 	if err := json.Unmarshal(result.Body.Bytes(), &preflight); err != nil {
 		t.Fatal(err)
 	}
-	if preflight.SchemaVersion != 1 || preflight.DeployedVersion != "1.2.1" || preflight.AlreadyDeployed ||
+	if preflight.SchemaVersion != 1 || preflight.GatewayReleaseProtocol != releaseProtocolVersion ||
+		preflight.DeployedVersion != "1.2.1" || preflight.AlreadyDeployed ||
 		!preflight.RequiresInvitationRemoval || preflight.CancellationBlocked || len(preflight.BlockingInvitations) != 1 ||
 		preflight.BlockingInvitations[0].IDHash != idHash || !preflight.BlockingInvitations[0].CanRevoke ||
 		!inviteHashPattern.MatchString(preflight.DeploymentRevision) {

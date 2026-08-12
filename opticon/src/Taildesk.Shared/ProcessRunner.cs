@@ -37,7 +37,8 @@ public static class ProcessRunner
         CancellationToken cancellationToken = default,
         bool captureOutput = true,
         IReadOnlyDictionary<string, string?>? environment = null,
-        bool clearEnvironment = false)
+        bool clearEnvironment = false,
+        string? workingDirectory = null)
     {
         var start = new ProcessStartInfo(executable)
         {
@@ -47,6 +48,8 @@ public static class ProcessRunner
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden
         };
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+            start.WorkingDirectory = Path.GetFullPath(workingDirectory);
 
         foreach (var argument in arguments)
         {

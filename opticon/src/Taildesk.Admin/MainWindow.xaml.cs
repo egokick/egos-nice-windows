@@ -529,10 +529,11 @@ public partial class MainWindow : Window
         ReleaseDeploymentPreflight plan;
         try
         {
-            // This is an authenticated, read-only preflight. It must happen
-            // before any prompt, local cancellation, build, S3 upload, or
-            // manifest publication so an unseen gateway invitation cannot be
-            // bypassed by a stale UI list.
+            // This obtains an authenticated preflight and, when necessary,
+            // converges the Fly gateway protocol before reading it again. It
+            // must happen before any prompt, invitation cancellation, source
+            // build, S3 upload, or manifest publication so an unseen gateway
+            // invitation cannot be bypassed by a stale UI list.
             plan = await _viewModel.PrepareReleaseDeploymentAsync();
         }
         catch (Exception exception)

@@ -17,6 +17,7 @@ namespace Taildesk.Admin;
 public sealed class ReleaseDeploymentPreflight
 {
     public int SchemaVersion { get; set; }
+    public int GatewayReleaseProtocol { get; set; }
     public string TargetVersion { get; set; } = string.Empty;
     public string DeployedVersion { get; set; } = string.Empty;
     public bool AlreadyDeployed { get; set; }
@@ -90,12 +91,15 @@ internal sealed record ReleaseDeploymentLeaseRecovery(
 /// </summary>
 public sealed class ReleaseDeploymentService
 {
+    public const int RequiredGatewayReleaseProtocol = 2;
     private const string ReleaseScriptRelativePath = "scripts\\Ensure-OpticonTargetRelease.ps1";
     private const string PublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonSourceRelease.ps1";
     private const string BundlePublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonBundles.ps1";
     private const string TimestampUrl = "http://timestamp.digicert.com";
     private const string ExpectedWorkspaceDirectoryName = "opticon";
     private const string ExpectedGitRemote = "https://github.com/egokick/egos-nice-windows.git";
+    private const string GatewayAppName = "taildesk-egokick-control";
+    private const string GatewayDirectoryName = "fly-headscale";
     private readonly AdminState _state;
     private readonly HostedInviteClient _hostedInvites;
 
@@ -115,6 +119,53 @@ public sealed class ReleaseDeploymentService
         var preflight = await _hostedInvites.GetReleasePreflightAsync(normalizedTarget, forceRedeploy, cancellationToken);
         ValidatePreflight(preflight, normalizedTarget);
         return preflight;
+    }
+
+    public async Task<ReleaseDeploymentPreflight> EnsureGatewayCompatibilityAsync(
+        string targetVersion,
+        ReleaseDeploymentPreflight preflight,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(preflight);
+        if (preflight.GatewayReleaseProtocol >= RequiredGatewayReleaseProtocol)
+            return preflight;
+
+        var prerequisites = await ResolvePublisherPrerequisitesAsync(targetVersion, cancellationToken);
+        var gatewayDirectory = RequireRegularDirectory(
+            Path.Combine(prerequisites.Workspace, GatewayDirectoryName), "Opticon Fly gateway source directory");
+        var flyConfig = RequireRegularFile(Path.Combine(gatewayDirectory, "fly.toml"), "Opticon Fly gateway configuration");
+        var dockerfile = RequireRegularFile(Path.Combine(gatewayDirectory, "Dockerfile"), "Opticon Fly gateway Dockerfile");
+        _ = RequireRegularFile(Path.Combine(gatewayDirectory, "gateway", "main.go"), "Opticon Fly gateway source");
+        var configText = await File.ReadAllTextAsync(flyConfig, cancellationToken);
+        if (!configText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Any(line => line.Trim().Equals($"app = \"{GatewayAppName}\"", StringComparison.Ordinal)))
+            throw new InvalidDataException("The verified Opticon Fly configuration does not target the fixed production gateway app.");
+        if (!File.ReadAllText(dockerfile).Contains("/opt/opticon/gateway", StringComparison.Ordinal))
+            throw new InvalidDataException("The verified Opticon Fly Dockerfile does not contain the expected gateway entrypoint.");
+
+        var fly = FindFlyCtl();
+        progress?.Report("Updating the Opticon Fly gateway required by this release…");
+        var result = await ProcessRunner.RunAsync(
+            fly,
+            ["deploy", "--app", GatewayAppName, "--remote-only", "--ha=false"],
+            TimeSpan.FromMinutes(20),
+            cancellationToken,
+            workingDirectory: gatewayDirectory);
+        if (!result.Succeeded)
+            throw new InvalidOperationException(
+                $"The Opticon Fly gateway update failed ({result.ExitCode}). {DescribeProcessFailure(result)}");
+
+        progress?.Report("Waiting for the updated Opticon Fly gateway protocol…");
+        for (var attempt = 0; attempt < 12; attempt++)
+        {
+            if (attempt != 0) await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+            var updated = await PrepareAsync(targetVersion, forceRedeploy: true, cancellationToken);
+            if (updated.GatewayReleaseProtocol >= RequiredGatewayReleaseProtocol)
+                return updated;
+        }
+        throw new InvalidOperationException(
+            "Fly reported a healthy deployment, but the Opticon gateway did not expose the required release protocol.");
     }
 
     public async Task<ReleaseDeploymentLease> AcquireLeaseAsync(
@@ -714,6 +765,32 @@ public sealed class ReleaseDeploymentService
         return environment;
     }
 
+    private static string FindFlyCtl()
+    {
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var candidates = new[]
+        {
+            Path.Combine(programFiles, "flyctl", "flyctl.exe"),
+            Path.Combine(localAppData, "Microsoft", "WinGet", "Packages",
+                "Fly-io.flyctl_Microsoft.Winget.Source_8wekyb3d8bbwe", "flyctl.exe")
+        };
+        foreach (var candidate in candidates)
+        {
+            try { return RequireRegularFile(candidate, "Fly CLI"); }
+            catch (Exception exception) when (exception is FileNotFoundException or IOException or UnauthorizedAccessException) { }
+        }
+        throw new FileNotFoundException(
+            "The official Fly CLI is required to update Opticon's deployment gateway automatically. Install Fly-io.flyctl with WinGet, then retry Redeploy.");
+    }
+
+    private static string DescribeProcessFailure(ProcessResult result)
+    {
+        var detail = string.IsNullOrWhiteSpace(result.StandardError) ? result.StandardOutput : result.StandardError;
+        detail = detail.Trim();
+        return detail.Length <= 4096 ? detail : detail[^4096..];
+    }
+
     private static string FindGit()
     {
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
@@ -768,6 +845,7 @@ public sealed class ReleaseDeploymentService
     private static void ValidatePreflight(ReleaseDeploymentPreflight preflight, string targetVersion)
     {
         if (preflight.SchemaVersion != 1
+            || preflight.GatewayReleaseProtocol < 0
             || !string.Equals(preflight.TargetVersion, targetVersion, StringComparison.Ordinal)
             || !IsSha256(preflight.DeploymentRevision)
             || preflight.Manifest is null

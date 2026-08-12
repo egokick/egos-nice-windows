@@ -5,6 +5,7 @@ artifacts/*.zip
 artifacts/*.zip.*
 artifacts/hosted-build/
 artifacts/hosted-bundle-stage/
+artifacts/.publish-work-*/
 # Signed bootstraps are immutable CloudFront release objects. Legacy gateway
 # images retain their baked fallback, but future builds never carry one.
 artifacts/opticon-bootstrap-*.exe

@@ -31,6 +31,7 @@ import (
 )
 
 const (
+	releaseProtocolVersion    = 2
 	adminPrefix               = "/opticon/v1/headscale/"
 	artifactPrefix            = "/opticon/artifacts/v1/"
 	inviteAdminPrefix         = "/opticon/v1/invitations/"
@@ -560,6 +561,7 @@ type invitationInventoryResponse struct {
 
 type releasePreflightResponse struct {
 	SchemaVersion           int       `json:"schemaVersion"`
+	GatewayReleaseProtocol  int       `json:"gatewayReleaseProtocol"`
 	TargetVersion           string    `json:"targetVersion"`
 	DeployedVersion         string    `json:"deployedVersion"`
 	AlreadyDeployed         bool      `json:"alreadyDeployed"`
@@ -1166,6 +1168,7 @@ func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time, for
 	requiresRemoval := !alreadyDeployed && !targetIsOlder && len(active) != 0
 	response := releasePreflightResponse{
 		SchemaVersion:             1,
+		GatewayReleaseProtocol:    releaseProtocolVersion,
 		TargetVersion:             targetVersion,
 		DeployedVersion:           deployedVersion,
 		AlreadyDeployed:           alreadyDeployed,

@@ -27,6 +27,7 @@ var tests = new (string Name, Action Body)[]
     ("dependency downloads are version and hash pinned", TestDependencyPins),
     ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
     ("process runner supports commands with inherited standard handles", TestProcessRunnerWithoutCapture),
+    ("process runner applies an exact working directory", TestProcessRunnerWorkingDirectory),
     ("process runner applies its deadline to inherited output handles", TestProcessRunnerStreamDeadline),
     ("machine install crash recovery is exact-source bound and roll-forward only", TestMachineInstallCrashRecovery),
     ("installer convergence records verified repairs and plans every discovered repair", TestInstallerConvergenceContracts),
@@ -684,6 +685,27 @@ static void TestProcessRunnerWithoutCapture()
     Assert(result.Succeeded, "uncaptured command failed");
     Assert(result.StandardOutput.Length == 0 && result.StandardError.Length == 0,
         "uncaptured command unexpectedly retained redirected output");
+}
+
+static void TestProcessRunnerWorkingDirectory()
+{
+    if (!OperatingSystem.IsWindows()) return;
+    var directory = Path.Combine(Path.GetTempPath(), "Opticon-ProcessRunner-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    try
+    {
+        var result = ProcessRunner.RunAsync("cmd.exe", ["/d", "/c", "cd"],
+            TimeSpan.FromSeconds(5), workingDirectory: directory).GetAwaiter().GetResult();
+        Assert(result.Succeeded && string.Equals(
+                Path.TrimEndingDirectorySeparator(result.StandardOutput.Trim()),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)),
+                StringComparison.OrdinalIgnoreCase),
+            "the child process did not run in the requested working directory");
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
+    }
 }
 
 static void TestProcessRunnerStreamDeadline()
@@ -1620,6 +1642,8 @@ static void TestReleaseDeploymentSurface()
            && viewModel.Contains("SelectedClientValidationPolicy", StringComparison.Ordinal)
            && viewModel.Contains("option.Enabled = !value", StringComparison.Ordinal)
            && viewModel.Contains("forceRedeploy: true", StringComparison.Ordinal)
+           && viewModel.Contains("EnsureGatewayCompatibilityAsync", StringComparison.Ordinal)
+           && viewModel.Contains("RequiredGatewayReleaseProtocol", StringComparison.Ordinal)
            && viewModel.Contains("RefreshReleaseDeploymentAsync", StringComparison.Ordinal)
            && viewModel.Contains("PrepareReleaseDeploymentAsync", StringComparison.Ordinal)
            && viewModel.Contains("DeployReleaseAsync", StringComparison.Ordinal)
@@ -1633,7 +1657,7 @@ static void TestReleaseDeploymentSurface()
     Assert(preflightIndex >= 0 && confirmationIndex > preflightIndex && deploymentIndex > confirmationIndex
            && windowCode.Contains("MessageBoxButton.YesNo", StringComparison.Ordinal)
            && windowCode.Contains("MessageBoxResult.No", StringComparison.Ordinal),
-        "release deployment must read the authoritative plan, ask one default-No Yes/No question, then mutate state only after consent");
+        "release deployment must converge its gateway and read the authoritative plan before any default-No invitation or validation confirmation");
     var prerequisiteIndex = viewModel.IndexOf("ResolvePublisherPrerequisitesAsync(OpticonVersion", StringComparison.Ordinal);
     var readinessIndex = viewModel.IndexOf("VerifyPublisherReadinessAsync", StringComparison.Ordinal);
     var stageIndex = viewModel.IndexOf("StageAsync(OpticonVersion", StringComparison.Ordinal);
@@ -1663,6 +1687,10 @@ static void TestReleaseDeploymentSurface()
         "new hosted invitations must retain only a non-secret key identity while a protected local lease supports safe deployment recovery without persisting a source path");
     Assert(service.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
             && service.Contains("ProcessRunner.RunAsync", StringComparison.Ordinal)
+            && service.Contains("FindFlyCtl", StringComparison.Ordinal)
+            && service.Contains("fly.toml", StringComparison.Ordinal)
+            && service.Contains("--remote-only", StringComparison.Ordinal)
+            && service.Contains("GatewayAppName", StringComparison.Ordinal)
             && service.Contains("VerifyPublisherReadinessAsync", StringComparison.Ordinal)
             && service.Contains("ResolvePublisherPrerequisitesAsync", StringComparison.Ordinal)
             && service.Contains("EnumerateAutomaticWorkspaceCandidates", StringComparison.Ordinal)
