@@ -16,25 +16,36 @@ param(
     [Parameter(Mandatory)][ValidateSet('ManagedOnly', 'ControllerAndManaged')][string]$Role,
     [Parameter(Mandatory)][string]$InvitePath,
     [Parameter(Mandatory)][string]$InviteKey,
-    [Parameter(Mandatory)][string]$DotnetPath
+    [Parameter(Mandatory)][string]$DotnetPath,
+    [string]$ClientInstallValidationBase64 = ''
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+try {
+    $clientValidation = if ([string]::IsNullOrWhiteSpace($ClientInstallValidationBase64)) {
+        [pscustomobject]@{ disableAll = $false; disabledSteps = @() }
+    } else {
+        [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ClientInstallValidationBase64)) | ConvertFrom-Json
+    }
+} catch { throw 'The client installation validation policy is malformed.' }
+function Test-ClientValidationEnabled([string]$Step) {
+    return -not [bool]$clientValidation.disableAll -and @($clientValidation.disabledSteps) -notcontains $Step
+}
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'The authenticated source build must run in the elevated signed bootstrap.'
 }
-if ($SourceVersion -notmatch '^[1-9][0-9]*\.[0-9]+\.[0-9]+$' -or
+if ((Test-ClientValidationEnabled 'InvitationConstraints') -and ($SourceVersion -notmatch '^[1-9][0-9]*\.[0-9]+\.[0-9]+$' -or
     $SourceSha256 -notmatch '^[a-f0-9]{64}$' -or $SourceManifestSha256 -notmatch '^[a-f0-9]{64}$' -or
     $SourceManifestKeyId -notmatch '^[A-F0-9]{40}$' -or
     $ProductSignerThumbprint -notmatch '^[A-F0-9]{40}$' -or
     $SourceManifestKeyId -eq 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
     $ProductSignerThumbprint -eq 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
     $ProductSignerThumbprint -eq $SourceManifestKeyId -or
-    $SdkVersion -ne '10.*.*' -or $RuntimeVersion -ne '10.0.10') {
+    $SdkVersion -ne '10.*.*' -or $RuntimeVersion -ne '10.0.10')) {
     throw 'The source build pins are invalid or unsupported.'
 }
 try {
@@ -45,9 +56,9 @@ try {
 } catch {
     throw 'The signed source manifest contains malformed public signing certificates.'
 }
-if ($sourceReleaseCertificate.HasPrivateKey -or $productCertificate.HasPrivateKey -or
+if ((Test-ClientValidationEnabled 'SourceArchiveAuthenticity') -and ($sourceReleaseCertificate.HasPrivateKey -or $productCertificate.HasPrivateKey -or
     $sourceReleaseCertificate.Thumbprint.ToUpperInvariant() -ne $SourceManifestKeyId -or
-    $productCertificate.Thumbprint.ToUpperInvariant() -ne $ProductSignerThumbprint) {
+    $productCertificate.Thumbprint.ToUpperInvariant() -ne $ProductSignerThumbprint)) {
     throw 'The signed source manifest certificate bytes do not match its immutable key pins.'
 }
 
@@ -58,14 +69,15 @@ $DotnetPath = [IO.Path]::GetFullPath($DotnetPath)
 foreach ($path in @($SourceRoot, $SourceArchive, $InvitePath, $DotnetPath)) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Required protected source-build input is missing: $path" }
 }
-if ((Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $SourceSha256) {
+if ((Test-ClientValidationEnabled 'DownloadIntegrity') -and
+    (Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $SourceSha256) {
     throw 'The source archive changed after the signed bootstrap verified it.'
 }
 
 $globalJson = Get-Content -Raw -LiteralPath (Join-Path $SourceRoot 'global.json') | ConvertFrom-Json
-if ([string]$globalJson.sdk.version -ne '10.0.100' -or
+if ((Test-ClientValidationEnabled 'DependencyIntegrity') -and ([string]$globalJson.sdk.version -ne '10.0.100' -or
     [string]$globalJson.sdk.rollForward -ne 'latestMinor' -or
-    [bool]$globalJson.sdk.allowPrerelease) {
+    [bool]$globalJson.sdk.allowPrerelease)) {
     throw 'The authenticated source global.json does not enforce the stable .NET 10 SDK policy.'
 }
 $installedSdks = & $DotnetPath --list-sdks
@@ -75,7 +87,8 @@ if ($LASTEXITCODE -ne 0 -or -not ($installedSdks | Where-Object { $_ -match '^10
 Push-Location $SourceRoot
 try {
     $selectedSdk = (& $DotnetPath --version).Trim()
-    if ($LASTEXITCODE -ne 0 -or $selectedSdk -notmatch '^10\.[0-9]+\.[0-9]+$') {
+    if ((Test-ClientValidationEnabled 'DependencyIntegrity') -and
+        ($LASTEXITCODE -ne 0 -or $selectedSdk -notmatch '^10\.[0-9]+\.[0-9]+$')) {
         throw "global.json selected SDK '$selectedSdk', which does not match $SdkVersion."
     }
 

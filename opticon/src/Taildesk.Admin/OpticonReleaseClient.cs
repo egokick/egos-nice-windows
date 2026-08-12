@@ -72,7 +72,8 @@ public sealed class OpticonReleaseClient
             source.ProductSignerThumbprint,
             source.TargetRuntimes.ToArray(),
             RequireImmutableCloudFrontDownload(source),
-            OpticonSourceReleaseClient.SourceInstallProtocol);
+            OpticonSourceReleaseClient.SourceInstallProtocol,
+            ClientInstallValidationPolicy.Normalize(source.ClientInstallValidation));
 
         var installedAgent = UpdatePackageVerifier.ParseVersion(device.AgentVersion);
         var installedGuardian = ParseInstalledGuardianVersion(device.GuardianVersion);

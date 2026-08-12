@@ -345,6 +345,8 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
                         <TextBlock Text="Invite release deployment" Style="{StaticResource SectionTitle}" />
@@ -372,8 +374,30 @@
                                 </StackPanel>
                             </Grid>
                         </Border>
-                        <TextBlock Grid.Row="3" Margin="0,14,0,10" Text="Files currently deployed for invitation creation" Style="{StaticResource LabelText}" />
-                        <DataGrid Grid.Row="4" ItemsSource="{Binding DeployedReleaseArtifacts}" IsReadOnly="True" CanUserAddRows="False"
+                        <Border Grid.Row="3" Margin="0,14,0,0" Padding="16" Background="{StaticResource PanelBrush}"
+                                BorderBrush="#9B3B3B" BorderThickness="1">
+                            <StackPanel>
+                                <TextBlock Text="CLIENT INSTALL VALIDATION POLICY" Style="{StaticResource LabelText}" />
+                                <TextBlock Margin="0,5,0,12" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
+                                           Text="Emergency controls for newly created invitations. Disabled checks are skipped on the target computer; installation command failures are still reported." />
+                                <CheckBox IsChecked="{Binding DisableAllClientValidation}" FontWeight="SemiBold" Foreground="#FF8C86"
+                                          Content="Disable ALL client-side installation validation" />
+                                <ItemsControl Margin="22,10,0,0" ItemsSource="{Binding ClientValidationOptions}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <CheckBox IsChecked="{Binding Enabled}" Margin="0,3,0,3">
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                                                    <TextBlock Text="{Binding Description}" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                                </StackPanel>
+                                            </CheckBox>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Grid.Row="4" Margin="0,14,0,10" Text="Files currently deployed for invitation creation" Style="{StaticResource LabelText}" />
+                        <DataGrid Grid.Row="5" ItemsSource="{Binding DeployedReleaseArtifacts}" IsReadOnly="True" CanUserAddRows="False"
                                   AutoGenerateColumns="False" HeadersVisibility="Column" MinHeight="190">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="VERSION" Binding="{Binding Version}" Width="110" />

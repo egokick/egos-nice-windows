@@ -165,9 +165,10 @@ public sealed class HostedInviteClient
 
     public async Task<ReleaseDeploymentPreflight> GetReleasePreflightAsync(
         string targetVersion,
+        bool forceRedeploy,
         CancellationToken cancellationToken = default)
     {
-        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion }, JsonDefaults.Options);
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, forceRedeploy }, JsonDefaults.Options);
         using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleasePreflightPath), body, cancellationToken);
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException($"Fly release preflight failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
@@ -207,9 +208,10 @@ public sealed class HostedInviteClient
         string targetVersion,
         string deploymentRevision,
         string leaseToken,
+        bool forceRedeploy,
         CancellationToken cancellationToken = default)
     {
-        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, deploymentRevision, leaseToken }, JsonDefaults.Options);
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, deploymentRevision, leaseToken, forceRedeploy }, JsonDefaults.Options);
         using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleaseAcquirePath), body, cancellationToken);
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException($"Fly release deployment acquisition failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");

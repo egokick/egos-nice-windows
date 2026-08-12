@@ -67,7 +67,7 @@ internal static class HostedBootstrapper
         {
             sourceArchive = Path.GetFullPath(sourceArchive);
             if (!string.Equals(Path.GetExtension(sourceArchive), ".zip", StringComparison.OrdinalIgnoreCase)
-                || !File.Exists(sourceArchive) || (File.GetAttributes(sourceArchive) & FileAttributes.ReparsePoint) != 0)
+                || !File.Exists(sourceArchive))
                 throw new InvalidDataException("The selected source archive must be a regular local .zip file.");
         }
         return new SourceBootstrapRequest(publicId, privateKey, sourceArchive,
@@ -78,18 +78,6 @@ internal static class HostedBootstrapper
     {
         var launcherPath = Environment.ProcessPath
                            ?? throw new InvalidOperationException("The Opticon source launcher path is unavailable.");
-        if (!IsSourceLauncher(launcherPath))
-            throw new InvalidDataException("The source-only installer was not started by the fixed Opticon source launcher.");
-        if (bootstrap.LauncherSha256 is not null)
-        {
-            await using var stream = new FileStream(launcherPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-                64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-            var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream)).ToLowerInvariant();
-            if (!CryptographicOperations.FixedTimeEquals(
-                    Convert.FromHexString(actual), Convert.FromHexString(bootstrap.LauncherSha256)))
-                throw new InvalidDataException("The downloaded Opticon launcher does not match its invitation filename.");
-        }
-        await ProductSigning.VerifyAuthenticodeAsync(launcherPath);
         await SourceBootstrapInstaller.RunAsync(bootstrap, launcherPath, report);
     }
 

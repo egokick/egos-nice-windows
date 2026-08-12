@@ -11,6 +11,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
     [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
     [Parameter(Mandatory)][string]$SignToolPath,
+    [string]$ClientInstallValidationBase64 = '',
+    [switch]$ForceRedeploy,
     [ValidatePattern('^[A-Za-z0-9_.-]{1,64}$')][string]$AwsProfile = 'default',
     [switch]$CheckOnly,
     [switch]$SkipBuild,
@@ -54,6 +56,8 @@ $arguments = @{
     SkipManifestPublish = $SkipManifestPublish
     StageOnly = $StageOnly
     CommitStaged = $CommitStaged
+    ClientInstallValidationBase64 = $ClientInstallValidationBase64
+    ForceRedeploy = $ForceRedeploy
 }
 
 & (Join-Path $PSScriptRoot 'Publish-OpticonBundles.ps1') @arguments

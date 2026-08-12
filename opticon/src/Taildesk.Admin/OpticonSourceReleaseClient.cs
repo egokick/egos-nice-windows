@@ -16,7 +16,8 @@ public sealed record OpticonSourceRelease(
     string ProductSignerThumbprint,
     IReadOnlyList<string> TargetRuntimes,
     Uri DownloadUri,
-    string InstallProtocol);
+    string InstallProtocol,
+    ClientInstallValidationPolicy ClientInstallValidation);
 
 public sealed class OpticonSourceReleaseClient
 {
@@ -79,7 +80,8 @@ public sealed class OpticonSourceReleaseClient
             source.Sha256.ToLowerInvariant(), source.SdkVersion, source.RuntimeVersion,
             source.SourceManifestSha256.ToLowerInvariant(), source.SourceManifestKeyId,
             source.SigningProfile, source.ProductSignerThumbprint, source.TargetRuntimes,
-            download, SourceInstallProtocol);
+            download, SourceInstallProtocol,
+            ClientInstallValidationPolicy.Normalize(source.ClientInstallValidation));
     }
 
     private static Uri RequireCloudFrontDownload(ArtifactRecordDto artifact, string version)

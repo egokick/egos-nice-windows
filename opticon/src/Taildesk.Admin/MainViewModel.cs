@@ -8,6 +8,25 @@ using Taildesk.Shared;
 
 namespace Taildesk.Admin;
 
+public sealed class ClientValidationOption : INotifyPropertyChanged
+{
+    private bool _enabled = true;
+    public required ClientInstallValidationStep Step { get; init; }
+    public required string Name { get; init; }
+    public required string Description { get; init; }
+    public bool Enabled
+    {
+        get => _enabled;
+        set
+        {
+            if (_enabled == value) return;
+            _enabled = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Enabled)));
+        }
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
 public sealed class MainViewModel : INotifyPropertyChanged
 {
     private readonly AdminState _state;
@@ -34,6 +53,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _releaseDeploymentStatus = "Read the live invite release state to prepare a deployment.";
     private ReleaseDeploymentPreflight? _releasePreflight;
     private bool _releaseDeploymentCanResume;
+    private bool _disableAllClientValidation;
     private readonly SemaphoreSlim _checksGate = new(1, 1);
 
     public MainViewModel(AdminState state, HeadscaleApiClient headscale, AgentClient agents, TransferManager transfers,
@@ -49,7 +69,28 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Transfers = transfers.Items;
         ScheduledTransfers = scheduledTransfers.Schedules;
         ScheduledTransferHistory = scheduledTransfers.History;
+        ClientValidationOptions =
+        [
+            Validation(ClientInstallValidationStep.InvitationAuthenticity, "Invitation signature", "Verify the signed invitation envelope."),
+            Validation(ClientInstallValidationStep.InvitationConstraints, "Invitation constraints", "Enforce schema, expiry, release pins, runtime, and architecture."),
+            Validation(ClientInstallValidationStep.ProtectedPaths, "Protected paths and ACLs", "Require canonical owners, ACLs, and non-reparse handoff paths."),
+            Validation(ClientInstallValidationStep.DownloadIntegrity, "Download integrity", "Enforce declared sizes, hashes, encoding, and download origin."),
+            Validation(ClientInstallValidationStep.SourceArchiveAuthenticity, "Source archive manifest", "Verify the signed source allowlist and every archived file."),
+            Validation(ClientInstallValidationStep.LauncherBinding, "Launcher binding", "Require the running launcher to match the source archive."),
+            Validation(ClientInstallValidationStep.SourceBuildProvenance, "Source-build provenance", "Verify build attestation, payload hashes, and machine provenance storage."),
+            Validation(ClientInstallValidationStep.SetupPreflight, "Setup preflight", "Block unsupported Windows, profile, disk, and reboot states."),
+            Validation(ClientInstallValidationStep.MachineState, "Existing machine state", "Validate protected journals, resume state, and installed configuration."),
+            Validation(ClientInstallValidationStep.PayloadAuthenticity, "Opticon payload signatures", "Verify locally built Setup, Agent, Guardian, UI, and CLI payloads."),
+            Validation(ClientInstallValidationStep.DependencyIntegrity, "Dependency integrity", "Verify downloaded Tailscale, RustDesk, and SDK versions and hashes."),
+            Validation(ClientInstallValidationStep.ComponentPostconditions, "Component postconditions", "Verify services, tasks, listeners, files, and installed versions after repair."),
+            Validation(ClientInstallValidationStep.NetworkIdentity, "Network identity", "Verify the joined tailnet, node identity, role, tags, and address."),
+            Validation(ClientInstallValidationStep.FirewallPolicy, "Firewall policy", "Assert the exact Opticon firewall isolation rules."),
+            Validation(ClientInstallValidationStep.EnrollmentConfirmation, "Enrollment confirmation", "Wait for and verify the Command Center enrollment receipt.")
+        ];
     }
+
+    private static ClientValidationOption Validation(ClientInstallValidationStep step, string name, string description) =>
+        new() { Step = step, Name = name, Description = description };
 
     public ObservableCollection<DeviceRecord> Devices { get; } = [];
     public ObservableCollection<InviteRecord> Invites { get; } = [];
@@ -65,6 +106,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<string> UpdateProgressLines { get; } = [];
     public ObservableCollection<SystemCheckResult> SystemChecks { get; } = [];
     public ObservableCollection<DeployedReleaseArtifactRow> DeployedReleaseArtifacts { get; } = [];
+    public ObservableCollection<ClientValidationOption> ClientValidationOptions { get; }
     public AdminConfig Config => _state.Config;
     public bool IsPrimary => Config.Mode == AdminMode.Primary;
     public string OpticonVersion { get; } = UpdatePackageVerifier.NormalizeVersion(
@@ -78,6 +120,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string ChecksLastRun { get => _checksLastRun; private set { _checksLastRun = value; Changed(); } }
     public string DeployedReleaseVersion { get => _deployedReleaseVersion; private set { _deployedReleaseVersion = value; Changed(); } }
     public string ReleaseDeploymentStatus { get => _releaseDeploymentStatus; private set { _releaseDeploymentStatus = value; Changed(); } }
+    public bool DisableAllClientValidation
+    {
+        get => _disableAllClientValidation;
+        set
+        {
+            if (_disableAllClientValidation == value) return;
+            _disableAllClientValidation = value;
+            Changed();
+        }
+    }
+    public ClientInstallValidationPolicy SelectedClientValidationPolicy => new()
+    {
+        DisableAll = DisableAllClientValidation,
+        DisabledSteps = ClientValidationOptions.Where(option => !option.Enabled)
+            .Select(option => option.Step.ToString()).ToArray()
+    };
     public bool ReleaseDeploymentBusy
     {
         get => _releaseDeploymentBusy;
@@ -90,13 +148,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
     public bool CanDeployRelease => IsPrimary && !ReleaseDeploymentBusy
-        && _releasePreflight is { AlreadyDeployed: false, TargetIsOlder: false }
+        && _releasePreflight is { TargetIsOlder: false }
         && (!_releasePreflight.DeploymentBlocked || _releaseDeploymentCanResume);
     public bool CanResumeReleaseDeployment => _releaseDeploymentCanResume;
     public string DeployReleaseButtonText => ReleaseDeploymentBusy
         ? "Deploying source release…"
         : _releasePreflight?.AlreadyDeployed == true
-            ? $"Deployed version {_releasePreflight.DeployedVersion} already matches this Command Center"
+            ? $"Redeploy {OpticonVersion} with selected install policy"
             : _releasePreflight?.DeploymentBlocked == true && _releaseDeploymentCanResume
                 ? $"Resume deployment {OpticonVersion} for invitations"
                 : _releasePreflight?.DeploymentBlocked == true
@@ -750,7 +808,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         try
         {
             Status = "Reading the live Opticon invite release…";
-            var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
+            var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy: false, cancellationToken);
             ApplyReleasePreflight(preflight);
             if (preflight.AlreadyDeployed)
             {
@@ -795,17 +853,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         try
         {
             Status = "Preparing the invite release deployment…";
-            var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
+            var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy: true, cancellationToken);
+            preflight.OperatorValidationPolicy = SelectedClientValidationPolicy;
             ApplyReleasePreflight(preflight);
-            if (preflight.AlreadyDeployed)
-            {
-                var recovery = _releaseDeployment.TryGetLeaseRecovery(OpticonVersion);
-                if (recovery is not null)
-                    await _releaseDeployment.FinalizeLeaseAsync(OpticonVersion, recovery, cancellationToken);
-                await _releaseDeployment.ClearLeaseRecoveryAsync(cancellationToken);
-                _releaseDeploymentCanResume = false;
-                return preflight;
-            }
             if (preflight.TargetIsOlder)
                 throw new InvalidOperationException(
                     $"The deployed invite release {preflight.DeployedVersion} is newer than this Command Center ({OpticonVersion}). A downgrade is refused.");
@@ -847,20 +897,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var manifestCommitted = false;
         try
         {
+            var validationPolicy = ClientInstallValidationPolicy.Normalize(confirmedPlan.OperatorValidationPolicy);
+            var forceRedeploy = confirmedPlan.ForceRedeploy;
             // The UI has already completed its read-only plan and Yes/No
             // decision. Repeat readiness immediately before acquiring the
             // lease so revoked invitations are never the first evidence of a
             // missing signer, AWS identity, git sync, or gateway credential.
             var prerequisites = await _releaseDeployment.ResolvePublisherPrerequisitesAsync(OpticonVersion, cancellationToken);
-            await _releaseDeployment.VerifyPublisherReadinessAsync(OpticonVersion, prerequisites, cancellationToken);
+            await _releaseDeployment.VerifyPublisherReadinessAsync(
+                OpticonVersion, prerequisites, validationPolicy, forceRedeploy, cancellationToken);
 
-            var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
+            var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy, cancellationToken);
+            preflight.OperatorValidationPolicy = validationPolicy;
             ApplyReleasePreflight(preflight);
-            if (preflight.AlreadyDeployed)
-            {
-                Status = $"Invite release {preflight.DeployedVersion} already matches this Command Center";
-                return;
-            }
             if (preflight.TargetIsOlder)
                 throw new InvalidOperationException("The live invite release is newer than this Command Center. A downgrade is refused.");
 
@@ -872,6 +921,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (resuming)
             {
                 lease = recovery!;
+                validationPolicy = ClientInstallValidationPolicy.Normalize(lease.ValidationPolicy);
+                forceRedeploy = lease.ForceRedeploy;
+                preflight.OperatorValidationPolicy = validationPolicy;
                 Status = "Resuming the confirmed Opticon release deployment…";
             }
             else
@@ -886,15 +938,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // live manifest and invitations untouched. Never acquire the
                 // cancellation lease until the immutable archive is verified.
                 var stageProgress = new Progress<string>(message => Status = message);
-                await _releaseDeployment.StageAsync(OpticonVersion, prerequisites, stageProgress, cancellationToken);
+                await _releaseDeployment.StageAsync(OpticonVersion,
+                    prerequisites, validationPolicy, forceRedeploy, stageProgress, cancellationToken);
 
-                preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
+                preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy, cancellationToken);
+                preflight.OperatorValidationPolicy = validationPolicy;
                 ApplyReleasePreflight(preflight);
-                if (preflight.AlreadyDeployed)
-                {
-                    Status = $"Invite release {preflight.DeployedVersion} already matches this Command Center";
-                    return;
-                }
                 if (preflight.TargetIsOlder)
                     throw new InvalidOperationException("The live invite release is newer than this Command Center. A downgrade is refused.");
                 if (preflight.DeploymentBlocked
@@ -921,7 +970,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 await MarkLocallyRemovedInvitationsAsync(cancellation.RemovedInviteIds, cancellationToken);
                 cancellationCompleted = cancellation.RemovedInviteIds.Count != 0;
 
-                preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
+                preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy, cancellationToken);
+                preflight.OperatorValidationPolicy = validationPolicy;
                 ApplyReleasePreflight(preflight);
                 if (preflight.RequiresInvitationRemoval)
                     throw new InvalidOperationException(
@@ -929,8 +979,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
 
             var progress = new Progress<string>(message => Status = message);
-            await _releaseDeployment.PublishAsync(OpticonVersion, prerequisites, lease, progress, cancellationToken);
-            var verified = await _releaseDeployment.PrepareAsync(OpticonVersion, cancellationToken);
+            await _releaseDeployment.PublishAsync(OpticonVersion,
+                prerequisites, lease, validationPolicy, forceRedeploy, progress, cancellationToken);
+            var verified = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy: false, cancellationToken);
             ApplyReleasePreflight(verified);
             if (!verified.AlreadyDeployed)
                 throw new InvalidOperationException(

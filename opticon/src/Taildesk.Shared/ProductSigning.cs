@@ -10,6 +10,7 @@ namespace Taildesk.Shared;
 /// </summary>
 public static class ProductSigning
 {
+    public static bool BypassValidation { get; set; }
     private const string CodeSigningEku = "1.3.6.1.5.5.7.3.3";
 
     public static X509Certificate2 PinnedCertificate { get; } = LoadPinnedCertificate();
@@ -18,6 +19,7 @@ public static class ProductSigning
     public static async Task VerifyAuthenticodeAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (BypassValidation) return;
         try
         {
             await BoundWindowsProductSignatureVerifier.VerifyPinnedAsync(

@@ -286,4 +286,5 @@ public sealed class ArtifactRecordDto
     public string LegacyMigrationSignerThumbprint { get; set; } = string.Empty;
     public string TargetRuntime { get; set; } = string.Empty;
     public List<string> TargetRuntimes { get; set; } = [];
+    public ClientInstallValidationPolicy ClientInstallValidation { get; set; } = new();
 }

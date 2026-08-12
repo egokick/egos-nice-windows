@@ -9,6 +9,9 @@ param(
     # SourceOnly is the v2 release path: it produces exactly one signed source
     # archive and deliberately emits no standalone bundle/bootstrap artifact.
     [switch]$SourceOnly,
+    # Explicitly authorize replacement of the local record for this semantic
+    # version. The publisher and gateway independently require the same flag.
+    [switch]$ForceRedeploy,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$SourceReleaseCertificateThumbprint,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$ProductCertificateThumbprint,
     [ValidatePattern('^$|^[A-Fa-f0-9]{40}$')][string]$LegacyMigrationSignerThumbprint = '',
@@ -1175,7 +1178,7 @@ $sourceRecord = [pscustomobject][ordered]@{
 }
 $existingSources = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonSource' -and $_.version -eq $Version })
 if ($existingSources.Count -gt 1) { throw "The outer manifest declares source release $Version more than once." }
-if ($existingSources.Count -eq 1 -and (([long]$existingSources[0].size -ne [long]$sourceRecord.size) -or
+if (-not $ForceRedeploy -and $existingSources.Count -eq 1 -and (([long]$existingSources[0].size -ne [long]$sourceRecord.size) -or
     -not ([string]$existingSources[0].sha256).Equals([string]$sourceRecord.sha256, [StringComparison]::OrdinalIgnoreCase) -or
     -not ([string]$existingSources[0].sourceManifestSha256).Equals($sourceManifestHash, [StringComparison]::OrdinalIgnoreCase))) {
     Remove-Item -LiteralPath $sourceTemporary -Force

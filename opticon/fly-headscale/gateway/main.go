@@ -512,12 +512,14 @@ type hostedInvite struct {
 // manifest and hosted invitation records; a client never supplies either.
 type releasePreflightRequest struct {
 	TargetVersion string `json:"targetVersion"`
+	ForceRedeploy bool   `json:"forceRedeploy,omitempty"`
 }
 
 type releaseAcquireRequest struct {
 	TargetVersion      string `json:"targetVersion"`
 	DeploymentRevision string `json:"deploymentRevision"`
 	LeaseToken         string `json:"leaseToken"`
+	ForceRedeploy      bool   `json:"forceRedeploy,omitempty"`
 }
 
 type releaseCancellationRequest struct {
@@ -561,6 +563,7 @@ type releasePreflightResponse struct {
 	TargetVersion           string    `json:"targetVersion"`
 	DeployedVersion         string    `json:"deployedVersion"`
 	AlreadyDeployed         bool      `json:"alreadyDeployed"`
+	ForceRedeploy           bool      `json:"forceRedeploy,omitempty"`
 	TargetIsOlder           bool      `json:"targetIsOlder"`
 	DeploymentBlocked       bool      `json:"deploymentBlocked"`
 	DeploymentBlockedReason string    `json:"deploymentBlockedReason,omitempty"`
@@ -611,6 +614,7 @@ type releaseLease struct {
 	CancellationStarted  bool                 `json:"cancellationStarted"`
 	CancellationComplete bool                 `json:"cancellationComplete"`
 	RemovedInviteIDs     []string             `json:"removedInviteIds"`
+	ForceRedeploy        bool                 `json:"forceRedeploy,omitempty"`
 }
 
 type releaseLeaseInvite struct {
@@ -624,27 +628,33 @@ type artifactManifest struct {
 }
 
 type bundleArtifact struct {
-	Product                         string   `json:"product"`
-	Version                         string   `json:"version"`
-	Role                            string   `json:"role,omitempty"`
-	Architecture                    string   `json:"architecture"`
-	File                            string   `json:"file"`
-	Size                            int64    `json:"size"`
-	SHA256                          string   `json:"sha256"`
-	SignerThumbprint                string   `json:"signerThumbprint,omitempty"`
-	DownloadURL                     string   `json:"downloadUrl,omitempty"`
-	SDKVersion                      string   `json:"sdkVersion,omitempty"`
-	RuntimeVersion                  string   `json:"runtimeVersion,omitempty"`
-	SourceManifestSHA256            string   `json:"sourceManifestSha256,omitempty"`
-	SourceManifestKeyID             string   `json:"sourceManifestKeyId,omitempty"`
-	SourceLauncherFile              string   `json:"sourceLauncherFile,omitempty"`
-	SourceLauncherSize              int64    `json:"sourceLauncherSize,omitempty"`
-	SourceLauncherSHA256            string   `json:"sourceLauncherSha256,omitempty"`
-	SigningProfile                  string   `json:"signingProfile,omitempty"`
-	ProductSigner                   string   `json:"productSignerThumbprint,omitempty"`
-	LegacyMigrationSignerThumbprint string   `json:"legacyMigrationSignerThumbprint,omitempty"`
-	TargetRuntime                   string   `json:"targetRuntime,omitempty"`
-	TargetRuntimes                  []string `json:"targetRuntimes,omitempty"`
+	Product                         string                        `json:"product"`
+	Version                         string                        `json:"version"`
+	Role                            string                        `json:"role,omitempty"`
+	Architecture                    string                        `json:"architecture"`
+	File                            string                        `json:"file"`
+	Size                            int64                         `json:"size"`
+	SHA256                          string                        `json:"sha256"`
+	SignerThumbprint                string                        `json:"signerThumbprint,omitempty"`
+	DownloadURL                     string                        `json:"downloadUrl,omitempty"`
+	SDKVersion                      string                        `json:"sdkVersion,omitempty"`
+	RuntimeVersion                  string                        `json:"runtimeVersion,omitempty"`
+	SourceManifestSHA256            string                        `json:"sourceManifestSha256,omitempty"`
+	SourceManifestKeyID             string                        `json:"sourceManifestKeyId,omitempty"`
+	SourceLauncherFile              string                        `json:"sourceLauncherFile,omitempty"`
+	SourceLauncherSize              int64                         `json:"sourceLauncherSize,omitempty"`
+	SourceLauncherSHA256            string                        `json:"sourceLauncherSha256,omitempty"`
+	SigningProfile                  string                        `json:"signingProfile,omitempty"`
+	ProductSigner                   string                        `json:"productSignerThumbprint,omitempty"`
+	LegacyMigrationSignerThumbprint string                        `json:"legacyMigrationSignerThumbprint,omitempty"`
+	TargetRuntime                   string                        `json:"targetRuntime,omitempty"`
+	TargetRuntimes                  []string                      `json:"targetRuntimes,omitempty"`
+	ClientInstallValidation         clientInstallValidationPolicy `json:"clientInstallValidation,omitempty"`
+}
+
+type clientInstallValidationPolicy struct {
+	DisableAll    bool     `json:"disableAll,omitempty"`
+	DisabledSteps []string `json:"disabledSteps,omitempty"`
 }
 
 func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request) {
@@ -886,13 +896,20 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "manifest release is incomplete", http.StatusBadRequest)
 		return
 	}
+	// The lease records whether the operator explicitly requested a same-version
+	// emergency replacement. Ordinary deployments retain immutable versions.
+	lease, err := g.requireManifestLeaseLocked(r.Header.Get("X-Opticon-Release-Lease"), nextVersion, g.currentTime())
+	if err != nil {
+		http.Error(w, "release deployment lease is unavailable or does not match this manifest", http.StatusConflict)
+		return
+	}
 	if currentOK {
 		comparison, valid := compareSemanticVersions(nextVersion, currentVersion)
 		if !valid || comparison < 0 {
 			http.Error(w, "release downgrade refused", http.StatusConflict)
 			return
 		}
-		if comparison == 0 && !sameReleaseArtifacts(current, next, currentVersion) {
+		if comparison == 0 && !sameReleaseArtifacts(current, next, currentVersion) && (lease == nil || !lease.ForceRedeploy) {
 			http.Error(w, "release version is immutable", http.StatusConflict)
 			return
 		}
@@ -904,11 +921,6 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 	// A live release lease spans cancellation through this atomic manifest
 	// commit. It stops a concurrent invite write from making the just-reviewed
 	// snapshot stale during a long source build and upload.
-	lease, err := g.requireManifestLeaseLocked(r.Header.Get("X-Opticon-Release-Lease"), nextVersion, g.currentTime())
-	if err != nil {
-		http.Error(w, "release deployment lease is unavailable or does not match this manifest", http.StatusConflict)
-		return
-	}
 	if err := g.requireActiveInviteArtifacts(next, g.currentTime()); err != nil {
 		http.Error(w, "manifest would break an active invitation", http.StatusConflict)
 		return
@@ -951,7 +963,7 @@ func (g *gateway) releasePreflight(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid release preflight", http.StatusBadRequest)
 		return
 	}
-	preflight, err := g.buildReleasePreflight(request.TargetVersion, g.currentTime())
+	preflight, err := g.buildReleasePreflight(request.TargetVersion, g.currentTime(), request.ForceRedeploy)
 	if err != nil {
 		http.Error(w, "release preflight unavailable", http.StatusServiceUnavailable)
 		return
@@ -995,7 +1007,7 @@ func (g *gateway) releaseAcquire(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lease, err := g.acquireReleaseLease(request.TargetVersion, strings.ToLower(request.DeploymentRevision), request.LeaseToken, g.currentTime())
+	lease, err := g.acquireReleaseLease(request.TargetVersion, strings.ToLower(request.DeploymentRevision), request.LeaseToken, g.currentTime(), request.ForceRedeploy)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -1128,7 +1140,8 @@ func validStableReleaseVersion(value string) bool {
 	return valid && parsed.core[0] != "0" && !strings.ContainsAny(value, "-+")
 }
 
-func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time) (releasePreflightResponse, error) {
+func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time, forceOptions ...bool) (releasePreflightResponse, error) {
+	forceRedeploy := len(forceOptions) != 0 && forceOptions[0]
 	if !validStableReleaseVersion(targetVersion) {
 		return releasePreflightResponse{}, errors.New("target release version is invalid")
 	}
@@ -1144,7 +1157,7 @@ func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time) (re
 	if !valid {
 		return releasePreflightResponse{}, errors.New("release version comparison failed")
 	}
-	alreadyDeployed := comparison == 0 && completeCloudFrontRelease(manifest, targetVersion)
+	alreadyDeployed := !forceRedeploy && comparison == 0 && completeCloudFrontRelease(manifest, targetVersion)
 	targetIsOlder := comparison < 0
 	active, err := g.activeReleaseInvites(now)
 	if err != nil {
@@ -1156,6 +1169,7 @@ func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time) (re
 		TargetVersion:             targetVersion,
 		DeployedVersion:           deployedVersion,
 		AlreadyDeployed:           alreadyDeployed,
+		ForceRedeploy:             forceRedeploy,
 		TargetIsOlder:             targetIsOlder,
 		DeploymentRevision:        releaseInvitationRevision(targetVersion, active),
 		RequiresInvitationRemoval: requiresRemoval,
@@ -1381,7 +1395,8 @@ func (g *gateway) removeReleaseLeaseLocked() error {
 	return nil
 }
 
-func (g *gateway) acquireReleaseLease(targetVersion, revision, token string, now time.Time) (releaseLease, error) {
+func (g *gateway) acquireReleaseLease(targetVersion, revision, token string, now time.Time, forceOptions ...bool) (releaseLease, error) {
+	forceRedeploy := len(forceOptions) != 0 && forceOptions[0]
 	g.releaseMu.Lock()
 	defer g.releaseMu.Unlock()
 	if existing, err := g.readReleaseLeaseLocked(now); err != nil {
@@ -1391,13 +1406,14 @@ func (g *gateway) acquireReleaseLease(targetVersion, revision, token string, now
 		// acquire response is lost, the exact same request can safely recover
 		// the durable transaction without ever storing the raw token server-side.
 		if existing.TargetVersion == targetVersion && existing.DeploymentRevision == revision &&
+			existing.ForceRedeploy == forceRedeploy &&
 			hmac.Equal([]byte(existing.TokenSHA256), []byte(releaseLeaseTokenHash(token))) {
 			return *existing, nil
 		}
 		return releaseLease{}, fmt.Errorf("%w: an Opticon release deployment remains active until %s", errReleaseLeaseConflict, existing.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 
-	preflight, err := g.buildReleasePreflight(targetVersion, now)
+	preflight, err := g.buildReleasePreflight(targetVersion, now, forceRedeploy)
 	if err != nil {
 		return releaseLease{}, err
 	}
@@ -1430,6 +1446,7 @@ func (g *gateway) acquireReleaseLease(targetVersion, revision, token string, now
 		Invitations:          items,
 		CancellationComplete: len(items) == 0,
 		RemovedInviteIDs:     []string{},
+		ForceRedeploy:        forceRedeploy,
 	}
 	if err := g.writeReleaseLeaseLocked(lease); err != nil {
 		return releaseLease{}, err
@@ -1834,7 +1851,8 @@ func validSourceArtifact(artifact bundleArtifact) bool {
 	if artifact.Product != "OpticonSource" || artifact.Architecture != "source" || artifact.Size <= 0 ||
 		!safeSourceFilePattern.MatchString(artifact.File) || !inviteHashPattern.MatchString(strings.ToLower(artifact.SHA256)) ||
 		artifact.SDKVersion != pinnedSDKVersion || artifact.RuntimeVersion != pinnedRuntimeVersion || !supportedTargetRuntimes(artifact.TargetRuntimes) ||
-		!inviteHashPattern.MatchString(strings.ToLower(artifact.SourceManifestSHA256)) || !validProductionArtifactTrust(artifact) {
+		!inviteHashPattern.MatchString(strings.ToLower(artifact.SourceManifestSHA256)) || !validProductionArtifactTrust(artifact) ||
+		!validClientInstallValidationPolicy(artifact.ClientInstallValidation) {
 		return false
 	}
 	version, valid := parseSemanticVersion(artifact.Version)
@@ -1843,6 +1861,24 @@ func validSourceArtifact(artifact bundleArtifact) bool {
 	}
 	comparison, _ := compareSemanticVersions(artifact.Version, "1.2.1")
 	return comparison < 0 || validSourceLauncherMetadata(artifact)
+}
+
+func validClientInstallValidationPolicy(policy clientInstallValidationPolicy) bool {
+	known := map[string]bool{
+		"InvitationAuthenticity": true, "InvitationConstraints": true, "ProtectedPaths": true,
+		"DownloadIntegrity": true, "SourceArchiveAuthenticity": true, "LauncherBinding": true,
+		"SourceBuildProvenance": true, "SetupPreflight": true, "MachineState": true,
+		"PayloadAuthenticity": true, "DependencyIntegrity": true, "ComponentPostconditions": true,
+		"NetworkIdentity": true, "FirewallPolicy": true, "EnrollmentConfirmation": true,
+	}
+	seen := make(map[string]bool, len(policy.DisabledSteps))
+	for _, step := range policy.DisabledSteps {
+		if !known[step] || seen[step] {
+			return false
+		}
+		seen[step] = true
+	}
+	return true
 }
 
 func validSourceLauncherMetadata(artifact bundleArtifact) bool {

@@ -614,10 +614,13 @@ function Assert-ValidPublisher {
     }
     $actualText = (($signature.SignerCertificate.Thumbprint.ToUpperInvariant().ToCharArray() |
         Where-Object { [Uri]::IsHexDigit($_) }) -join '')
-    $actual = [Convert]::FromHexString($actualText)
-    $expected = [Convert]::FromHexString($ExpectedSignerThumbprint.ToUpperInvariant())
-    if ($actual.Length -ne $expected.Length -or
-        -not [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($actual,$expected)) {
+    # This installer intentionally runs in inbox Windows PowerShell 5.1.
+    # Convert.FromHexString and CryptographicOperations are modern .NET APIs
+    # that are not available in that host. Certificate thumbprints are public
+    # identifiers, so an ordinal normalized string comparison is appropriate.
+    if (-not $actualText.Equals(
+            $ExpectedSignerThumbprint.ToUpperInvariant(),
+            [StringComparison]::Ordinal)) {
         throw "Unexpected publisher certificate on $([IO.Path]::GetFileName($Path))."
     }
     $codeSigningOid = '1.3.6.1.5.5.7.3.3'

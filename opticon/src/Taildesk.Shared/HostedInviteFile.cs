@@ -41,6 +41,32 @@ public static class HostedInviteFile
                ?? throw new InvalidDataException("The hosted invitation payload is empty.");
     }
 
+    public static InvitePayload ReadWithEmbeddedValidationPolicy(ReadOnlySpan<byte> envelopeBytes)
+    {
+        var envelope = JsonSerializer.Deserialize<SignedInviteEnvelope>(envelopeBytes, JsonDefaults.Options)
+                       ?? throw new InvalidDataException("The hosted invitation envelope is empty.");
+        if (envelope.SchemaVersion != 1)
+            throw new InvalidDataException("The hosted invitation envelope version is unsupported.");
+        byte[] payloadBytes;
+        byte[] signature;
+        try
+        {
+            payloadBytes = Convert.FromBase64String(envelope.Payload);
+            signature = Convert.FromBase64String(envelope.Signature);
+        }
+        catch (FormatException exception)
+        {
+            throw new InvalidDataException("The hosted invitation envelope is malformed.", exception);
+        }
+        var payload = JsonSerializer.Deserialize<InvitePayload>(payloadBytes, JsonDefaults.Options)
+                      ?? throw new InvalidDataException("The hosted invitation payload is empty.");
+        payload.ClientInstallValidation = ClientInstallValidationPolicy.Normalize(payload.ClientInstallValidation);
+        if (payload.ClientInstallValidation.IsEnabled(ClientInstallValidationStep.InvitationAuthenticity)
+            && !InvitationSigning.Verify(payloadBytes, signature))
+            throw new InvalidDataException("The hosted invitation signature is invalid.");
+        return payload;
+    }
+
     public static byte[] Encrypt(string fragmentKey, ReadOnlySpan<byte> plaintext)
     {
         if (string.IsNullOrWhiteSpace(fragmentKey)) throw new ArgumentException("An invitation fragment key is required.", nameof(fragmentKey));

@@ -12,6 +12,8 @@ param(
     [ValidatePattern('^$|^[A-Fa-f0-9]{40}$')][string]$LegacyMigrationSignerThumbprint = '',
     [Parameter(Mandatory)][string]$Rfc3161TimestampUrl,
     [Parameter(Mandatory)][string]$SignToolPath,
+    [string]$ClientInstallValidationBase64 = '',
+    [switch]$ForceRedeploy,
     [ValidatePattern('^[A-Za-z0-9_.-]{1,64}$')][string]$AwsProfile = 'default',
     # Publish exactly one signed source archive and a schema-2 source-only
     # manifest. No executable bundle/bootstrap object is uploaded to S3.
@@ -45,6 +47,27 @@ $invitationSigningThumbprint = 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53'
 $legacyMigrationBridgeVersion = '1.1.41'
 $SourceReleaseCertificateThumbprint = $SourceReleaseCertificateThumbprint.ToUpperInvariant()
 $ProductCertificateThumbprint = $ProductCertificateThumbprint.ToUpperInvariant()
+$knownClientValidationSteps = @(
+    'InvitationAuthenticity','InvitationConstraints','ProtectedPaths','DownloadIntegrity',
+    'SourceArchiveAuthenticity','LauncherBinding','SourceBuildProvenance','SetupPreflight',
+    'MachineState','PayloadAuthenticity','DependencyIntegrity','ComponentPostconditions',
+    'NetworkIdentity','FirewallPolicy','EnrollmentConfirmation')
+try {
+    $clientInstallValidation = if ([string]::IsNullOrWhiteSpace($ClientInstallValidationBase64)) {
+        [pscustomobject]@{ disableAll = $false; disabledSteps = @() }
+    } else {
+        [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ClientInstallValidationBase64)) | ConvertFrom-Json
+    }
+} catch { throw 'The client installation validation policy is malformed.' }
+$disabledValidationSteps = @($clientInstallValidation.disabledSteps)
+if ($disabledValidationSteps.Count -ne @($disabledValidationSteps | Sort-Object -Unique).Count -or
+    @($disabledValidationSteps | Where-Object { [string]$_ -notin $knownClientValidationSteps }).Count -ne 0) {
+    throw 'The client installation validation policy contains an unknown or duplicate step.'
+}
+$clientInstallValidation = [ordered]@{
+    disableAll = [bool]$clientInstallValidation.disableAll
+    disabledSteps = @($disabledValidationSteps | Sort-Object)
+}
 $LegacyMigrationSignerThumbprint = $LegacyMigrationSignerThumbprint.ToUpperInvariant()
 $isLegacyMigration = -not [string]::IsNullOrWhiteSpace($LegacyMigrationSignerThumbprint)
 if ($SourceReleaseCertificateThumbprint -eq $invitationSigningThumbprint -or
@@ -1401,7 +1424,7 @@ $recoveredStageLocal = $null
 $recoveredManifestBytes = $null
 $archiveStage = $null
 $stageId = ''
-if ($StageOnly -or $CommitStaged) {
+if (($StageOnly -or $CommitStaged) -and -not $ForceRedeploy) {
     # The canonical archive is the authority once it exists: its immutable S3
     # metadata selects one immutable receipt object.  This avoids a mutable
     # per-version journal and prevents two concurrent publishers from pairing
@@ -1438,6 +1461,15 @@ if ($StageOnly -or $CommitStaged) {
         # pre-upload journal is therefore safely discardable; StageOnly will
         # build a new stage and create a new unique receipt object.
     }
+} elseif ($ForceRedeploy -and $CommitStaged) {
+    $recoveredStageLocal = Read-LocalSourceStageReceipt -ReleaseVersion $version
+    if ($null -eq $recoveredStageLocal -or $recoveredStageLocal.IsLegacy) {
+        throw "The forced same-version deployment has no current local stage receipt for $version. Run -StageOnly first."
+    }
+    $recoveredStage = $recoveredStageLocal
+    $recoveredManifestBytes = $recoveredStage.ManifestBytes
+    $stageId = $recoveredStage.StageId
+    $SkipBuild = $true
 }
 if ($SkipBuild -and [string]::IsNullOrWhiteSpace($Version)) { throw "-SkipBuild requires an explicit -Version so an existing build is never misidentified." }
 if (-not $SkipBuild) {
@@ -1457,6 +1489,9 @@ if (-not $SkipBuild) {
     }
     if ($SourceOnly) {
         $buildArguments.SourceOnly = $true
+    }
+    if ($ForceRedeploy) {
+        $buildArguments.ForceRedeploy = $true
     }
     & (Join-Path $PSScriptRoot "Build-OpticonBundles.ps1") @buildArguments
 }
@@ -1480,6 +1515,7 @@ if ($SourceOnly) {
     if ($unexpected.Count -ne 0 -or $sources.Count -ne 1 -or [string]$sources[0].version -cne $version) {
         throw "A source-only publication must contain exactly one current OpticonSource archive for $version."
     }
+    $sources[0] | Add-Member -NotePropertyName clientInstallValidation -NotePropertyValue $clientInstallValidation -Force
     $key = "opticon/releases/$version/$([string]$sources[0].file)"
     $expectedUrl = "https://$($output.DistributionDomainName)/$key"
     if ($null -ne $recoveredStage) {
@@ -1593,7 +1629,20 @@ try {
             $objectExists = $existingHeadResult.ExitCode -eq 0
         } finally { $ErrorActionPreference = $savedPreference }
         if ($objectExists) {
-            $head = $existingHeadJson | ConvertFrom-Json
+            if ($ForceRedeploy -and $StageOnly -and $isStagedSourceArchive) {
+                $putResult = Invoke-AwsCli -Arguments @('s3api', 'put-object', '--bucket', $bucket, '--key', $key,
+                    '--body', $path, '--content-type', $contentType, '--cache-control', 'no-cache',
+                    '--server-side-encryption', 'AES256', '--checksum-algorithm', 'SHA256', '--metadata', $objectMetadata,
+                    '--output', 'json')
+                if ($putResult.ExitCode -ne 0) { throw "Forced S3 replacement failed: $($putResult.Error.Trim())" }
+                $headResult = Invoke-AwsCli -Arguments @('s3api', 'head-object', '--bucket', $bucket,
+                    '--key', $key, '--checksum-mode', 'ENABLED', '--output', 'json')
+                if ($headResult.ExitCode -ne 0) { throw "Forced S3 replacement verification failed: $($headResult.Error.Trim())" }
+                $head = $headResult.Output | ConvertFrom-Json
+                $objectExists = $false
+            } else {
+                $head = $existingHeadJson | ConvertFrom-Json
+            }
         } else {
             if ($CommitStaged) {
                 throw "The staged immutable release object is missing from S3: s3://$bucket/$key. Commit refuses to upload or rebuild; run -StageOnly again."
@@ -1627,7 +1676,9 @@ try {
         if ($head.ContentLength -ne $info.Length -or
             -not (Get-S3ObjectMetadataValue -Object $head -Name 'sha256').Equals($hash, [StringComparison]::OrdinalIgnoreCase) -or
             (-not $directChecksum -and -not $migratedCompositeChecksum) -or
-            $head.ContentType -ne $contentType -or $head.CacheControl -ne "public, max-age=31536000, immutable" -or
+            $head.ContentType -ne $contentType -or
+            ($head.CacheControl -ne "public, max-age=31536000, immutable" -and
+             -not ($ForceRedeploy -and [string]$head.CacheControl -eq 'no-cache')) -or
             $head.ServerSideEncryption -ne "AES256") {
             if ($objectExists) { throw "Refusing to overwrite immutable release object s3://$bucket/$key because it does not match the local release." }
             throw "S3 verification failed for $key."
@@ -1635,6 +1686,18 @@ try {
         $url = "https://$($output.DistributionDomainName)/$key"
         if ([string]$artifact.downloadUrl -cne $url) {
             throw "The release manifest download URL was not the canonical immutable URL for $($artifact.file)."
+        }
+        if ($ForceRedeploy -and $StageOnly) {
+            if ([string]$output.DistributionId -notmatch '^[A-Z0-9]+$') {
+                throw 'CloudFormation outputs do not expose the CloudFront distribution ID required for a forced replacement.'
+            }
+            $invalidation = Invoke-AwsCli -Arguments @('cloudfront', 'create-invalidation',
+                '--distribution-id', [string]$output.DistributionId, '--paths', "/$key", '--output', 'json')
+            if ($invalidation.ExitCode -ne 0) { throw "CloudFront invalidation failed: $($invalidation.Error.Trim())" }
+            $invalidationId = [string](($invalidation.Output | ConvertFrom-Json).Invalidation.Id)
+            $wait = Invoke-AwsCli -Arguments @('cloudfront', 'wait', 'invalidation-completed',
+                '--distribution-id', [string]$output.DistributionId, '--id', $invalidationId)
+            if ($wait.ExitCode -ne 0) { throw "CloudFront invalidation did not complete: $($wait.Error.Trim())" }
         }
         $deadline = [DateTime]::UtcNow.AddMinutes(12)
         do {

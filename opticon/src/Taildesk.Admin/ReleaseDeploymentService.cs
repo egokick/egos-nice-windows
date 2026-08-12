@@ -20,6 +20,7 @@ public sealed class ReleaseDeploymentPreflight
     public string TargetVersion { get; set; } = string.Empty;
     public string DeployedVersion { get; set; } = string.Empty;
     public bool AlreadyDeployed { get; set; }
+    public bool ForceRedeploy { get; set; }
     public bool TargetIsOlder { get; set; }
     public bool DeploymentBlocked { get; set; }
     public string DeploymentBlockedReason { get; set; } = string.Empty;
@@ -30,6 +31,8 @@ public sealed class ReleaseDeploymentPreflight
     public bool CancellationBlocked { get; set; }
     public ArtifactManifestDto Manifest { get; set; } = new();
     public List<ReleaseInvitationSummary> BlockingInvitations { get; set; } = [];
+    [System.Text.Json.Serialization.JsonIgnore]
+    public ClientInstallValidationPolicy OperatorValidationPolicy { get; set; } = new();
 }
 
 public sealed class ReleaseDeploymentLease
@@ -37,6 +40,10 @@ public sealed class ReleaseDeploymentLease
     public string LeaseToken { get; set; } = string.Empty;
     public DateTimeOffset ExpiresAt { get; set; }
     public List<string> RemovedInviteIds { get; set; } = [];
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool ForceRedeploy { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public ClientInstallValidationPolicy ValidationPolicy { get; set; } = new();
 }
 
 public sealed class ReleaseInvitationSummary
@@ -70,7 +77,9 @@ internal sealed record ReleaseDeploymentLeaseRecovery(
     string TargetVersion,
     string DeploymentRevision,
     string LeaseToken,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    bool ForceRedeploy,
+    ClientInstallValidationPolicy ValidationPolicy);
 
 /// <summary>
 /// Calls the gateway's signed preflight/revocation endpoints and delegates the
@@ -98,11 +107,12 @@ public sealed class ReleaseDeploymentService
 
     public async Task<ReleaseDeploymentPreflight> PrepareAsync(
         string targetVersion,
+        bool forceRedeploy = false,
         CancellationToken cancellationToken = default)
     {
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
-        var preflight = await _hostedInvites.GetReleasePreflightAsync(normalizedTarget, cancellationToken);
+        var preflight = await _hostedInvites.GetReleasePreflightAsync(normalizedTarget, forceRedeploy, cancellationToken);
         ValidatePreflight(preflight, normalizedTarget);
         return preflight;
     }
@@ -121,6 +131,7 @@ public sealed class ReleaseDeploymentService
             preflight.TargetVersion,
             preflight.DeploymentRevision,
             leaseToken,
+            preflight.ForceRedeploy,
             cancellationToken);
         if (!string.Equals(lease.LeaseToken, leaseToken, StringComparison.Ordinal) || !IsLeaseToken(lease.LeaseToken))
             throw new InvalidDataException("The gateway did not confirm the requested release deployment lease.");
@@ -226,7 +237,9 @@ public sealed class ReleaseDeploymentService
             preflight.TargetVersion,
             preflight.DeploymentRevision,
             lease.LeaseToken,
-            lease.ExpiresAt);
+            lease.ExpiresAt,
+            preflight.ForceRedeploy,
+            ClientInstallValidationPolicy.Normalize(preflight.OperatorValidationPolicy));
         _state.Config.ReleaseDeploymentLeaseProtected = SecretProtector.Protect(
             JsonSerializer.Serialize(recovery, JsonDefaults.Options));
         await _state.SaveAsync(cancellationToken);
@@ -249,7 +262,9 @@ public sealed class ReleaseDeploymentService
             return new ReleaseDeploymentLease
             {
                 LeaseToken = recovery.LeaseToken,
-                ExpiresAt = recovery.ExpiresAt
+                ExpiresAt = recovery.ExpiresAt,
+                ForceRedeploy = recovery.ForceRedeploy,
+                ValidationPolicy = ClientInstallValidationPolicy.Normalize(recovery.ValidationPolicy)
             };
         }
         catch (Exception exception) when (exception is CryptographicException or JsonException or FormatException)
@@ -274,6 +289,8 @@ public sealed class ReleaseDeploymentService
     public async Task StageAsync(
         string targetVersion,
         ReleasePublisherPrerequisites prerequisites,
+        ClientInstallValidationPolicy validationPolicy,
+        bool forceRedeploy,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -285,7 +302,7 @@ public sealed class ReleaseDeploymentService
         progress?.Report($"Staging and verifying immutable source release {normalizedTarget}…");
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
-            PublisherArguments(prerequisites, normalizedTarget).Append("-StageOnly").ToArray(),
+            PublisherArguments(prerequisites, normalizedTarget, validationPolicy, forceRedeploy).Append("-StageOnly").ToArray(),
             TimeSpan.FromMinutes(45),
             cancellationToken,
             environment: PublisherEnvironment(prerequisites));
@@ -299,6 +316,8 @@ public sealed class ReleaseDeploymentService
         string targetVersion,
         ReleasePublisherPrerequisites prerequisites,
         ReleaseDeploymentLease lease,
+        ClientInstallValidationPolicy validationPolicy,
+        bool forceRedeploy,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -315,7 +334,7 @@ public sealed class ReleaseDeploymentService
         environment["OPTICON_RELEASE_LEASE_TOKEN"] = lease.LeaseToken;
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
-            PublisherArguments(prerequisites, normalizedTarget).Append("-CommitStaged").ToArray(),
+            PublisherArguments(prerequisites, normalizedTarget, validationPolicy, forceRedeploy).Append("-CommitStaged").ToArray(),
             TimeSpan.FromMinutes(45),
             cancellationToken,
             environment: environment);
@@ -328,6 +347,8 @@ public sealed class ReleaseDeploymentService
     public async Task VerifyPublisherReadinessAsync(
         string targetVersion,
         ReleasePublisherPrerequisites prerequisites,
+        ClientInstallValidationPolicy validationPolicy,
+        bool forceRedeploy,
         CancellationToken cancellationToken = default)
     {
         BuildSigningTrust.RequirePublishable();
@@ -335,7 +356,7 @@ public sealed class ReleaseDeploymentService
         ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
         await VerifyTrustedWorkspaceAsync(
             prerequisites.Workspace, normalizedTarget, prerequisites.SourceCommit, refreshOrigin: true, cancellationToken);
-        var arguments = PublisherArguments(prerequisites, normalizedTarget).Append("-CheckOnly").ToArray();
+        var arguments = PublisherArguments(prerequisites, normalizedTarget, validationPolicy, forceRedeploy).Append("-CheckOnly").ToArray();
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
             arguments,
@@ -749,7 +770,8 @@ public sealed class ReleaseDeploymentService
                 throw new InvalidDataException("The Opticon release gateway preflight contains invalid source artifact metadata.");
         }
 
-        if (preflight.AlreadyDeployed != string.Equals(deployed, targetVersion, StringComparison.Ordinal))
+        if (preflight.AlreadyDeployed != (!preflight.ForceRedeploy
+                                          && string.Equals(deployed, targetVersion, StringComparison.Ordinal)))
             throw new InvalidDataException("The Opticon release gateway preflight has inconsistent deployed-version state.");
         if (preflight.TargetIsOlder && preflight.RequiresInvitationRemoval)
             throw new InvalidDataException("The Opticon release gateway preflight requested invitation removal for a refused downgrade.");
@@ -944,8 +966,16 @@ public sealed class ReleaseDeploymentService
     private static bool IsLeaseToken(string? value) => value is { Length: 43 }
         && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
-    private static string[] PublisherArguments(ReleasePublisherPrerequisites prerequisites, string targetVersion) =>
-    [
+    private static string[] PublisherArguments(
+        ReleasePublisherPrerequisites prerequisites,
+        string targetVersion,
+        ClientInstallValidationPolicy validationPolicy,
+        bool forceRedeploy)
+    {
+        var policy = ClientInstallValidationPolicy.Normalize(validationPolicy);
+        var encodedPolicy = Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(policy, JsonDefaults.Options));
+        var arguments = new List<string>
+        {
         "-NoLogo",
         "-NoProfile",
         "-NonInteractive",
@@ -956,8 +986,12 @@ public sealed class ReleaseDeploymentService
         "-SourceReleaseCertificateThumbprint", SourceReleaseSigning.KeyId,
         "-ProductCertificateThumbprint", ProductSigning.CertificateThumbprint,
         "-Rfc3161TimestampUrl", TimestampUrl,
-        "-SignToolPath", prerequisites.SignTool
-    ];
+        "-SignToolPath", prerequisites.SignTool,
+        "-ClientInstallValidationBase64", encodedPolicy
+        };
+        if (forceRedeploy) arguments.Add("-ForceRedeploy");
+        return [.. arguments];
+    }
 
     private static string FormatBytes(long size)
     {

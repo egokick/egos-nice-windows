@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -702,6 +703,74 @@ func TestSourceOnlyManifestHasOneSignedArchivePerRelease(t *testing.T) {
 	missingLauncher.Artifacts[0].SourceLauncherSHA256 = ""
 	if err := validateArtifactManifest(missingLauncher); err == nil {
 		t.Fatal("source-only 1.2.1 manifest accepted missing one-click launcher metadata")
+	}
+	invalidPolicy := manifest
+	invalidPolicy.Artifacts = append([]bundleArtifact(nil), manifest.Artifacts...)
+	invalidPolicy.Artifacts[0].ClientInstallValidation.DisabledSteps = []string{"ProtectedPaths", "NotAValidation"}
+	if err := validateArtifactManifest(invalidPolicy); err == nil {
+		t.Fatal("source-only manifest accepted an unknown client validation step")
+	}
+	duplicatePolicy := manifest
+	duplicatePolicy.Artifacts = append([]bundleArtifact(nil), manifest.Artifacts...)
+	duplicatePolicy.Artifacts[0].ClientInstallValidation.DisabledSteps = []string{"ProtectedPaths", "ProtectedPaths"}
+	if err := validateArtifactManifest(duplicatePolicy); err == nil {
+		t.Fatal("source-only manifest accepted duplicate client validation steps")
+	}
+}
+
+func TestForcedSameVersionSourcePublicationRequiresAndUsesForceLease(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, "release", "manifest.json")
+	inviteDir := filepath.Join(root, "invites")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(inviteDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	hash := strings.Repeat("a", 64)
+	currentSource := productionArtifact(bundleArtifact{
+		Product: "OpticonSource", Version: "1.2.1", Architecture: "source",
+		File: "opticon-source-1.2.1.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.1/opticon-source-1.2.1.zip",
+		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
+		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+		SourceLauncherFile: "opticon-source-launcher-1.2.1.exe", SourceLauncherSize: 1024, SourceLauncherSHA256: hash,
+	})
+	current := artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{currentSource}}
+	currentBytes, _ := json.Marshal(current)
+	if err := os.WriteFile(manifestPath, currentBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	g := &gateway{artifactDir: root, manifestPath: manifestPath, inviteDir: inviteDir,
+		adminSecret: secret, nonces: make(map[string]time.Time)}
+
+	preflight, err := g.buildReleasePreflight("1.2.1", time.Now(), true)
+	if err != nil || preflight.AlreadyDeployed || !preflight.ForceRedeploy {
+		t.Fatalf("forced same-version preflight was not publishable: %+v, %v", preflight, err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	if _, err := g.acquireReleaseLease("1.2.1", preflight.DeploymentRevision, token, time.Now(), true); err != nil {
+		t.Fatalf("forced same-version lease was rejected: %v", err)
+	}
+	next := current
+	next.Artifacts = append([]bundleArtifact(nil), current.Artifacts...)
+	next.Artifacts[0].SHA256 = strings.Repeat("b", 64)
+	next.Artifacts[0].SourceManifestSHA256 = strings.Repeat("c", 64)
+	next.Artifacts[0].ClientInstallValidation = clientInstallValidationPolicy{DisableAll: true}
+	body, _ := json.Marshal(next)
+	request := signedRouteRequest(secret, http.MethodPut, releaseAdminPath, "forced-release-nonce-012345", body)
+	request.Header.Set("X-Opticon-Release-Lease", token)
+	result := httptest.NewRecorder()
+	g.ServeHTTP(result, request)
+	if result.Code != http.StatusCreated {
+		t.Fatalf("forced same-version publication returned %d: %s", result.Code, result.Body.String())
+	}
+	published, err := g.readArtifactManifest()
+	if err != nil || published.Artifacts[0].SHA256 != strings.Repeat("b", 64) ||
+		!published.Artifacts[0].ClientInstallValidation.DisableAll {
+		t.Fatalf("forced same-version publication did not commit exact replacement: %+v, %v", published, err)
 	}
 }
 

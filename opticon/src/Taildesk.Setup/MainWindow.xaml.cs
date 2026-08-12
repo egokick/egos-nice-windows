@@ -92,27 +92,38 @@ public partial class MainWindow : Window
             }
 
             _invitePath = ResolveInvitePath();
-            HostedBootstrapper.RequireProtectedHandoff(_invitePath, AppContext.BaseDirectory);
             var encrypted = await File.ReadAllBytesAsync(_invitePath);
             var signedEnvelope = HostedInviteFile.Decrypt(_hostedFragmentKey, encrypted);
-            try { _invite = HostedInviteFile.ReadSigned(signedEnvelope); }
+            try { _invite = HostedInviteFile.ReadWithEmbeddedValidationPolicy(signedEnvelope); }
             finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(signedEnvelope); }
+            var validation = ClientInstallValidationPolicy.Normalize(_invite.ClientInstallValidation);
+            _invite.ClientInstallValidation = validation;
+            MachineStorageSecurity.BypassValidation =
+                !validation.IsEnabled(ClientInstallValidationStep.MachineState);
+            ProductSigning.BypassValidation =
+                !validation.IsEnabled(ClientInstallValidationStep.PayloadAuthenticity);
+            if (validation.IsEnabled(ClientInstallValidationStep.ProtectedPaths))
+                HostedBootstrapper.RequireProtectedHandoff(_invitePath, AppContext.BaseDirectory);
             var sourceAttestationArgument = arguments.FirstOrDefault(value =>
                 value.StartsWith("--source-attestation=", StringComparison.OrdinalIgnoreCase));
             _sourceAttestationPath = sourceAttestationArgument is null
                 ? _resumeContext?.SourceAttestationPath
                 : sourceAttestationArgument[21..].Trim('"');
-            if (_resumeContext is not null && _resumeContext.InviteId != _invite.InviteId)
+            if (validation.IsEnabled(ClientInstallValidationStep.MachineState)
+                && _resumeContext is not null && _resumeContext.InviteId != _invite.InviteId)
                 throw new InvalidDataException("The protected reboot continuation belongs to a different invitation.");
-            if (_invite.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion)
+            if (validation.IsEnabled(ClientInstallValidationStep.InvitationConstraints)
+                && _invite.SchemaVersion != InvitationPolicy.HostedLinkSchemaVersion)
                 throw new InvalidDataException(
                     "This legacy invitation is retained for history only and cannot install software. Ask for a new source-build invitation.");
             if (_invite.SchemaVersion == InvitationPolicy.HostedLinkSchemaVersion)
             {
-                if (string.IsNullOrWhiteSpace(_sourceAttestationPath))
+                if (validation.IsEnabled(ClientInstallValidationStep.SourceBuildProvenance)
+                    && string.IsNullOrWhiteSpace(_sourceAttestationPath))
                     throw new InvalidDataException("This source-build invitation requires an elevated build attestation.");
                 await SourceBuildProvenance.ActivateForSetupAsync(
-                    _sourceAttestationPath, _invitePath, _invite, AppContext.BaseDirectory);
+                    _sourceAttestationPath ?? string.Empty, _invitePath, _invite, AppContext.BaseDirectory,
+                    validation, CancellationToken.None);
                 AppendLog($"Authenticated local source build {_invite.ReleaseVersion} was reverified after elevation.");
             }
             else if (sourceAttestationArgument is not null)

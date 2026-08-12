@@ -94,6 +94,7 @@ public sealed class InviteBundleService
             RuntimeVersion = sourceRelease.RuntimeVersion,
             TargetRuntimes = sourceRelease.TargetRuntimes.ToArray(),
             InstallProtocol = sourceRelease.InstallProtocol,
+            ClientInstallValidation = sourceRelease.ClientInstallValidation.Clone(),
             AdvertiseExitNode = advertiseExitNode,
             AllowedRoots = selectedRoots
         };

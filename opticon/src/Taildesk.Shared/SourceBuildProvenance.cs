@@ -86,6 +86,7 @@ public static class SourceBuildProvenance
     private static Guid _pendingInviteId;
     private static string _pendingInviteCiphertextSha256 = string.Empty;
     private static FileStream? _activeStoreLease;
+    private static bool _unpersistedActiveInstallation;
     private static readonly SecurityIdentifier SystemSid = new(WellKnownSidType.LocalSystemSid, null);
     private static readonly SecurityIdentifier AdministratorsSid = new(WellKnownSidType.BuiltinAdministratorsSid, null);
     private static readonly SecurityIdentifier UsersSid = new(WellKnownSidType.BuiltinUsersSid, null);
@@ -126,41 +127,44 @@ public static class SourceBuildProvenance
         string invitePath,
         InvitePayload invite,
         string payloadDirectory,
+        ClientInstallValidationPolicy? validationPolicy = null,
         CancellationToken cancellationToken = default)
     {
+        var validate = ClientInstallValidationPolicy.Normalize(validationPolicy)
+            .IsEnabled(ClientInstallValidationStep.SourceBuildProvenance);
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Source-build provenance requires Windows.");
         ArgumentException.ThrowIfNullOrWhiteSpace(attestationPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(invitePath);
         ArgumentNullException.ThrowIfNull(invite);
         var attestationFullPath = Path.GetFullPath(attestationPath);
         var payloadRoot = Path.GetFullPath(payloadDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!Path.GetDirectoryName(attestationFullPath)!.Equals(payloadRoot.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+        if (validate && !Path.GetDirectoryName(attestationFullPath)!.Equals(payloadRoot.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The source-build attestation is not beside the elevated Setup payload.");
-        RejectReparsePoints(payloadRoot);
-        if (new FileInfo(attestationFullPath).Length is <= 0 or > 4 * 1024 * 1024)
+        if (validate) RejectReparsePoints(payloadRoot);
+        if (validate && new FileInfo(attestationFullPath).Length is <= 0 or > 4 * 1024 * 1024)
             throw new InvalidDataException("The source-build attestation has an invalid size.");
 
         await using var attestationStream = new FileStream(attestationFullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             4096, FileOptions.SequentialScan);
         var attestation = await JsonSerializer.DeserializeAsync<SourceBuildAttestation>(attestationStream, JsonDefaults.Options, cancellationToken)
                           ?? throw new InvalidDataException("The source-build attestation is empty.");
-        await ValidatePinsAsync(attestation, invitePath, invite, cancellationToken);
+        if (validate) await ValidatePinsAsync(attestation, invitePath, invite, cancellationToken);
 
         var sourceFiles = new Dictionary<string, InstalledSourceFile>(StringComparer.OrdinalIgnoreCase);
         var installedFiles = new Dictionary<string, InstalledSourceFile>(StringComparer.OrdinalIgnoreCase);
         var controllerFiles = new Dictionary<string, InstalledSourceFile>(StringComparer.OrdinalIgnoreCase);
-        if (attestation.Files.Count is < 3 or > 512)
+        if (validate && attestation.Files.Count is < 3 or > 512)
             throw new InvalidDataException("The source-build attestation file count is invalid.");
         foreach (var file in attestation.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var relative = NormalizeRelativePath(file.Path);
-            if (file.Size <= 0 || !Sha256Pattern.IsMatch(file.Sha256))
+            if (validate && (file.Size <= 0 || !Sha256Pattern.IsMatch(file.Sha256)))
                 throw new InvalidDataException($"The source-build attestation is invalid for {relative}.");
             var sourcePath = Path.GetFullPath(Path.Combine(payloadRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
-            if (!sourcePath.StartsWith(payloadRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(sourcePath))
+            if (validate && (!sourcePath.StartsWith(payloadRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(sourcePath)))
                 throw new InvalidDataException($"The attested source-build file is missing: {relative}.");
-            await VerifyHashAsync(sourcePath, file.Size, file.Sha256, cancellationToken);
+            if (validate) await VerifyHashAsync(sourcePath, file.Size, file.Sha256, cancellationToken);
             var trusted = new InstalledSourceFile { Path = sourcePath, Size = file.Size, Sha256 = file.Sha256 };
             if (!sourceFiles.TryAdd(sourcePath, trusted))
                 throw new InvalidDataException("The source-build attestation contains a duplicate path.");
@@ -178,7 +182,7 @@ public static class SourceBuildProvenance
             .Select(Path.GetFullPath)
             .Where(path => !path.Equals(attestationFullPath, StringComparison.OrdinalIgnoreCase))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (actualFiles.Count != sourceFiles.Count || actualFiles.Except(sourceFiles.Keys, StringComparer.OrdinalIgnoreCase).Any())
+        if (validate && (actualFiles.Count != sourceFiles.Count || actualFiles.Except(sourceFiles.Keys, StringComparer.OrdinalIgnoreCase).Any()))
             throw new InvalidDataException("The elevated source-build payload contains missing, duplicate, or unattested files.");
 
         var candidate = new InstalledSourceGeneration
@@ -194,6 +198,23 @@ public static class SourceBuildProvenance
             TargetRuntime = attestation.TargetRuntime,
             Files = installedFiles.Values.OrderBy(item => item.Path, StringComparer.OrdinalIgnoreCase).ToList()
         };
+        if (!validate)
+        {
+            lock (Gate)
+            {
+                _activeFiles = sourceFiles.Concat(installedFiles)
+                    .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+                _activeControllerFiles = controllerFiles;
+                _pendingPromotion = candidate;
+                _pendingTransactionId = Guid.NewGuid().ToString("N");
+                _pendingInviteId = invite.InviteId;
+                _pendingInviteCiphertextSha256 = string.IsNullOrWhiteSpace(attestation.InviteCiphertextSha256)
+                    ? new string('0', 64)
+                    : attestation.InviteCiphertextSha256;
+                _unpersistedActiveInstallation = true;
+            }
+            return;
+        }
         FileStream? storeLease = AcquireStoreLease(cancellationToken);
         try
         {
@@ -316,6 +337,11 @@ public static class SourceBuildProvenance
     {
         var (candidate, transactionId, inviteId, inviteHash, storeLease) = GetActiveInstallation();
         if (candidate is null || string.IsNullOrEmpty(transactionId)) return;
+        if (_unpersistedActiveInstallation)
+        {
+            ClearUnpersistedActiveInstallation(candidate);
+            return;
+        }
         if (storeLease is null) throw new InvalidOperationException("The source-build installation lease is missing.");
         var agentFiles = FilesBelow(candidate, AppPaths.AgentInstallDirectory);
         if (agentFiles.Count == 0)
@@ -338,6 +364,7 @@ public static class SourceBuildProvenance
     {
         var (candidate, transactionId, inviteId, inviteHash, storeLease) = GetActiveInstallation();
         if (candidate is null || string.IsNullOrEmpty(transactionId)) return;
+        if (_unpersistedActiveInstallation) return;
         if (storeLease is null) throw new InvalidOperationException("The source-build installation lease is missing.");
         var files = FilesBelow(candidate, componentDirectory);
         if (files.Count == 0)
@@ -354,6 +381,7 @@ public static class SourceBuildProvenance
     public static void PruneInstalledTrust()
     {
         if (!OperatingSystem.IsWindows()) return;
+        if (_unpersistedActiveInstallation) return;
         using var storeLease = AcquireStoreLease(CancellationToken.None);
         var store = ReadProtectedStore();
         if (store.Installed.Count == 0) return;
@@ -482,7 +510,7 @@ public static class SourceBuildProvenance
         lock (Gate)
         {
             if (_pendingPromotion is null
-                || _activeStoreLease is null
+                || (_activeStoreLease is null && !_unpersistedActiveInstallation)
                 || string.IsNullOrEmpty(_pendingTransactionId)
                 || _pendingInviteId != expectedInviteId
                 || string.IsNullOrEmpty(_pendingInviteCiphertextSha256))
@@ -501,6 +529,11 @@ public static class SourceBuildProvenance
     {
         var (candidate, transactionId, inviteId, inviteHash, storeLease) = GetActiveInstallation();
         if (candidate is null || string.IsNullOrEmpty(transactionId)) return;
+        if (_unpersistedActiveInstallation)
+        {
+            ClearUnpersistedActiveInstallation(candidate);
+            return;
+        }
         if (storeLease is null) throw new InvalidOperationException("The source-build installation lease is missing.");
         var store = ReadProtectedStore();
         RequirePendingMatches(store, candidate, transactionId, inviteId, inviteHash);
@@ -561,6 +594,21 @@ public static class SourceBuildProvenance
         lock (Gate)
             return (_pendingPromotion, _pendingTransactionId, _pendingInviteId,
                 _pendingInviteCiphertextSha256, _activeStoreLease);
+    }
+
+    private static void ClearUnpersistedActiveInstallation(InstalledSourceGeneration candidate)
+    {
+        lock (Gate)
+        {
+            if (!ReferenceEquals(_pendingPromotion, candidate)) return;
+            _activeFiles = null;
+            _activeControllerFiles = null;
+            _pendingPromotion = null;
+            _pendingTransactionId = string.Empty;
+            _pendingInviteId = Guid.Empty;
+            _pendingInviteCiphertextSha256 = string.Empty;
+            _unpersistedActiveInstallation = false;
+        }
     }
 
     private static void RequirePendingMatches(

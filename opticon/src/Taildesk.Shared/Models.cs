@@ -182,6 +182,7 @@ public sealed class InvitePayload
     public string TargetRuntime { get; set; } = string.Empty;
     public string[] TargetRuntimes { get; set; } = [];
     public string InstallProtocol { get; set; } = InvitationPolicy.SourceInstallProtocol;
+    public ClientInstallValidationPolicy ClientInstallValidation { get; set; } = new();
     public bool AdvertiseExitNode { get; set; }
     public string[] AllowedRoots { get; set; } = ["Desktop", "Documents", "Downloads", "Pictures", "Videos"];
 }

@@ -45,7 +45,6 @@ public partial class MainWindow : Window
         }
         await _viewModel.InitializeAsync();
         _refreshTimer.Start();
-        if (_viewModel.Config.SetupComplete) _ = _viewModel.RunSystemChecksAsync();
     }
 
     private async void Navigation_Click(object sender, RoutedEventArgs e)
@@ -55,7 +54,6 @@ public partial class MainWindow : Window
         if (index == 1) await _viewModel.ScheduledTransferManager.RefreshAsync();
         if (index == 4) await RunAsync(() => _viewModel.RefreshInvitationsAsync());
         if (index == 5) await RunAsync(() => _viewModel.RefreshReleaseDeploymentAsync());
-        if (index == 7) await _viewModel.RunSystemChecksAsync();
     }
 
     private async void GoToInvites_Click(object sender, RoutedEventArgs e)
@@ -543,30 +541,41 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (plan.AlreadyDeployed) return;
         // A protected local lease means the operator already chose Yes before
         // this Command Center was interrupted. Resume that exact decision;
         // otherwise show the one early default-No confirmation before any
-            // lease, key revocation, build, S3 upload, or manifest mutation.
+        // lease, key revocation, build, S3 upload, or manifest mutation.
         var resuming = plan.DeploymentBlocked && _viewModel.CanResumeReleaseDeployment;
-        if (plan.RequiresInvitationRemoval && !resuming)
+        var validation = ClientInstallValidationPolicy.Normalize(plan.OperatorValidationPolicy);
+        var disabledValidation = validation.DisableAll || validation.DisabledSteps.Length != 0;
+        if ((plan.RequiresInvitationRemoval || disabledValidation) && !resuming)
         {
-            var names = plan.BlockingInvitations
-                .Select(item => string.IsNullOrWhiteSpace(item.DeviceName) ? "unnamed machine" : item.DeviceName)
-                .Take(5)
-                .ToArray();
-            var nameText = string.Join(", ", names);
-            if (plan.BlockingInvitations.Count > names.Length)
-                nameText += $" and {plan.BlockingInvitations.Count - names.Length} more";
-            var legacy = plan.BlockingInvitations.Where(item => !item.CanRevoke).ToArray();
-            var removalDetail = legacy.Length == 0
-                ? "Each affected one-use network key is revoked before its hosted link is removed."
-                : $"{legacy.Length} legacy invitation(s) do not retain a network key identity. Their hosted links will be deleted, but a recipient that already extracted a key may still use it until the invitation expires (latest: {legacy.Max(item => item.ExpiresAt).LocalDateTime:g}).";
-            var prompt =
-                $"Deploy Opticon {plan.TargetVersion} for new invitations?\n\n" +
-                $"A replacement archive is staged and verified first. It then removes {plan.BlockingInvitations.Count} active hosted invitation(s): {nameText}.\n\n" +
-                removalDetail + " This cannot be undone.";
-            if (MessageBox.Show(prompt, "Remove active invitations?", MessageBoxButton.YesNo,
+            var details = new List<string>();
+            if (disabledValidation)
+            {
+                details.Add(validation.DisableAll
+                    ? "ALL client-side installation validation will be disabled for invitations created from this release."
+                    : $"Client-side installation validation will be disabled for: {string.Join(", ", validation.DisabledSteps)}.");
+            }
+            if (plan.RequiresInvitationRemoval)
+            {
+                var names = plan.BlockingInvitations
+                    .Select(item => string.IsNullOrWhiteSpace(item.DeviceName) ? "unnamed machine" : item.DeviceName)
+                    .Take(5)
+                    .ToArray();
+                var nameText = string.Join(", ", names);
+                if (plan.BlockingInvitations.Count > names.Length)
+                    nameText += $" and {plan.BlockingInvitations.Count - names.Length} more";
+                var legacy = plan.BlockingInvitations.Where(item => !item.CanRevoke).ToArray();
+                var removalDetail = legacy.Length == 0
+                    ? "Each affected one-use network key is revoked before its hosted link is removed."
+                    : $"{legacy.Length} legacy invitation(s) do not retain a network key identity. Their hosted links will be deleted, but a recipient that already extracted a key may still use it until the invitation expires (latest: {legacy.Max(item => item.ExpiresAt).LocalDateTime:g}).";
+                details.Add($"The deployment removes {plan.BlockingInvitations.Count} active hosted invitation(s): {nameText}. {removalDetail}");
+            }
+            var prompt = $"Deploy Opticon {plan.TargetVersion} for new invitations?\n\n" +
+                         string.Join("\n\n", details) +
+                         "\n\nA replacement archive is staged and verified first. Continue?";
+            if (MessageBox.Show(prompt, "Confirm emergency release", MessageBoxButton.YesNo,
                     MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
                 return;
         }

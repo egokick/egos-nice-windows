@@ -8,6 +8,8 @@ param(
     [string]$ProductCertificateThumbprint = '',
     [string]$Rfc3161TimestampUrl = '',
     [string]$SignToolPath = '',
+    [string]$ClientInstallValidationBase64 = '',
+    [switch]$ForceRedeploy,
     [switch]$CheckOnly,
     # Build/upload/verify the immutable source release, but leave the live
     # invitation manifest untouched until a later explicit commit.
@@ -131,7 +133,7 @@ if (($StageOnly -or $CommitStaged) -and $CheckOnly) {
 $manifest = $null
 $manifestReadFailure = $null
 try { $manifest = Get-ReleaseManifest } catch { $manifestReadFailure = $_ }
-if ($null -ne $manifest -and (Test-CompleteRelease $manifest $Version)) {
+if (-not $ForceRedeploy -and $null -ne $manifest -and (Test-CompleteRelease $manifest $Version)) {
     Write-Host "Opticon target release $Version is already deployed and complete." -ForegroundColor Green
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $false; Deployed = $false }
     return
@@ -162,7 +164,8 @@ if ($CheckOnly) {
     & $publisher -Version $Version -ControlOrigin $ControlOrigin -SigningProfile $SigningProfile `
         -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
         -ProductCertificateThumbprint $ProductCertificateThumbprint `
-        -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath -CheckOnly
+        -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath `
+        -ClientInstallValidationBase64 $ClientInstallValidationBase64 -ForceRedeploy:$ForceRedeploy -CheckOnly
     $publisherExitCode = $LASTEXITCODE
     if ($publisherExitCode -ne 0) { throw "Opticon target readiness check for $Version failed." }
     Write-Host "Opticon target release $Version passed non-mutating publisher readiness checks." -ForegroundColor Green
@@ -195,6 +198,8 @@ $publisherArguments = @{
     ProductCertificateThumbprint = $ProductCertificateThumbprint
     Rfc3161TimestampUrl = $Rfc3161TimestampUrl
     SignToolPath = $SignToolPath
+    ClientInstallValidationBase64 = $ClientInstallValidationBase64
+    ForceRedeploy = $ForceRedeploy
 }
 if ($StageOnly) {
     Write-Host "Staging immutable Opticon target source release $Version; the live invitation manifest will remain unchanged." -ForegroundColor Yellow

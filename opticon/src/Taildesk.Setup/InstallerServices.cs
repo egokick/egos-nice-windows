@@ -78,11 +78,15 @@ public sealed class InstallCoordinator
 
     public async Task InstallAsync(CancellationToken cancellationToken)
     {
-        EnsureInviteIsValid();
-        var preflight = await SetupPreflight.DiscoverElevatedAsync(
-            _invite, _bundleDirectory, cancellationToken);
-        ReportPreflight(preflight);
-        if (preflight.IsBlocked) throw new SetupPreflightBlockedException(preflight);
+        if (ValidationEnabled(ClientInstallValidationStep.InvitationConstraints))
+            EnsureInviteIsValid();
+        if (ValidationEnabled(ClientInstallValidationStep.SetupPreflight))
+        {
+            var preflight = await SetupPreflight.DiscoverElevatedAsync(
+                _invite, _bundleDirectory, cancellationToken);
+            ReportPreflight(preflight);
+            if (preflight.IsBlocked) throw new SetupPreflightBlockedException(preflight);
+        }
 
         // This is deliberately after read-only discovery. Generic Taildesk
         // state can contain secrets and remains fail-closed; regenerable
@@ -199,7 +203,8 @@ public sealed class InstallCoordinator
             var expectedRustDesk = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
                 "RustDesk", "rustdesk.exe");
-            await ConfigureFirewallAsync(snapshot.Ip, expectedRustDesk, cancellationToken);
+            if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
+                await ConfigureFirewallAsync(snapshot.Ip, expectedRustDesk, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.RemoteIsolationPrepared, cancellationToken);
             var reuseJournalRemoteComponent = RequireMachineInstallTransaction().Phase
@@ -211,7 +216,8 @@ public sealed class InstallCoordinator
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.RemoteComponentReady, cancellationToken);
             var rustDesk = rustDeskInstallation.Path;
-            await EnsureFirewallPolicyAsync(snapshot.Ip, rustDesk, cancellationToken);
+            if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
+                await EnsureFirewallPolicyAsync(snapshot.Ip, rustDesk, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.RemoteIsolationApplied, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
@@ -228,7 +234,8 @@ public sealed class InstallCoordinator
                     agentPayload, completedEnrollmentState, snapshot.Ip, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.AgentInstalled, cancellationToken);
-            await AssertExactFirewallConfigurationAsync(snapshot.Ip, rustDesk, cancellationToken);
+            if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
+                await AssertExactFirewallConfigurationAsync(snapshot.Ip, rustDesk, cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.FirewallConfigured, cancellationToken);
             OpticonComponentIntegration.Integrate(installedNetworkComponent, rustDeskInstallation.InstalledByOpticon);
@@ -243,7 +250,8 @@ public sealed class InstallCoordinator
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.AgentStartRequested, cancellationToken);
             var start = await RunSystemToolAsync("schtasks.exe", ["/Run", "/TN", "Taildesk Agent"], TimeSpan.FromSeconds(20), cancellationToken);
-            if (!await WaitForListeningExecutableAsync(
+            if (ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions)
+                && !await WaitForListeningExecutableAsync(
                     45831,
                     Path.Combine(AppPaths.AgentInstallDirectory, "Taildesk.Agent.exe"),
                     TimeSpan.FromSeconds(30),
@@ -255,7 +263,10 @@ public sealed class InstallCoordinator
             _progress.Report(new InstallProgress(96, "Waiting for the command center to confirm enrollment…"));
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.EnrollmentWaitStarted, cancellationToken);
-            await EnsureEnrollmentCommittedAsync(completedEnrollmentState, cancellationToken);
+            if (ValidationEnabled(ClientInstallValidationStep.EnrollmentConfirmation))
+                await EnsureEnrollmentCommittedAsync(completedEnrollmentState, cancellationToken);
+            else
+                await CommitWithoutEnrollmentConfirmationAsync(cancellationToken);
             await StartControllerTasksIfInstalledAsync(cancellationToken);
             _progress.Report(new InstallProgress(100, "Connected. This machine is ready."));
         }
@@ -283,6 +294,9 @@ public sealed class InstallCoordinator
         }
     }
 
+    private bool ValidationEnabled(ClientInstallValidationStep step) =>
+        ClientInstallValidationPolicy.Normalize(_invite.ClientInstallValidation).IsEnabled(step);
+
     /// <summary>
     /// The source bootstrap owns the actual local build. At this point Setup
     /// verifies the attested build binding again, which is the postcondition
@@ -294,7 +308,7 @@ public sealed class InstallCoordinator
     {
         cancellationToken.ThrowIfCancellationRequested();
         var active = SourceBuildProvenance.RequireActiveInstallationBinding(_invite.InviteId);
-        if (active != sourceBinding)
+        if (ValidationEnabled(ClientInstallValidationStep.SourceBuildProvenance) && active != sourceBinding)
             throw new InvalidDataException("The active authenticated source build changed during installer preflight.");
         return Task.FromResult(InstallerEnsureResult.Ready(
             "EnsureBuildEnvironmentAsync",
@@ -347,7 +361,9 @@ public sealed class InstallCoordinator
         var hadMachineState = Directory.Exists(AppPaths.MachineDataDirectory);
         var hadStaging = Directory.Exists(AppPaths.SetupStagingDirectory);
         MachineStorageSecurity.EnsureOpticonMachineState();
-        var provenance = SourceBuildProvenance.EnsureRecoverableStore();
+        var provenance = ValidationEnabled(ClientInstallValidationStep.SourceBuildProvenance)
+            ? SourceBuildProvenance.EnsureRecoverableStore()
+            : SourceBuildProvenance.StoreRecoveryOutcome.Ready;
         var repaired = !hadMachineState || !hadStaging
                        || provenance is not SourceBuildProvenance.StoreRecoveryOutcome.Ready;
         var result = repaired
@@ -447,7 +463,8 @@ public sealed class InstallCoordinator
             "UpdateGuardian", executable, wasReady, cancellationToken);
         if (!wasReady)
             await InstallGuardianAsync(guardianPayload, cancellationToken);
-        if (!await IsGuardianReadyAsync(guardianPayload, cancellationToken))
+        if (ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions)
+            && !await IsGuardianReadyAsync(guardianPayload, cancellationToken))
             throw new InvalidDataException(
                 "The signed Update Guardian did not satisfy its executable and task postconditions after repair.");
         var result = wasReady
@@ -799,10 +816,11 @@ public sealed class InstallCoordinator
                                   && !string.IsNullOrWhiteSpace(journal.TailscaleNodeIdentity)
                                   && FixedAsciiEquals(existing.DeviceId, journal.TailscaleNodeIdentity);
         var reusedEnrollment = existing is { Online: true }
-                               && ExistingSessionHasExpectedRole(existing)
-                               && (canResumeExistingSession
-                                   || matchesRecordedNode
-                                   || ExistingSessionHasExpectedDeviceName(existing));
+                               && (!ValidationEnabled(ClientInstallValidationStep.NetworkIdentity)
+                                   || (ExistingSessionHasExpectedRole(existing)
+                                       && (canResumeExistingSession
+                                           || matchesRecordedNode
+                                           || ExistingSessionHasExpectedDeviceName(existing))));
         var repaired = false;
         LocalTailscaleSnapshot snapshot;
         if (reusedEnrollment)
@@ -867,10 +885,12 @@ public sealed class InstallCoordinator
             repaired = true;
         }
 
-        if (!ExistingSessionHasExpectedRole(snapshot))
+        if (ValidationEnabled(ClientInstallValidationStep.NetworkIdentity)
+            && !ExistingSessionHasExpectedRole(snapshot))
             throw new InvalidOperationException(
                 "Tailscale joined, but the resulting tailnet or device tags do not exactly match this invitation.");
-        if (string.IsNullOrWhiteSpace(snapshot.Ip) || string.IsNullOrWhiteSpace(snapshot.DeviceId))
+        if (ValidationEnabled(ClientInstallValidationStep.NetworkIdentity)
+            && (string.IsNullOrWhiteSpace(snapshot.Ip) || string.IsNullOrWhiteSpace(snapshot.DeviceId)))
             throw new InvalidOperationException(
                 "Tailscale joined, but did not publish an address and stable node identity.");
 
@@ -1013,6 +1033,10 @@ public sealed class InstallCoordinator
         CancellationToken cancellationToken)
     {
         await ConfigureRustDeskAsync(rustDesk, cancellationToken);
+        if (!ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions))
+            return InstallerEnsureResult.Ready(
+                "EnsureRustDeskAsync",
+                "RustDesk configuration commands completed; listener validation was disabled by release policy.");
         var repaired = false;
         if (!await WaitForListeningExecutableAsync(
                 21118, rustDesk, TimeSpan.FromSeconds(90), cancellationToken))
@@ -1104,8 +1128,11 @@ public sealed class InstallCoordinator
         }
 
         await InstallAgentCoreAsync(source, tailscaleIp, cancellationToken);
-        await VerifyInstalledExecutableDirectoryAsync(AppPaths.AgentInstallDirectory, cancellationToken);
-        await RequireExactAgentTaskAsync(cancellationToken);
+        if (ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions))
+        {
+            await VerifyInstalledExecutableDirectoryAsync(AppPaths.AgentInstallDirectory, cancellationToken);
+            await RequireExactAgentTaskAsync(cancellationToken);
+        }
         var result = InstallerEnsureResult.Repaired(
             "EnsureAgentAsync",
             "The Agent payload, protected configuration, and exact SYSTEM scheduled task are verified.",
@@ -1137,9 +1164,12 @@ public sealed class InstallCoordinator
         // the protected completed configuration so this repair does not spend
         // another invitation or drop the existing device identity.
         await InstallAgentCoreAsync(source, tailscaleIp, completedState, cancellationToken);
-        await VerifyPayloadDirectoryCopyAsync(
-            source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
-        await RequireExactAgentTaskAsync(cancellationToken);
+        if (ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions))
+        {
+            await VerifyPayloadDirectoryCopyAsync(
+                source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
+            await RequireExactAgentTaskAsync(cancellationToken);
+        }
         var result = InstallerEnsureResult.Repaired(
             "EnsureAgentAsync",
             "The completed Agent payload, protected configuration, and exact SYSTEM task were repaired without re-enrollment.",
@@ -3213,7 +3243,9 @@ public sealed class InstallCoordinator
             try
             {
                 last = await ReadTailscaleStatusAsync(tailscale, cancellationToken);
-                if (!string.IsNullOrWhiteSpace(last.Ip) && ExistingSessionHasExpectedRole(last)) return last;
+                if (!string.IsNullOrWhiteSpace(last.Ip)
+                    && (!ValidationEnabled(ClientInstallValidationStep.NetworkIdentity)
+                        || ExistingSessionHasExpectedRole(last))) return last;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -3369,6 +3401,18 @@ public sealed class InstallCoordinator
         SourceBuildProvenance.PruneInstalledTrust();
     }
 
+    private async Task CommitWithoutEnrollmentConfirmationAsync(CancellationToken cancellationToken)
+    {
+        // Emergency policy skips the remote receipt comparison, not local
+        // transaction completion. Leaving either journal pending would turn a
+        // successful installation into a forced recovery on the next launch.
+        await CompleteMachineInstallTransactionAsync(cancellationToken);
+        SourceBuildProvenance.CommitActiveInstallation();
+        _agentInstallCommitted = true;
+        await FinalizeAgentInstallTransactionAsync(cancellationToken);
+        SourceBuildProvenance.PruneInstalledTrust();
+    }
+
     private static bool FixedAsciiEquals(string left, string right)
     {
         if (left.Length != right.Length || left.Any(character => character > 0x7f)
@@ -3433,7 +3477,8 @@ public sealed class InstallCoordinator
                     request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (response.StatusCode != System.Net.HttpStatusCode.OK)
                     throw new HttpRequestException($"Dependency server returned HTTP {(int)response.StatusCode}.");
-                if (response.Content.Headers.ContentLength != artifact.Size)
+                if (ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity)
+                    && response.Content.Headers.ContentLength != artifact.Size)
                     throw new InvalidDataException("The dependency response omitted or changed its pinned Content-Length.");
                 if (response.Content.Headers.ContentEncoding.Count != 0)
                     throw new InvalidDataException("Encoded dependency responses are not accepted.");
@@ -3447,22 +3492,26 @@ public sealed class InstallCoordinator
                     long total = 0;
                     while (true)
                     {
-                        var remaining = artifact.Size - total;
+                        var maximumSize = ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity)
+                            ? artifact.Size : 1024L * 1024 * 1024;
+                        var remaining = maximumSize - total;
                         var requested = checked((int)Math.Min(buffer.Length, Math.Max(1L, remaining + 1)));
                         var read = await source.ReadAsync(buffer.AsMemory(0, requested), cancellationToken);
                         if (read == 0) break;
                         total = checked(total + read);
-                        if (total > artifact.Size)
+                        if (total > maximumSize)
                             throw new InvalidDataException("The dependency response exceeded its pinned size.");
                         hasher.AppendData(buffer, 0, read);
                         await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                     }
                     await output.FlushAsync(cancellationToken);
                     output.Flush(flushToDisk: true);
-                    if (total != artifact.Size)
+                    if (ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity)
+                        && total != artifact.Size)
                         throw new InvalidDataException("The dependency response ended before its pinned size.");
                 }
-                if (!CryptographicOperations.FixedTimeEquals(
+                if (ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity)
+                    && !CryptographicOperations.FixedTimeEquals(
                         hasher.GetHashAndReset(), Convert.FromHexString(artifact.Sha256)))
                     throw new InvalidDataException("SHA-256 did not match the pinned artifact.");
                 MachineStorageSecurity.SealRestrictedFile(destination);
@@ -3492,7 +3541,7 @@ public sealed class InstallCoordinator
         throw new InvalidDataException($"Neither verified source supplied {artifact.Product} {artifact.Version}: {string.Join(" | ", errors)}");
     }
 
-    private static async Task<ProcessResult> InstallVerifiedMsiAsync(
+    private async Task<ProcessResult> InstallVerifiedMsiAsync(
         VerifiedInstallerLease lease,
         CancellationToken cancellationToken)
     {
@@ -3506,10 +3555,11 @@ public sealed class InstallCoordinator
             clearEnvironment: true);
     }
 
-    private static async Task VerifyInstallerLeaseAsync(
+    private async Task VerifyInstallerLeaseAsync(
         VerifiedInstallerLease lease,
         CancellationToken cancellationToken)
     {
+        if (!ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity)) return;
         if (lease.Stream.Length != lease.Artifact.Size)
             throw new InvalidDataException("The held installer lease changed size.");
         lease.Stream.Position = 0;
@@ -3815,7 +3865,7 @@ public sealed class InstallCoordinator
         return result.ExitCode == 1638;
     }
 
-    private static async Task<bool> InstalledDependencyMatchesAsync(
+    private async Task<bool> InstalledDependencyMatchesAsync(
         string executable,
         DependencyArtifact artifact,
         bool runVersionCommand,
@@ -3823,6 +3873,8 @@ public sealed class InstallCoordinator
     {
         try
         {
+            if (!ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity))
+                return File.Exists(executable);
             var full = RequireFixedProgramFilesExecutable(executable);
             var signer = await RequireInstallerSignatureAsync(full, cancellationToken);
             var expectedSigner = artifact.ExpectedSignerThumbprint.ToUpperInvariant();
