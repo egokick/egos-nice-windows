@@ -2870,6 +2870,9 @@ static void TestOpenSshRecoveryDesign()
            && buildScript.Contains("bin\\Taildesk.SelfTest\\release\\Taildesk.SelfTest.dll", StringComparison.Ordinal)
            && buildScript.Contains("must contain only the signed opticon.exe", StringComparison.Ordinal)
            && buildScript.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal)
+           && buildScript.Contains("DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE = '1'", StringComparison.Ordinal)
+           && buildScript.Contains("DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'", StringComparison.Ordinal)
+           && buildScript.Contains("MSBuildEnableWorkloadResolver = 'false'", StringComparison.Ordinal)
            && hostedBuild.Contains("The clean $component publish must contain only", StringComparison.Ordinal)
            && hostedBuild.Contains("IncludeSourceRevisionInInformationalVersion=false", StringComparison.Ordinal),
         "release packaging must fail on native build/test errors and ship a single signed CLI app");

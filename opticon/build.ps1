@@ -333,6 +333,9 @@ function Invoke-DotNet {
             DOTNET_MULTILEVEL_LOOKUP = '0'
             DOTNET_NOLOGO = '1'
             DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+            DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE = '1'
+            DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+            MSBuildEnableWorkloadResolver = 'false'
             NUGET_PACKAGES = $script:packageCache
             NUGET_HTTP_CACHE_PATH = $script:nugetHttpCache
             NUGET_PLUGINS_CACHE_PATH = $script:nugetPluginsCache
