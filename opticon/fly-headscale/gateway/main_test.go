@@ -1044,6 +1044,71 @@ func TestReleasePreflightRedactsActiveInvitationSecrets(t *testing.T) {
 	}
 }
 
+func TestInvitationInventoryShowsGatewayOnlyLinksWithoutSecrets(t *testing.T) {
+	g, secret, idHash, ciphertextMarker := releasePreflightGatewayFixture(t, "inventory-key-77")
+	result := httptest.NewRecorder()
+	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodGet, inviteInventoryPath, "invite-inventory-nonce-012345", nil))
+	if result.Code != http.StatusOK {
+		t.Fatalf("invitation inventory returned %d: %s", result.Code, result.Body.String())
+	}
+	if strings.Contains(result.Body.String(), "ciphertext") || strings.Contains(result.Body.String(), "inventory-key-77") ||
+		strings.Contains(result.Body.String(), ciphertextMarker) || strings.Contains(result.Body.String(), "tailscaleKeyId") {
+		t.Fatal("invitation inventory exposed ciphertext or network-key metadata")
+	}
+	var inventory invitationInventoryResponse
+	if err := json.Unmarshal(result.Body.Bytes(), &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if inventory.SchemaVersion != 1 || len(inventory.Invitations) != 1 ||
+		inventory.Invitations[0].IDHash != idHash || inventory.Invitations[0].DeviceName != "Gateway-only invite" ||
+		!inventory.Invitations[0].CanRevoke || inventory.Invitations[0].CreatedAt.IsZero() {
+		t.Fatalf("inventory did not return the expected sanitized active link: %+v", inventory)
+	}
+
+	replay := httptest.NewRecorder()
+	g.ServeHTTP(replay, signedRouteRequest(secret, http.MethodGet, inviteInventoryPath, "invite-inventory-nonce-012345", nil))
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("invitation inventory replay returned %d instead of 401", replay.Code)
+	}
+}
+
+func TestInvitationDeleteRevokesStoredKeyBeforeRemovingGatewayOnlyLink(t *testing.T) {
+	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "inventory-delete-key-42")
+	invitePath := filepath.Join(g.inviteDir, idHash+".json")
+	var revoked bool
+	headscale := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat(invitePath); err != nil {
+			t.Fatalf("gateway-only link was deleted before network-key revocation: %v", err)
+		}
+		var request struct {
+			ID string `json:"id"`
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/preauthkey/expire" ||
+			json.NewDecoder(r.Body).Decode(&request) != nil || request.ID != "inventory-delete-key-42" {
+			http.Error(w, "unexpected revocation", http.StatusBadRequest)
+			return
+		}
+		revoked = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer headscale.Close()
+	g.headscaleKey = "headscale-test-key"
+	g.headscaleAdminURL = headscale.URL
+
+	result := httptest.NewRecorder()
+	path := inviteAdminPrefix + idHash
+	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodDelete, path, "invite-delete-nonce-012345678", nil))
+	if result.Code != http.StatusNoContent {
+		t.Fatalf("gateway-only invitation deletion returned %d: %s", result.Code, result.Body.String())
+	}
+	if !revoked {
+		t.Fatal("gateway-only invitation network key was not revoked")
+	}
+	if _, err := os.Stat(invitePath); !os.IsNotExist(err) {
+		t.Fatalf("gateway-only invitation remained after deletion: %v", err)
+	}
+}
+
 func TestReleaseRevokeActiveRevokesKeysBeforeDeletingHostedLinks(t *testing.T) {
 	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "revoke-key-42")
 	invitePath := filepath.Join(g.inviteDir, idHash+".json")

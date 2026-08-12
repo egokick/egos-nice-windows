@@ -53,6 +53,7 @@ var tests = new (string Name, Action Body)[]
     ("scheduled transfer file filters are bounded and predictable", TestScheduledTransferFilters),
     ("scheduled transfers expose UI history/retry and a complete CLI surface", TestScheduledTransferSurface),
     ("CLI invitation creation and cancellation share the UI lifecycle", TestInviteCliSurface),
+    ("Invitations page reconciles authenticated gateway-only active links", TestInvitationInventorySurface),
     ("scheduled transfer retention and destructive operations fail closed", TestScheduledTransferSecurityPolicy),
     ("Admin media, local-file, and invitation trust boundaries are enforced", TestAdminTrustBoundarySource),
     ("path guard permits a child and blocks traversal", TestPathGuard),
@@ -421,6 +422,38 @@ static void TestScheduledTransferSecurityPolicy()
         CronExpression = "0 * * * *", TimeZoneId = TimeZoneInfo.Utc.Id
     };
     AssertThrows<InvalidDataException>(() => ScheduledTransferRules.Validate(unsafeMove));
+}
+
+static void TestInvitationInventorySurface()
+{
+    var window = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml");
+    var windowCode = ReadSource("src", "Taildesk.Admin", "MainWindow.xaml.cs");
+    var viewModel = ReadSource("src", "Taildesk.Admin", "MainViewModel.cs");
+    var hosted = ReadSource("src", "Taildesk.Admin", "HostedInviteClient.cs");
+    var service = ReadSource("src", "Taildesk.Admin", "InviteBundleService.cs");
+    var gateway = ReadSource("fly-headscale", "gateway", "main.go");
+
+    Assert(window.Contains("RecordSource", StringComparison.Ordinal)
+           && window.Contains("authenticated Opticon gateway", StringComparison.Ordinal)
+           && windowCode.Contains("RefreshInvitationsAsync", StringComparison.Ordinal),
+        "the Invitations page does not expose or refresh gateway-authoritative active links");
+    Assert(viewModel.Contains("GetActiveInvitationsAsync", StringComparison.Ordinal)
+           && viewModel.Contains("localActiveHashes", StringComparison.Ordinal)
+           && viewModel.Contains("IsRemoteOrphan = true", StringComparison.Ordinal)
+           && viewModel.Contains("if (invite.IsRemoteOrphan)", StringComparison.Ordinal)
+           && viewModel.Contains("HostedInviteClient(_state).DeleteAsync", StringComparison.Ordinal),
+        "gateway-only invitations are not merged and removable from the Invitations page");
+    Assert(hosted.Contains("InvitationInventoryPath", StringComparison.Ordinal)
+           && hosted.Contains("GetActiveInvitationsAsync", StringComparison.Ordinal)
+           && hosted.Contains("ComputeIdHash(publicId)", StringComparison.Ordinal)
+           && service.Contains("attemptedHostedIdHash", StringComparison.Ordinal)
+           && service.Contains("publication?.IdHash ?? attemptedHostedIdHash", StringComparison.Ordinal),
+        "an ambiguous hosted invitation publication can still leave an invisible remote orphan");
+    Assert(gateway.Contains("inviteInventoryPath", StringComparison.Ordinal)
+           && gateway.Contains("func (g *gateway) invitationInventory", StringComparison.Ordinal)
+           && gateway.Contains("network key revocation failed; invitation was retained", StringComparison.Ordinal)
+           && gateway.Contains("invitationInventoryResponse{SchemaVersion: 1", StringComparison.Ordinal),
+        "the gateway does not provide a sanitized authoritative inventory or fail-closed deletion");
 }
 
 static void TestAdminTrustBoundarySource()

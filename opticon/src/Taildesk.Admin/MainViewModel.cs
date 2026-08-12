@@ -20,6 +20,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly RemoteDeviceUpdateCoordinator _deviceUpdates;
     private readonly SemaphoreSlim _updateGate = new(1, 1);
     private readonly SemaphoreSlim _releaseDeploymentGate = new(1, 1);
+    private readonly SemaphoreSlim _invitationInventoryGate = new(1, 1);
+    private List<ReleaseInvitationSummary> _remoteInvitations = [];
     private readonly HashSet<SshSessionHandle> _sshSessions = [];
     private DeviceRecord? _selectedDevice;
     private string _status = "Ready";
@@ -171,6 +173,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 await RefreshPrimaryTailnetAsync(cancellationToken);
                 await CleanupInactiveHostedInvitationsAsync(cancellationToken);
+                try
+                {
+                    await LoadHostedInvitationInventoryAsync(cancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    Log("Hosted invitation inventory refresh failed: " + exception.Message);
+                }
             }
 
             var currentDevices = Devices.ToArray();
@@ -662,9 +672,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return result;
     }
 
+    public async Task RefreshInvitationsAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsPrimary)
+        {
+            ReplaceInvites();
+            return;
+        }
+        if (!await _invitationInventoryGate.WaitAsync(0, cancellationToken)) return;
+        try
+        {
+            Status = "Reading active invitation links from the Opticon gateway…";
+            await LoadHostedInvitationInventoryAsync(cancellationToken);
+            Status = $"{_remoteInvitations.Count} active gateway invitation link(s)";
+        }
+        finally
+        {
+            _invitationInventoryGate.Release();
+        }
+    }
+
     public async Task ExtendInviteAsync(InviteRecord invite, int additionalDays, CancellationToken cancellationToken = default)
     {
         RequirePrimary();
+        if (invite.IsRemoteOrphan)
+            throw new InvalidOperationException("A gateway-only invitation cannot be extended because this Command Center does not have its private URL. Expire it and create a new invitation.");
         await _state.InviteGate.WaitAsync(cancellationToken);
         bool oldKeyRevoked;
         try
@@ -681,7 +713,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task CancelInviteAsync(InviteRecord invite, CancellationToken cancellationToken = default)
     {
         RequirePrimary();
+        if (invite.IsRemoteOrphan)
+        {
+            if (string.IsNullOrWhiteSpace(invite.HostedInviteIdHash))
+                throw new InvalidDataException("The gateway invitation has no safe identity.");
+            await new HostedInviteClient(_state).DeleteAsync(invite.HostedInviteIdHash, cancellationToken);
+            await LoadHostedInvitationInventoryAsync(cancellationToken);
+            Log(invite.CanRevokeRemoteNetworkKey
+                ? $"Expired the gateway-only invitation for {invite.DeviceName}; its hosted link and network key are disabled."
+                : $"Removed the gateway-only hosted link for {invite.DeviceName}. Its legacy network key identity was unavailable and may remain usable until {invite.ExpiresAt.LocalDateTime:g}.");
+            Status = $"Invitation expired: {invite.DeviceName}";
+            return;
+        }
+        var hostedIdHash = invite.HostedInviteIdHash;
         var result = await new InviteBundleService(_state, _headscale).CancelAsync(invite, cancellationToken);
+        if (result.HostedLinkRemoved && !string.IsNullOrWhiteSpace(hostedIdHash))
+            _remoteInvitations.RemoveAll(remote =>
+                string.Equals(remote.IdHash, hostedIdHash, StringComparison.OrdinalIgnoreCase));
         ReplaceInvites();
         Log(result.HostedLinkRemoved && result.LegacyBundleDeleted
             ? $"Canceled the invitation for {invite.DeviceName}; its link and network key are disabled."
@@ -1258,8 +1306,43 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void ReplaceInvites()
     {
+        var localActiveHashes = Config.Invites
+            .Where(invite => !invite.IsExpired && !string.IsNullOrWhiteSpace(invite.HostedInviteIdHash))
+            .Select(invite => invite.HostedInviteIdHash)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var combined = new List<InviteRecord>(Config.Invites.Count + _remoteInvitations.Count);
+        foreach (var invite in Config.Invites)
+        {
+            invite.IsRemoteOrphan = false;
+            invite.CanRevokeRemoteNetworkKey = false;
+            combined.Add(invite);
+        }
+        foreach (var remote in _remoteInvitations.Where(remote =>
+                     !string.IsNullOrWhiteSpace(remote.IdHash) && !localActiveHashes.Contains(remote.IdHash)))
+        {
+            combined.Add(new InviteRecord
+            {
+                Id = Guid.Empty,
+                DeviceName = remote.DeviceName,
+                Role = Enum.TryParse<DeviceRole>(remote.Role, out var role) ? role : DeviceRole.ManagedOnly,
+                CreatedAt = remote.CreatedAt,
+                ExpiresAt = remote.ExpiresAt,
+                HostedInviteIdHash = remote.IdHash,
+                ReleaseVersion = remote.ReleaseVersion,
+                SourceFile = remote.SourceFile,
+                InstallProtocol = remote.InstallProtocol,
+                IsRemoteOrphan = true,
+                CanRevokeRemoteNetworkKey = remote.CanRevoke
+            });
+        }
         Invites.Clear();
-        foreach (var invite in Config.Invites.OrderByDescending(invite => invite.CreatedAt)) Invites.Add(invite);
+        foreach (var invite in combined.OrderByDescending(invite => invite.CreatedAt)) Invites.Add(invite);
+    }
+
+    private async Task LoadHostedInvitationInventoryAsync(CancellationToken cancellationToken)
+    {
+        _remoteInvitations = [.. await new HostedInviteClient(_state).GetActiveInvitationsAsync(cancellationToken)];
+        ReplaceInvites();
     }
 
     private async Task ObserveSshSessionAsync(string deviceName, SshSessionHandle handle)

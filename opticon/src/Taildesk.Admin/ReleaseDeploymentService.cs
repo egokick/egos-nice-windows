@@ -44,6 +44,7 @@ public sealed class ReleaseInvitationSummary
     public string IdHash { get; set; } = string.Empty;
     public string DeviceName { get; set; } = string.Empty;
     public string Role { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public string ReleaseVersion { get; set; } = string.Empty;
     public string SourceFile { get; set; } = string.Empty;

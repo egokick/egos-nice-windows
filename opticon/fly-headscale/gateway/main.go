@@ -34,6 +34,7 @@ const (
 	adminPrefix               = "/opticon/v1/headscale/"
 	artifactPrefix            = "/opticon/artifacts/v1/"
 	inviteAdminPrefix         = "/opticon/v1/invitations/"
+	inviteInventoryPath       = "/opticon/v1/invitations"
 	bundleAdminPrefix         = "/opticon/v1/bundles/"
 	releaseAdminPath          = "/opticon/v1/releases/manifest"
 	releasePreflightPath      = "/opticon/v1/releases/preflight"
@@ -237,6 +238,10 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == releaseFinalizePath {
 		g.releaseFinalize(w, r)
+		return
+	}
+	if r.URL.Path == inviteInventoryPath {
+		g.invitationInventory(w, r)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, artifactPrefix) {
@@ -472,6 +477,7 @@ func validProductionArtifactTrust(artifact bundleArtifact) bool {
 type hostedInvite struct {
 	DeviceName string    `json:"deviceName"`
 	Role       string    `json:"role"`
+	CreatedAt  time.Time `json:"createdAt,omitempty"`
 	ExpiresAt  time.Time `json:"expiresAt"`
 	// InstallProtocol is explicit so that a source-only invitation cannot be
 	// silently interpreted as an older bootstrap-and-binary invitation.
@@ -536,12 +542,18 @@ type releaseInvitationSummary struct {
 	IDHash          string    `json:"idHash"`
 	DeviceName      string    `json:"deviceName"`
 	Role            string    `json:"role"`
+	CreatedAt       time.Time `json:"createdAt"`
 	ExpiresAt       time.Time `json:"expiresAt"`
 	ReleaseVersion  string    `json:"releaseVersion"`
 	SourceFile      string    `json:"sourceFile"`
 	InstallProtocol string    `json:"installProtocol"`
 	CanRevoke       bool      `json:"canRevoke"`
 	BlockedReason   string    `json:"blockedReason,omitempty"`
+}
+
+type invitationInventoryResponse struct {
+	SchemaVersion int                        `json:"schemaVersion"`
+	Invitations   []releaseInvitationSummary `json:"invitations"`
 }
 
 type releasePreflightResponse struct {
@@ -1171,6 +1183,7 @@ func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time) (re
 			IDHash:          item.IDHash,
 			DeviceName:      item.Invite.DeviceName,
 			Role:            item.Invite.Role,
+			CreatedAt:       item.Invite.CreatedAt,
 			ExpiresAt:       item.Invite.ExpiresAt,
 			ReleaseVersion:  item.Invite.ReleaseVersion,
 			SourceFile:      item.Invite.SourceFile,
@@ -1854,6 +1867,97 @@ func (g *gateway) bundleIsFinalized(artifact bundleArtifact) bool {
 	return err == nil && info.Mode().IsRegular() && info.Size() == artifact.Size
 }
 
+func (g *gateway) invitationInventory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := g.readAdminBody(w, r, maxAdminBody)
+	if err != nil {
+		if errors.Is(err, errAdminBusy) {
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+		} else {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+		}
+		return
+	}
+	if !g.authenticate(r, body, time.Now()) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Keep the same global order used by invitation mutations and release
+	// transactions so this is one authoritative point-in-time inventory.
+	g.releaseMu.Lock()
+	defer g.releaseMu.Unlock()
+	g.inviteMu.Lock()
+	defer g.inviteMu.Unlock()
+
+	now := g.currentTime()
+	entries, err := os.ReadDir(g.inviteDir)
+	if err != nil {
+		http.Error(w, "invitation inventory unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	items := make([]releaseInvitationSummary, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		idHash := strings.TrimSuffix(entry.Name(), ".json")
+		if !inviteHashPattern.MatchString(idHash) {
+			http.Error(w, "invitation inventory contains an invalid identity", http.StatusServiceUnavailable)
+			return
+		}
+		path := filepath.Join(g.inviteDir, entry.Name())
+		data, readErr := os.ReadFile(path)
+		if readErr != nil || len(data) == 0 || len(data) > maxInviteBody*2 {
+			http.Error(w, "invitation inventory could not be read safely", http.StatusServiceUnavailable)
+			return
+		}
+		var invite hostedInvite
+		if json.Unmarshal(data, &invite) != nil {
+			http.Error(w, "invitation inventory contains a corrupt record", http.StatusServiceUnavailable)
+			return
+		}
+		if !invite.ExpiresAt.After(now) {
+			continue
+		}
+		createdAt := invite.CreatedAt
+		if createdAt.IsZero() {
+			info, statErr := entry.Info()
+			if statErr != nil {
+				http.Error(w, "invitation inventory metadata is unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			createdAt = info.ModTime().UTC()
+		}
+		canRevoke := strings.TrimSpace(invite.TailscaleKeyID) != ""
+		summary := releaseInvitationSummary{
+			IDHash:          idHash,
+			DeviceName:      invite.DeviceName,
+			Role:            invite.Role,
+			CreatedAt:       createdAt,
+			ExpiresAt:       invite.ExpiresAt,
+			ReleaseVersion:  invite.ReleaseVersion,
+			SourceFile:      invite.SourceFile,
+			InstallProtocol: invite.InstallProtocol,
+			CanRevoke:       canRevoke,
+		}
+		if !canRevoke {
+			summary.BlockedReason = "Its hosted link can be removed, but its network key identity is unavailable and the key may remain usable until the invitation expires."
+		}
+		items = append(items, summary)
+	}
+	sort.Slice(items, func(left, right int) bool {
+		if items[left].CreatedAt.Equal(items[right].CreatedAt) {
+			return items[left].IDHash < items[right].IDHash
+		}
+		return items[left].CreatedAt.After(items[right].CreatedAt)
+	})
+	writeJSON(w, http.StatusOK, invitationInventoryResponse{SchemaVersion: 1, Invitations: items})
+}
+
 func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 	idHash := strings.ToLower(strings.TrimPrefix(r.URL.Path, inviteAdminPrefix))
 	if !inviteHashPattern.MatchString(idHash) {
@@ -1900,6 +2004,9 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 		if g.now != nil {
 			now = g.now()
 		}
+		if invite.CreatedAt.IsZero() {
+			invite.CreatedAt = now.UTC()
+		}
 		sourceOnly := invite.InstallProtocol == sourceInstallProtocol
 		legacyBootstrap := invite.InstallProtocol == ""
 		if strings.TrimSpace(invite.DeviceName) == "" || (invite.Role != "ManagedOnly" && invite.Role != "ControllerAndManaged") ||
@@ -1907,7 +2014,8 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 			!inviteHashPattern.MatchString(strings.ToLower(invite.SourceSHA256)) || !inviteHashPattern.MatchString(strings.ToLower(invite.SourceManifestSHA256)) ||
 			invite.SourceSize <= 0 || invite.SDKVersion != pinnedSDKVersion || invite.RuntimeVersion != pinnedRuntimeVersion || !supportedTargetRuntimes(invite.TargetRuntimes) ||
 			invite.SigningProfile != trustedSigningProfile || invite.SourceManifestKeyID != trustedSourceManifestKeyID ||
-			invite.ProductSigner != trustedProductSignerThumbprint || len(invite.TailscaleKeyID) > 512 || strings.ContainsAny(invite.TailscaleKeyID, "\r\n") || (!sourceOnly && !legacyBootstrap) {
+			invite.ProductSigner != trustedProductSignerThumbprint || len(invite.TailscaleKeyID) > 512 || strings.ContainsAny(invite.TailscaleKeyID, "\r\n") || (!sourceOnly && !legacyBootstrap) ||
+			invite.CreatedAt.After(now.Add(5*time.Minute)) || invite.CreatedAt.After(invite.ExpiresAt) {
 			http.Error(w, "invalid invitation", http.StatusBadRequest)
 			return
 		}
@@ -1933,13 +2041,26 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		g.inviteMu.Lock()
+		defer g.inviteMu.Unlock()
+		if existing, readErr := os.ReadFile(path); readErr == nil {
+			var stored hostedInvite
+			if json.Unmarshal(existing, &stored) != nil {
+				http.Error(w, "stored invitation is corrupt", http.StatusInternalServerError)
+				return
+			}
+			if !stored.CreatedAt.IsZero() {
+				invite.CreatedAt = stored.CreatedAt
+			}
+		} else if !os.IsNotExist(readErr) {
+			http.Error(w, "storage unavailable", http.StatusInternalServerError)
+			return
+		}
 		encoded, err := json.Marshal(invite)
 		if err != nil {
 			http.Error(w, "invalid invitation", http.StatusBadRequest)
 			return
 		}
-		g.inviteMu.Lock()
-		defer g.inviteMu.Unlock()
 		temporary := path + ".tmp"
 		if err := os.WriteFile(temporary, encoded, 0600); err != nil {
 			http.Error(w, "storage unavailable", http.StatusInternalServerError)
@@ -1950,10 +2071,39 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage unavailable", http.StatusInternalServerError)
 			return
 		}
+		if err := syncDirectory(g.inviteDir); err != nil {
+			http.Error(w, "storage unavailable", http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, http.StatusCreated, map[string]any{"stored": true, "expiresAt": invite.ExpiresAt})
 	case http.MethodDelete:
 		g.inviteMu.Lock()
+		storedData, readErr := os.ReadFile(path)
+		g.inviteMu.Unlock()
+		if os.IsNotExist(readErr) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if readErr != nil || len(storedData) == 0 || len(storedData) > maxInviteBody*2 {
+			http.Error(w, "stored invitation could not be read safely", http.StatusInternalServerError)
+			return
+		}
+		var stored hostedInvite
+		if json.Unmarshal(storedData, &stored) != nil {
+			http.Error(w, "stored invitation is corrupt", http.StatusInternalServerError)
+			return
+		}
+		if strings.TrimSpace(stored.TailscaleKeyID) != "" {
+			if err := g.revokeHostedInviteKey(stored.TailscaleKeyID); err != nil {
+				http.Error(w, "network key revocation failed; invitation was retained", http.StatusBadGateway)
+				return
+			}
+		}
+		g.inviteMu.Lock()
 		err := os.Remove(path)
+		if err == nil {
+			err = syncDirectory(g.inviteDir)
+		}
 		g.inviteMu.Unlock()
 		if err != nil && !os.IsNotExist(err) {
 			http.Error(w, "storage unavailable", http.StatusInternalServerError)

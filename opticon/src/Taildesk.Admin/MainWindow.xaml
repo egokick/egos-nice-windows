@@ -274,7 +274,7 @@
                 <Grid Margin="20">
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <TextBlock Text="Invitations" Style="{StaticResource SectionTitle}" />
-                    <TextBlock Grid.Row="1" Margin="0,4,0,18" Text="Create a personalized, single-use setup link for a new Windows machine." Foreground="{StaticResource MutedBrush}" />
+                    <TextBlock Grid.Row="1" Margin="0,4,0,18" Text="Create single-use setup links and reconcile every active link reported by the authenticated Opticon gateway." Foreground="{StaticResource MutedBrush}" />
                     <Border Grid.Row="2" Padding="14" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="210" /><ColumnDefinition Width="220" /><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -327,7 +327,8 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="MACHINE" Binding="{Binding DeviceName}" Width="2*" />
                             <DataGridTextColumn Header="ROLE" Binding="{Binding Role}" Width="180" />
-                            <DataGridTextColumn Header="STATUS" Binding="{Binding Status}" Width="100" />
+                            <DataGridTextColumn Header="STATUS" Binding="{Binding Status}" Width="120" />
+                            <DataGridTextColumn Header="SOURCE" Binding="{Binding RecordSource}" Width="105" />
                             <DataGridTextColumn Header="CREATED" Binding="{Binding CreatedAt, StringFormat={}{0:g}}" Width="150" />
                             <DataGridTextColumn Header="EXPIRES" Binding="{Binding ExpiresAt, StringFormat={}{0:g}}" Width="150" />
                             <DataGridTextColumn Header="INVITATION LINK" Binding="{Binding HostedUrl}" Width="3*" />

@@ -6,6 +6,11 @@ using Taildesk.Shared;
 namespace Taildesk.Admin;
 
 public sealed record HostedInvitePublication(string IdHash, string Url);
+public sealed class HostedInvitationInventory
+{
+    public int SchemaVersion { get; set; }
+    public List<ReleaseInvitationSummary> Invitations { get; set; } = [];
+}
 internal sealed record HostedInviteUpload(
     string DeviceName,
     string Role,
@@ -27,6 +32,7 @@ internal sealed record HostedInviteUpload(
 
 public sealed class HostedInviteClient
 {
+    private const string InvitationInventoryPath = "/opticon/v1/invitations";
     private const string InviteAdminPath = "/opticon/v1/invitations/";
     private const string ReleasePreflightPath = "/opticon/v1/releases/preflight";
     private const string ReleaseAcquirePath = "/opticon/v1/releases/acquire";
@@ -54,7 +60,7 @@ public sealed class HostedInviteClient
         BuildSigningTrust.RequirePublishable();
         if (string.IsNullOrWhiteSpace(tailscaleKeyId))
             throw new ArgumentException("A Headscale pre-authentication key identity is required for a hosted invitation.", nameof(tailscaleKeyId));
-        var idHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(publicId))).ToLowerInvariant();
+        var idHash = ComputeIdHash(publicId);
         var upload = new HostedInviteUpload(payload.DeviceName, payload.Role.ToString(), payload.ExpiresAt,
             payload.ReleaseVersion, payload.SourceSha256, payload.SourceFile, payload.SourceSize,
             payload.SourceManifestSha256, payload.SourceManifestKeyId,
@@ -62,15 +68,75 @@ public sealed class HostedInviteClient
             payload.RuntimeVersion, payload.TargetRuntimes, payload.InstallProtocol, tailscaleKeyId, encryptedEnvelope);
         var body = JsonSerializer.SerializeToUtf8Bytes(upload, JsonDefaults.Options);
         var uri = BuildUri(InviteAdminPath + idHash);
-        using var response = await SendSignedAsync(HttpMethod.Put, uri, body, cancellationToken);
-        if (!response.IsSuccessStatusCode)
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < 3; attempt++)
         {
-            var detail = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new InvalidOperationException($"Fly invitation publishing failed ({(int)response.StatusCode}): {detail.Trim()}");
+            try
+            {
+                using var response = await SendSignedAsync(HttpMethod.Put, uri, body, cancellationToken);
+                if (response.IsSuccessStatusCode)
+                    return BuildPublication(uri, publicId, fragmentKey, idHash);
+                var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+                if ((int)response.StatusCode < 500)
+                    throw new InvalidOperationException($"Fly invitation publishing failed ({(int)response.StatusCode}): {detail.Trim()}");
+                lastError = new HttpRequestException($"Fly invitation publishing failed ({(int)response.StatusCode}): {detail.Trim()}");
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested && exception is HttpRequestException or TaskCanceledException)
+            {
+                lastError = exception;
+            }
+            if (attempt < 2) await Task.Delay(TimeSpan.FromMilliseconds(300 * (attempt + 1)), cancellationToken);
         }
-        var origin = new Uri(uri.GetLeftPart(UriPartial.Authority));
+
+        // The PUT identity and body are deterministic. If every response was
+        // lost, query the authenticated inventory before reporting failure so
+        // an already-successful publish is committed locally instead of being
+        // left as an invisible remote orphan.
+        try
+        {
+            var inventory = await GetActiveInvitationsAsync(cancellationToken);
+            var stored = inventory.FirstOrDefault(item =>
+                SecurityHelpers.FixedTimeEquals(item.IdHash, idHash));
+            if (stored is not null
+                && string.Equals(stored.DeviceName, payload.DeviceName, StringComparison.Ordinal)
+                && string.Equals(stored.Role, payload.Role.ToString(), StringComparison.Ordinal)
+                && stored.ExpiresAt == payload.ExpiresAt
+                && string.Equals(stored.ReleaseVersion, payload.ReleaseVersion, StringComparison.Ordinal)
+                && string.Equals(stored.SourceFile, payload.SourceFile, StringComparison.Ordinal))
+                return BuildPublication(uri, publicId, fragmentKey, idHash);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested && exception is HttpRequestException or TaskCanceledException)
+        {
+            lastError = exception;
+        }
+        throw new InvalidOperationException("Fly invitation publishing did not return a durable result after retries.", lastError);
+    }
+
+    internal static string ComputeIdHash(string publicId)
+    {
+        if (string.IsNullOrWhiteSpace(publicId)) throw new ArgumentException("A hosted invitation ID is required.", nameof(publicId));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(publicId))).ToLowerInvariant();
+    }
+
+    private static HostedInvitePublication BuildPublication(Uri adminUri, string publicId, string fragmentKey, string idHash)
+    {
+        var origin = new Uri(adminUri.GetLeftPart(UriPartial.Authority));
         var url = new Uri(origin, $"/opticon/i/{Uri.EscapeDataString(publicId)}").AbsoluteUri + "#" + fragmentKey;
         return new HostedInvitePublication(idHash, url);
+    }
+
+    public async Task<IReadOnlyList<ReleaseInvitationSummary>> GetActiveInvitationsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await SendSignedAsync(HttpMethod.Get, BuildUri(InvitationInventoryPath), [], cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Fly invitation inventory failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
+        var content = await ReadBoundedAsync(response, 1024 * 1024, cancellationToken);
+        var inventory = JsonSerializer.Deserialize<HostedInvitationInventory>(content, JsonDefaults.Options)
+                        ?? throw new InvalidDataException("Fly invitation inventory returned an empty response.");
+        if (inventory.SchemaVersion != 1 || inventory.Invitations is null)
+            throw new InvalidDataException("Fly invitation inventory returned an unsupported response.");
+        return inventory.Invitations;
     }
 
     public async Task DeleteAsync(string idHash, CancellationToken cancellationToken = default)

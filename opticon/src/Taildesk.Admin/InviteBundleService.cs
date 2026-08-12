@@ -126,10 +126,12 @@ public sealed class InviteBundleService
         };
 
         HostedInvitePublication? publication = null;
+        string? attemptedHostedIdHash = null;
         try
         {
             progress?.Report("Signing and encrypting the private invitation...");
             var publicId = SecurityHelpers.CreateToken(24);
+            attemptedHostedIdHash = HostedInviteClient.ComputeIdHash(publicId);
             var fragmentKey = SecurityHelpers.CreateToken(32);
             var signedEnvelope = HostedInviteFile.CreateSigned(payload);
             var encryptedEnvelope = HostedInviteFile.Encrypt(fragmentKey, signedEnvelope);
@@ -158,9 +160,14 @@ public sealed class InviteBundleService
         }
         catch
         {
-            if (publication is not null)
+            var hostedIdHash = publication?.IdHash ?? attemptedHostedIdHash;
+            if (!string.IsNullOrWhiteSpace(hostedIdHash))
             {
-                try { await new HostedInviteClient(_state).DeleteAsync(publication.IdHash, CancellationToken.None); } catch { }
+                // Cleanup uses the client-chosen stable identity even if the
+                // PUT response was lost before HostedInvitePublication could
+                // be returned. A 404 is accepted; a later inventory refresh
+                // still exposes the record if cleanup itself is unreachable.
+                try { await new HostedInviteClient(_state).DeleteAsync(hostedIdHash, CancellationToken.None); } catch { }
             }
             try { await _headscale.RevokeKeyAsync(authKey.Id, CancellationToken.None); } catch { }
             throw;

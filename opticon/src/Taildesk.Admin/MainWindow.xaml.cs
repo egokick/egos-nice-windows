@@ -53,11 +53,16 @@ public partial class MainWindow : Window
         if (sender is not Button { Tag: string value } || !int.TryParse(value, out var index)) return;
         WorkspaceTabs.SelectedIndex = index;
         if (index == 1) await _viewModel.ScheduledTransferManager.RefreshAsync();
+        if (index == 4) await RunAsync(() => _viewModel.RefreshInvitationsAsync());
         if (index == 5) await RunAsync(() => _viewModel.RefreshReleaseDeploymentAsync());
         if (index == 7) await _viewModel.RunSystemChecksAsync();
     }
 
-    private void GoToInvites_Click(object sender, RoutedEventArgs e) => WorkspaceTabs.SelectedIndex = 4;
+    private async void GoToInvites_Click(object sender, RoutedEventArgs e)
+    {
+        WorkspaceTabs.SelectedIndex = 4;
+        await RunAsync(() => _viewModel.RefreshInvitationsAsync());
+    }
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await RunAsync(() => _viewModel.RefreshAsync());
     private async void RunSystemChecks_Click(object sender, RoutedEventArgs e) => await _viewModel.RunSystemChecksAsync();
 
@@ -474,6 +479,11 @@ public partial class MainWindow : Window
     private async void ExtendInvite_Click(object sender, RoutedEventArgs e)
     {
         if (InviteGrid.SelectedItem is not InviteRecord invite) { ShowError(new InvalidOperationException("Select an invitation first.")); return; }
+        if (invite.IsRemoteOrphan)
+        {
+            ShowError(new InvalidOperationException("This active link exists only on the gateway, so its private URL cannot be extended here. Expire it and create a new invitation."));
+            return;
+        }
         var input = Microsoft.VisualBasic.Interaction.InputBox(
             $"How many days should be added to the current expiry for '{invite.DeviceName}'?\n\nThe URL remains the same and the one-use network key will be rotated.",
             "Extend invitation expiry", "14");
@@ -504,7 +514,10 @@ public partial class MainWindow : Window
 
     private async Task ExpireInviteAsync(InviteRecord invite)
     {
-        if (MessageBox.Show($"Expire the invitation for '{invite.DeviceName}' now?\n\nIts URL and one-use network key will be disabled immediately.",
+        var effect = invite.IsRemoteOrphan && !invite.CanRevokeRemoteNetworkKey
+            ? $"Its hosted link will be removed immediately. This legacy record has no safely revocable network key identity, so a recipient that already extracted the key may still use it until {invite.ExpiresAt.LocalDateTime:g}."
+            : "Its URL and one-use network key will be disabled immediately.";
+        if (MessageBox.Show($"Expire the invitation for '{invite.DeviceName}' now?\n\n{effect}",
                 "Expire invitation", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
         await RunAsync(() => _viewModel.CancelInviteAsync(invite));
     }

@@ -126,6 +126,18 @@ public sealed class InviteRecord
     public string[] TargetRuntimes { get; set; } = [];
     public string InstallProtocol { get; set; } = InvitationPolicy.SourceInstallProtocol;
 
+    // Gateway-only rows are synthesized by the primary Command Center from
+    // authenticated, sanitized inventory. They are deliberately never written
+    // to admin.json because they do not contain invitation secrets or a URL.
+    [JsonIgnore]
+    public bool IsRemoteOrphan { get; set; }
+
+    [JsonIgnore]
+    public bool CanRevokeRemoteNetworkKey { get; set; }
+
+    [JsonIgnore]
+    public string RecordSource => IsRemoteOrphan ? "Gateway only" : "Local";
+
     [JsonIgnore]
     public string HostedUrl => string.IsNullOrWhiteSpace(HostedUrlProtected)
         ? string.Empty
@@ -135,7 +147,9 @@ public sealed class InviteRecord
     public bool IsExpired => DateTimeOffset.UtcNow >= ExpiresAt;
 
     [JsonIgnore]
-    public string Status => (PendingTailscaleKeyRevocations?.Count ?? 0) > 0
+    public string Status => IsRemoteOrphan
+        ? "Remote orphan"
+        : (PendingTailscaleKeyRevocations?.Count ?? 0) > 0
         ? "Key cleanup pending"
         : RedeemedAt.HasValue ? "Redeemed" : IsExpired ? "Expired" : "Ready";
 }
