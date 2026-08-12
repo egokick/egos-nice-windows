@@ -126,6 +126,9 @@ app.MapPost("/api/finance/accounts/{id}/refresh", async (
     return Results.Json(result);
 });
 
+app.MapGet("/api/finance/codex-refresh/status", (CodexFinanceRefreshLauncher launcher) =>
+    Results.Json(launcher.GetStatus()));
+
 app.MapPost("/api/finance/transactions/refresh", async (
     CodexFinanceRefreshLauncher launcher,
     FinanceStore store,
@@ -1407,6 +1410,37 @@ public sealed class FinanceStore
         }
     }
 
+    public async Task<bool> WasAccountRefreshCompletedSinceAsync(
+        string accountId,
+        DateTimeOffset startedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            var account = LoadUserAccounts().FirstOrDefault(candidate =>
+                string.Equals(candidate.Id, accountId, StringComparison.OrdinalIgnoreCase));
+            return account?.LastUpdatedUtc is { } completedAtUtc && completedAtUtc >= startedAtUtc;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task AppendRefreshLogAsync(FinanceRefreshLog log, CancellationToken cancellationToken)
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await AppendJsonLineAsync(_logPath, log, cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task<FinanceSnapshot> RefreshAsync(string reason, CancellationToken cancellationToken)
     {
         await _lock.WaitAsync(cancellationToken);
@@ -1771,7 +1805,7 @@ public sealed class FinanceStore
             await AppendJsonLineAsync(_snapshotsPath, snapshot, cancellationToken);
             await AppendJsonLineAsync(
                 _logPath,
-                new FinanceRefreshLog(completedAtUtc, "ok", "Verified finance values updated from an assisted account check.", "assisted"),
+                new FinanceRefreshLog(completedAtUtc, "ok", $"Verified finance values updated for {completed.Name}.", "assisted"),
                 cancellationToken);
             return ToFinanceAccount(completed.ToConfig());
         }
@@ -4117,11 +4151,31 @@ public sealed class CodexFinanceRefreshLauncher
     private readonly object _sync = new();
     private readonly Dictionary<string, Process> _processes = new(StringComparer.OrdinalIgnoreCase);
     private readonly FinanceCredentialLeaseStore _credentialLeases;
+    private readonly FinanceStore _store;
+    private readonly string _diagnosticsDirectory;
     private bool _sequenceActive;
 
-    public CodexFinanceRefreshLauncher(FinanceCredentialLeaseStore credentialLeases)
+    public CodexFinanceRefreshLauncher(
+        FinanceCredentialLeaseStore credentialLeases,
+        FinanceStore store,
+        FinanceSettings settings)
     {
         _credentialLeases = credentialLeases;
+        _store = store;
+        _diagnosticsDirectory = Path.Combine(settings.DataRoot, "data", "finance", "codex-runs");
+        Directory.CreateDirectory(_diagnosticsDirectory);
+    }
+
+    public CodexFinanceLauncherStatus GetStatus()
+    {
+        lock (_sync)
+        {
+            PruneExitedProcessesLocked();
+            return new CodexFinanceLauncherStatus(
+                _sequenceActive || _processes.Count > 0,
+                _processes.Count,
+                _sequenceActive ? "A Codex finance refresh is running." : "No Codex finance refresh is running.");
+        }
     }
 
     public CodexRefreshLaunchResult StartAccounts(IReadOnlyList<FinanceAccountSnapshot> accounts)
@@ -4444,6 +4498,15 @@ public sealed class CodexFinanceRefreshLauncher
         Process? process = null;
         try
         {
+            var startedAtUtc = DateTimeOffset.UtcNow;
+            var diagnosticName = string.Concat(
+                startedAtUtc.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture),
+                "-",
+                SafeDiagnosticSegment(plan.AccountId),
+                "-",
+                Guid.NewGuid().ToString("N"),
+                ".txt");
+            var finalMessagePath = Path.Combine(_diagnosticsDirectory, diagnosticName);
             var prompt = plan.Prompt;
             if (!string.IsNullOrWhiteSpace(plan.LoginUrl))
             {
@@ -4453,12 +4516,12 @@ public sealed class CodexFinanceRefreshLauncher
 
             process = new Process
             {
-                StartInfo = BuildStartInfo(plan.RepositoryRoot, prompt),
+                StartInfo = BuildStartInfo(plan.RepositoryRoot, prompt, finalMessagePath),
                 EnableRaisingEvents = true
             };
             if (process.Start())
             {
-                return new CodexProcessHandle(process, leaseToken);
+                return new CodexProcessHandle(process, leaseToken, startedAtUtc, finalMessagePath);
             }
 
             throw new InvalidOperationException("Codex could not be started.");
@@ -4469,6 +4532,14 @@ public sealed class CodexFinanceRefreshLauncher
             process?.Dispose();
             throw;
         }
+    }
+
+    private static string SafeDiagnosticSegment(string value)
+    {
+        var safe = new string(value
+            .Select(character => char.IsLetterOrDigit(character) || character is '-' or '_' ? character : '-')
+            .ToArray());
+        return string.IsNullOrWhiteSpace(safe) ? "account" : safe;
     }
 
     private static string AppendCredentialLeaseInstructions(string prompt, string accountId, string leaseToken)
@@ -4492,7 +4563,10 @@ public sealed class CodexFinanceRefreshLauncher
             "and excessive retries. A different foreground tab or application is not a blocker.");
     }
 
-    private static ProcessStartInfo BuildStartInfo(string repositoryRoot, string prompt)
+    private static ProcessStartInfo BuildStartInfo(
+        string repositoryRoot,
+        string prompt,
+        string finalMessagePath)
     {
         var codexCommand = ResolveCodexCommand();
         var startInfo = new ProcessStartInfo
@@ -4533,6 +4607,10 @@ public sealed class CodexFinanceRefreshLauncher
         // Non-interactive execution exits when this account finishes (or reports
         // a genuine blocker), allowing the sequential launcher to advance.
         startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add("--color");
+        startInfo.ArgumentList.Add("never");
+        startInfo.ArgumentList.Add("--output-last-message");
+        startInfo.ArgumentList.Add(finalMessagePath);
         startInfo.ArgumentList.Add("--skip-git-repo-check");
         startInfo.ArgumentList.Add(prompt);
 
@@ -4580,17 +4658,44 @@ public sealed class CodexFinanceRefreshLauncher
     private async Task WaitForSequentialProcessAsync(CodexLaunchPlan plan, CodexProcessHandle handle)
     {
         var process = handle.Process;
+        Exception? waitError = null;
+        int? exitCode = null;
         try
         {
             await process.WaitForExitAsync();
+            exitCode = process.ExitCode;
         }
         catch (Exception ex)
         {
+            waitError = ex;
             Console.Error.WriteLine(
                 $"Could not wait for the Codex session for '{plan.AccountName}': {ex.Message}");
         }
         finally
         {
+            var finalMessage = ReadAndSanitizeFinalMessage(handle.FinalMessagePath, handle.CredentialLeaseToken);
+            var refreshCompleted = false;
+            try
+            {
+                refreshCompleted = await _store.WasAccountRefreshCompletedSinceAsync(
+                    plan.AccountId,
+                    handle.StartedAtUtc,
+                    CancellationToken.None);
+                if (!refreshCompleted)
+                {
+                    var status = IsUserActionBlocker(finalMessage) ? "blocked" : "failed";
+                    var explanation = BuildRunExplanation(plan.AccountName, finalMessage, exitCode, waitError);
+                    await _store.AppendRefreshLogAsync(
+                        new FinanceRefreshLog(DateTimeOffset.UtcNow, status, explanation, "codex-account-refresh"),
+                        CancellationToken.None);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(
+                    $"Could not record the Codex result for '{plan.AccountName}': {ex.Message}");
+            }
+
             _credentialLeases.Revoke(handle.CredentialLeaseToken);
             lock (_sync)
             {
@@ -4603,6 +4708,62 @@ public sealed class CodexFinanceRefreshLauncher
 
             process.Dispose();
         }
+    }
+
+    private static string? ReadAndSanitizeFinalMessage(string path, string? leaseToken)
+    {
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            var message = File.ReadAllText(path, Encoding.UTF8).Trim();
+            if (!string.IsNullOrWhiteSpace(leaseToken))
+            {
+                message = message.Replace(leaseToken, "[REDACTED]", StringComparison.Ordinal);
+            }
+
+            if (message.Length > 4000)
+            {
+                message = string.Concat(message.AsSpan(0, 4000), "…");
+            }
+
+            File.WriteAllText(path, message, Encoding.UTF8);
+            return string.IsNullOrWhiteSpace(message) ? null : message;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsUserActionBlocker(string? message) =>
+        message is not null && Regex.IsMatch(
+            message,
+            @"\b(blocked|mfa|captcha|approve|approval|verification code|one-time code)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static string BuildRunExplanation(
+        string accountName,
+        string? finalMessage,
+        int? exitCode,
+        Exception? waitError)
+    {
+        if (!string.IsNullOrWhiteSpace(finalMessage))
+        {
+            return $"{accountName}: {finalMessage}";
+        }
+
+        if (waitError is not null)
+        {
+            return $"{accountName}: the Codex process could not be monitored: {waitError.Message}";
+        }
+
+        return exitCode is null
+            ? $"{accountName}: Codex ended without verifying or committing updated account values."
+            : $"{accountName}: Codex exited with code {exitCode} without verifying or committing updated account values.";
     }
 
     private void PruneExitedProcessesLocked()
@@ -4622,7 +4783,11 @@ public sealed class CodexFinanceRefreshLauncher
         string RepositoryRoot,
         string Prompt,
         string? LoginUrl);
-    private sealed record CodexProcessHandle(Process Process, string? CredentialLeaseToken);
+    private sealed record CodexProcessHandle(
+        Process Process,
+        string? CredentialLeaseToken,
+        DateTimeOffset StartedAtUtc,
+        string FinalMessagePath);
     private sealed record CodexLaunchCommand(string FileName, string? ScriptPath);
 
     private static CodexLaunchCommand ResolveCodexCommand()
@@ -4819,6 +4984,11 @@ public sealed record FinanceRefreshLog(
     string Status,
     string Message,
     string Reason);
+
+public sealed record CodexFinanceLauncherStatus(
+    bool IsRunning,
+    int ActiveProcessCount,
+    string Message);
 
 // Income lives in its own versioned ledger so account configuration and balance
 // snapshots remain independently migratable. AccountId is the stable join key;

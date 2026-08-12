@@ -2634,6 +2634,11 @@
   color: #9b650d;
 }
 
+.finance-page .state-pill.failed {
+  background: #f8d7da;
+  color: #9f1f2b;
+}
+
 .refresh-log {
   display: grid;
   max-height: 280px;
@@ -2652,6 +2657,11 @@
 
 .refresh-log-row:first-child {
   border-top: none;
+}
+
+.refresh-log-row .status-note {
+  color: inherit;
+  font: inherit;
 }
 
 .chart-line-cash {
@@ -2842,6 +2852,26 @@
   }
 }
 @media (max-width: 480px) {
+  .refresh-log-row {
+    grid-template-columns: 82px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .refresh-log-row .state-pill {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .refresh-log-row > :nth-child(2) {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
+  .refresh-log-row .event-time {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
   .accounts-table {
     min-width: 500px;
     table-layout: fixed;

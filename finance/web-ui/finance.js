@@ -85,6 +85,7 @@ const financeState = {
   hiddenValueSections: new Set(),
   uiPreferences: null,
   uiPreferencesLoaded: false,
+  workflowPollTimer: null,
   uiPreferencesApplied: false,
   selectedTransactionAccountId: null,
   transactionFilters: {
@@ -1353,12 +1354,14 @@ function showEditAccountForm(account) {
 
 async function loadFinance() {
   const shouldLoadPreferences = !financeState.uiPreferencesLoaded;
-  const [data, preferences] = await Promise.all([
+  const [data, preferences, codexRefresh] = await Promise.all([
     fetchJson("/api/finance/state"),
     shouldLoadPreferences
       ? fetchJson("/api/finance/settings/ui-preferences")
-      : Promise.resolve(null)
+      : Promise.resolve(null),
+    fetchJson("/api/finance/codex-refresh/status")
   ]);
+  data.codexRefresh = codexRefresh;
   financeState.data = data;
   if (shouldLoadPreferences && preferences) {
     financeState.uiPreferences = preferences;
@@ -1366,6 +1369,28 @@ async function loadFinance() {
     financeState.hiddenValueSections = new Set(preferences.hiddenValueSections || []);
   }
   renderFinance();
+  syncFinanceWorkflowPolling(codexRefresh);
+}
+
+function syncFinanceWorkflowPolling(codexRefresh) {
+  if (!codexRefresh?.isRunning) {
+    if (financeState.workflowPollTimer !== null) {
+      clearTimeout(financeState.workflowPollTimer);
+      financeState.workflowPollTimer = null;
+    }
+    return;
+  }
+
+  if (financeState.workflowPollTimer !== null) return;
+  financeState.workflowPollTimer = setTimeout(async () => {
+    financeState.workflowPollTimer = null;
+    try {
+      await loadFinance();
+    } catch (error) {
+      financeEls.alert.textContent = `Could not refresh Codex run status: ${error.message || error}`;
+      syncFinanceWorkflowPolling({ isRunning: true });
+    }
+  }, 3000);
 }
 
 async function fetchJson(url, options = {}) {
@@ -1899,10 +1924,11 @@ function summaryText(data) {
 
 function renderRefreshAlert(data) {
   const refresh = data.refresh || {};
+  const codexRefreshRunning = Boolean(data.codexRefresh?.isRunning);
   const currencyUnavailable = data.currencySettings && !data.currencySettings.hasCachedRates;
   const noAccounts = data.configuredAccountCount === 0;
   const hasError = Boolean(refresh.error);
-  const hasWarning = currencyUnavailable || noAccounts || Boolean(refresh.message && !refresh.lastSucceeded);
+  const hasWarning = codexRefreshRunning || currencyUnavailable || noAccounts || Boolean(refresh.message && !refresh.lastSucceeded);
   if (!hasError && !hasWarning) {
     financeEls.alert.hidden = true;
     financeEls.alert.textContent = "";
@@ -1914,6 +1940,8 @@ function renderRefreshAlert(data) {
   financeEls.alert.className = `poll-alert ${hasError ? "poll-alert-failed" : "poll-alert-warning"}`;
   financeEls.alert.textContent = hasError
     ? `Finance refresh failed: ${refresh.error}`
+    : codexRefreshRunning
+      ? "Codex is refreshing an account. The dashboard will keep checking until the session completes or reports what needs your attention."
     : currencyUnavailable
       ? "Exchange rates are unavailable and no cached rates exist yet. Foreign values will remain unconverted until a later app start can refresh rates."
     : noAccounts
@@ -2693,9 +2721,15 @@ function renderLog(logs) {
     const row = document.createElement("div");
     row.className = "refresh-log-row";
     const pill = document.createElement("span");
-    pill.className = `state-pill ${log.status === "ok" || log.status === "queued" ? "online" : log.status === "warning" || log.status === "partial" ? "stale" : ""}`;
+    pill.className = `state-pill ${log.status === "ok" || log.status === "queued" ? "online" : log.status === "warning" || log.status === "partial" || log.status === "blocked" ? "stale" : log.status === "failed" ? "failed" : ""}`;
     pill.textContent = log.status;
-    const message = document.createElement("div");
+    const message = document.createElement(log.message.length > 180 || log.message.includes("\n") ? "button" : "div");
+    if (message instanceof HTMLButtonElement) {
+      message.type = "button";
+      message.className = "status-note collapsed";
+      message.title = "Click to expand or collapse this Codex explanation";
+      message.addEventListener("click", () => message.classList.toggle("collapsed"));
+    }
     message.textContent = log.message;
     const time = document.createElement("div");
     time.className = "event-time";
