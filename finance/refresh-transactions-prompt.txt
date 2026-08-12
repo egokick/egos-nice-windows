@@ -36,6 +36,7 @@ Never print, echo, enumerate, serialize, copy, log, return, persist, reveal, or 
 - An enabled login/continue button is an action for you, not a user blocker. Never preserve an unsubmitted login form and ask the user to click it.
 - Do not report missing credentials or request user sign-in until the exact account-scoped lease requests and targeted locator fills have been attempted, the enabled login action has been submitted, actionable validation errors have been handled, and one appropriate retry has been attempted. Do not fall back to environment variables or foreground typing.
 - Ask the user only for a genuine user-only step such as MFA, mobile approval, a one-time code, CAPTCHA, or an explicit institution error requiring intervention. Preserve the dedicated tab and resume after the user completes that step.
+- Prefer visible in-page buttons, links, menus, tabs, filters, breadcrumbs, and Back controls for navigation and recovery. Do not refresh or reload the page when an appropriate in-page control is available. Reload only as a last resort for a clearly stalled or broken page after waiting and inspecting it; never reload during credential submission, an active MFA/approval window, a partially entered filter, a statement/document handoff, or another state that could be lost.
 
 ## Navigation memory and visual recovery
 
@@ -60,7 +61,7 @@ If the page layout, controls, login action, account selector, filter, pagination
 1. Inspect the assigned tab's current DOM/accessibility state and visible interactive controls.
 2. Take a screenshot of that assigned browser tab with the browser screenshot tool and inspect the image to locate controls that semantic inspection missed. Do not capture or expose secrets unnecessarily.
 3. Try plausible visible account cards/names, **Activity**, **Transactions**, **View activity**, **View all**, **Filter**, **Date range**, calendar icons, overflow menus, chevrons, row descriptions/dates/amounts, **Details**, statements, breadcrumbs, and browser Back.
-4. Wait for loading, refresh the page if safe, restore the assigned account/range, and retry.
+4. Wait for loading, then prefer an available in-page retry, Back, breadcrumb, account, Activity, Transactions, Apply, or equivalent button. Reload only if the page is clearly stalled or broken and no appropriate in-page recovery control exists; afterward restore the assigned account/range and retry.
 5. Update `Transaction navigation:` with the path that worked.
 
 Do not give up after one failed selector, one missing control, one empty page, one timeout, or one response-size failure. Keep searching for a workable route using DOM inspection, a screenshot, alternate controls/views, smaller date ranges, pagination, statements, and retries. A screenshot is required before declaring that a needed visible control cannot be found.
@@ -146,7 +147,7 @@ For each reconciled date POST:
 
 ## Recovery and genuine blockers
 
-Before declaring the assigned account blocked, you must have tried all applicable recovery steps: saved notes, correct account selection, activity/transaction navigation, DOM/accessibility inspection, a screenshot of the assigned tab, alternate visible buttons and menus, date filters, smaller subranges, month-scoped statements, pagination/load-more controls, multiple row-detail targets, back/breadcrumb return paths, waiting/reloading, and at least one retry.
+Before declaring the assigned account blocked, you must have tried all applicable recovery steps: saved notes, correct account selection, activity/transaction navigation, DOM/accessibility inspection, a screenshot of the assigned tab, alternate visible buttons and menus, date filters, smaller subranges, month-scoped statements, pagination/load-more controls, multiple row-detail targets, back/breadcrumb return paths, waiting, in-page retry/recovery controls, and at least one retry. Reload is optional and only a last resort when the page is clearly stalled or broken and no appropriate in-page control exists.
 
 A 15-minute duration is not a stopping condition. A large result set, slow batch loader, response-size limit, failure of one selector, empty range, missing obvious detail panel, or need to work in smaller batches is not a blocker. Continue until the required range is fully reconciled or a genuine external/user-only blocker remains after the recovery checklist.
 

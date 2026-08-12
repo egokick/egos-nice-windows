@@ -411,14 +411,14 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                                 <StackPanel Grid.Row="5" Grid.ColumnSpan="2" Margin="0,10,0,0">
-                                    <Button Content="{Binding ReleaseDeploymentLogsToggleText}" Click="ToggleReleaseDeploymentLogs_Click" HorizontalAlignment="Left" />
-                                    <ListBox Margin="0,7,0,0" ItemsSource="{Binding ReleaseDeploymentLogLines}" MaxHeight="190"
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Content="{Binding ReleaseDeploymentLogsToggleText}" Click="ToggleReleaseDeploymentLogs_Click" />
+                                        <Button Margin="8,0,0,0" Content="Copy displayed logs" Click="CopyReleaseDeploymentLogs_Click" />
+                                    </StackPanel>
+                                    <TextBox Margin="0,7,0,0" Text="{Binding ReleaseDeploymentLogText}" MaxHeight="220" MinHeight="94"
+                                             IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
                                              Background="#0D0F12" BorderBrush="{StaticResource BorderBrush}" Foreground="#C8D0D8"
-                                             FontFamily="Cascadia Mono,Consolas" FontSize="11">
-                                        <ListBox.ItemTemplate>
-                                            <DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="4,2" /></DataTemplate>
-                                        </ListBox.ItemTemplate>
-                                    </ListBox>
+                                             FontFamily="Cascadia Mono,Consolas" FontSize="11" />
                                 </StackPanel>
                             </Grid>
                         </Border>

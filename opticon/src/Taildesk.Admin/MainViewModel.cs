@@ -52,7 +52,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _deployedReleaseVersion = "Not checked";
     private string _releaseDeploymentStatus = "Read the live invite release state to prepare a deployment.";
     private ReleaseDeploymentPreflight? _releasePreflight;
-    private bool _releaseDeploymentCanResume;
     private readonly List<string> _releaseDeploymentLogHistory = [];
     private bool _releaseDeploymentLogsExpanded;
     private int _releaseDeploymentCurrentStep = -1;
@@ -140,6 +139,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string ReleaseDeploymentLogsToggleText => ReleaseDeploymentLogsExpanded
         ? "Hide detailed logs"
         : "Show detailed logs";
+    public string ReleaseDeploymentLogText => string.Join(Environment.NewLine, ReleaseDeploymentLogLines.Reverse());
     public bool DisableAllClientValidation
     {
         get => _disableAllClientValidation;
@@ -170,19 +170,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
     public bool CanDeployRelease => IsPrimary && !ReleaseDeploymentBusy
-        && _releasePreflight is { TargetIsOlder: false }
-        && (!_releasePreflight.DeploymentBlocked || _releaseDeploymentCanResume);
-    public bool CanResumeReleaseDeployment => _releaseDeploymentCanResume;
+        && _releasePreflight is { TargetIsOlder: false };
     public string DeployReleaseButtonText => ReleaseDeploymentBusy
         ? "Deploying source release…"
         : _releasePreflight?.AlreadyDeployed == true
             ? $"Redeploy {OpticonVersion} with selected install policy"
-            : _releasePreflight?.DeploymentBlocked == true && _releaseDeploymentCanResume
-                ? $"Resume deployment {OpticonVersion} for invitations"
-                : _releasePreflight?.DeploymentBlocked == true
-                    ? "Another release deployment is in progress"
-                    : _releasePreflight?.TargetIsOlder == true
-                        ? $"Deployed version {_releasePreflight.DeployedVersion} is newer"
+            : _releasePreflight?.TargetIsOlder == true
+                ? $"Deployed version {_releasePreflight.DeployedVersion} is newer"
             : $"Deploy {OpticonVersion} for invitations";
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -832,17 +826,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Status = "Reading the live Opticon invite release…";
             var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy: false, cancellationToken);
             ApplyReleasePreflight(preflight);
-            if (preflight.AlreadyDeployed)
-            {
-                var recovery = _releaseDeployment.TryGetLeaseRecovery(OpticonVersion);
-                if (recovery is not null)
-                    await _releaseDeployment.FinalizeLeaseAsync(OpticonVersion, recovery, cancellationToken);
-                await _releaseDeployment.ClearLeaseRecoveryAsync(cancellationToken);
-                _releaseDeploymentCanResume = false;
-                Changed(nameof(CanDeployRelease));
-                Changed(nameof(CanResumeReleaseDeployment));
-                Changed(nameof(DeployReleaseButtonText));
-            }
             Status = preflight.AlreadyDeployed
                 ? $"Invite release {preflight.DeployedVersion} already matches this Command Center"
                 : $"Invite release {preflight.DeployedVersion} is currently deployed";
@@ -896,8 +879,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (preflight.TargetIsOlder)
                 throw new InvalidOperationException(
                     $"The deployed invite release {preflight.DeployedVersion} is newer than this Command Center ({OpticonVersion}). A downgrade is refused.");
-            if (preflight.DeploymentBlocked && !_releaseDeploymentCanResume)
-                throw new InvalidOperationException(preflight.DeploymentBlockedReason);
             CompleteReleaseDeploymentStep(0, "Live deployment plan is ready for confirmation.");
             return preflight;
         }
@@ -916,8 +897,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     /// <summary>
     /// Executes the mutation phase only after MainWindow obtained an explicit
-    /// Yes. It re-reads the plan, binds cancellation to the original gateway
-    /// revision, rechecks afterward, then starts the existing S3 publisher.
+    /// Yes. It stages the source, deploys the gateway, removes whichever
+    /// invitations are active at that moment, commits the manifest, and verifies
+    /// the live release. It does not re-run preflight during the mutation phase.
     /// </summary>
     public async Task DeployReleaseAsync(
         ReleaseDeploymentPreflight confirmedPlan,
@@ -931,130 +913,61 @@ public sealed class MainViewModel : INotifyPropertyChanged
             throw new InvalidOperationException("Another release deployment operation is already in progress.");
         ReleaseDeploymentBusy = true;
         Busy = true;
-        ReleaseDeploymentLease? lease = null;
-        var cancellationCompleted = false;
-        var manifestCommitted = false;
         try
         {
             var validationPolicy = ClientInstallValidationPolicy.Normalize(confirmedPlan.OperatorValidationPolicy);
             var forceRedeploy = confirmedPlan.ForceRedeploy;
-            // The UI has already completed its read-only plan and Yes/No
-            // decision. Repeat readiness immediately before acquiring the
-            // lease so revoked invitations are never the first evidence of a
-            // missing signer, AWS identity, git sync, or gateway credential.
+            // Repeat readiness immediately before making release changes so
+            // missing signing, AWS, or publisher prerequisites fail early.
             StartReleaseDeploymentStep(1, "Checking signing, AWS, source workspace, and publisher prerequisites.");
             var prerequisites = await _releaseDeployment.ResolvePublisherPrerequisitesAsync(OpticonVersion, cancellationToken);
             await _releaseDeployment.VerifyPublisherReadinessAsync(
                 OpticonVersion, prerequisites, validationPolicy, forceRedeploy, cancellationToken);
             CompleteReleaseDeploymentStep(1, "Publisher prerequisites are ready.");
 
-            StartReleaseDeploymentStep(0, "Refreshing the live gateway plan before staging.");
-            var preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy, cancellationToken);
-            preflight.OperatorValidationPolicy = validationPolicy;
-            ApplyReleasePreflight(preflight);
-            CompleteReleaseDeploymentStep(0, "Live gateway plan refreshed.");
-            if (preflight.TargetIsOlder)
-                throw new InvalidOperationException("The live invite release is newer than this Command Center. A downgrade is refused.");
-
-            var recovery = _releaseDeployment.TryGetLeaseRecovery(OpticonVersion);
-            var resuming = ReleaseDeploymentService.RecoveryMatchesLiveLease(preflight, recovery);
-            if (preflight.DeploymentBlocked && !resuming)
-                throw new InvalidOperationException(preflight.DeploymentBlockedReason);
-
-            if (!resuming && !string.Equals(preflight.DeploymentRevision, confirmedPlan.DeploymentRevision, StringComparison.Ordinal))
-                AddReleaseDeploymentLog("Prepare deployment plan: active invitations changed after confirmation; continuing with the latest gateway snapshot.");
-
-            if (resuming)
+            StartReleaseDeploymentStep(2, "Building and signing the source archive, uploading it to S3, invalidating CloudFront, and verifying the full download.");
+            var stageProgress = new Progress<string>(message =>
             {
-                lease = recovery!;
-                validationPolicy = ClientInstallValidationPolicy.Normalize(lease.ValidationPolicy);
-                forceRedeploy = lease.ForceRedeploy;
-                preflight.OperatorValidationPolicy = validationPolicy;
-                SkipReleaseDeploymentStep(2, "A previously staged release is being resumed.");
-                SkipReleaseDeploymentStep(3, "Reusing the existing protected gateway deployment lock.");
-                Status = "Resuming the confirmed Opticon release deployment…";
-            }
-            else
+                if (!message.StartsWith("[publisher] ", StringComparison.Ordinal)) Status = message;
+                AddReleaseDeploymentLog("Build, sign, upload, and verify the source archive: " + message);
+            });
+            await RunReleaseStepWithHeartbeatAsync(2, () => _releaseDeployment.StageAsync(OpticonVersion,
+                prerequisites, validationPolicy, forceRedeploy, stageProgress, cancellationToken), cancellationToken);
+            CompleteReleaseDeploymentStep(2, "Replacement source release is staged and verified.");
+
+            StartReleaseDeploymentStep(3, "Deploying the Fly gateway and verifying every pinned network and remote-access installer.");
+            var gatewayProgress = new Progress<string>(message =>
             {
-                // This phase can take time and may expose environmental release
-                // problems (signing, S3, CloudFront) but it leaves the current
-                // live manifest and invitations untouched. Never acquire the
-                // cancellation lease until the immutable archive is verified.
-                StartReleaseDeploymentStep(2, "Building, signing, uploading, and verifying the replacement source release.");
-                var stageProgress = new Progress<string>(message =>
-                {
-                    if (!message.StartsWith("[log] ", StringComparison.Ordinal)) Status = message;
-                    AddReleaseDeploymentLog("Stage and verify source release: " + message);
-                });
-                await _releaseDeployment.StageAsync(OpticonVersion,
-                    prerequisites, validationPolicy, forceRedeploy, stageProgress, cancellationToken);
-                CompleteReleaseDeploymentStep(2, "Replacement source release is staged and verified.");
+                Status = message;
+                AddReleaseDeploymentLog("Deploy the Fly gateway and verify its pinned installers: " + message);
+            });
+            await RunReleaseStepWithHeartbeatAsync(3, () => _releaseDeployment.DeployGatewayForStagedReleaseAsync(
+                OpticonVersion, prerequisites, gatewayProgress, cancellationToken), cancellationToken);
+            CompleteReleaseDeploymentStep(3, "Fly gateway serves the staged installer plus every verified pinned dependency.");
 
-                StartReleaseDeploymentStep(0, "Refreshing the live gateway plan after staging.");
-                preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy, cancellationToken);
-                preflight.OperatorValidationPolicy = validationPolicy;
-                ApplyReleasePreflight(preflight);
-                CompleteReleaseDeploymentStep(0, "Live gateway plan refreshed after staging.");
-                if (preflight.TargetIsOlder)
-                    throw new InvalidOperationException("The live invite release is newer than this Command Center. A downgrade is refused.");
-                if (preflight.DeploymentBlocked)
-                    throw new InvalidOperationException(preflight.DeploymentBlockedReason);
-
-                // Persist a caller-generated opaque token before POSTing it.
-                // If the gateway acquires the lease but its response is lost,
-                // this exact token makes the acquire idempotently recoverable.
-                StartReleaseDeploymentStep(3, "Acquiring an exclusive gateway deployment lock.");
-                var candidate = ReleaseDeploymentService.CreateLeaseCandidate(preflight);
-                await _releaseDeployment.SaveLeaseRecoveryAsync(preflight, candidate, cancellationToken);
-                lease = await _releaseDeployment.AcquireLeaseAsync(preflight, candidate.LeaseToken, cancellationToken);
-                await _releaseDeployment.SaveLeaseRecoveryAsync(preflight, lease, cancellationToken);
-                CompleteReleaseDeploymentStep(3, "Gateway deployment lock acquired.");
-            }
-
-            // A resumed lease may already have deleted the hosted records and
-            // journaled the full removal result. Calling the idempotent gateway
-            // operation retrieves that result for local cleanup.
-            if (preflight.RequiresInvitationRemoval || resuming)
-            {
-                StartReleaseDeploymentStep(4, $"Revoking {preflight.BlockingInvitations.Count} active invitation(s).");
-                Status = $"Revoking {preflight.BlockingInvitations.Count} active invitation(s)…";
-                var cancellation = await _releaseDeployment.RevokeActiveInvitationsAsync(preflight, lease, cancellationToken);
-                await MarkLocallyRemovedInvitationsAsync(cancellation.RemovedInviteIds, cancellationToken);
-                cancellationCompleted = cancellation.RemovedInviteIds.Count != 0;
-                CompleteReleaseDeploymentStep(4, $"Revoked and removed {cancellation.RemovedInviteIds.Count} invitation(s).");
-
-                StartReleaseDeploymentStep(0, "Confirming that no active invitation blocks the live release.");
-                preflight = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy, cancellationToken);
-                preflight.OperatorValidationPolicy = validationPolicy;
-                ApplyReleasePreflight(preflight);
-                CompleteReleaseDeploymentStep(0, "Gateway confirms the release can be committed.");
-                if (preflight.RequiresInvitationRemoval)
-                    throw new InvalidOperationException(
-                        "An active invitation remains after the cancellation attempt. Review the refreshed release plan before publishing.");
-            }
-            else
-            {
-                SkipReleaseDeploymentStep(4, "No active invitations need revocation.");
-            }
+            StartReleaseDeploymentStep(4, "Revoking any invitations that are active now.");
+            Status = "Revoking active invitations…";
+            var cancellation = await _releaseDeployment.RevokeActiveInvitationsAsync(OpticonVersion, cancellationToken);
+            await MarkLocallyRemovedInvitationsAsync(cancellation.RemovedInviteIds, cancellationToken);
+            CompleteReleaseDeploymentStep(4, cancellation.RemovedInviteIds.Count == 0
+                ? "No active invitations were present."
+                : $"Revoked and removed {cancellation.RemovedInviteIds.Count} invitation(s).");
 
             StartReleaseDeploymentStep(5, "Committing the staged release to the live invitation manifest.");
             var progress = new Progress<string>(message =>
             {
-                if (!message.StartsWith("[log] ", StringComparison.Ordinal)) Status = message;
-                AddReleaseDeploymentLog("Commit and verify live release: " + message);
+                if (!message.StartsWith("[publisher] ", StringComparison.Ordinal)) Status = message;
+                AddReleaseDeploymentLog("Commit the staged release and verify it is live: " + message);
             });
-            await _releaseDeployment.PublishAsync(OpticonVersion,
-                prerequisites, lease, validationPolicy, forceRedeploy, progress, cancellationToken);
+            await RunReleaseStepWithHeartbeatAsync(5, () => _releaseDeployment.PublishAsync(OpticonVersion,
+                prerequisites, validationPolicy, forceRedeploy, progress, cancellationToken), cancellationToken);
             ReleaseDeploymentSteps[5].Detail = "Checking that the exact release is live through the gateway.";
-            AddReleaseDeploymentLog("Commit and verify live release: manifest commit completed; verifying live state.");
+            AddReleaseDeploymentLog("Commit the staged release and verify it is live: manifest commit completed; verifying live state.");
             var verified = await _releaseDeployment.PrepareAsync(OpticonVersion, forceRedeploy: false, cancellationToken);
             ApplyReleasePreflight(verified);
             if (!verified.AlreadyDeployed)
                 throw new InvalidOperationException(
                     "The publisher completed, but the live invite manifest does not contain the exact Command Center source release.");
-            await _releaseDeployment.FinalizeLeaseAsync(OpticonVersion, lease, cancellationToken);
-            await _releaseDeployment.ClearLeaseRecoveryAsync(cancellationToken);
-            manifestCommitted = true;
             CompleteReleaseDeploymentStep(5, "Live manifest, CloudFront artifact, and gateway release were verified.");
             Status = $"Invite release {verified.DeployedVersion} is deployed and ready for new invitations";
             Log($"Published verified invite source release {verified.DeployedVersion}; the live manifest and CloudFront artifact were rechecked.");
@@ -1066,18 +979,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         finally
         {
-            if (lease is not null && !manifestCommitted && !cancellationCompleted)
-            {
-                try
-                {
-                    await _releaseDeployment.ReleaseLeaseAsync(lease, CancellationToken.None);
-                    await _releaseDeployment.ClearLeaseRecoveryAsync(CancellationToken.None);
-                }
-                catch (Exception exception)
-                {
-                    Log($"Could not release the uncommitted Opticon deployment lease; it will expire safely: {exception.Message}");
-                }
-            }
             Busy = false;
             ReleaseDeploymentBusy = false;
             _releaseDeploymentGate.Release();
@@ -1145,12 +1046,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ReleaseDeploymentSteps.Clear();
         foreach (var name in new[]
         {
-            "Prepare deployment plan",
+            "Read and confirm the deployment plan",
             "Check publisher readiness",
-            "Stage and verify source release",
-            "Acquire deployment lock",
+            "Build, sign, upload, and verify the source archive",
+            "Deploy the Fly gateway with the staged installer",
             "Revoke active invitations",
-            "Commit and verify live release"
+            "Commit the staged release and verify it is live"
         })
             ReleaseDeploymentSteps.Add(new ReleaseDeploymentProgress(name));
 
@@ -1207,6 +1108,34 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Log(message);
     }
 
+    private async Task RunReleaseStepWithHeartbeatAsync(int index, Func<Task> operation, CancellationToken cancellationToken)
+    {
+        using var heartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeat = ReportReleaseHeartbeatAsync(index, heartbeatCancellation.Token);
+        try
+        {
+            await operation();
+        }
+        finally
+        {
+            heartbeatCancellation.Cancel();
+            try { await heartbeat; }
+            catch (OperationCanceledException) when (heartbeatCancellation.IsCancellationRequested) { }
+        }
+    }
+
+    private async Task ReportReleaseHeartbeatAsync(int index, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken);
+            if (index < 0 || index >= ReleaseDeploymentSteps.Count || ReleaseDeploymentSteps[index].Status != "RUNNING") return;
+            var detail = $"Still running at {DateTime.Now:T}; waiting for the publisher or deployment service to report its next update.";
+            ReleaseDeploymentSteps[index].Detail = detail;
+            AddReleaseDeploymentLog(ReleaseDeploymentSteps[index].Name + ": " + detail);
+        }
+    }
+
     private void RebuildReleaseDeploymentLogs()
     {
         var visible = ReleaseDeploymentLogsExpanded
@@ -1214,6 +1143,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             : _releaseDeploymentLogHistory.Take(8);
         ReleaseDeploymentLogLines.Clear();
         foreach (var line in visible) ReleaseDeploymentLogLines.Add(line);
+        Changed(nameof(ReleaseDeploymentLogText));
     }
 
     private async Task RefreshPrimaryTailnetAsync(CancellationToken cancellationToken)
@@ -1427,9 +1357,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void ApplyReleasePreflight(ReleaseDeploymentPreflight preflight)
     {
         _releasePreflight = preflight;
-        _releaseDeploymentCanResume = ReleaseDeploymentService.RecoveryMatchesLiveLease(
-            preflight,
-            _releaseDeployment.TryGetLeaseRecovery(OpticonVersion));
         DeployedReleaseArtifacts.Clear();
         foreach (var artifact in ReleaseDeploymentService.ToArtifactRows(preflight.Manifest))
             DeployedReleaseArtifacts.Add(artifact);
@@ -1438,29 +1365,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ? $"Deployed version {preflight.DeployedVersion} already matches this Command Center."
             : preflight.TargetIsOlder
                 ? $"Deployed version {preflight.DeployedVersion} is newer than this Command Center; deployment is blocked."
-                : preflight.DeploymentBlocked
-                    ? _releaseDeploymentCanResume
-                        ? $"A confirmed Opticon deployment is paused until {preflight.LeaseExpiresAt.LocalDateTime:g}; click Deploy to resume it."
-                        : preflight.DeploymentBlockedReason
                 : preflight.RequiresInvitationRemoval
                     ? preflight.BlockingInvitations.Any(item => !item.CanRevoke)
                         ? $"Deployment requires removing {preflight.BlockingInvitations.Count} active invitation(s); legacy hosted links can be abandoned after confirmation."
                         : $"Deployment requires removing {preflight.BlockingInvitations.Count} active invitation(s) before the manifest can change."
                     : $"Deployed version {preflight.DeployedVersion}; {OpticonVersion} is ready to publish for new invitations.";
         Changed(nameof(CanDeployRelease));
-        Changed(nameof(CanResumeReleaseDeployment));
         Changed(nameof(DeployReleaseButtonText));
     }
 
     private void ClearReleaseDeploymentState(string status)
     {
         _releasePreflight = null;
-        _releaseDeploymentCanResume = false;
         DeployedReleaseArtifacts.Clear();
         DeployedReleaseVersion = "Unavailable";
         ReleaseDeploymentStatus = status;
         Changed(nameof(CanDeployRelease));
-        Changed(nameof(CanResumeReleaseDeployment));
         Changed(nameof(DeployReleaseButtonText));
     }
 

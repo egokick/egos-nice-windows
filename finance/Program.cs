@@ -3612,12 +3612,9 @@ public sealed class FinanceStore
         {
             if (request.BalanceOwed is null
                 || request.AprPercent is null
-                || request.MinimumPayment is null
-                || request.PaymentDueDate is null
-                || request.MinimumPaymentMet is null
                 || CleanFinanceText(request.CollectorNotes) is null)
             {
-                return "A complete credit or loan refresh requires balanceOwed, aprPercent, minimumPayment, paymentDueDate, minimumPaymentMet, and collectorNotes.";
+                return "A complete credit or loan refresh requires balanceOwed, aprPercent, and collectorNotes. Minimum payment, payment due date, and minimum-payment status may be null when the institution does not display them or explicitly reports them as unavailable.";
             }
 
             if (account.Kind == "credit_card"
@@ -4527,6 +4524,11 @@ public sealed class CodexFinanceRefreshLauncher
         string promptTemplate,
         FinanceAccountSnapshot account)
     {
+        var aprHandling = account.AprPercent is null
+            ? "No APR is configured for this account. Freshly find and verify the current regular APR on an authoritative institution account surface or statement, and submit it as aprPercent. If it cannot be found after checking the available authenticated account surfaces, the refresh must remain uncommitted."
+            : string.Create(
+                CultureInfo.InvariantCulture,
+                $"APR is already configured for this account as {account.AprPercent.Value:0.####}%. Do not search for, open statements for, or revalidate APR during this refresh. Submit the configured value {account.AprPercent.Value:0.####} as aprPercent while freshly collecting all other required values.");
         var accountContext = new
         {
             accountId = account.Id,
@@ -4546,7 +4548,9 @@ public sealed class CodexFinanceRefreshLauncher
             JsonSerializer.Serialize(accountContext, PromptJson),
             "\n```\n\n",
             "This JSON object is your only assigned account. The launcher-appended secure credential lease is restricted to this account. ",
-            "Do not browse, collect, update notes, post values or income, or verify data for any other account.");
+            "Do not browse, collect, update notes, post values or income, or verify data for any other account.",
+            "\n\n## APR handling (authoritative)\n\n",
+            aprHandling);
     }
 
     private static string BuildTransactionAccountPrompt(

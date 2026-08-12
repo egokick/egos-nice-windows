@@ -26,10 +26,6 @@ public sealed class AdminConfig
     public string InviteOutputDirectory { get; set; } = PrivateStorage.InviteDirectory;
     public string RustDeskPath { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "RustDesk", "rustdesk.exe");
-    // A short-lived gateway lease is DPAPI-protected so a Command Center can
-    // resume a confirmed deployment after interruption. It is cleared only
-    // after live-manifest verification or before any invitation is revoked.
-    public string ReleaseDeploymentLeaseProtected { get; set; } = string.Empty;
     public List<DeviceRecord> Devices { get; set; } = [];
     public List<InviteRecord> Invites { get; set; } = [];
     public Dictionary<Guid, bool> PrivacyMode2ByDevice { get; set; } = [];

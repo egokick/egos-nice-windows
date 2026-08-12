@@ -1143,16 +1143,6 @@ function Publish-ManifestAtomically([byte[]]$Body) {
             $request.Headers.Add("X-Opticon-Nonce", $nonce)
             $request.Headers.Add("X-Opticon-Content-SHA256", $bodyHash)
             $request.Headers.Add("X-Opticon-Signature", $signature)
-            # A deployment lease is an opaque bearer held only in the child
-            # process environment. It is never placed in the manifest body,
-            # URL, artifact metadata, or command line.
-            $leaseToken = [string]$env:OPTICON_RELEASE_LEASE_TOKEN
-            if (-not [string]::IsNullOrWhiteSpace($leaseToken)) {
-                if ($leaseToken -notmatch '^[A-Za-z0-9_-]{43}$') {
-                    throw 'The Opticon release deployment lease token is invalid.'
-                }
-                $request.Headers.Add("X-Opticon-Release-Lease", $leaseToken)
-            }
             $response = $client.SendAsync($request).GetAwaiter().GetResult()
             try {
                 if (-not $response.IsSuccessStatusCode) {

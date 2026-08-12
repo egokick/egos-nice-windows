@@ -23,28 +23,12 @@ public sealed class ReleaseDeploymentPreflight
     public bool AlreadyDeployed { get; set; }
     public bool ForceRedeploy { get; set; }
     public bool TargetIsOlder { get; set; }
-    public bool DeploymentBlocked { get; set; }
-    public string DeploymentBlockedReason { get; set; } = string.Empty;
-    public DateTimeOffset LeaseExpiresAt { get; set; }
-    public string LeaseTokenSha256 { get; set; } = string.Empty;
-    public string DeploymentRevision { get; set; } = string.Empty;
     public bool RequiresInvitationRemoval { get; set; }
     public bool CancellationBlocked { get; set; }
     public ArtifactManifestDto Manifest { get; set; } = new();
     public List<ReleaseInvitationSummary> BlockingInvitations { get; set; } = [];
     [System.Text.Json.Serialization.JsonIgnore]
     public ClientInstallValidationPolicy OperatorValidationPolicy { get; set; } = new();
-}
-
-public sealed class ReleaseDeploymentLease
-{
-    public string LeaseToken { get; set; } = string.Empty;
-    public DateTimeOffset ExpiresAt { get; set; }
-    public List<string> RemovedInviteIds { get; set; } = [];
-    [System.Text.Json.Serialization.JsonIgnore]
-    public bool ForceRedeploy { get; set; }
-    [System.Text.Json.Serialization.JsonIgnore]
-    public ClientInstallValidationPolicy ValidationPolicy { get; set; } = new();
 }
 
 public sealed class ReleaseInvitationSummary
@@ -74,14 +58,6 @@ public sealed record DeployedReleaseArtifactRow(
     string Sha256,
     string DownloadUrl);
 
-internal sealed record ReleaseDeploymentLeaseRecovery(
-    string TargetVersion,
-    string DeploymentRevision,
-    string LeaseToken,
-    DateTimeOffset ExpiresAt,
-    bool ForceRedeploy,
-    ClientInstallValidationPolicy ValidationPolicy);
-
 /// <summary>
 /// Calls the gateway's signed preflight/revocation endpoints and delegates the
 /// actual S3/CloudFront publish to the existing, audited source-release script.
@@ -91,7 +67,7 @@ internal sealed record ReleaseDeploymentLeaseRecovery(
 /// </summary>
 public sealed class ReleaseDeploymentService
 {
-    public const int RequiredGatewayReleaseProtocol = 2;
+    public const int RequiredGatewayReleaseProtocol = 3;
     private const string ReleaseScriptRelativePath = "scripts\\Ensure-OpticonTargetRelease.ps1";
     private const string PublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonSourceRelease.ps1";
     private const string BundlePublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonBundles.ps1";
@@ -101,6 +77,7 @@ public sealed class ReleaseDeploymentService
     private const string GatewayDirectoryName = "fly-headscale";
     private readonly AdminState _state;
     private readonly HostedInviteClient _hostedInvites;
+    private readonly HttpClient _dependencyHttp = DirectHttp.CreateClient(TimeSpan.FromMinutes(10));
 
     public ReleaseDeploymentService(AdminState state)
     {
@@ -160,174 +137,25 @@ public sealed class ReleaseDeploymentService
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
         ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
+        var gatewayDirectory = RequireRegularDirectory(
+            Path.Combine(prerequisites.Workspace, GatewayDirectoryName), "Opticon Fly gateway source directory");
+        progress?.Report("Verifying the pinned Tailscale and RustDesk installers included with the gateway…");
+        await VerifyGatewayDependencyInputsAsync(gatewayDirectory, cancellationToken);
         await DeployGatewayAsync(
             prerequisites,
             $"Updating the Opticon Fly gateway with the staged {normalizedTarget} signed installer…",
             progress,
             cancellationToken);
+        progress?.Report("Verifying the deployed gateway serves every pinned Tailscale and RustDesk installer…");
+        await VerifyHostedDependenciesAsync(cancellationToken);
     }
 
-    public async Task<ReleaseDeploymentLease> AcquireLeaseAsync(
-        ReleaseDeploymentPreflight preflight,
-        string leaseToken,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(preflight);
-        if (preflight.AlreadyDeployed || preflight.TargetIsOlder || preflight.DeploymentBlocked)
-            throw new InvalidOperationException("The live release state cannot be acquired for deployment.");
-        if (!IsSha256(preflight.DeploymentRevision) || !IsLeaseToken(leaseToken))
-            throw new InvalidDataException("The gateway did not provide a release deployment snapshot token.");
-        var lease = await _hostedInvites.AcquireReleaseLeaseAsync(
-            preflight.TargetVersion,
-            preflight.DeploymentRevision,
-            leaseToken,
-            preflight.ForceRedeploy,
-            cancellationToken);
-        if (!string.Equals(lease.LeaseToken, leaseToken, StringComparison.Ordinal) || !IsLeaseToken(lease.LeaseToken))
-            throw new InvalidDataException("The gateway did not confirm the requested release deployment lease.");
-        return lease;
-    }
-
-    public static ReleaseDeploymentLease CreateLeaseCandidate(ReleaseDeploymentPreflight preflight)
-    {
-        ArgumentNullException.ThrowIfNull(preflight);
-        if (!IsSha256(preflight.DeploymentRevision))
-            throw new InvalidDataException("The gateway did not provide a release deployment snapshot token.");
-        var random = RandomNumberGenerator.GetBytes(32);
-        try
-        {
-            return new ReleaseDeploymentLease
-            {
-                LeaseToken = Convert.ToBase64String(random).TrimEnd('=').Replace('+', '-').Replace('/', '_'),
-                // The gateway returns the authoritative expiry after acquire.
-                // This short local placeholder is persisted before the POST so
-                // a lost response can be retried with the exact same token.
-                ExpiresAt = DateTimeOffset.UtcNow.AddHours(3)
-            };
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(random);
-        }
-    }
-
-    /// <summary>
-    /// A resume is allowed only when the gateway's authenticated lease
-    /// fingerprint matches the protected local bearer token. A stale candidate
-    /// must never bypass the operator's confirmation for another administrator's
-    /// active deployment.
-    /// </summary>
-    public static bool RecoveryMatchesLiveLease(
-        ReleaseDeploymentPreflight preflight,
-        ReleaseDeploymentLease? recovery)
-    {
-        if (recovery is null
-            || !preflight.DeploymentBlocked
-            || !IsLeaseToken(recovery.LeaseToken)
-            || !IsSha256(preflight.LeaseTokenSha256))
-            return false;
-
-        var tokenHash = SHA256.HashData(Encoding.UTF8.GetBytes(recovery.LeaseToken));
-        try
-        {
-            return CryptographicOperations.FixedTimeEquals(tokenHash, Convert.FromHexString(preflight.LeaseTokenSha256));
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(tokenHash);
-        }
-    }
-
-    public async Task<ReleaseCancellationResponse> RevokeActiveInvitationsAsync(
-        ReleaseDeploymentPreflight preflight,
-        ReleaseDeploymentLease lease,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(preflight);
-        ArgumentNullException.ThrowIfNull(lease);
-        if (!preflight.RequiresInvitationRemoval && !preflight.DeploymentBlocked)
-            return new ReleaseCancellationResponse();
-        if (!IsLeaseToken(lease.LeaseToken))
-            throw new InvalidDataException("The gateway did not provide a valid release deployment lease.");
-        return await _hostedInvites.RevokeActiveReleaseInvitationsAsync(
-            preflight.TargetVersion,
-            lease.LeaseToken,
-            cancellationToken);
-    }
-
-    public async Task ReleaseLeaseAsync(ReleaseDeploymentLease lease, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(lease);
-        if (!IsLeaseToken(lease.LeaseToken)) return;
-        await _hostedInvites.ReleaseDeploymentLeaseAsync(lease.LeaseToken, cancellationToken);
-    }
-
-    public async Task FinalizeLeaseAsync(
+    public Task<ReleaseCancellationResponse> RevokeActiveInvitationsAsync(
         string targetVersion,
-        ReleaseDeploymentLease lease,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(lease);
-        if (!IsLeaseToken(lease.LeaseToken))
-            throw new InvalidDataException("The protected Opticon release deployment lease is invalid.");
-        await _hostedInvites.FinalizeDeploymentLeaseAsync(targetVersion, lease.LeaseToken, cancellationToken);
-    }
-
-    public async Task SaveLeaseRecoveryAsync(
-        ReleaseDeploymentPreflight preflight,
-        ReleaseDeploymentLease lease,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(preflight);
-        ArgumentNullException.ThrowIfNull(lease);
-        if (!IsLeaseToken(lease.LeaseToken) || !IsSha256(preflight.DeploymentRevision) ||
-            lease.ExpiresAt <= DateTimeOffset.UtcNow)
-            throw new InvalidDataException("The gateway returned an invalid release deployment lease.");
-        var recovery = new ReleaseDeploymentLeaseRecovery(
-            preflight.TargetVersion,
-            preflight.DeploymentRevision,
-            lease.LeaseToken,
-            lease.ExpiresAt,
-            preflight.ForceRedeploy,
-            ClientInstallValidationPolicy.Normalize(preflight.OperatorValidationPolicy));
-        _state.Config.ReleaseDeploymentLeaseProtected = SecretProtector.Protect(
-            JsonSerializer.Serialize(recovery, JsonDefaults.Options));
-        await _state.SaveAsync(cancellationToken);
-    }
-
-    public ReleaseDeploymentLease? TryGetLeaseRecovery(string targetVersion)
-    {
-        var protectedValue = _state.Config.ReleaseDeploymentLeaseProtected;
-        if (string.IsNullOrWhiteSpace(protectedValue)) return null;
-        try
-        {
-            var recovery = JsonSerializer.Deserialize<ReleaseDeploymentLeaseRecovery>(
-                SecretProtector.Unprotect(protectedValue), JsonDefaults.Options);
-            if (recovery is null
-                || !string.Equals(recovery.TargetVersion, targetVersion, StringComparison.Ordinal)
-                || !IsSha256(recovery.DeploymentRevision)
-                || !IsLeaseToken(recovery.LeaseToken)
-                || recovery.ExpiresAt <= DateTimeOffset.UtcNow)
-                return null;
-            return new ReleaseDeploymentLease
-            {
-                LeaseToken = recovery.LeaseToken,
-                ExpiresAt = recovery.ExpiresAt,
-                ForceRedeploy = recovery.ForceRedeploy,
-                ValidationPolicy = ClientInstallValidationPolicy.Normalize(recovery.ValidationPolicy)
-            };
-        }
-        catch (Exception exception) when (exception is CryptographicException or JsonException or FormatException)
-        {
-            throw new InvalidDataException("The protected Opticon release deployment recovery state is invalid.", exception);
-        }
-    }
-
-    public async Task ClearLeaseRecoveryAsync(CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrWhiteSpace(_state.Config.ReleaseDeploymentLeaseProtected)) return;
-        _state.Config.ReleaseDeploymentLeaseProtected = string.Empty;
-        await _state.SaveAsync(cancellationToken);
+        var normalizedTarget = NormalizeStableVersion(targetVersion);
+        return _hostedInvites.RevokeActiveReleaseInvitationsAsync(normalizedTarget, cancellationToken);
     }
 
     /// <summary>
@@ -348,24 +176,23 @@ public sealed class ReleaseDeploymentService
         var normalizedTarget = NormalizeStableVersion(targetVersion);
         ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
         progress?.Report($"Staging and verifying immutable source release {normalizedTarget}…");
+        var publisherOutput = progress is null ? null : new Progress<string>(line => progress.Report("[publisher] " + line));
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
             PublisherArguments(prerequisites, normalizedTarget, validationPolicy, forceRedeploy).Append("-StageOnly").ToArray(),
             TimeSpan.FromMinutes(45),
             cancellationToken,
-            environment: PublisherEnvironment(prerequisites));
+            environment: PublisherEnvironment(prerequisites),
+            outputProgress: publisherOutput);
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The Opticon source archive could not be staged and verified. " + DescribePublisherFailure(result));
-        ReportPublisherOutput(progress, result);
-        await DeployGatewayForStagedReleaseAsync(normalizedTarget, prerequisites, progress, cancellationToken);
         progress?.Report($"Immutable source release {normalizedTarget} is staged and verified.");
     }
 
     public async Task PublishAsync(
         string targetVersion,
         ReleasePublisherPrerequisites prerequisites,
-        ReleaseDeploymentLease lease,
         ClientInstallValidationPolicy validationPolicy,
         bool forceRedeploy,
         IProgress<string>? progress = null,
@@ -375,23 +202,20 @@ public sealed class ReleaseDeploymentService
         var normalizedTarget = NormalizeStableVersion(targetVersion);
         ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
         await VerifyStagedPublisherAsync(prerequisites, normalizedTarget, cancellationToken);
-        ArgumentNullException.ThrowIfNull(lease);
-        if (!IsLeaseToken(lease.LeaseToken))
-            throw new InvalidDataException("A valid release deployment lease is required before the invite manifest can change.");
 
         progress?.Report($"Committing staged source release {normalizedTarget} to the invite manifest…");
         var environment = PublisherEnvironment(prerequisites);
-        environment["OPTICON_RELEASE_LEASE_TOKEN"] = lease.LeaseToken;
+        var publisherOutput = progress is null ? null : new Progress<string>(line => progress.Report("[publisher] " + line));
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
             PublisherArguments(prerequisites, normalizedTarget, validationPolicy, forceRedeploy).Append("-CommitStaged").ToArray(),
             TimeSpan.FromMinutes(45),
             cancellationToken,
-            environment: environment);
+            environment: environment,
+            outputProgress: publisherOutput);
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The verified Opticon staged-release commit did not complete. " + DescribePublisherFailure(result));
-        ReportPublisherOutput(progress, result);
         progress?.Report($"Source release {normalizedTarget} was committed and verified.");
     }
 
@@ -590,7 +414,7 @@ public sealed class ReleaseDeploymentService
         string targetVersion,
         CancellationToken cancellationToken)
     {
-        // This runs after the release lease may have removed invitations. It
+        // This runs after the gateway may have removed invitations. It
         // deliberately performs no fetch/network synchronization: the exact
         // publisher selected before staging must remain byte-for-byte intact.
         ValidatePublisherPrerequisites(prerequisites, targetVersion);
@@ -635,8 +459,11 @@ public sealed class ReleaseDeploymentService
         if (!configText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
                 .Any(line => line.Trim().Equals($"app = \"{GatewayAppName}\"", StringComparison.Ordinal)))
             throw new InvalidDataException("The verified Opticon Fly configuration does not target the fixed production gateway app.");
-        if (!File.ReadAllText(dockerfile).Contains("/opt/opticon/gateway", StringComparison.Ordinal))
+        var dockerfileText = File.ReadAllText(dockerfile);
+        if (!dockerfileText.Contains("/opt/opticon/gateway", StringComparison.Ordinal))
             throw new InvalidDataException("The verified Opticon Fly Dockerfile does not contain the expected gateway entrypoint.");
+        if (!dockerfileText.Contains("artifacts/ /opt/opticon/artifacts/", StringComparison.Ordinal))
+            throw new InvalidDataException("The verified Opticon Fly Dockerfile does not copy the pinned dependency installers into the gateway image.");
 
         var fly = FindFlyCtl();
         progress?.Report(progressMessage);
@@ -649,6 +476,86 @@ public sealed class ReleaseDeploymentService
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 $"The Opticon Fly gateway update failed ({result.ExitCode}). {DescribeProcessFailure(result)}");
+    }
+
+    /// <summary>
+    /// Source-only manifests intentionally omit dependency records, so prove
+    /// that the exact MSI bytes which Docker will copy into the gateway image
+    /// are present before Fly is allowed to replace the running gateway.
+    /// </summary>
+    private static async Task VerifyGatewayDependencyInputsAsync(
+        string gatewayDirectory,
+        CancellationToken cancellationToken)
+    {
+        foreach (var artifact in DependencyArtifacts.All)
+        {
+            var path = RequireRegularFile(
+                Path.Combine(gatewayDirectory, "artifacts", artifact.FileName),
+                $"pinned {artifact.Product} gateway installer");
+            var info = new FileInfo(path);
+            if (info.Length != artifact.Size)
+                throw new InvalidDataException(
+                    $"The pinned {artifact.Product} gateway installer has an unexpected size: {artifact.FileName}.");
+
+            await using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await VerifyDependencyBytesAsync(stream, artifact, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// The post-deploy check is deliberately a full byte-stream verification,
+    /// not merely a health check or HEAD request. It is the final boundary
+    /// before the caller can revoke any still-active invitations.
+    /// </summary>
+    private async Task VerifyHostedDependenciesAsync(CancellationToken cancellationToken)
+    {
+        foreach (var artifact in DependencyArtifacts.All)
+        {
+            if (!Uri.TryCreate(artifact.PrimaryUrl, UriKind.Absolute, out var uri)
+                || uri.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(uri.UserInfo))
+                throw new InvalidDataException("The pinned gateway dependency URL is invalid.");
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.AcceptEncoding.Clear();
+            using var response = await _dependencyHttp.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
+                throw new InvalidDataException(
+                    $"The deployed gateway did not serve pinned {artifact.Product} {artifact.Version} ({(int)response.StatusCode}).");
+            if (response.Content.Headers.ContentLength != artifact.Size
+                || response.Content.Headers.ContentEncoding.Count != 0)
+                throw new InvalidDataException(
+                    $"The deployed gateway returned invalid transport metadata for pinned {artifact.Product} {artifact.Version}.");
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await VerifyDependencyBytesAsync(stream, artifact, cancellationToken);
+        }
+    }
+
+    private static async Task VerifyDependencyBytesAsync(
+        Stream stream,
+        DependencyArtifact artifact,
+        CancellationToken cancellationToken)
+    {
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[128 * 1024];
+        long total = 0;
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            total = checked(total + read);
+            if (total > artifact.Size)
+                throw new InvalidDataException($"Pinned {artifact.Product} {artifact.Version} exceeded its expected size.");
+            hasher.AppendData(buffer, 0, read);
+        }
+        if (total != artifact.Size
+            || !CryptographicOperations.FixedTimeEquals(
+                hasher.GetHashAndReset(), Convert.FromHexString(artifact.Sha256)))
+            throw new InvalidDataException(
+                $"Pinned {artifact.Product} {artifact.Version} does not match its required SHA-256.");
     }
 
     private static Dictionary<string, string?> PublisherEnvironment(ReleasePublisherPrerequisites prerequisites)
@@ -720,7 +627,6 @@ public sealed class ReleaseDeploymentService
         if (preflight.SchemaVersion != 1
             || preflight.GatewayReleaseProtocol < 0
             || !string.Equals(preflight.TargetVersion, targetVersion, StringComparison.Ordinal)
-            || !IsSha256(preflight.DeploymentRevision)
             || preflight.Manifest is null
             || preflight.Manifest.SchemaVersion != 2
             || preflight.Manifest.Artifacts.Count == 0)
@@ -755,10 +661,6 @@ public sealed class ReleaseDeploymentService
             throw new InvalidDataException("The Opticon release gateway preflight has inconsistent deployed-version state.");
         if (preflight.TargetIsOlder && preflight.RequiresInvitationRemoval)
             throw new InvalidDataException("The Opticon release gateway preflight requested invitation removal for a refused downgrade.");
-        if (preflight.DeploymentBlocked && string.IsNullOrWhiteSpace(preflight.DeploymentBlockedReason))
-            throw new InvalidDataException("The Opticon release gateway returned an incomplete deployment lock state.");
-        if (!string.IsNullOrEmpty(preflight.LeaseTokenSha256) && !IsSha256(preflight.LeaseTokenSha256))
-            throw new InvalidDataException("The Opticon release gateway returned an invalid deployment lease fingerprint.");
         if (preflight.RequiresInvitationRemoval)
         {
             if (preflight.BlockingInvitations.Count == 0)
@@ -958,9 +860,6 @@ public sealed class ReleaseDeploymentService
         return Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(safePath))).ToLowerInvariant();
     }
 
-    private static bool IsLeaseToken(string? value) => value is { Length: 43 }
-        && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
-
     private static string[] PublisherArguments(
         ReleasePublisherPrerequisites prerequisites,
         string targetVersion,
@@ -1014,14 +913,6 @@ public sealed class ReleaseDeploymentService
         return string.IsNullOrWhiteSpace(detail)
             ? $"Publisher exit code: {result.ExitCode}."
             : $"Publisher exit code: {result.ExitCode}. {detail}";
-    }
-
-    private static void ReportPublisherOutput(IProgress<string>? progress, ProcessResult result)
-    {
-        if (progress is null) return;
-        var output = TailPublisherOutput(CleanPublisherOutput(result.StandardOutput), 4_000);
-        foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            progress.Report("[log] " + line);
     }
 
     private static string CleanPublisherOutput(string value)

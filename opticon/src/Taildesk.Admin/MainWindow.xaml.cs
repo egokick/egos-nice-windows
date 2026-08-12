@@ -526,6 +526,13 @@ public partial class MainWindow : Window
     private void ToggleReleaseDeploymentLogs_Click(object sender, RoutedEventArgs e) =>
         _viewModel.ReleaseDeploymentLogsExpanded = !_viewModel.ReleaseDeploymentLogsExpanded;
 
+    private void CopyReleaseDeploymentLogs_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_viewModel.ReleaseDeploymentLogText)) return;
+        System.Windows.Clipboard.SetText(_viewModel.ReleaseDeploymentLogText);
+        _viewModel.Status = "Displayed release deployment logs copied to the clipboard.";
+    }
+
     private async void DeployRelease_Click(object sender, RoutedEventArgs e)
     {
         if (!_viewModel.CanDeployRelease) return;
@@ -545,14 +552,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        // A protected local lease means the operator already chose Yes before
-        // this Command Center was interrupted. Resume that exact decision;
-        // otherwise show the one early default-No confirmation before any
-        // lease, key revocation, build, S3 upload, or manifest mutation.
-        var resuming = plan.DeploymentBlocked && _viewModel.CanResumeReleaseDeployment;
         var validation = ClientInstallValidationPolicy.Normalize(plan.OperatorValidationPolicy);
         var disabledValidation = validation.DisableAll || validation.DisabledSteps.Length != 0;
-        if ((plan.RequiresInvitationRemoval || disabledValidation) && !resuming)
+        if (plan.RequiresInvitationRemoval || disabledValidation)
         {
             var details = new List<string>();
             if (disabledValidation)

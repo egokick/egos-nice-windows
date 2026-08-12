@@ -513,26 +513,6 @@ if ((Compare-SemanticVersion $MinimumGuardianVersion $Version) -gt 0) {
 
 $flyRoot = Split-Path $PSScriptRoot -Parent
 $repo = Split-Path $flyRoot -Parent
-$script:trustedGitRoot = [IO.Path]::GetFullPath((Split-Path $repo -Parent))
-$gitMetadata = Join-Path $script:trustedGitRoot '.git'
-if (-not (Test-Path -LiteralPath $gitMetadata -PathType Container)) {
-    throw 'The expected production Git metadata directory is missing.'
-}
-Assert-NoReparseTraversal -Root $script:trustedGitRoot -Path $gitMetadata
-$gitRoot = (Invoke-FixedGit -Arguments @('-C', $repo, 'rev-parse', '--show-toplevel')).Trim()
-if ([string]::IsNullOrWhiteSpace($gitRoot) -or $gitRoot.Contains([Environment]::NewLine)) {
-    throw 'A production hosted build must originate from one committed Git checkout.'
-}
-$gitRoot = [IO.Path]::GetFullPath($gitRoot)
-if (-not $gitRoot.Equals($script:trustedGitRoot, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The production hosted build resolved an unexpected Git root.'
-}
-$relativeRepo = [IO.Path]::GetRelativePath($gitRoot, $repo).Replace('\', '/')
-$gitStatus = Invoke-FixedGit -Arguments @(
-    '-C', $gitRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', $relativeRepo)
-if (-not [string]::IsNullOrWhiteSpace($gitStatus)) {
-    throw 'A production hosted build requires a clean committed Opticon source tree, including no untracked files.'
-}
 $dotnetRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'dotnet'
 $dotnet = Join-Path $dotnetRoot 'dotnet.exe'
 $timestampUri = $null

@@ -38,7 +38,8 @@ public static class ProcessRunner
         bool captureOutput = true,
         IReadOnlyDictionary<string, string?>? environment = null,
         bool clearEnvironment = false,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        IProgress<string>? outputProgress = null)
     {
         var start = new ProcessStartInfo(executable)
         {
@@ -79,10 +80,10 @@ public static class ProcessRunner
         // handles.  Read the streams under the same deadline as the process so
         // that this case is reported as a timeout rather than hanging forever.
         var outputTask = captureOutput
-            ? process.StandardOutput.ReadToEndAsync(linked.Token)
+            ? ReadOutputAsync(process.StandardOutput, outputProgress, linked.Token)
             : Task.FromResult(string.Empty);
         var errorTask = captureOutput
-            ? process.StandardError.ReadToEndAsync(linked.Token)
+            ? ReadOutputAsync(process.StandardError, outputProgress, linked.Token)
             : Task.FromResult(string.Empty);
 
         try
@@ -104,6 +105,20 @@ public static class ProcessRunner
             throw;
         }
         return new ProcessResult(process.ExitCode, outputTask.Result, errorTask.Result);
+    }
+
+    private static async Task<string> ReadOutputAsync(
+        StreamReader reader,
+        IProgress<string>? outputProgress,
+        CancellationToken cancellationToken)
+    {
+        var output = new System.Text.StringBuilder();
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            output.AppendLine(line);
+            if (!string.IsNullOrWhiteSpace(line)) outputProgress?.Report(line);
+        }
+        return output.ToString();
     }
 
     private static async Task<string> ReadCompletedOutputAsync(Task<string> outputTask)

@@ -1675,32 +1675,38 @@ static void TestReleaseDeploymentSurface()
     var prerequisiteIndex = viewModel.IndexOf("ResolvePublisherPrerequisitesAsync(OpticonVersion", StringComparison.Ordinal);
     var readinessIndex = viewModel.IndexOf("VerifyPublisherReadinessAsync", StringComparison.Ordinal);
     var stageIndex = viewModel.IndexOf("StageAsync(OpticonVersion", StringComparison.Ordinal);
-    var acquireIndex = viewModel.IndexOf("AcquireLeaseAsync", StringComparison.Ordinal);
+    var gatewayDeployIndex = viewModel.IndexOf("DeployGatewayForStagedReleaseAsync", StringComparison.Ordinal);
     var revokeIndex = viewModel.IndexOf("RevokeActiveInvitationsAsync", StringComparison.Ordinal);
     var publishIndex = viewModel.IndexOf("PublishAsync(OpticonVersion", StringComparison.Ordinal);
-    Assert(prerequisiteIndex >= 0 && readinessIndex > prerequisiteIndex && stageIndex > readinessIndex && acquireIndex > stageIndex
-           && revokeIndex > acquireIndex && publishIndex > revokeIndex
-           && viewModel.Contains("active invitations changed after confirmation; continuing with the latest gateway snapshot", StringComparison.Ordinal)
+    var deploymentMethodIndex = viewModel.IndexOf("public async Task DeployReleaseAsync", StringComparison.Ordinal);
+    var mutationBeforeCommit = deploymentMethodIndex >= 0 && publishIndex > deploymentMethodIndex
+        ? viewModel[deploymentMethodIndex..publishIndex]
+        : string.Empty;
+    Assert(prerequisiteIndex >= 0 && readinessIndex > prerequisiteIndex && stageIndex > readinessIndex
+           && gatewayDeployIndex > stageIndex && revokeIndex > gatewayDeployIndex && publishIndex > revokeIndex
+           && !mutationBeforeCommit.Contains("PrepareAsync(", StringComparison.Ordinal)
+           && viewModel.Contains("RevokeActiveInvitationsAsync(OpticonVersion", StringComparison.Ordinal)
            && viewModel.Contains("ReleaseDeploymentSteps", StringComparison.Ordinal)
            && viewModel.Contains("ReleaseDeploymentLogLines", StringComparison.Ordinal)
            && viewModel.Contains("FailReleaseDeploymentStep", StringComparison.Ordinal)
-           && viewModel.Contains("RecoveryMatchesLiveLease", StringComparison.Ordinal)
+           && !viewModel.Contains("AcquireLeaseAsync", StringComparison.Ordinal)
+           && !viewModel.Contains("RecoveryMatchesLiveLease", StringComparison.Ordinal)
            && viewModel.Contains("PrepareAsync(OpticonVersion", StringComparison.Ordinal),
-        "the immutable archive must be staged before the latest revision-bound lease and invitation removal, with visible progress and failure details");
+        "the release must stage its archive, deploy the gateway, revoke the current invitations, and commit directly, with visible progress and failure details");
 
     Assert(hostedClient.Contains("ReleasePreflightPath", StringComparison.Ordinal)
-           && hostedClient.Contains("ReleaseAcquirePath", StringComparison.Ordinal)
            && hostedClient.Contains("ReleaseRevokeActivePath", StringComparison.Ordinal)
-           && hostedClient.Contains("ReleaseFinalizePath", StringComparison.Ordinal)
            && hostedClient.Contains("GetReleasePreflightAsync", StringComparison.Ordinal)
-           && hostedClient.Contains("AcquireReleaseLeaseAsync", StringComparison.Ordinal)
            && hostedClient.Contains("RevokeActiveReleaseInvitationsAsync", StringComparison.Ordinal)
+           && !hostedClient.Contains("ReleaseAcquirePath", StringComparison.Ordinal)
+           && !hostedClient.Contains("ReleaseFinalizePath", StringComparison.Ordinal)
+           && !hostedClient.Contains("AcquireReleaseLeaseAsync", StringComparison.Ordinal)
            && hostedClient.Contains("TailscaleKeyId", StringComparison.Ordinal)
            && invitationService.Contains("authKey.Id", StringComparison.Ordinal)
            && invitationService.Contains("replacementKey.Id", StringComparison.Ordinal)
            && !config.Contains("ReleaseWorkspacePath", StringComparison.Ordinal)
-           && config.Contains("ReleaseDeploymentLeaseProtected", StringComparison.Ordinal),
-        "new hosted invitations must retain only a non-secret key identity while a protected local lease supports safe deployment recovery without persisting a source path");
+           && !config.Contains("ReleaseDeploymentLeaseProtected", StringComparison.Ordinal),
+        "new hosted invitations must retain only a non-secret key identity while direct deployment avoids local lease recovery state and source-path persistence");
     Assert(service.Contains("Ensure-OpticonTargetRelease.ps1", StringComparison.Ordinal)
             && service.Contains("ProcessRunner.RunAsync", StringComparison.Ordinal)
             && service.Contains("FindFlyCtl", StringComparison.Ordinal)
@@ -1725,15 +1731,19 @@ static void TestReleaseDeploymentSurface()
            && service.Contains("FindPackagesForUser", StringComparison.Ordinal)
            && service.Contains("Microsoft.PowerShell", StringComparison.Ordinal)
            && service.Contains("version.FileMinorPart >= 1", StringComparison.Ordinal)
-           && service.Contains("StageAsync", StringComparison.Ordinal)
-           && service.Contains("DeployGatewayForStagedReleaseAsync", StringComparison.Ordinal)
-           && service.Contains("signed installer…", StringComparison.Ordinal)
-           && service.Contains("source-only invitation's signed launcher is a sidecar", StringComparison.Ordinal)
-           && service.Contains("-StageOnly", StringComparison.Ordinal)
-           && service.Contains("-CommitStaged", StringComparison.Ordinal)
-           && service.Contains("RecoveryMatchesLiveLease", StringComparison.Ordinal)
-           && service.Contains("OPTICON_RELEASE_LEASE_TOKEN", StringComparison.Ordinal)
-           && service.Contains("-Version", StringComparison.Ordinal)
+            && service.Contains("StageAsync", StringComparison.Ordinal)
+            && service.Contains("DeployGatewayForStagedReleaseAsync", StringComparison.Ordinal)
+            && service.Contains("signed installer…", StringComparison.Ordinal)
+            && service.Contains("VerifyGatewayDependencyInputsAsync", StringComparison.Ordinal)
+            && service.Contains("VerifyHostedDependenciesAsync", StringComparison.Ordinal)
+            && service.Contains("DependencyArtifacts.All", StringComparison.Ordinal)
+            && service.Contains("full byte-stream verification", StringComparison.Ordinal)
+             && service.Contains("source-only invitation's signed launcher is a sidecar", StringComparison.Ordinal)
+            && service.Contains("-StageOnly", StringComparison.Ordinal)
+            && service.Contains("-CommitStaged", StringComparison.Ordinal)
+            && !service.Contains("RecoveryMatchesLiveLease", StringComparison.Ordinal)
+            && !service.Contains("OPTICON_RELEASE_LEASE_TOKEN", StringComparison.Ordinal)
+            && service.Contains("-Version", StringComparison.Ordinal)
            && service.Contains("-ControlOrigin", StringComparison.Ordinal)
            && ensureRelease.Contains("Publish-OpticonSourceRelease.ps1", StringComparison.Ordinal)
            && ensureRelease.Contains("-CheckOnly", StringComparison.Ordinal)
@@ -1741,10 +1751,10 @@ static void TestReleaseDeploymentSurface()
            && ensureRelease.Contains("-CommitStaged", StringComparison.Ordinal)
            && bundlePublisher.Contains("Read-SourceStageManifest", StringComparison.Ordinal)
            && bundlePublisher.Contains("Get-SourceStageForExistingArchive", StringComparison.Ordinal)
-           && bundlePublisher.Contains("stageId", StringComparison.Ordinal)
-           && bundlePublisher.Contains("Commit refuses to upload or rebuild", StringComparison.Ordinal)
-           && bundlePublisher.Contains("Publish-ManifestAtomically $manifestBytes", StringComparison.Ordinal),
-        "the release page must prove publisher readiness, fully stage S3/CloudFront artifacts before revocation, then make a leased immutable staged-manifest commit");
+            && bundlePublisher.Contains("stageId", StringComparison.Ordinal)
+            && bundlePublisher.Contains("Commit refuses to upload or rebuild", StringComparison.Ordinal)
+            && bundlePublisher.Contains("Publish-ManifestAtomically $manifestBytes", StringComparison.Ordinal),
+        "the release page must prove publisher readiness, fully stage S3/CloudFront artifacts, verify every baked and served pinned dependency after gateway deployment, then revoke current invitations and commit the staged manifest directly");
 
     const string powerShell71Guard = "$PSVersionTable.PSVersion -lt [Version]'7.1'";
     Assert(buildScript.Contains(powerShell71Guard, StringComparison.Ordinal)
@@ -1760,25 +1770,23 @@ static void TestReleaseDeploymentSurface()
     var summaryStart = gateway.IndexOf("type releaseInvitationSummary", StringComparison.Ordinal);
     var summaryEnd = gateway.IndexOf("type releasePreflightResponse", StringComparison.Ordinal);
     var revokeKeyIndex = gateway.IndexOf("g.revokeHostedInviteKey", StringComparison.Ordinal);
-    var removeIndex = gateway.IndexOf("lease.CancellationComplete = true", StringComparison.Ordinal);
+    var removeIndex = gateway.IndexOf("os.Remove(invite.Path)", StringComparison.Ordinal);
     Assert(gateway.Contains("releasePreflightPath", StringComparison.Ordinal)
-           && gateway.Contains("releaseAcquirePath", StringComparison.Ordinal)
            && gateway.Contains("releaseRevokeActivePath", StringComparison.Ordinal)
-           && gateway.Contains("releaseFinalizePath", StringComparison.Ordinal)
-           && gateway.Contains("DeploymentRevision", StringComparison.Ordinal)
-           && gateway.Contains("LeaseTokenSHA256", StringComparison.Ordinal)
-           && gateway.Contains("X-Opticon-Release-Lease", StringComparison.Ordinal)
-           && gateway.Contains("TokenSHA256", StringComparison.Ordinal)
-           && gateway.Contains("CancellationStarted", StringComparison.Ordinal)
+           && gateway.Contains("releaseProtocolVersion    = 3", StringComparison.Ordinal)
+           && gateway.Contains("func (g *gateway) revokeActiveInvitations", StringComparison.Ordinal)
+           && !gateway.Contains("releaseAcquirePath", StringComparison.Ordinal)
+           && !gateway.Contains("releaseFinalizePath", StringComparison.Ordinal)
+           && !gateway.Contains("DeploymentRevision", StringComparison.Ordinal)
+           && !gateway.Contains("X-Opticon-Release-Lease", StringComparison.Ordinal)
            && gateway.Contains("TailscaleKeyID", StringComparison.Ordinal)
-           && gateway.Contains("return syncDirectory(filepath.Dir(path))", StringComparison.Ordinal)
            && gateway.Contains("syncDirectory(g.inviteDir)", StringComparison.Ordinal)
            && summaryStart >= 0 && summaryEnd > summaryStart
            && !gateway[summaryStart..summaryEnd].Contains("Ciphertext           []byte", StringComparison.Ordinal)
            && revokeKeyIndex >= 0 && removeIndex > revokeKeyIndex
            && gateway.Contains("the key may remain usable until the invitation expires", StringComparison.Ordinal)
            && gateway.Contains("strings.TrimSpace(invite.TailscaleKeyID) != \"\"", StringComparison.Ordinal),
-        "the gateway must redact invitation secrets, journal a revision-bound lease, revoke known network keys before links, and explicitly warn before abandoning a keyless legacy link");
+        "the gateway must redact invitation secrets, directly revoke the current known network keys before deleting their links, and explicitly warn before abandoning a keyless legacy link");
 }
 
 static void TestTailnetSshPolicy()

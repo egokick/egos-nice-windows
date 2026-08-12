@@ -4,11 +4,8 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -125,6 +122,60 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	g.ServeHTTP(missingResult, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID, nil))
 	if missingResult.Code != http.StatusNotFound {
 		t.Fatal("deleted invitation remained public")
+	}
+}
+
+func TestPinnedGatewayDependenciesRemainAvailableForSourceOnlyManifest(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := filepath.Join(root, "artifacts")
+	if err := os.MkdirAll(artifactDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	hash := strings.Repeat("b", 64)
+	source := productionArtifact(bundleArtifact{
+		Product: "OpticonSource", Version: "1.2.0", Architecture: "source",
+		File: "opticon-source-1.2.0.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.0.zip",
+		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
+		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+	})
+	manifest, err := json.Marshal(artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{source}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, size := range pinnedGatewayDependencies {
+		path := filepath.Join(artifactDir, name)
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(size); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	g := &gateway{artifactDir: artifactDir}
+	for name, size := range pinnedGatewayDependencies {
+		result := httptest.NewRecorder()
+		g.ServeHTTP(result, httptest.NewRequest(http.MethodHead, artifactPrefix+name, nil))
+		if result.Code != http.StatusOK || result.Header().Get("Content-Length") != strconv.FormatInt(size, 10) {
+			t.Fatalf("pinned dependency %s was unavailable or had the wrong length: status=%d length=%q", name, result.Code, result.Header().Get("Content-Length"))
+		}
+	}
+
+	unknown := httptest.NewRecorder()
+	g.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, artifactPrefix+"unexpected.msi", nil))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("undeclared dependency was served with status %d", unknown.Code)
 	}
 }
 
@@ -657,8 +708,15 @@ func TestAuthenticatedManifestPublicationIsAtomicPersistentAndReplaySafe(t *test
 	changedBody, _ := json.Marshal(next)
 	changed := httptest.NewRecorder()
 	g.ServeHTTP(changed, signedRouteRequest(secret, http.MethodPut, releaseAdminPath, "changed-release-nonce-0123", changedBody))
-	if changed.Code != http.StatusConflict {
+	if changed.Code != http.StatusCreated {
 		t.Fatalf("same-version byte change returned %d", changed.Code)
+	}
+	republished, err := g.readArtifactManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if republished.Artifacts[0].Size != next.Artifacts[0].Size {
+		t.Fatal("same-version forced release did not replace the manifest")
 	}
 }
 
@@ -718,7 +776,7 @@ func TestSourceOnlyManifestHasOneSignedArchivePerRelease(t *testing.T) {
 	}
 }
 
-func TestForcedSameVersionSourcePublicationRequiresAndUsesForceLease(t *testing.T) {
+func TestForcedSameVersionSourcePublicationProceedsWithActiveInvitationAndNeedsNoLease(t *testing.T) {
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, "release", "manifest.json")
 	inviteDir := filepath.Join(root, "invites")
@@ -742,17 +800,26 @@ func TestForcedSameVersionSourcePublicationRequiresAndUsesForceLease(t *testing.
 	if err := os.WriteFile(manifestPath, currentBytes, 0600); err != nil {
 		t.Fatal(err)
 	}
+	activeInvite := productionInvite(hostedInvite{
+		DeviceName: "Invitation created before redeploy", Role: "ManagedOnly", ExpiresAt: time.Now().Add(time.Hour),
+		InstallProtocol: sourceInstallProtocol, ReleaseVersion: currentSource.Version,
+		SourceFile: currentSource.File, SourceSize: currentSource.Size, SourceSHA256: currentSource.SHA256,
+		SourceManifestSHA256: currentSource.SourceManifestSHA256, SDKVersion: currentSource.SDKVersion,
+		RuntimeVersion: currentSource.RuntimeVersion, TargetRuntimes: currentSource.TargetRuntimes,
+		TailscaleKeyID: "active-redeploy-key", Ciphertext: []byte("opaque"),
+	})
+	inviteBytes, _ := json.Marshal(activeInvite)
+	if err := os.WriteFile(filepath.Join(inviteDir, strings.Repeat("d", 64)+".json"), inviteBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	g := &gateway{artifactDir: root, manifestPath: manifestPath, inviteDir: inviteDir,
 		adminSecret: secret, nonces: make(map[string]time.Time)}
 
 	preflight, err := g.buildReleasePreflight("1.2.1", time.Now(), true)
-	if err != nil || preflight.GatewayReleaseProtocol != releaseProtocolVersion || preflight.AlreadyDeployed || !preflight.ForceRedeploy {
+	if err != nil || preflight.GatewayReleaseProtocol != releaseProtocolVersion || preflight.AlreadyDeployed ||
+		!preflight.ForceRedeploy || !preflight.RequiresInvitationRemoval {
 		t.Fatalf("forced same-version preflight was not publishable: %+v, %v", preflight, err)
-	}
-	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
-	if _, err := g.acquireReleaseLease("1.2.1", preflight.DeploymentRevision, token, time.Now(), true); err != nil {
-		t.Fatalf("forced same-version lease was rejected: %v", err)
 	}
 	next := current
 	next.Artifacts = append([]bundleArtifact(nil), current.Artifacts...)
@@ -761,7 +828,6 @@ func TestForcedSameVersionSourcePublicationRequiresAndUsesForceLease(t *testing.
 	next.Artifacts[0].ClientInstallValidation = clientInstallValidationPolicy{DisableAll: true}
 	body, _ := json.Marshal(next)
 	request := signedRouteRequest(secret, http.MethodPut, releaseAdminPath, "forced-release-nonce-012345", body)
-	request.Header.Set("X-Opticon-Release-Lease", token)
 	result := httptest.NewRecorder()
 	g.ServeHTTP(result, request)
 	if result.Code != http.StatusCreated {
@@ -1060,28 +1126,6 @@ func TestLegacyInvitationLandingIsRetired(t *testing.T) {
 	}
 }
 
-func TestManifestMustRetainArtifactsForUnexpiredInvitations(t *testing.T) {
-	root := t.TempDir()
-	hash := strings.Repeat("a", 64)
-	signer := strings.Repeat("C", 40)
-	oldBootstrap := productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.2.0", Architecture: "x64", File: "opticon-bootstrap-1.2.0.exe", Size: 20, SHA256: hash, SignerThumbprint: signer, DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.0/opticon-bootstrap-1.2.0.exe"})
-	oldSource := productionArtifact(bundleArtifact{Product: "OpticonSource", Version: "1.2.0", Architecture: "source", File: "opticon-source-1.2.0.zip", Size: 30, SHA256: hash, DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.0/opticon-source-1.2.0.zip", SDKVersion: pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion, TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash})
-	invite := productionInvite(hostedInvite{ExpiresAt: time.Now().Add(time.Hour), ReleaseVersion: oldSource.Version, SourceFile: oldSource.File, SourceSize: oldSource.Size, SourceSHA256: oldSource.SHA256, SourceManifestSHA256: oldSource.SourceManifestSHA256, SDKVersion: oldSource.SDKVersion, RuntimeVersion: oldSource.RuntimeVersion, TargetRuntimes: oldSource.TargetRuntimes, BootstrapVersion: oldBootstrap.Version, BootstrapFile: oldBootstrap.File, BootstrapSize: oldBootstrap.Size, BootstrapSHA256: oldBootstrap.SHA256, BootstrapSigner: oldBootstrap.SignerThumbprint})
-	data, _ := json.Marshal(invite)
-	if err := os.WriteFile(filepath.Join(root, "active.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	g := &gateway{inviteDir: root}
-	newOnly := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{{Product: "unrelated", File: "other", Size: 1}}}
-	if err := g.requireActiveInviteArtifacts(newOnly, time.Now()); err == nil {
-		t.Fatal("manifest removal broke an unexpired invitation without being rejected")
-	}
-	retained := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{oldBootstrap, oldSource}}
-	if err := g.requireActiveInviteArtifacts(retained, time.Now()); err != nil {
-		t.Fatalf("immutable old invitation artifacts were rejected: %v", err)
-	}
-}
-
 func TestReleasePreflightRedactsActiveInvitationSecrets(t *testing.T) {
 	g, secret, idHash, ciphertextMarker := releasePreflightGatewayFixture(t, "preflight-key-77")
 	body := []byte(`{"targetVersion":"1.2.2"}`)
@@ -1101,8 +1145,7 @@ func TestReleasePreflightRedactsActiveInvitationSecrets(t *testing.T) {
 	if preflight.SchemaVersion != 1 || preflight.GatewayReleaseProtocol != releaseProtocolVersion ||
 		preflight.DeployedVersion != "1.2.1" || preflight.AlreadyDeployed ||
 		!preflight.RequiresInvitationRemoval || preflight.CancellationBlocked || len(preflight.BlockingInvitations) != 1 ||
-		preflight.BlockingInvitations[0].IDHash != idHash || !preflight.BlockingInvitations[0].CanRevoke ||
-		!inviteHashPattern.MatchString(preflight.DeploymentRevision) {
+		preflight.BlockingInvitations[0].IDHash != idHash || !preflight.BlockingInvitations[0].CanRevoke {
 		t.Fatalf("release preflight did not return the expected sanitized deployment plan: %+v", preflight)
 	}
 
@@ -1216,38 +1259,7 @@ func TestReleaseRevokeActiveRevokesKeysBeforeDeletingHostedLinks(t *testing.T) {
 	if err := json.Unmarshal(preflightResult.Body.Bytes(), &preflight); err != nil {
 		t.Fatal(err)
 	}
-	leaseToken := "abcdefghijklmnopqrstuvwxyzABCDEFGHI01234567"
-	acquireBody, _ := json.Marshal(releaseAcquireRequest{TargetVersion: "1.2.2", DeploymentRevision: preflight.DeploymentRevision, LeaseToken: leaseToken})
-	acquireResult := httptest.NewRecorder()
-	g.ServeHTTP(acquireResult, signedRouteRequest(secret, http.MethodPost, releaseAcquirePath, "release-acquire-nonce-012345", acquireBody))
-	if acquireResult.Code != http.StatusCreated {
-		t.Fatalf("release acquisition returned %d: %s", acquireResult.Code, acquireResult.Body.String())
-	}
-	var lease releaseLeaseResponse
-	if err := json.Unmarshal(acquireResult.Body.Bytes(), &lease); err != nil || !validReleaseLeaseToken(lease.LeaseToken) {
-		t.Fatalf("release acquisition returned an invalid lease: %+v (%v)", lease, err)
-	}
-	// A lost POST response is recoverable because the caller proposed and
-	// persisted the opaque token before acquiring the lease.
-	acquireRetry := httptest.NewRecorder()
-	g.ServeHTTP(acquireRetry, signedRouteRequest(secret, http.MethodPost, releaseAcquirePath, "release-acquire-retry-nonce-012", acquireBody))
-	var recoveredLease releaseLeaseResponse
-	if acquireRetry.Code != http.StatusCreated || json.Unmarshal(acquireRetry.Body.Bytes(), &recoveredLease) != nil ||
-		recoveredLease.LeaseToken != lease.LeaseToken {
-		t.Fatalf("release acquisition retry did not recover the existing lease: %d %s", acquireRetry.Code, acquireRetry.Body.String())
-	}
-	// The authenticated preflight exposes only a fingerprint. It lets the same
-	// Command Center resume after a crash without turning a stale local candidate
-	// into authority over another operator's lease.
-	lockedPreflightResult := httptest.NewRecorder()
-	g.ServeHTTP(lockedPreflightResult, signedRouteRequest(secret, http.MethodPost, releasePreflightPath, "release-locked-plan-nonce-012", preflightBody))
-	var lockedPreflight releasePreflightResponse
-	if lockedPreflightResult.Code != http.StatusOK || json.Unmarshal(lockedPreflightResult.Body.Bytes(), &lockedPreflight) != nil ||
-		!lockedPreflight.DeploymentBlocked || lockedPreflight.LeaseTokenSHA256 != releaseLeaseTokenHash(lease.LeaseToken) ||
-		strings.Contains(lockedPreflightResult.Body.String(), lease.LeaseToken) {
-		t.Fatalf("locked preflight did not expose only the matching lease fingerprint: %d %s", lockedPreflightResult.Code, lockedPreflightResult.Body.String())
-	}
-	cancellationBody, _ := json.Marshal(releaseCancellationRequest{TargetVersion: "1.2.2", LeaseToken: lease.LeaseToken})
+	cancellationBody, _ := json.Marshal(releaseCancellationRequest{TargetVersion: "1.2.2"})
 	cancellationResult := httptest.NewRecorder()
 	g.ServeHTTP(cancellationResult, signedRouteRequest(secret, http.MethodPost, releaseRevokeActivePath, "release-remove-confirm-nonce-012", cancellationBody))
 	if cancellationResult.Code != http.StatusOK {
@@ -1264,23 +1276,9 @@ func TestReleaseRevokeActiveRevokesKeysBeforeDeletingHostedLinks(t *testing.T) {
 		len(cancellation.RemovedInviteIDs) != 1 || cancellation.RemovedInviteIDs[0] != idHash {
 		t.Fatalf("release cancellation response is incomplete: %+v (%v)", cancellation, err)
 	}
-	// Retrying after a lost response must return the full original result, not
-	// merely the files still present after an earlier partial operation.
-	retry := httptest.NewRecorder()
-	g.ServeHTTP(retry, signedRouteRequest(secret, http.MethodPost, releaseRevokeActivePath, "release-remove-retry-nonce-012", cancellationBody))
-	var retried releaseCancellationResponse
-	if retry.Code != http.StatusOK || json.Unmarshal(retry.Body.Bytes(), &retried) != nil ||
-		len(retried.RemovedInviteIDs) != 1 || retried.RemovedInviteIDs[0] != idHash {
-		t.Fatalf("release cancellation retry lost its durable result: %d %s", retry.Code, retry.Body.String())
-	}
-	journal, err := os.ReadFile(g.releaseLeasePath())
-	if err != nil || strings.Contains(string(journal), lease.LeaseToken) ||
-		!strings.Contains(string(journal), releaseLeaseTokenHash(lease.LeaseToken)) {
-		t.Fatalf("release journal persisted a raw token or omitted its token hash: %v", err)
-	}
 }
 
-func TestReleaseRevokeActiveDoesNotRevokeAfterInvitationSnapshotChanges(t *testing.T) {
+func TestReleaseRevokeActiveUsesCurrentInvitationSet(t *testing.T) {
 	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "known-key-42")
 	preflightBody := []byte(`{"targetVersion":"1.2.2"}`)
 	preflightResult := httptest.NewRecorder()
@@ -1288,13 +1286,8 @@ func TestReleaseRevokeActiveDoesNotRevokeAfterInvitationSnapshotChanges(t *testi
 	if preflightResult.Code != http.StatusOK {
 		t.Fatalf("release preflight returned %d: %s", preflightResult.Code, preflightResult.Body.String())
 	}
-	var preflight releasePreflightResponse
-	if err := json.Unmarshal(preflightResult.Body.Bytes(), &preflight); err != nil {
-		t.Fatal(err)
-	}
-
 	// Simulate an invite created after the operator saw the confirmation but
-	// before submitting it. Its key must not be touched by that confirmation.
+	// before submitting it. Direct revocation uses the set active at call time.
 	originalPath := filepath.Join(g.inviteDir, idHash+".json")
 	data, err := os.ReadFile(originalPath)
 	if err != nil {
@@ -1316,179 +1309,28 @@ func TestReleaseRevokeActiveDoesNotRevokeAfterInvitationSnapshotChanges(t *testi
 		t.Fatal(err)
 	}
 
-	acquireBody, _ := json.Marshal(releaseAcquireRequest{TargetVersion: "1.2.2", DeploymentRevision: preflight.DeploymentRevision, LeaseToken: strings.Repeat("b", 43)})
-	acquireResult := httptest.NewRecorder()
-	g.ServeHTTP(acquireResult, signedRouteRequest(secret, http.MethodPost, releaseAcquirePath, "release-race-confirm-nonce-012", acquireBody))
-	if acquireResult.Code != http.StatusConflict {
-		t.Fatalf("changed invitation snapshot acquisition returned %d: %s", acquireResult.Code, acquireResult.Body.String())
-	}
-	for _, path := range []string{originalPath, laterPath} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("changed snapshot removed a hosted invitation: %v", err)
-		}
-	}
-}
-
-func TestReleaseLeaseBlocksAllInvitationMutations(t *testing.T) {
-	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "lease-key-19")
-	preflightBody := []byte(`{"targetVersion":"1.2.2"}`)
-	preflightResult := httptest.NewRecorder()
-	g.ServeHTTP(preflightResult, signedRouteRequest(secret, http.MethodPost, releasePreflightPath, "release-lock-plan-nonce-012345", preflightBody))
-	var preflight releasePreflightResponse
-	if preflightResult.Code != http.StatusOK || json.Unmarshal(preflightResult.Body.Bytes(), &preflight) != nil {
-		t.Fatalf("release preflight failed: %d %s", preflightResult.Code, preflightResult.Body.String())
-	}
-	acquireBody, _ := json.Marshal(releaseAcquireRequest{
-		TargetVersion: "1.2.2", DeploymentRevision: preflight.DeploymentRevision, LeaseToken: strings.Repeat("g", 43),
-	})
-	acquireResult := httptest.NewRecorder()
-	g.ServeHTTP(acquireResult, signedRouteRequest(secret, http.MethodPost, releaseAcquirePath, "release-lock-acquire-nonce-012", acquireBody))
-	if acquireResult.Code != http.StatusCreated {
-		t.Fatalf("release acquisition failed: %d %s", acquireResult.Code, acquireResult.Body.String())
-	}
-	deleteResult := httptest.NewRecorder()
-	g.ServeHTTP(deleteResult, signedRouteRequest(secret, http.MethodDelete, inviteAdminPrefix+idHash, "release-lock-delete-nonce-0123", nil))
-	if deleteResult.Code != http.StatusConflict {
-		t.Fatalf("lease allowed invitation deletion: %d %s", deleteResult.Code, deleteResult.Body.String())
-	}
-	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); err != nil {
-		t.Fatalf("blocked invitation mutation changed the record: %v", err)
-	}
-}
-
-func TestReleaseLeaseCanBeReleasedBeforeCancellationStarts(t *testing.T) {
-	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "release-before-cancel-key")
-	preflight, err := g.buildReleasePreflight("1.2.2", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	token := strings.Repeat("r", 43)
-	lease, err := g.acquireReleaseLease("1.2.2", preflight.DeploymentRevision, token, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.SchemaVersion != releaseLeaseSchemaVersion || lease.CancellationStarted || lease.CancellationComplete {
-		t.Fatalf("newly acquired lease did not preserve a releasable pre-cancellation state: %+v", lease)
-	}
-
-	body, _ := json.Marshal(releaseReleaseRequest{LeaseToken: token})
-	result := httptest.NewRecorder()
-	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPost, releaseReleasePath, "release-before-cancel-nonce-012", body))
-	if result.Code != http.StatusNoContent {
-		t.Fatalf("pre-cancellation lease release returned %d: %s", result.Code, result.Body.String())
-	}
-	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); err != nil {
-		t.Fatalf("releasing an untouched lease changed the invitation: %v", err)
-	}
-	if current, err := g.currentReleaseLease(time.Now()); err != nil || current != nil {
-		t.Fatalf("released pre-cancellation lease remained durable: %+v (%v)", current, err)
-	}
-}
-
-func TestReleaseLeaseCanBeAdministrativelyAbandonedOnlyBeforeCancellationStarts(t *testing.T) {
-	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "lost-token-key")
-	preflight, err := g.buildReleasePreflight("1.2.2", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := g.acquireReleaseLease("1.2.2", preflight.DeploymentRevision, strings.Repeat("u", 43), time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	body, _ := json.Marshal(releaseReleaseRequest{AbandonUnstarted: true})
-	result := httptest.NewRecorder()
-	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPost, releaseReleasePath, "release-lost-token-nonce-0123", body))
-	if result.Code != http.StatusNoContent {
-		t.Fatalf("authenticated untouched-lease abandonment returned %d: %s", result.Code, result.Body.String())
-	}
-	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); err != nil {
-		t.Fatalf("abandoning an untouched lost-token lease changed its invitation: %v", err)
-	}
-	if current, err := g.currentReleaseLease(time.Now()); err != nil || current != nil {
-		t.Fatalf("abandoned untouched lease remained durable: %+v (%v)", current, err)
-	}
-}
-
-func TestReleaseLeaseCannotBeReleasedAfterCancellationStarts(t *testing.T) {
-	g, secret, idHash, _ := releasePreflightGatewayFixture(t, "release-after-cancel-key")
-	persistedBeforeRevocation := make(chan bool, 1)
+	revoked := make(map[string]bool)
 	headscale := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		journal, err := os.ReadFile(g.releaseLeasePath())
-		var lease releaseLease
-		persistedBeforeRevocation <- err == nil && json.Unmarshal(journal, &lease) == nil &&
-			lease.SchemaVersion == releaseLeaseSchemaVersion && lease.CancellationStarted && !lease.CancellationComplete
-		http.Error(w, "deliberate revocation failure", http.StatusBadGateway)
+		var request struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		revoked[request.ID] = true
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer headscale.Close()
-	g.headscaleAdminURL = headscale.URL
 	g.headscaleKey = "headscale-test-key"
-
-	preflight, err := g.buildReleasePreflight("1.2.2", time.Now())
-	if err != nil {
-		t.Fatal(err)
+	g.headscaleAdminURL = headscale.URL
+	body, _ := json.Marshal(releaseCancellationRequest{TargetVersion: "1.2.2"})
+	result := httptest.NewRecorder()
+	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPost, releaseRevokeActivePath, "release-current-set-nonce-012", body))
+	if result.Code != http.StatusOK || !revoked["known-key-42"] || !revoked["later-key-77"] {
+		t.Fatalf("direct revocation did not use the current active invitation set: %d %+v", result.Code, revoked)
 	}
-	token := strings.Repeat("s", 43)
-	if _, err := g.acquireReleaseLease("1.2.2", preflight.DeploymentRevision, token, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	cancellationBody, _ := json.Marshal(releaseCancellationRequest{TargetVersion: "1.2.2", LeaseToken: token})
-	cancellation := httptest.NewRecorder()
-	g.ServeHTTP(cancellation, signedRouteRequest(secret, http.MethodPost, releaseRevokeActivePath, "release-started-nonce-012345", cancellationBody))
-	if cancellation.Code != http.StatusBadGateway {
-		t.Fatalf("failed revocation returned %d: %s", cancellation.Code, cancellation.Body.String())
-	}
-	if persisted := <-persistedBeforeRevocation; !persisted {
-		t.Fatal("cancellation start was not durably recorded before the first key-revocation request")
-	}
-
-	releaseBody, _ := json.Marshal(releaseReleaseRequest{LeaseToken: token})
-	release := httptest.NewRecorder()
-	g.ServeHTTP(release, signedRouteRequest(secret, http.MethodPost, releaseReleasePath, "release-after-cancel-nonce-012", releaseBody))
-	if release.Code != http.StatusConflict {
-		t.Fatalf("started cancellation lease was released: %d %s", release.Code, release.Body.String())
-	}
-	forceBody, _ := json.Marshal(releaseReleaseRequest{AbandonUnstarted: true})
-	forceRelease := httptest.NewRecorder()
-	g.ServeHTTP(forceRelease, signedRouteRequest(secret, http.MethodPost, releaseReleasePath, "release-started-force-nonce-012", forceBody))
-	if forceRelease.Code != http.StatusConflict {
-		t.Fatalf("administrative recovery released a started cancellation: %d %s", forceRelease.Code, forceRelease.Body.String())
-	}
-	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); err != nil {
-		t.Fatalf("failed revocation removed the hosted invitation: %v", err)
-	}
-	journal, err := os.ReadFile(g.releaseLeasePath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stored releaseLease
-	if err := json.Unmarshal(journal, &stored); err != nil || !stored.CancellationStarted || stored.CancellationComplete {
-		t.Fatalf("failed cancellation lost its durable recovery boundary: %+v (%v)", stored, err)
-	}
-}
-
-func TestReleaseLeaseDoesNotTreatLegacyJournalAsUncancelled(t *testing.T) {
-	g, _, idHash, _ := releasePreflightGatewayFixture(t, "legacy-state-key")
-	token := strings.Repeat("t", 43)
-	legacy := releaseLease{
-		SchemaVersion:        legacyReleaseLeaseSchemaVersion,
-		TargetVersion:        "1.2.2",
-		DeploymentRevision:   strings.Repeat("a", 64),
-		TokenSHA256:          releaseLeaseTokenHash(token),
-		ExpiresAt:            time.Now().Add(time.Hour),
-		Invitations:          []releaseLeaseInvite{{IDHash: idHash, TailscaleKeyID: "legacy-state-key"}},
-		CancellationComplete: false,
-		RemovedInviteIDs:     []string{},
-	}
-	g.releaseMu.Lock()
-	err := g.writeReleaseLeaseLocked(legacy)
-	g.releaseMu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := g.releaseUncancelledLease(token, false, time.Now()); !errors.Is(err, errReleaseLeaseConflict) {
-		t.Fatalf("legacy non-empty lease was treated as safely untouched: %v", err)
-	}
-	if _, err := os.Stat(g.releaseLeasePath()); err != nil {
-		t.Fatalf("legacy lease was removed despite ambiguous cancellation state: %v", err)
+	for _, path := range []string{originalPath, laterPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("current active invitation remained after revocation: %v", err)
+		}
 	}
 }
 
@@ -1508,14 +1350,7 @@ func TestReleasePreflightAllowsExplicitKeylessLegacyLinkAbandonment(t *testing.T
 		preflight.BlockingInvitations[0].CanRevoke || preflight.BlockingInvitations[0].BlockedReason == "" {
 		t.Fatalf("keyless legacy invitation did not produce an explicit abandonment warning: %+v", preflight)
 	}
-	leaseToken := strings.Repeat("c", 43)
-	acquireBody, _ := json.Marshal(releaseAcquireRequest{TargetVersion: "1.2.2", DeploymentRevision: preflight.DeploymentRevision, LeaseToken: leaseToken})
-	acquireResult := httptest.NewRecorder()
-	g.ServeHTTP(acquireResult, signedRouteRequest(secret, http.MethodPost, releaseAcquirePath, "release-legacy-confirm-nonce-01", acquireBody))
-	if acquireResult.Code != http.StatusCreated {
-		t.Fatalf("keyless legacy acquisition returned %d: %s", acquireResult.Code, acquireResult.Body.String())
-	}
-	cancellationBody, _ := json.Marshal(releaseCancellationRequest{TargetVersion: "1.2.2", LeaseToken: leaseToken})
+	cancellationBody, _ := json.Marshal(releaseCancellationRequest{TargetVersion: "1.2.2"})
 	cancellationResult := httptest.NewRecorder()
 	g.ServeHTTP(cancellationResult, signedRouteRequest(secret, http.MethodPost, releaseRevokeActivePath, "release-legacy-abandon-nonce-01", cancellationBody))
 	if cancellationResult.Code != http.StatusOK {
@@ -1523,71 +1358,6 @@ func TestReleasePreflightAllowsExplicitKeylessLegacyLinkAbandonment(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(g.inviteDir, idHash+".json")); !os.IsNotExist(err) {
 		t.Fatalf("keyless legacy hosted link remained after confirmed abandonment: %v", err)
-	}
-}
-
-func TestReleasePreflightBlocksOversizedInvitationTransaction(t *testing.T) {
-	g, _, idHash, _ := releasePreflightGatewayFixture(t, "bulk-key-0")
-	originalPath := filepath.Join(g.inviteDir, idHash+".json")
-	data, err := os.ReadFile(originalPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index := 1; index <= maxReleaseLeaseInvites; index++ {
-		var invite hostedInvite
-		if err := json.Unmarshal(data, &invite); err != nil {
-			t.Fatal(err)
-		}
-		invite.DeviceName = "Bulk invitation " + strconv.Itoa(index)
-		invite.TailscaleKeyID = "bulk-key-" + strconv.Itoa(index)
-		encoded, err := json.Marshal(invite)
-		if err != nil {
-			t.Fatal(err)
-		}
-		bulkID := fmt.Sprintf("%064x", index)
-		if err := os.WriteFile(filepath.Join(g.inviteDir, bulkID+".json"), encoded, 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	preflight, err := g.buildReleasePreflight("1.2.2", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !preflight.DeploymentBlocked || preflight.RequiresInvitationRemoval ||
-		!strings.Contains(preflight.DeploymentBlockedReason, strconv.Itoa(maxReleaseLeaseInvites)) ||
-		len(preflight.BlockingInvitations) != 0 {
-		t.Fatalf("oversized release transaction was not blocked before confirmation: %+v", preflight)
-	}
-}
-
-func TestReleaseFinalizeClearsACommittedRecoveryLease(t *testing.T) {
-	g, secret, _, _ := releasePreflightGatewayFixture(t, "finalize-key-17")
-	token := strings.Repeat("f", 43)
-	lease := releaseLease{
-		SchemaVersion:        1,
-		TargetVersion:        "1.2.1",
-		DeploymentRevision:   strings.Repeat("a", 64),
-		TokenSHA256:          releaseLeaseTokenHash(token),
-		ExpiresAt:            time.Now().Add(time.Hour),
-		Invitations:          []releaseLeaseInvite{},
-		CancellationComplete: true,
-		RemovedInviteIDs:     []string{},
-	}
-	g.releaseMu.Lock()
-	err := g.writeReleaseLeaseLocked(lease)
-	g.releaseMu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := json.Marshal(releaseFinalizeRequest{TargetVersion: "1.2.1", LeaseToken: token})
-	result := httptest.NewRecorder()
-	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPost, releaseFinalizePath, "release-finalize-nonce-012345", body))
-	if result.Code != http.StatusNoContent {
-		t.Fatalf("release finalization returned %d: %s", result.Code, result.Body.String())
-	}
-	if _, err := os.Stat(g.releaseLeasePath()); !os.IsNotExist(err) {
-		t.Fatalf("committed release lease was not removed: %v", err)
 	}
 }
 

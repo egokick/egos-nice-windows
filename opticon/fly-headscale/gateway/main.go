@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,7 +30,7 @@ import (
 )
 
 const (
-	releaseProtocolVersion    = 2
+	releaseProtocolVersion    = 3
 	adminPrefix               = "/opticon/v1/headscale/"
 	artifactPrefix            = "/opticon/artifacts/v1/"
 	inviteAdminPrefix         = "/opticon/v1/invitations/"
@@ -39,34 +38,35 @@ const (
 	bundleAdminPrefix         = "/opticon/v1/bundles/"
 	releaseAdminPath          = "/opticon/v1/releases/manifest"
 	releasePreflightPath      = "/opticon/v1/releases/preflight"
-	releaseAcquirePath        = "/opticon/v1/releases/acquire"
 	releaseRevokeActivePath   = "/opticon/v1/releases/revoke-active"
-	releaseReleasePath        = "/opticon/v1/releases/release"
-	releaseFinalizePath       = "/opticon/v1/releases/finalize"
 	invitePublicPrefix        = "/opticon/i/"
 	maxInviteBody             = 64 << 10
 	maxBundleChunk            = 4 << 20
 	maxAdminBody              = 1 << 20
-	maxReleaseLeaseBytes      = 128 << 10
-	maxReleaseLeaseInvites    = 64
 	maxParallelKeyRevocations = 4
-	releaseLeaseLifetime      = 2 * time.Hour
-	// A v2 lease records the irreversible boundary before it calls Headscale or
-	// removes a hosted invitation. Keep reading v1 journals conservatively so a
-	// gateway upgrade can never mistake an old in-flight cancellation for an
-	// untouched lease.
-	legacyReleaseLeaseSchemaVersion = 1
-	releaseLeaseSchemaVersion       = 2
-	maxBootstrapArtifactBytes       = 128 << 20
-	pinnedSDKVersion                = "10.*.*"
-	pinnedRuntimeVersion            = "10.0.10"
-	sourceOnlyManifestSchema        = 2
-	sourceInstallProtocol           = "source-v1"
-	invitationSigningKeyID          = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
+	maxBootstrapArtifactBytes = 128 << 20
+	pinnedSDKVersion          = "10.*.*"
+	pinnedRuntimeVersion      = "10.0.10"
+	sourceOnlyManifestSchema  = 2
+	sourceInstallProtocol     = "source-v1"
+	invitationSigningKeyID    = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
 	// The retired invitation signer is allowed only for this immutable ACL
 	// transition package. It is never a general release signing channel.
 	legacyMachineStateMigrationBridgeVersion = "1.1.41"
 )
+
+// Pinned dependency installers are part of the gateway image, not the
+// source-only release manifest.  The setup binary independently pins and
+// verifies their name, length, SHA-256, and Authenticode publisher before it
+// installs either component.  Keeping this allowlist separate lets schema-2
+// manifests remain source-only without making a newly issued invitation lose
+// its recovery components.
+var pinnedGatewayDependencies = map[string]int64{
+	"tailscale-setup-1.102.1-amd64.msi": 38354432,
+	"tailscale-setup-1.102.1-arm64.msi": 36000256,
+	"rustdesk-1.4.9-x86_64.msi":         24825856,
+	"rustdesk-1.4.9-aarch64.msi":        22855680,
+}
 
 var trustedSourceManifestKeyID string
 var trustedProductSignerThumbprint string
@@ -90,7 +90,6 @@ type gateway struct {
 	inviteMu          sync.Mutex
 	bundleMu          sync.Mutex
 	manifestMu        sync.RWMutex
-	releaseMu         sync.Mutex
 	adminSlots        chan struct{}
 	artifactSlots     chan struct{}
 	proxySlots        chan struct{}
@@ -225,20 +224,8 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.releasePreflight(w, r)
 		return
 	}
-	if r.URL.Path == releaseAcquirePath {
-		g.releaseAcquire(w, r)
-		return
-	}
 	if r.URL.Path == releaseRevokeActivePath {
 		g.releaseRevokeActive(w, r)
-		return
-	}
-	if r.URL.Path == releaseReleasePath {
-		g.releaseRelease(w, r)
-		return
-	}
-	if r.URL.Path == releaseFinalizePath {
-		g.releaseFinalize(w, r)
 		return
 	}
 	if r.URL.Path == inviteInventoryPath {
@@ -378,6 +365,10 @@ func (g *gateway) artifact(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		path = filepath.Join(g.bundleDir, name)
+	} else if size, pinned := pinnedGatewayDependencies[name]; pinned {
+		// Schema-2 source releases deliberately contain only OpticonSource. The
+		// four setup prerequisites instead remain pinned gateway image inputs.
+		expected = bundleArtifact{File: name, Size: size}
 	} else {
 		var err error
 		expected, err = g.artifactByFile(name)
@@ -516,26 +507,8 @@ type releasePreflightRequest struct {
 	ForceRedeploy bool   `json:"forceRedeploy,omitempty"`
 }
 
-type releaseAcquireRequest struct {
-	TargetVersion      string `json:"targetVersion"`
-	DeploymentRevision string `json:"deploymentRevision"`
-	LeaseToken         string `json:"leaseToken"`
-	ForceRedeploy      bool   `json:"forceRedeploy,omitempty"`
-}
-
 type releaseCancellationRequest struct {
 	TargetVersion string `json:"targetVersion"`
-	LeaseToken    string `json:"leaseToken"`
-}
-
-type releaseReleaseRequest struct {
-	LeaseToken       string `json:"leaseToken"`
-	AbandonUnstarted bool   `json:"abandonUnstarted,omitempty"`
-}
-
-type releaseFinalizeRequest struct {
-	TargetVersion string `json:"targetVersion"`
-	LeaseToken    string `json:"leaseToken"`
 }
 
 // releaseInvitationSummary is safe to return to an authenticated command
@@ -560,31 +533,17 @@ type invitationInventoryResponse struct {
 }
 
 type releasePreflightResponse struct {
-	SchemaVersion           int       `json:"schemaVersion"`
-	GatewayReleaseProtocol  int       `json:"gatewayReleaseProtocol"`
-	TargetVersion           string    `json:"targetVersion"`
-	DeployedVersion         string    `json:"deployedVersion"`
-	AlreadyDeployed         bool      `json:"alreadyDeployed"`
-	ForceRedeploy           bool      `json:"forceRedeploy,omitempty"`
-	TargetIsOlder           bool      `json:"targetIsOlder"`
-	DeploymentBlocked       bool      `json:"deploymentBlocked"`
-	DeploymentBlockedReason string    `json:"deploymentBlockedReason,omitempty"`
-	LeaseExpiresAt          time.Time `json:"leaseExpiresAt,omitempty"`
-	// LeaseTokenSHA256 is an authenticated, non-bearer fingerprint. It lets a
-	// Command Center prove that its locally protected recovery token belongs to
-	// this live lease without ever returning the raw token from the gateway.
-	LeaseTokenSHA256          string                     `json:"leaseTokenSha256,omitempty"`
-	DeploymentRevision        string                     `json:"deploymentRevision"`
+	SchemaVersion             int                        `json:"schemaVersion"`
+	GatewayReleaseProtocol    int                        `json:"gatewayReleaseProtocol"`
+	TargetVersion             string                     `json:"targetVersion"`
+	DeployedVersion           string                     `json:"deployedVersion"`
+	AlreadyDeployed           bool                       `json:"alreadyDeployed"`
+	ForceRedeploy             bool                       `json:"forceRedeploy,omitempty"`
+	TargetIsOlder             bool                       `json:"targetIsOlder"`
 	RequiresInvitationRemoval bool                       `json:"requiresInvitationRemoval"`
 	CancellationBlocked       bool                       `json:"cancellationBlocked"`
 	Manifest                  artifactManifest           `json:"manifest"`
 	BlockingInvitations       []releaseInvitationSummary `json:"blockingInvitations"`
-}
-
-type releaseLeaseResponse struct {
-	LeaseToken       string    `json:"leaseToken"`
-	ExpiresAt        time.Time `json:"expiresAt"`
-	RemovedInviteIDs []string  `json:"removedInviteIds"`
 }
 
 type releaseCancellationResponse struct {
@@ -596,32 +555,6 @@ type activeReleaseInvite struct {
 	IDHash string
 	Path   string
 	Invite hostedInvite
-	Digest string
-}
-
-// releaseLease is an on-volume recovery journal for one deployment. The raw
-// bearer token is never persisted: only its SHA-256 digest is stored here.
-// CancellationStarted is written before the first network-key revocation or
-// hosted-link removal. Once set, the transaction must be resumed rather than
-// released, even if the gateway crashed before recording a later outcome.
-// The list lets a retry return the full original removal result after a lost
-// response or a partial filesystem failure.
-type releaseLease struct {
-	SchemaVersion        int                  `json:"schemaVersion"`
-	TargetVersion        string               `json:"targetVersion"`
-	DeploymentRevision   string               `json:"deploymentRevision"`
-	TokenSHA256          string               `json:"tokenSha256"`
-	ExpiresAt            time.Time            `json:"expiresAt"`
-	Invitations          []releaseLeaseInvite `json:"invitations"`
-	CancellationStarted  bool                 `json:"cancellationStarted"`
-	CancellationComplete bool                 `json:"cancellationComplete"`
-	RemovedInviteIDs     []string             `json:"removedInviteIds"`
-	ForceRedeploy        bool                 `json:"forceRedeploy,omitempty"`
-}
-
-type releaseLeaseInvite struct {
-	IDHash         string `json:"idHash"`
-	TailscaleKeyID string `json:"tailscaleKeyId"`
 }
 
 type artifactManifest struct {
@@ -839,10 +772,7 @@ func writeFileAtomically(path string, data []byte) error {
 		return err
 	}
 	// fsyncing the file makes its bytes durable; fsyncing the parent directory
-	// makes the name replacement durable too. Release leases record an
-	// irreversible cancellation boundary, so returning before the rename is
-	// committed would permit a power loss to forget that boundary after a
-	// Headscale key was revoked.
+	// makes the name replacement durable too.
 	return syncDirectory(filepath.Dir(path))
 }
 
@@ -869,11 +799,6 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid manifest", http.StatusBadRequest)
 		return
 	}
-	// Global lock order is release -> manifest -> invitation. Keep the release
-	// lease for the entire commit so no invitation mutation can pass its final
-	// check between manifest validation and the atomic write.
-	g.releaseMu.Lock()
-	defer g.releaseMu.Unlock()
 	g.manifestMu.Lock()
 	defer g.manifestMu.Unlock()
 	current, err := g.readArtifactManifestUnlocked()
@@ -898,21 +823,10 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "manifest release is incomplete", http.StatusBadRequest)
 		return
 	}
-	// The lease records whether the operator explicitly requested a same-version
-	// emergency replacement. Ordinary deployments retain immutable versions.
-	lease, err := g.requireManifestLeaseLocked(r.Header.Get("X-Opticon-Release-Lease"), nextVersion, g.currentTime())
-	if err != nil {
-		http.Error(w, "release deployment lease is unavailable or does not match this manifest", http.StatusConflict)
-		return
-	}
 	if currentOK {
 		comparison, valid := compareSemanticVersions(nextVersion, currentVersion)
 		if !valid || comparison < 0 {
 			http.Error(w, "release downgrade refused", http.StatusConflict)
-			return
-		}
-		if comparison == 0 && !sameReleaseArtifacts(current, next, currentVersion) && (lease == nil || !lease.ForceRedeploy) {
-			http.Error(w, "release version is immutable", http.StatusConflict)
 			return
 		}
 	}
@@ -920,24 +834,10 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pinned dependencies changed", http.StatusConflict)
 		return
 	}
-	// A live release lease spans cancellation through this atomic manifest
-	// commit. It stops a concurrent invite write from making the just-reviewed
-	// snapshot stale during a long source build and upload.
-	if err := g.requireActiveInviteArtifacts(next, g.currentTime()); err != nil {
-		http.Error(w, "manifest would break an active invitation", http.StatusConflict)
-		return
-	}
 	err = writeFileAtomically(g.artifactManifestPath(), body)
 	if err != nil {
 		http.Error(w, "storage unavailable", http.StatusInternalServerError)
 		return
-	}
-	if lease != nil {
-		if err := g.removeReleaseLeaseLocked(); err != nil {
-			// The manifest is already committed. Preserve the successful response;
-			// the bounded lease will expire if this best-effort cleanup cannot run.
-			log.Printf("manifest %s published but release lease cleanup failed: %v", nextVersion, err)
-		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"published": true, "version": nextVersion})
 }
@@ -970,123 +870,11 @@ func (g *gateway) releasePreflight(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "release preflight unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	lease, err := g.currentReleaseLease(g.currentTime())
-	if err != nil {
-		http.Error(w, "release deployment state unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if lease != nil {
-		preflight.DeploymentBlocked = true
-		preflight.DeploymentBlockedReason = "Another Opticon release deployment is in progress. Wait for it to commit or expire before starting a new one."
-		preflight.LeaseExpiresAt = lease.ExpiresAt
-		preflight.LeaseTokenSHA256 = lease.TokenSHA256
-	}
 	writeJSON(w, http.StatusOK, preflight)
 }
 
-// releaseAcquire is the post-confirmation boundary. It binds the UI's
-// reviewed preflight snapshot to an opaque server-side lease before any invite
-// key is revoked. While the lease is live, all admin invitation mutations are
-// rejected so a long source build cannot race the manifest commit.
-func (g *gateway) releaseAcquire(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := g.readAdminBody(w, r, maxAdminBody)
-	if err != nil {
-		g.writeAdminBodyError(w, err, "invalid release acquisition")
-		return
-	}
-	if !g.authenticate(r, body, g.currentTime()) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	var request releaseAcquireRequest
-	if json.Unmarshal(body, &request) != nil || !validStableReleaseVersion(request.TargetVersion) ||
-		!inviteHashPattern.MatchString(strings.ToLower(request.DeploymentRevision)) || !validReleaseLeaseToken(request.LeaseToken) {
-		http.Error(w, "invalid release acquisition", http.StatusBadRequest)
-		return
-	}
-
-	lease, err := g.acquireReleaseLease(request.TargetVersion, strings.ToLower(request.DeploymentRevision), request.LeaseToken, g.currentTime(), request.ForceRedeploy)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, http.StatusCreated, releaseLeaseResponse{
-		LeaseToken:       request.LeaseToken,
-		ExpiresAt:        lease.ExpiresAt,
-		RemovedInviteIDs: append([]string(nil), lease.RemovedInviteIDs...),
-	})
-}
-
-// releaseRelease abandons a lease only before invitation cancellation starts.
-// After the durable journal crosses that boundary it is intentionally retained
-// for retry/recovery until the manifest commit or expiry.
-func (g *gateway) releaseRelease(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := g.readAdminBody(w, r, maxAdminBody)
-	if err != nil {
-		g.writeAdminBodyError(w, err, "invalid release lease release")
-		return
-	}
-	if !g.authenticate(r, body, g.currentTime()) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	var request releaseReleaseRequest
-	if json.Unmarshal(body, &request) != nil ||
-		(request.AbandonUnstarted && request.LeaseToken != "") ||
-		(!request.AbandonUnstarted && !validReleaseLeaseToken(request.LeaseToken)) {
-		http.Error(w, "invalid release lease release", http.StatusBadRequest)
-		return
-	}
-	if err := g.releaseUncancelledLease(request.LeaseToken, request.AbandonUnstarted, g.currentTime()); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// releaseFinalize clears a recovered lease only after independently proving
-// that the exact target is live in the gateway manifest. It repairs the rare
-// case where the manifest write succeeded but the publisher lost its response
-// or post-commit lease-file cleanup failed.
-func (g *gateway) releaseFinalize(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := g.readAdminBody(w, r, maxAdminBody)
-	if err != nil {
-		g.writeAdminBodyError(w, err, "invalid release finalization")
-		return
-	}
-	if !g.authenticate(r, body, g.currentTime()) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	var request releaseFinalizeRequest
-	if json.Unmarshal(body, &request) != nil || !validStableReleaseVersion(request.TargetVersion) ||
-		!validReleaseLeaseToken(request.LeaseToken) {
-		http.Error(w, "invalid release finalization", http.StatusBadRequest)
-		return
-	}
-	if err := g.finalizeReleaseLease(request.TargetVersion, request.LeaseToken, g.currentTime()); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// releaseRevokeActive continues the durable lease transaction. The lease
-// captures the exact invitation snapshot seen by the operator; keys are
-// revoked before hosted links are removed. Its journal makes retries return
-// the full original result even after a partial delete or lost response.
+// releaseRevokeActive revokes every invitation that is active when this call
+// runs. Network keys are revoked before hosted links are removed.
 func (g *gateway) releaseRevokeActive(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1102,25 +890,18 @@ func (g *gateway) releaseRevokeActive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request releaseCancellationRequest
-	if json.Unmarshal(body, &request) != nil || !validStableReleaseVersion(request.TargetVersion) ||
-		!validReleaseLeaseToken(request.LeaseToken) {
+	if json.Unmarshal(body, &request) != nil || !validStableReleaseVersion(request.TargetVersion) {
 		http.Error(w, "invalid release cancellation", http.StatusBadRequest)
 		return
 	}
 
-	removed, err := g.revokeLeaseInvitations(request.TargetVersion, request.LeaseToken, g.currentTime())
+	removed, err := g.revokeActiveInvitations(g.currentTime())
 	if err != nil {
-		if errors.Is(err, errReleaseLeaseConflict) {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
 		http.Error(w, "could not revoke and remove every active invitation", http.StatusBadGateway)
 		return
 	}
 	writeJSON(w, http.StatusOK, releaseCancellationResponse{RemovedCount: len(removed), RemovedInviteIDs: removed})
 }
-
-var errReleaseLeaseConflict = errors.New("release deployment lease changed or expired")
 
 func (g *gateway) writeAdminBodyError(w http.ResponseWriter, err error, invalidMessage string) {
 	if errors.Is(err, errAdminBusy) {
@@ -1174,21 +955,9 @@ func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time, for
 		AlreadyDeployed:           alreadyDeployed,
 		ForceRedeploy:             forceRedeploy,
 		TargetIsOlder:             targetIsOlder,
-		DeploymentRevision:        releaseInvitationRevision(targetVersion, active),
 		RequiresInvitationRemoval: requiresRemoval,
 		Manifest:                  manifest,
 		BlockingInvitations:       []releaseInvitationSummary{},
-	}
-	if requiresRemoval && len(active) > maxReleaseLeaseInvites {
-		// Do not ask for confirmation which this version cannot safely fulfill.
-		// A bounded transaction guarantees the lease outlives key revocation and
-		// lets a lost response remain recoverable as one coherent operation.
-		response.RequiresInvitationRemoval = false
-		response.DeploymentBlocked = true
-		response.DeploymentBlockedReason = fmt.Sprintf(
-			"%d active invitations exceed this release transaction's safe limit of %d. Reconcile them in smaller safe batches before publishing a new source release.",
-			len(active), maxReleaseLeaseInvites)
-		return response, nil
 	}
 	if !requiresRemoval {
 		return response, nil
@@ -1259,285 +1028,27 @@ func (g *gateway) activeReleaseInvitesLocked(now time.Time) ([]activeReleaseInvi
 		if invite.InstallProtocol != "" && invite.InstallProtocol != sourceInstallProtocol {
 			return nil, errors.New("an invitation record has an unsupported install protocol")
 		}
-		digest := sha256.Sum256(data)
 		result = append(result, activeReleaseInvite{
 			IDHash: idHash,
 			Path:   path,
 			Invite: invite,
-			Digest: hex.EncodeToString(digest[:]),
 		})
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].IDHash < result[right].IDHash })
 	return result, nil
 }
 
-func releaseInvitationRevision(targetVersion string, active []activeReleaseInvite) string {
-	hash := sha256.New()
-	_, _ = io.WriteString(hash, "target="+targetVersion+"\n")
-	for _, item := range active {
-		_, _ = io.WriteString(hash, item.IDHash+":"+item.Digest+"\n")
-	}
-	return hex.EncodeToString(hash.Sum(nil))
-}
+func (g *gateway) revokeActiveInvitations(now time.Time) ([]string, error) {
+	g.inviteMu.Lock()
+	defer g.inviteMu.Unlock()
 
-func (g *gateway) releaseLeasePath() string {
-	// The live manifest path is on the durable writable volume in production;
-	// artifactDir is image content and intentionally read-only there.
-	return filepath.Join(filepath.Dir(g.artifactManifestPath()), "release-deployment.json")
-}
-
-func validReleaseLeaseToken(token string) bool {
-	if len(token) != 43 || strings.TrimSpace(token) != token {
-		return false
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(token)
-	return err == nil && len(raw) == 32
-}
-
-func releaseLeaseTokenHash(token string) string {
-	digest := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(digest[:])
-}
-
-func (g *gateway) currentReleaseLease(now time.Time) (*releaseLease, error) {
-	g.releaseMu.Lock()
-	defer g.releaseMu.Unlock()
-	return g.readReleaseLeaseLocked(now)
-}
-
-func (g *gateway) readReleaseLeaseLocked(now time.Time) (*releaseLease, error) {
-	path := g.releaseLeasePath()
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil || len(data) == 0 || len(data) > maxReleaseLeaseBytes {
-		return nil, errors.New("release deployment journal could not be read safely")
-	}
-	var lease releaseLease
-	if json.Unmarshal(data, &lease) != nil || !validStoredReleaseLease(lease) {
-		return nil, errors.New("release deployment journal is corrupt")
-	}
-	if !lease.ExpiresAt.After(now) {
-		if err := g.removeReleaseLeaseLocked(); err != nil {
-			return nil, errors.New("expired release deployment journal could not be removed")
-		}
-		return nil, nil
-	}
-	return &lease, nil
-}
-
-func validStoredReleaseLease(lease releaseLease) bool {
-	if (lease.SchemaVersion != legacyReleaseLeaseSchemaVersion && lease.SchemaVersion != releaseLeaseSchemaVersion) ||
-		!validStableReleaseVersion(lease.TargetVersion) ||
-		!inviteHashPattern.MatchString(strings.ToLower(lease.DeploymentRevision)) ||
-		!inviteHashPattern.MatchString(strings.ToLower(lease.TokenSHA256)) || lease.ExpiresAt.IsZero() ||
-		len(lease.Invitations) > maxReleaseLeaseInvites || len(lease.RemovedInviteIDs) > maxReleaseLeaseInvites {
-		return false
-	}
-	ids := make(map[string]struct{}, len(lease.Invitations))
-	for _, invite := range lease.Invitations {
-		if !inviteHashPattern.MatchString(invite.IDHash) || len(invite.TailscaleKeyID) > 512 ||
-			strings.ContainsAny(invite.TailscaleKeyID, "\r\n") {
-			return false
-		}
-		if _, exists := ids[invite.IDHash]; exists {
-			return false
-		}
-		ids[invite.IDHash] = struct{}{}
-	}
-	if len(lease.Invitations) == 0 && (!lease.CancellationComplete || lease.CancellationStarted) {
-		return false
-	}
-	if !lease.CancellationComplete {
-		return len(lease.RemovedInviteIDs) == 0
-	}
-	if len(lease.RemovedInviteIDs) != len(lease.Invitations) {
-		return false
-	}
-	removed := make(map[string]struct{}, len(lease.RemovedInviteIDs))
-	for _, idHash := range lease.RemovedInviteIDs {
-		if _, exists := ids[idHash]; !exists {
-			return false
-		}
-		if _, exists := removed[idHash]; exists {
-			return false
-		}
-		removed[idHash] = struct{}{}
-	}
-	// Version 1 predates CancellationStarted. It remains readable so a
-	// pre-upgrade journal can be completed, but a newly-written (v2) journal
-	// must never claim completed invitation cancellation without first having
-	// crossed and durably recorded that boundary.
-	if lease.SchemaVersion == releaseLeaseSchemaVersion && len(lease.Invitations) != 0 && !lease.CancellationStarted {
-		return false
-	}
-	return true
-}
-
-func (g *gateway) writeReleaseLeaseLocked(lease releaseLease) error {
-	if !validStoredReleaseLease(lease) {
-		return errors.New("release deployment journal is invalid")
-	}
-	body, err := json.Marshal(lease)
-	if err != nil {
-		return err
-	}
-	return writeFileAtomically(g.releaseLeasePath(), body)
-}
-
-func (g *gateway) removeReleaseLeaseLocked() error {
-	path := g.releaseLeasePath()
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err == nil {
-		return syncDirectory(filepath.Dir(path))
-	}
-	return nil
-}
-
-func (g *gateway) acquireReleaseLease(targetVersion, revision, token string, now time.Time, forceOptions ...bool) (releaseLease, error) {
-	forceRedeploy := len(forceOptions) != 0 && forceOptions[0]
-	g.releaseMu.Lock()
-	defer g.releaseMu.Unlock()
-	if existing, err := g.readReleaseLeaseLocked(now); err != nil {
-		return releaseLease{}, err
-	} else if existing != nil {
-		// The client persists this token before POSTing it. If a successful
-		// acquire response is lost, the exact same request can safely recover
-		// the durable transaction without ever storing the raw token server-side.
-		if existing.TargetVersion == targetVersion && existing.DeploymentRevision == revision &&
-			existing.ForceRedeploy == forceRedeploy &&
-			hmac.Equal([]byte(existing.TokenSHA256), []byte(releaseLeaseTokenHash(token))) {
-			return *existing, nil
-		}
-		return releaseLease{}, fmt.Errorf("%w: an Opticon release deployment remains active until %s", errReleaseLeaseConflict, existing.ExpiresAt.UTC().Format(time.RFC3339))
-	}
-
-	preflight, err := g.buildReleasePreflight(targetVersion, now, forceRedeploy)
-	if err != nil {
-		return releaseLease{}, err
-	}
-	if preflight.AlreadyDeployed || preflight.TargetIsOlder {
-		return releaseLease{}, fmt.Errorf("%w: the requested release is not publishable", errReleaseLeaseConflict)
-	}
-	if !hmac.Equal([]byte(revision), []byte(preflight.DeploymentRevision)) {
-		return releaseLease{}, fmt.Errorf("%w: active invitation state changed; refresh before confirming removal", errReleaseLeaseConflict)
-	}
-	active, err := g.activeReleaseInvites(now)
-	if err != nil {
-		return releaseLease{}, err
-	}
-	if !hmac.Equal([]byte(revision), []byte(releaseInvitationRevision(targetVersion, active))) {
-		return releaseLease{}, fmt.Errorf("%w: active invitation state changed; refresh before confirming removal", errReleaseLeaseConflict)
-	}
-	if len(active) > maxReleaseLeaseInvites {
-		return releaseLease{}, fmt.Errorf("%w: too many active invitations for one safe release transaction", errReleaseLeaseConflict)
-	}
-	items := make([]releaseLeaseInvite, 0, len(active))
-	for _, item := range active {
-		items = append(items, releaseLeaseInvite{IDHash: item.IDHash, TailscaleKeyID: item.Invite.TailscaleKeyID})
-	}
-	lease := releaseLease{
-		SchemaVersion:        releaseLeaseSchemaVersion,
-		TargetVersion:        targetVersion,
-		DeploymentRevision:   revision,
-		TokenSHA256:          releaseLeaseTokenHash(token),
-		ExpiresAt:            now.Add(releaseLeaseLifetime).UTC(),
-		Invitations:          items,
-		CancellationComplete: len(items) == 0,
-		RemovedInviteIDs:     []string{},
-		ForceRedeploy:        forceRedeploy,
-	}
-	if err := g.writeReleaseLeaseLocked(lease); err != nil {
-		return releaseLease{}, err
-	}
-	return lease, nil
-}
-
-func (g *gateway) releaseUncancelledLease(token string, abandonUnstarted bool, now time.Time) error {
-	g.releaseMu.Lock()
-	defer g.releaseMu.Unlock()
-	lease, err := g.readReleaseLeaseLocked(now)
-	if err != nil {
-		return err
-	}
-	if lease == nil || (!abandonUnstarted &&
-		!hmac.Equal([]byte(lease.TokenSHA256), []byte(releaseLeaseTokenHash(token)))) {
-		return errReleaseLeaseConflict
-	}
-	// A v1 journal did not have a durable cancellation boundary. Treat every
-	// non-empty v1 lease as potentially in progress: releasing it could make a
-	// partially-revoked invitation mutable again after a gateway upgrade.
-	if lease.CancellationStarted || (lease.SchemaVersion == legacyReleaseLeaseSchemaVersion && len(lease.Invitations) != 0) {
-		return fmt.Errorf("%w: invitation cancellation may have started; retry the manifest publication instead", errReleaseLeaseConflict)
-	}
-	return g.removeReleaseLeaseLocked()
-}
-
-func (g *gateway) finalizeReleaseLease(targetVersion, token string, now time.Time) error {
-	g.releaseMu.Lock()
-	defer g.releaseMu.Unlock()
-	lease, err := g.readReleaseLeaseLocked(now)
-	if err != nil {
-		return err
-	}
-	if lease != nil && (lease.TargetVersion != targetVersion || !lease.CancellationComplete ||
-		!hmac.Equal([]byte(lease.TokenSHA256), []byte(releaseLeaseTokenHash(token)))) {
-		return errReleaseLeaseConflict
-	}
-	// Global lock order remains release -> manifest. A target is final only if
-	// its complete immutable source artifact is what the gateway now serves.
-	manifest, err := g.readArtifactManifest()
-	if err != nil {
-		return err
-	}
-	if !completeCloudFrontRelease(manifest, targetVersion) {
-		return fmt.Errorf("%w: the target manifest is not live", errReleaseLeaseConflict)
-	}
-	deployed, ok := highestReleaseVersion(manifest)
-	if !ok || deployed != targetVersion {
-		return fmt.Errorf("%w: the target version is not the deployed release", errReleaseLeaseConflict)
-	}
-	if lease == nil {
-		return nil
-	}
-	return g.removeReleaseLeaseLocked()
-}
-
-func (g *gateway) revokeLeaseInvitations(targetVersion, token string, now time.Time) ([]string, error) {
-	g.releaseMu.Lock()
-	defer g.releaseMu.Unlock()
-	lease, err := g.readReleaseLeaseLocked(now)
+	active, err := g.activeReleaseInvitesLocked(now)
 	if err != nil {
 		return nil, err
 	}
-	if lease == nil || lease.TargetVersion != targetVersion ||
-		!hmac.Equal([]byte(lease.TokenSHA256), []byte(releaseLeaseTokenHash(token))) {
-		return nil, errReleaseLeaseConflict
-	}
-	if lease.CancellationComplete {
-		return append([]string(nil), lease.RemovedInviteIDs...), nil
-	}
-	// Persist the irreversible boundary before issuing a single Headscale call
-	// or deleting a hosted record. If the process dies after this write, a retry
-	// will safely repeat revocation (404 is accepted) instead of releasing a
-	// lease that might already have changed the outside world.
-	if lease.SchemaVersion != releaseLeaseSchemaVersion || !lease.CancellationStarted {
-		lease.SchemaVersion = releaseLeaseSchemaVersion
-		lease.CancellationStarted = true
-		if err := g.writeReleaseLeaseLocked(*lease); err != nil {
-			return nil, err
-		}
-	}
-	// Bound revocations so even the largest supported transaction completes
-	// well inside the two-hour lease while every key still finishes before any
-	// hosted link is deleted. A retry is safe because Headscale 404 is accepted.
-	revocable := make([]releaseLeaseInvite, 0, len(lease.Invitations))
-	for _, invite := range lease.Invitations {
-		if strings.TrimSpace(invite.TailscaleKeyID) != "" {
+	revocable := make([]activeReleaseInvite, 0, len(active))
+	for _, invite := range active {
+		if strings.TrimSpace(invite.Invite.TailscaleKeyID) != "" {
 			revocable = append(revocable, invite)
 		}
 	}
@@ -1546,7 +1057,7 @@ func (g *gateway) revokeLeaseInvitations(targetVersion, token string, now time.T
 		workers = len(revocable)
 	}
 	if workers > 0 {
-		jobs := make(chan releaseLeaseInvite)
+		jobs := make(chan activeReleaseInvite)
 		errs := make(chan error, len(revocable))
 		var wait sync.WaitGroup
 		for worker := 0; worker < workers; worker++ {
@@ -1554,7 +1065,7 @@ func (g *gateway) revokeLeaseInvitations(targetVersion, token string, now time.T
 			go func() {
 				defer wait.Done()
 				for invite := range jobs {
-					if err := g.revokeHostedInviteKey(invite.TailscaleKeyID); err != nil {
+					if err := g.revokeHostedInviteKey(invite.Invite.TailscaleKeyID); err != nil {
 						errs <- err
 					}
 				}
@@ -1572,46 +1083,19 @@ func (g *gateway) revokeLeaseInvitations(targetVersion, token string, now time.T
 			}
 		}
 	}
-	for _, invite := range lease.Invitations {
-		path := filepath.Join(g.inviteDir, invite.IDHash+".json")
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	removed := make([]string, 0, len(active))
+	for _, invite := range active {
+		if err := os.Remove(invite.Path); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		removed = append(removed, invite.IDHash)
+	}
+	if len(removed) != 0 {
+		if err := syncDirectory(g.inviteDir); err != nil {
 			return nil, err
 		}
 	}
-	// The completed journal is authoritative on retries. Do not write it until
-	// the directory entries for every removed hosted link are durable too; a
-	// power loss must not resurrect a link while the journal says cancellation
-	// has already finished.
-	if err := syncDirectory(g.inviteDir); err != nil {
-		return nil, err
-	}
-	lease.CancellationComplete = true
-	lease.RemovedInviteIDs = make([]string, 0, len(lease.Invitations))
-	for _, invite := range lease.Invitations {
-		lease.RemovedInviteIDs = append(lease.RemovedInviteIDs, invite.IDHash)
-	}
-	if err := g.writeReleaseLeaseLocked(*lease); err != nil {
-		return nil, err
-	}
-	return append([]string(nil), lease.RemovedInviteIDs...), nil
-}
-
-func (g *gateway) requireManifestLeaseLocked(token, targetVersion string, now time.Time) (*releaseLease, error) {
-	lease, err := g.readReleaseLeaseLocked(now)
-	if err != nil {
-		return nil, err
-	}
-	if lease == nil {
-		if token == "" {
-			return nil, nil
-		}
-		return nil, errReleaseLeaseConflict
-	}
-	if !validReleaseLeaseToken(token) || lease.TargetVersion != targetVersion || !lease.CancellationComplete ||
-		!hmac.Equal([]byte(lease.TokenSHA256), []byte(releaseLeaseTokenHash(token))) {
-		return nil, errReleaseLeaseConflict
-	}
-	return lease, nil
+	return removed, nil
 }
 
 func (g *gateway) revokeHostedInviteKey(keyID string) error {
@@ -1647,30 +1131,6 @@ func (g *gateway) revokeHostedInviteKey(keyID string) error {
 		return nil
 	}
 	return errors.New("Headscale pre-authentication key revocation failed")
-}
-
-func sameReleaseArtifacts(left, right artifactManifest, version string) bool {
-	encode := func(manifest artifactManifest) map[string]string {
-		result := make(map[string]string)
-		for _, artifact := range manifest.Artifacts {
-			if artifact.Version != version || (artifact.Product != "OpticonBundle" && artifact.Product != "OpticonBootstrap" && artifact.Product != "OpticonSource") {
-				continue
-			}
-			encoded, _ := json.Marshal(artifact)
-			result[artifact.Product+"|"+artifact.Role+"|"+artifact.Architecture] = string(encoded)
-		}
-		return result
-	}
-	a, b := encode(left), encode(right)
-	if len(a) != len(b) {
-		return false
-	}
-	for key, value := range a {
-		if b[key] != value {
-			return false
-		}
-	}
-	return true
 }
 
 func completeCloudFrontRelease(manifest artifactManifest, version string) bool {
@@ -1925,10 +1385,6 @@ func (g *gateway) invitationInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Keep the same global order used by invitation mutations and release
-	// transactions so this is one authoritative point-in-time inventory.
-	g.releaseMu.Lock()
-	defer g.releaseMu.Unlock()
 	g.inviteMu.Lock()
 	defer g.inviteMu.Unlock()
 
@@ -2014,21 +1470,6 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !g.authenticate(r, body, time.Now()) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	// Global lock order is release -> manifest -> invitation. Hold the release
-	// lock through this write/delete, not merely through a preliminary check,
-	// so an acquire cannot capture a snapshot while this request is still about
-	// to mutate the invitation directory.
-	g.releaseMu.Lock()
-	defer g.releaseMu.Unlock()
-	lease, leaseErr := g.readReleaseLeaseLocked(g.currentTime())
-	if leaseErr != nil {
-		http.Error(w, "release deployment state unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if lease != nil {
-		http.Error(w, "invitation changes are temporarily blocked by an Opticon release deployment", http.StatusConflict)
 		return
 	}
 	path := filepath.Join(g.inviteDir, idHash+".json")
@@ -2473,46 +1914,6 @@ func sourceForInviteInManifest(invite hostedInvite, manifest artifactManifest) (
 		}
 	}
 	return bundleArtifact{}, errors.New("invitation source release is not published")
-}
-
-func (g *gateway) requireActiveInviteArtifacts(next artifactManifest, now time.Time) error {
-	if g.inviteDir == "" {
-		return nil
-	}
-	g.inviteMu.Lock()
-	defer g.inviteMu.Unlock()
-	entries, err := os.ReadDir(g.inviteDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		data, readErr := os.ReadFile(filepath.Join(g.inviteDir, entry.Name()))
-		if readErr != nil || len(data) > maxInviteBody*2 {
-			return errors.New("an invitation record could not be read safely")
-		}
-		var invite hostedInvite
-		if json.Unmarshal(data, &invite) != nil {
-			return errors.New("an invitation record is corrupt")
-		}
-		if !invite.ExpiresAt.After(now) || invite.ReleaseVersion == "" {
-			continue
-		}
-		if invite.InstallProtocol != "" && invite.InstallProtocol != sourceInstallProtocol {
-			return errors.New("an invitation record has an unsupported install protocol")
-		}
-		if _, err := sourceForInviteInManifest(invite, next); err != nil {
-			return err
-		}
-		if invite.InstallProtocol != sourceInstallProtocol {
-			if _, err := bootstrapForInviteInManifest(invite, next); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func (g *gateway) bootstrapForInvite(invite hostedInvite) (bundleArtifact, error) {

@@ -35,10 +35,7 @@ public sealed class HostedInviteClient
     private const string InvitationInventoryPath = "/opticon/v1/invitations";
     private const string InviteAdminPath = "/opticon/v1/invitations/";
     private const string ReleasePreflightPath = "/opticon/v1/releases/preflight";
-    private const string ReleaseAcquirePath = "/opticon/v1/releases/acquire";
     private const string ReleaseRevokeActivePath = "/opticon/v1/releases/revoke-active";
-    private const string ReleaseReleasePath = "/opticon/v1/releases/release";
-    private const string ReleaseFinalizePath = "/opticon/v1/releases/finalize";
     private readonly AdminState _state;
     private readonly HttpClient _http = DirectHttp.CreateClient(TimeSpan.FromSeconds(30));
     private readonly HttpClient _releaseHttp = DirectHttp.CreateClient(TimeSpan.FromMinutes(5));
@@ -179,10 +176,9 @@ public sealed class HostedInviteClient
 
     public async Task<ReleaseCancellationResponse> RevokeActiveReleaseInvitationsAsync(
         string targetVersion,
-        string leaseToken,
         CancellationToken cancellationToken = default)
     {
-        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, leaseToken }, JsonDefaults.Options);
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion }, JsonDefaults.Options);
         Exception? lastError = null;
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -202,41 +198,6 @@ public sealed class HostedInviteClient
             if (attempt < 2) await Task.Delay(TimeSpan.FromMilliseconds(500 * (attempt + 1)), cancellationToken);
         }
         throw new InvalidOperationException("Fly active-invitation removal did not return a durable result after retries.", lastError);
-    }
-
-    public async Task<ReleaseDeploymentLease> AcquireReleaseLeaseAsync(
-        string targetVersion,
-        string deploymentRevision,
-        string leaseToken,
-        bool forceRedeploy,
-        CancellationToken cancellationToken = default)
-    {
-        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, deploymentRevision, leaseToken, forceRedeploy }, JsonDefaults.Options);
-        using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleaseAcquirePath), body, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Fly release deployment acquisition failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
-        var content = await ReadBoundedAsync(response, 1024 * 1024, cancellationToken);
-        return JsonSerializer.Deserialize<ReleaseDeploymentLease>(content, JsonDefaults.Options)
-               ?? throw new InvalidDataException("Fly release deployment acquisition returned an empty response.");
-    }
-
-    public async Task ReleaseDeploymentLeaseAsync(string leaseToken, CancellationToken cancellationToken = default)
-    {
-        var body = JsonSerializer.SerializeToUtf8Bytes(new { leaseToken }, JsonDefaults.Options);
-        using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleaseReleasePath), body, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Fly release deployment release failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
-    }
-
-    public async Task FinalizeDeploymentLeaseAsync(
-        string targetVersion,
-        string leaseToken,
-        CancellationToken cancellationToken = default)
-    {
-        var body = JsonSerializer.SerializeToUtf8Bytes(new { targetVersion, leaseToken }, JsonDefaults.Options);
-        using var response = await SendSignedAsync(HttpMethod.Post, BuildUri(ReleaseFinalizePath), body, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Fly release deployment finalization failed ({(int)response.StatusCode}): {await ReadDetailAsync(response, cancellationToken)}");
     }
 
     public async Task<byte[]> DownloadEncryptedAsync(string publicId, CancellationToken cancellationToken = default)

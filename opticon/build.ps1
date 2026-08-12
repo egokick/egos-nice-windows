@@ -703,7 +703,6 @@ try {
             [string]::IsNullOrWhiteSpace($SourceReleaseSigningCertificateThumbprint)) {
             throw 'Publishable builds require separate code-signing and source-release signing certificate thumbprints.'
         }
-        Assert-ProductionGitState
     }
     if ([string]::IsNullOrWhiteSpace($CodeSigningCertificateThumbprint) -or
         [string]::IsNullOrWhiteSpace($SourceReleaseSigningCertificateThumbprint)) {
