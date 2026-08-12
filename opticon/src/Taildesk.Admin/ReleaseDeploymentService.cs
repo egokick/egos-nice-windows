@@ -131,29 +131,7 @@ public sealed class ReleaseDeploymentService
             return preflight;
 
         var prerequisites = await ResolvePublisherPrerequisitesAsync(targetVersion, cancellationToken);
-        var gatewayDirectory = RequireRegularDirectory(
-            Path.Combine(prerequisites.Workspace, GatewayDirectoryName), "Opticon Fly gateway source directory");
-        var flyConfig = RequireRegularFile(Path.Combine(gatewayDirectory, "fly.toml"), "Opticon Fly gateway configuration");
-        var dockerfile = RequireRegularFile(Path.Combine(gatewayDirectory, "Dockerfile"), "Opticon Fly gateway Dockerfile");
-        _ = RequireRegularFile(Path.Combine(gatewayDirectory, "gateway", "main.go"), "Opticon Fly gateway source");
-        var configText = await File.ReadAllTextAsync(flyConfig, cancellationToken);
-        if (!configText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-                .Any(line => line.Trim().Equals($"app = \"{GatewayAppName}\"", StringComparison.Ordinal)))
-            throw new InvalidDataException("The verified Opticon Fly configuration does not target the fixed production gateway app.");
-        if (!File.ReadAllText(dockerfile).Contains("/opt/opticon/gateway", StringComparison.Ordinal))
-            throw new InvalidDataException("The verified Opticon Fly Dockerfile does not contain the expected gateway entrypoint.");
-
-        var fly = FindFlyCtl();
-        progress?.Report("Updating the Opticon Fly gateway required by this release…");
-        var result = await ProcessRunner.RunAsync(
-            fly,
-            ["deploy", "--app", GatewayAppName, "--remote-only", "--ha=false"],
-            TimeSpan.FromMinutes(20),
-            cancellationToken,
-            workingDirectory: gatewayDirectory);
-        if (!result.Succeeded)
-            throw new InvalidOperationException(
-                $"The Opticon Fly gateway update failed ({result.ExitCode}). {DescribeProcessFailure(result)}");
+        await DeployGatewayAsync(prerequisites, "Updating the Opticon Fly gateway required by this release…", progress, cancellationToken);
 
         progress?.Report("Waiting for the updated Opticon Fly gateway protocol…");
         for (var attempt = 0; attempt < 12; attempt++)
@@ -165,6 +143,28 @@ public sealed class ReleaseDeploymentService
         }
         throw new InvalidOperationException(
             "Fly reported a healthy deployment, but the Opticon gateway did not expose the required release protocol.");
+    }
+
+    /// <summary>
+    /// Publishes the gateway image after a source archive has been staged. The
+    /// source-only invitation's signed launcher is a sidecar copied into that
+    /// image, so a source release cannot become live until this deployment has
+    /// completed successfully.
+    /// </summary>
+    public async Task DeployGatewayForStagedReleaseAsync(
+        string targetVersion,
+        ReleasePublisherPrerequisites prerequisites,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        BuildSigningTrust.RequirePublishable();
+        var normalizedTarget = NormalizeStableVersion(targetVersion);
+        ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
+        await DeployGatewayAsync(
+            prerequisites,
+            $"Updating the Opticon Fly gateway with the staged {normalizedTarget} signed installer…",
+            progress,
+            cancellationToken);
     }
 
     public async Task<ReleaseDeploymentLease> AcquireLeaseAsync(
@@ -357,6 +357,7 @@ public sealed class ReleaseDeploymentService
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The Opticon source archive could not be staged and verified. " + DescribePublisherFailure(result));
+        await DeployGatewayForStagedReleaseAsync(normalizedTarget, prerequisites, progress, cancellationToken);
         progress?.Report($"Immutable source release {normalizedTarget} is staged and verified.");
     }
 
@@ -615,6 +616,37 @@ public sealed class ReleaseDeploymentService
             || !IsSha256(prerequisites.SourcePublisherSha256)
             || !IsSha256(prerequisites.BundlePublisherSha256))
             throw new InvalidDataException("The automatic Opticon publisher integrity record is invalid.");
+    }
+
+    private static async Task DeployGatewayAsync(
+        ReleasePublisherPrerequisites prerequisites,
+        string progressMessage,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var gatewayDirectory = RequireRegularDirectory(
+            Path.Combine(prerequisites.Workspace, GatewayDirectoryName), "Opticon Fly gateway source directory");
+        var flyConfig = RequireRegularFile(Path.Combine(gatewayDirectory, "fly.toml"), "Opticon Fly gateway configuration");
+        var dockerfile = RequireRegularFile(Path.Combine(gatewayDirectory, "Dockerfile"), "Opticon Fly gateway Dockerfile");
+        _ = RequireRegularFile(Path.Combine(gatewayDirectory, "gateway", "main.go"), "Opticon Fly gateway source");
+        var configText = await File.ReadAllTextAsync(flyConfig, cancellationToken);
+        if (!configText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Any(line => line.Trim().Equals($"app = \"{GatewayAppName}\"", StringComparison.Ordinal)))
+            throw new InvalidDataException("The verified Opticon Fly configuration does not target the fixed production gateway app.");
+        if (!File.ReadAllText(dockerfile).Contains("/opt/opticon/gateway", StringComparison.Ordinal))
+            throw new InvalidDataException("The verified Opticon Fly Dockerfile does not contain the expected gateway entrypoint.");
+
+        var fly = FindFlyCtl();
+        progress?.Report(progressMessage);
+        var result = await ProcessRunner.RunAsync(
+            fly,
+            ["deploy", "--app", GatewayAppName, "--remote-only", "--ha=false"],
+            TimeSpan.FromMinutes(20),
+            cancellationToken,
+            workingDirectory: gatewayDirectory);
+        if (!result.Succeeded)
+            throw new InvalidOperationException(
+                $"The Opticon Fly gateway update failed ({result.ExitCode}). {DescribeProcessFailure(result)}");
     }
 
     private static Dictionary<string, string?> PublisherEnvironment(ReleasePublisherPrerequisites prerequisites)
