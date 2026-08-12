@@ -479,6 +479,26 @@ function Enter-OpticonPackageBuildLock {
     }
 }
 
+function Move-FileReplacingWithRetry {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [TimeSpan]$Timeout = [TimeSpan]::FromMinutes(2)
+    )
+    $deadline = [DateTime]::UtcNow.Add($Timeout)
+    while ($true) {
+        try {
+            [IO.File]::Move($Source, $Destination, $true)
+            return
+        } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Timed out promoting the verified release file because another process kept its destination open: $Destination"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
 $null = Get-SemanticVersionParts $Version
 $null = Get-SemanticVersionParts $MinimumGuardianVersion
 # Agent file versions intentionally use three numeric components. Rejecting
@@ -1184,7 +1204,7 @@ if (-not $ForceRedeploy -and $existingSources.Count -eq 1 -and (([long]$existing
     Remove-Item -LiteralPath $sourceTemporary -Force
     throw "Source release $Version is already declared with different bytes. Bump -Version."
 }
-Move-Item -LiteralPath $sourceTemporary -Destination $sourceDestination -Force
+Move-FileReplacingWithRetry -Source $sourceTemporary -Destination $sourceDestination
 
 if ($SourceOnly) {
     # S3 still receives only the source ZIP. Fly embeds these exact signed
@@ -1198,7 +1218,7 @@ if ($SourceOnly) {
         Remove-Item -LiteralPath $sourceLauncherTemporary -Force
         throw 'The staged one-click source launcher did not match the signed source archive.'
     }
-    Move-Item -LiteralPath $sourceLauncherTemporary -Destination $sourceLauncherDestination -Force
+    Move-FileReplacingWithRetry -Source $sourceLauncherTemporary -Destination $sourceLauncherDestination
 }
 
 if ($SourceOnly) {

@@ -221,6 +221,30 @@ function Invoke-AwsCli {
     return $result
 }
 
+function Enter-OpticonReleasePublisherLock {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [TimeSpan]$Timeout = [TimeSpan]::FromMinutes(50)
+    )
+    $deadline = [DateTime]::UtcNow.Add($Timeout)
+    $reportedWait = $false
+    while ($true) {
+        try {
+            return [IO.File]::Open(
+                $Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Timed out waiting for another Opticon release publisher to finish."
+            }
+            if (-not $reportedWait) {
+                Write-Host 'Another Opticon release operation is active; waiting for it to finish.' -ForegroundColor Yellow
+                $reportedWait = $true
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
 function Assert-ProductionArtifactTrust {
     param([Parameter(Mandatory)]$Artifact)
     $profile = Get-ArtifactString $Artifact 'signingProfile'
@@ -1409,6 +1433,7 @@ function Assert-OpticonBundleArchive {
 }
 
 $script:AwsScratchDirectory = New-PrivatePublisherDirectory -Prefix 'publish-work'
+$releasePublisherLock = $null
 try {
 $identityResult = Invoke-AwsCli -Arguments @('sts', 'get-caller-identity', '--output', 'json')
 if ($identityResult.ExitCode -ne 0) { throw "AWS identity lookup failed: $($identityResult.Error.Trim())" }
@@ -1434,6 +1459,8 @@ if ($CheckOnly) {
     }
     return
 }
+$releasePublisherLock = Enter-OpticonReleasePublisherLock (
+    Join-Path $ArtifactDirectory '.opticon-release-publisher.lock')
 $recoveredStage = $null
 $recoveredStageLocal = $null
 $recoveredManifestBytes = $null
@@ -1789,6 +1816,7 @@ if (-not $SkipManifestPublish) {
     CommittedStaged = $CommitStaged
 }
 } finally {
+    if ($null -ne $releasePublisherLock) { $releasePublisherLock.Dispose() }
     if (-not [string]::IsNullOrWhiteSpace($script:AwsScratchDirectory) -and
         (Test-Path -LiteralPath $script:AwsScratchDirectory -PathType Container)) {
         Remove-Item -LiteralPath $script:AwsScratchDirectory -Recurse -Force -ErrorAction SilentlyContinue
