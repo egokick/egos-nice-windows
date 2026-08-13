@@ -108,9 +108,11 @@ internal static class SimpleDeviceInstaller
                 RequireSuccess(await ProcessRunner.RunAsync(rustDesk, ["--install-service"],
                     TimeSpan.FromSeconds(30), cancellationToken, captureOutput: false),
                     "RustDesk could not install its service");
-            RequireSuccess(await ProcessRunner.RunAsync(rustDesk, ["--password", invite.RustDeskPassword],
-                TimeSpan.FromSeconds(30), cancellationToken, captureOutput: false),
-                "RustDesk rejected its unattended-access password");
+            // RustDesk 1.4.x can keep its password helper resident after the
+            // configuration has been applied. Do not wait on that resident
+            // process as though it were an ordinary short-lived command.
+            ProcessRunner.StartDetached(rustDesk, ["--password", invite.RustDeskPassword]);
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             RustDeskServiceProfileStore.HardenAll();
             RequireSuccess(await ProcessRunner.RunAsync("sc.exe", ["config", "RustDesk", "start=", "auto"],
                 TimeSpan.FromSeconds(15), cancellationToken), "RustDesk could not be set to automatic startup");
@@ -322,8 +324,8 @@ internal static class SimpleDeviceInstaller
 #pragma warning restore SYSLIB0057
         if (!string.Equals(signer.Thumbprint, artifact.ExpectedSignerThumbprint, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"{artifact.Product} has an unexpected Authenticode signer.");
-        await BoundWindowsProductSignatureVerifier.VerifyPinnedAsync(path, signer,
-            requireWindowsTrustedChain: true, requireRfc3161Timestamp: false, cancellationToken);
+        await BoundWindowsProductSignatureVerifier.VerifyPinnedInstallerAsync(path, signer,
+            requireWindowsTrustedChain: true, cancellationToken);
         return path;
     }
 
@@ -410,12 +412,12 @@ internal static class SimpleDeviceInstaller
             _ = await ProcessRunner.RunAsync("netsh.exe", ["advfirewall", "firewall", "delete", "rule", $"name={name}"],
                 TimeSpan.FromSeconds(15), cancellationToken);
         RequireSuccess(await ProcessRunner.RunAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=Opticon Agent (Tailscale only)", "group=Opticon",
+            ["advfirewall", "firewall", "add", "rule", "name=Opticon Agent (Tailscale only)",
                 "dir=in", "action=allow", "protocol=TCP", "localport=45831", $"localip={tailscaleIp}",
                 "remoteip=100.64.0.0/10", $"program={agent}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(20), cancellationToken), "The Agent firewall rule could not be installed");
         RequireSuccess(await ProcessRunner.RunAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=Opticon RustDesk (Tailscale only)", "group=Opticon",
+            ["advfirewall", "firewall", "add", "rule", "name=Opticon RustDesk (Tailscale only)",
                 "dir=in", "action=allow", "protocol=TCP", "localport=21118", $"localip={tailscaleIp}",
                 "remoteip=100.64.0.0/10", $"program={rustDesk}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(20), cancellationToken), "The RustDesk firewall rule could not be installed");
@@ -425,7 +427,7 @@ internal static class SimpleDeviceInstaller
                      ("RustDesk External IPv6 Block", "::/1,8000::/1")
                  })
             RequireSuccess(await ProcessRunner.RunAsync("netsh.exe",
-                ["advfirewall", "firewall", "add", "rule", $"name={name}", "group=Opticon", "dir=out",
+                ["advfirewall", "firewall", "add", "rule", $"name={name}", "dir=out",
                     "action=block", $"remoteip={remote}", $"program={rustDesk}", "profile=any", "enable=yes"],
                 TimeSpan.FromSeconds(20), cancellationToken), "A RustDesk isolation rule could not be installed");
     }

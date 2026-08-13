@@ -103,6 +103,59 @@ public static class BoundWindowsProductSignatureVerifier
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Verifies an Authenticode subject such as an MSI through the Windows
+    /// Subject Interface Package (SIP) provider. MSI files are compound
+    /// documents rather than PE images, so their signature cannot be read
+    /// from a PE certificate table. The held file handle and the signer
+    /// returned by the Windows trust provider still bind the decision to the
+    /// exact file and exact pinned publisher certificate.
+    /// </summary>
+    public static Task VerifyPinnedInstallerAsync(
+        string path,
+        X509Certificate2 expectedSigner,
+        bool requireWindowsTrustedChain,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(expectedSigner);
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Authenticode verification requires Windows.");
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var fullPath = Path.GetFullPath(path);
+        using var lockedFile = new FileStream(
+            fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            64 * 1024, FileOptions.RandomAccess);
+        if (lockedFile.Length <= 0)
+            throw new InvalidDataException("The signed installer is empty.");
+
+        var addedReference = false;
+        lockedFile.SafeFileHandle.DangerousAddRef(ref addedReference);
+        try
+        {
+            using var verifiedSigner = VerifyWithWindows(
+                fullPath,
+                lockedFile.SafeFileHandle.DangerousGetHandle(),
+                requireWindowsTrustedChain);
+            if (!RawEquals(verifiedSigner, expectedSigner))
+                throw new InvalidDataException(
+                    "The exact Authenticode signer validated by Windows does not match the pinned installer publisher certificate.");
+            RequireEku(verifiedSigner, CodeSigningEku, "code signing");
+            if (requireWindowsTrustedChain
+                && verifiedSigner.SubjectName.RawData.AsSpan().SequenceEqual(verifiedSigner.IssuerName.RawData))
+                throw new InvalidDataException("The production installer publisher must not be self-signed.");
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        finally
+        {
+            if (addedReference)
+                lockedFile.SafeFileHandle.DangerousRelease();
+        }
+
+        return Task.CompletedTask;
+    }
+
     private static X509Certificate2 VerifyWithWindows(
         string path,
         IntPtr heldFileHandle,

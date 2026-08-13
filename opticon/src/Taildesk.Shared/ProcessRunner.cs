@@ -30,6 +30,28 @@ public sealed class ProcessTimeoutException : TimeoutException
 
 public static class ProcessRunner
 {
+    public static void StartDetached(
+        string executable,
+        IEnumerable<string> arguments,
+        string? workingDirectory = null)
+    {
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = false,
+            RedirectStandardError = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+            start.WorkingDirectory = Path.GetFullPath(workingDirectory);
+        foreach (var argument in arguments)
+            start.ArgumentList.Add(argument);
+
+        using var process = Process.Start(start)
+                            ?? throw new InvalidOperationException($"Could not start {executable}.");
+    }
+
     public static async Task<ProcessResult> RunAsync(
         string executable,
         IEnumerable<string> arguments,

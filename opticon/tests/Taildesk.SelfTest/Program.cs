@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Xml.Linq;
 using Taildesk.Shared;
@@ -13,8 +14,22 @@ if (args.Length == 2 && args[0].Equals("--verify-authenticode", StringComparison
     Console.WriteLine("PASS  pinned Authenticode signature and file digest");
     return;
 }
+if (args.Length == 3 && args[0].Equals("--verify-installer", StringComparison.Ordinal))
+{
+#pragma warning disable SYSLIB0057 // Authenticode signer extraction has no X509CertificateLoader replacement.
+    using var signer = X509CertificateLoader.LoadCertificate(
+        X509Certificate.CreateFromSignedFile(args[1]).GetRawCertData());
+#pragma warning restore SYSLIB0057
+    if (!string.Equals(signer.Thumbprint, args[2], StringComparison.OrdinalIgnoreCase))
+        throw new InvalidDataException("The installer signer does not match the expected publisher thumbprint.");
+    await BoundWindowsProductSignatureVerifier.VerifyPinnedInstallerAsync(
+        args[1], signer, requireWindowsTrustedChain: true);
+    Console.WriteLine("PASS  pinned Windows installer signature");
+    return;
+}
 if (args.Length != 0)
-    throw new ArgumentException("Taildesk.SelfTest accepts only --verify-authenticode <path>.");
+    throw new ArgumentException(
+        "Taildesk.SelfTest accepts --verify-authenticode <path> or --verify-installer <path> <thumbprint>.");
 
 var tests = new (string Name, Action Body)[]
 {
@@ -25,6 +40,7 @@ var tests = new (string Name, Action Body)[]
     ("hosted invitation encryption rejects wrong keys and tampering", TestHostedInvite),
     ("invitation storage rejects OneDrive", TestPrivateStorage),
     ("dependency downloads are version and hash pinned", TestDependencyPins),
+    ("simple installation detaches RustDesk's resident password helper", TestSimpleInstallerRustDeskLifecycle),
     ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
     ("process runner supports commands with inherited standard handles", TestProcessRunnerWithoutCapture),
     ("process runner applies an exact working directory", TestProcessRunnerWorkingDirectory),
@@ -905,6 +921,25 @@ static void TestDependencyPins()
         Assert(artifact.PrimaryUrl.EndsWith(artifact.FileName, StringComparison.Ordinal), "primary filename changed");
         Assert(artifact.FallbackUrl.EndsWith(artifact.FileName, StringComparison.Ordinal), "fallback filename changed");
     }
+    var simpleInstaller = ReadSource("src", "Taildesk.Setup", "SimpleDeviceInstaller.cs");
+    Assert(simpleInstaller.Contains(
+               "BoundWindowsProductSignatureVerifier.VerifyPinnedInstallerAsync", StringComparison.Ordinal)
+           && !simpleInstaller.Contains(
+               "BoundWindowsProductSignatureVerifier.VerifyPinnedAsync(path, signer", StringComparison.Ordinal),
+        "the simple installer must verify MSI signatures through Windows SIP instead of parsing a PE certificate table");
+}
+static void TestSimpleInstallerRustDeskLifecycle()
+{
+    var simpleInstaller = ReadSource("src", "Taildesk.Setup", "SimpleDeviceInstaller.cs");
+    Assert(simpleInstaller.Contains(
+               "ProcessRunner.StartDetached(rustDesk, [\"--password\", invite.RustDeskPassword])",
+               StringComparison.Ordinal)
+           && !simpleInstaller.Contains(
+               "ProcessRunner.RunAsync(rustDesk, [\"--password\", invite.RustDeskPassword]",
+               StringComparison.Ordinal),
+        "the simple installer must not wait for RustDesk's resident password helper to exit");
+    Assert(!simpleInstaller.Contains("\"group=Opticon\"", StringComparison.Ordinal),
+        "the simple installer must not pass the unsupported group argument to netsh add rule");
 }
 static void TestTailscaleEnrollmentArguments()
 {
