@@ -96,6 +96,7 @@ type gateway struct {
 	artifactSlots     chan struct{}
 	proxySlots        chan struct{}
 	streamSlots       chan struct{}
+	downloadClient    *http.Client
 }
 
 func main() {
@@ -1792,6 +1793,10 @@ func (g *gateway) publicInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if len(parts) == 2 {
+		if parts[1] == "bootstrap" {
+			g.serveInvitationBootstrap(w, r, invite)
+			return
+		}
 		if parts[1] == "source" {
 			g.redirectInvitationSource(w, r, invite, now)
 			return
@@ -1840,6 +1845,54 @@ func (g *gateway) publicInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.sourceInvitationLandingSecure(w, r, parts[0], invite, source)
+}
+
+// serveInvitationBootstrap relays the exact bootstrap selected by the
+// invitation's immutable manifest. The invitation page has already reached
+// this gateway, so keeping this transfer same-origin avoids making browser
+// CORS, proxy, or CloudFront reachability another installation prerequisite.
+// The browser still verifies the declared size and SHA-256 before saving it.
+func (g *gateway) serveInvitationBootstrap(w http.ResponseWriter, r *http.Request, invite hostedInvite) {
+	if invite.InstallProtocol != binaryInstallProtocol {
+		http.NotFound(w, r)
+		return
+	}
+	bootstrap, err := g.bootstrapForInvite(invite)
+	if err != nil || !validBootstrapArtifact(bootstrap) {
+		http.Error(w, "This invitation's signed installer is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	client := g.downloadClient
+	if client == nil {
+		client = &http.Client{
+			Timeout:       5 * time.Minute,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	}
+	request, err := http.NewRequestWithContext(r.Context(), r.Method, bootstrap.DownloadURL, nil)
+	if err != nil {
+		http.Error(w, "This invitation's signed installer is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		http.Error(w, "The signed installer could not be retrieved.", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.ContentLength != bootstrap.Size ||
+		!strings.EqualFold(response.Header.Get("x-amz-meta-sha256"), bootstrap.SHA256) ||
+		len(response.Header.Values("Content-Encoding")) != 0 {
+		http.Error(w, "The signed installer response is invalid.", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.microsoft.portable-executable")
+	w.Header().Set("Content-Length", strconv.FormatInt(bootstrap.Size, 10))
+	if r.Method == http.MethodGet {
+		if _, err := io.Copy(w, io.LimitReader(response.Body, bootstrap.Size+1)); err != nil {
+			return
+		}
+	}
 }
 
 func (g *gateway) redirectInvitationSource(w http.ResponseWriter, r *http.Request, invite hostedInvite, now time.Time) {
@@ -2127,13 +2180,12 @@ func (g *gateway) binaryInvitationLandingSecure(w http.ResponseWriter, r *http.R
 		http.Error(w, "This invitation's signed installer is unavailable.", http.StatusServiceUnavailable)
 		return
 	}
-	origin := parsed.Scheme + "://" + parsed.Host
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src "+origin+"; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
 	if r.Method == http.MethodHead {
 		return
 	}
-	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}button{background:#52d39a;color:#08130e;border:0;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Opticon <code>%s</code> is ready.</p><button id="download">Download signed installer</button><p id="status" class="muted">Download the installer, open it, and approve the Windows administrator prompt.</p><p class="muted">The installer verifies this invitation and the signed device bundle before installing Opticon. No ZIP extraction, SDK, source build, or invitation paste is required.</p><p class="muted">Device bundle SHA-256: <code>%s</code><br>Installer SHA-256: <code>%s</code><br>Invitation expires <code>%s</code>.</p><script>const key=location.hash.slice(1),button=document.getElementById('download'),status=document.getElementById('status');let active=false;function save(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000)}async function download(){if(active)return;if(!/^[A-Za-z0-9_-]{43}$/.test(key)){status.textContent='This invitation link is incomplete. Ask the command center for a new link.';button.disabled=true;return}active=true;button.disabled=true;status.textContent='Downloading and verifying the signed installer...';try{if(!globalThis.crypto||!crypto.subtle)throw new Error('Use current Microsoft Edge or Chrome; WebCrypto SHA-256 is unavailable.');const r=await fetch(%q,{credentials:'omit'});if(!r.ok)throw new Error('Installer returned HTTP '+r.status+'.');const b=await r.blob();if(b.size!==%d)throw new Error('Installer size is invalid.');const d=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await b.arrayBuffer()))).map(v=>v.toString(16).padStart(2,'0')).join('');if(d!==%q)throw new Error('Installer SHA-256 is invalid.');save(b,'Install-Opticon-%s--'+key+'--%s.exe');status.textContent='Installer verified and downloaded. Open it to install Opticon.'}catch(e){status.textContent=String(e&&e.message||e).slice(0,240)+' No unsigned fallback is offered.';button.disabled=false}finally{active=false}}button.addEventListener('click',download)</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(bundle.Version), html.EscapeString(strings.ToLower(bundle.SHA256)), html.EscapeString(strings.ToLower(bootstrap.SHA256)), invite.ExpiresAt.Local().Format(time.RFC1123), bootstrap.DownloadURL, bootstrap.Size, strings.ToLower(bootstrap.SHA256), publicID, strings.ToLower(bootstrap.SHA256))
+	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}button{background:#52d39a;color:#08130e;border:0;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Opticon <code>%s</code> is ready.</p><button id="download">Download signed installer</button><p id="status" class="muted">Download the installer, open it, and approve the Windows administrator prompt.</p><p class="muted">The installer verifies this invitation and the signed device bundle before installing Opticon. No ZIP extraction, SDK, source build, or invitation paste is required.</p><p class="muted">Device bundle SHA-256: <code>%s</code><br>Installer SHA-256: <code>%s</code><br>Invitation expires <code>%s</code>.</p><script>const key=location.hash.slice(1),button=document.getElementById('download'),status=document.getElementById('status');let active=false;function save(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000)}async function download(){if(active)return;if(!/^[A-Za-z0-9_-]{43}$/.test(key)){status.textContent='This invitation link is incomplete. Ask the command center for a new link.';button.disabled=true;return}active=true;button.disabled=true;status.textContent='Downloading and verifying the signed installer...';try{if(!globalThis.crypto||!crypto.subtle)throw new Error('Use current Microsoft Edge or Chrome; WebCrypto SHA-256 is unavailable.');const r=await fetch(%q,{credentials:'omit'});if(!r.ok)throw new Error('Installer returned HTTP '+r.status+'.');const b=await r.blob();if(b.size!==%d)throw new Error('Installer size is invalid.');const d=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await b.arrayBuffer()))).map(v=>v.toString(16).padStart(2,'0')).join('');if(d!==%q)throw new Error('Installer SHA-256 is invalid.');save(b,'Install-Opticon-%s--'+key+'--%s.exe');status.textContent='Installer verified and downloaded. Open it to install Opticon.'}catch(e){status.textContent=String(e&&e.message||e).slice(0,240)+' No unsigned fallback is offered.';button.disabled=false}finally{active=false}}button.addEventListener('click',download)</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(bundle.Version), html.EscapeString(strings.ToLower(bundle.SHA256)), html.EscapeString(strings.ToLower(bootstrap.SHA256)), invite.ExpiresAt.Local().Format(time.RFC1123), invitePublicPrefix+url.PathEscape(publicID)+"/bootstrap", bootstrap.Size, strings.ToLower(bootstrap.SHA256), publicID, strings.ToLower(bootstrap.SHA256))
 	_, _ = io.WriteString(w, page)
 }
 

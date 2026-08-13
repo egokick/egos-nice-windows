@@ -76,17 +76,24 @@ internal static class SimpleDeviceInstaller
             var tailscale = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
                 "Tailscale", "tailscale.exe");
             if (!File.Exists(tailscale)) throw new FileNotFoundException("Tailscale did not install.", tailscale);
-            _ = await ProcessRunner.RunAsync(tailscale, ["logout"], TimeSpan.FromSeconds(30), cancellationToken);
-            var joined = await ProcessRunner.RunAsync(tailscale,
-                TailscaleCommandLine.BuildEnrollmentArguments(
-                    invite.HeadscaleLoginUrl, invite.TailscaleAuthKey,
-                    TailscaleCommandLine.NormalizeHostName(invite.DeviceName, Environment.MachineName)),
-                TimeSpan.FromMinutes(2), cancellationToken);
-            RequireSuccess(joined, "Tailscale could not join the Opticon network");
-            if (invite.AdvertiseExitNode)
-                RequireSuccess(await ProcessRunner.RunAsync(tailscale, ["set", "--advertise-exit-node"],
-                    TimeSpan.FromSeconds(30), cancellationToken), "Tailscale could not enable exit-node advertisement");
-            var tailscaleIp = await ReadTailscaleIpAsync(tailscale, cancellationToken);
+            var tailscaleIp = await TryReadExpectedTailscaleIpAsync(tailscale, invite, cancellationToken);
+            if (tailscaleIp is null)
+            {
+                _ = await ProcessRunner.RunAsync(tailscale, ["logout"], TimeSpan.FromSeconds(30), cancellationToken);
+                var joined = await ProcessRunner.RunAsync(tailscale,
+                    TailscaleCommandLine.BuildEnrollmentArguments(
+                        invite.HeadscaleLoginUrl, invite.TailscaleAuthKey,
+                        TailscaleCommandLine.NormalizeHostName(invite.DeviceName, Environment.MachineName)),
+                    TimeSpan.FromMinutes(2), cancellationToken);
+                tailscaleIp = await TryReadExpectedTailscaleIpAsync(tailscale, invite, cancellationToken);
+                if (!joined.Succeeded && tailscaleIp is null)
+                    RequireSuccess(joined, "Tailscale could not join the Opticon network");
+                tailscaleIp ??= await ReadTailscaleIpAsync(tailscale, cancellationToken);
+            }
+            RequireSuccess(await ProcessRunner.RunAsync(tailscale,
+                    ["set", $"--advertise-exit-node={invite.AdvertiseExitNode.ToString().ToLowerInvariant()}"],
+                    TimeSpan.FromSeconds(30), cancellationToken),
+                "Tailscale could not apply exit-node advertisement policy");
 
             report("Installing remote access...");
             var rustDeskArtifact = DependencyArtifacts.RustDesk(architecture);
@@ -168,6 +175,7 @@ internal static class SimpleDeviceInstaller
             || string.IsNullOrWhiteSpace(invite.InviteSecret)
             || string.IsNullOrWhiteSpace(invite.TailscaleAuthKey)
             || string.IsNullOrWhiteSpace(invite.HeadscaleLoginUrl)
+            || string.IsNullOrWhiteSpace(invite.ExpectedTailnet)
             || string.IsNullOrWhiteSpace(invite.AgentToken)
             || string.IsNullOrWhiteSpace(invite.RustDeskPassword)
             || string.IsNullOrWhiteSpace(invite.DeviceName)
@@ -255,9 +263,22 @@ internal static class SimpleDeviceInstaller
         }
         StopProcessesFromRoot(AppPaths.InstallDirectory);
         _ = await ProcessRunner.RunAsync("sc.exe", ["delete", AgentServiceName], TimeSpan.FromSeconds(20), cancellationToken);
+        await WaitForServiceDeletionAsync(AgentServiceName, cancellationToken);
         DeleteFixedRoot(AppPaths.InstallDirectory);
         DeleteFixedRoot(AppPaths.MachineDataDirectory);
         DeleteFixedRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "OpticonProvenance"));
+    }
+
+    private static async Task WaitForServiceDeletionAsync(string serviceName, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            var query = await ProcessRunner.RunAsync(
+                "sc.exe", ["query", serviceName], TimeSpan.FromSeconds(10), cancellationToken);
+            if (!query.Succeeded) return;
+            await Task.Delay(500, cancellationToken);
+        }
+        throw new InvalidOperationException($"Windows did not remove the {serviceName} service within 15 seconds.");
     }
 
     private static void StopProcessesFromRoot(string directory)
@@ -324,6 +345,62 @@ internal static class SimpleDeviceInstaller
             await Task.Delay(1000, cancellationToken);
         }
         throw new InvalidOperationException("Tailscale did not provide a private IPv4 address.");
+    }
+
+    private static async Task<string?> TryReadExpectedTailscaleIpAsync(
+        string tailscale,
+        InvitePayload invite,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await ProcessRunner.RunAsync(
+                tailscale, ["status", "--json"], TimeSpan.FromSeconds(15), cancellationToken);
+            if (!result.Succeeded || string.IsNullOrWhiteSpace(result.StandardOutput)) return null;
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("BackendState", out var state)
+                || !string.Equals(state.GetString(), "Running", StringComparison.OrdinalIgnoreCase)
+                || !root.TryGetProperty("Self", out var self)) return null;
+            var tailnet = root.TryGetProperty("CurrentTailnet", out var current)
+                          && current.ValueKind == JsonValueKind.Object
+                          && current.TryGetProperty("Name", out var name)
+                ? name.GetString() ?? string.Empty
+                : root.TryGetProperty("MagicDNSSuffix", out var suffix)
+                    ? suffix.GetString() ?? string.Empty
+                    : string.Empty;
+            if (!tailnet.Equals(invite.ExpectedTailnet, StringComparison.OrdinalIgnoreCase)) return null;
+            var tags = self.TryGetProperty("Tags", out var tagArray) && tagArray.ValueKind == JsonValueKind.Array
+                ? tagArray.EnumerateArray().Select(tag => tag.GetString() ?? string.Empty).ToArray()
+                : [];
+            var expectedTag = invite.Role == DeviceRole.ControllerAndManaged
+                ? "tag:taildesk-controller" : "tag:taildesk-managed";
+            var oppositeTag = invite.Role == DeviceRole.ControllerAndManaged
+                ? "tag:taildesk-managed" : "tag:taildesk-controller";
+            if (!tags.Contains(expectedTag, StringComparer.OrdinalIgnoreCase)
+                || tags.Contains(oppositeTag, StringComparer.OrdinalIgnoreCase)
+                || tags.Contains("tag:taildesk-exit", StringComparer.OrdinalIgnoreCase) != invite.AdvertiseExitNode)
+                return null;
+            var dnsName = self.TryGetProperty("DNSName", out var dns) ? dns.GetString() ?? string.Empty
+                : self.TryGetProperty("HostName", out var host) ? host.GetString() ?? string.Empty : string.Empty;
+            var label = dnsName.TrimEnd('.').Split('.', 2, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            if (!string.Equals(label,
+                    TailscaleCommandLine.NormalizeHostName(invite.DeviceName, Environment.MachineName),
+                    StringComparison.OrdinalIgnoreCase)) return null;
+            if (!self.TryGetProperty("TailscaleIPs", out var addresses)
+                || addresses.ValueKind != JsonValueKind.Array) return null;
+            return addresses.EnumerateArray().Select(value => value.GetString() ?? string.Empty)
+                .FirstOrDefault(value => IPAddress.TryParse(value, out var ip)
+                                         && RemoteAdministrationProtocol.IsTailscaleIpv4(ip.ToString()));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static async Task ReplaceFirewallRulesAsync(

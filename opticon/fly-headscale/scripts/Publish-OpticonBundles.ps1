@@ -1101,6 +1101,13 @@ function Assert-PublisherReadiness {
             $probe = $rsa.SignData([byte[]]::new(32), [Security.Cryptography.HashAlgorithmName]::SHA256,
                 [Security.Cryptography.RSASignaturePadding]::Pkcs1)
             if ($probe.Length -eq 0) { throw "The $($item.Purpose) private key could not sign a readiness probe." }
+            if ($item.Thumbprint -eq $SourceReleaseCertificateThumbprint) {
+                # Binary releases deliberately have no source archive. Capture
+                # the exact already-verified source-release public certificate
+                # here so their inner manifests can be verified in this same
+                # publisher process.
+                $script:VerifiedSourceReleaseCertificateRawData = $certificate.RawData.Clone()
+            }
         } finally { $rsa.Dispose(); $certificate.Dispose() }
     }
     $secretText = Get-OpticonAdminSecret
@@ -1438,9 +1445,9 @@ if ($output.BucketName -ne $bucket -or $output.DistributionDomainName -notmatch 
 
 $version = if ([string]::IsNullOrWhiteSpace($Version)) { Get-NextReleaseVersion -SourceOnly:$SourceOnly } else { $Version }
 if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw "Version must be a stable major.minor.patch release." }
+Assert-PublisherReadiness
 if ($CheckOnly) {
     if ([string]::IsNullOrWhiteSpace($Version)) { throw '-CheckOnly requires an explicit target version.' }
-    Assert-PublisherReadiness
     [pscustomobject]@{
         Version = $version
         Bucket = $bucket
@@ -1660,7 +1667,12 @@ try {
             $objectExists = $existingHeadResult.ExitCode -eq 0
         } finally { $ErrorActionPreference = $savedPreference }
         if ($objectExists) {
-            if ($ForceRedeploy -and $StageOnly) {
+            # The Command Center's first phase maps its safe staging action to
+            # -SkipManifestPublish.  It does not pass this legacy source-only
+            # -StageOnly switch through, so use the actual operation boundary:
+            # a forced build/stage may replace the exact same version's bytes;
+            # a commit-only action may only verify those staged bytes.
+            if ($ForceRedeploy -and -not $CommitStaged -and -not $SkipBuild) {
                 $putResult = Invoke-AwsCli -MaximumAttempts 3 -Arguments @('s3api', 'put-object', '--bucket', $bucket, '--key', $key,
                     '--body', $path, '--content-type', $contentType, '--cache-control', 'no-cache',
                     '--server-side-encryption', 'AES256', '--checksum-algorithm', 'SHA256', '--metadata', $objectMetadata,
@@ -1718,7 +1730,7 @@ try {
         if ([string]$artifact.downloadUrl -cne $url) {
             throw "The release manifest download URL was not the canonical immutable URL for $($artifact.file)."
         }
-        if ($ForceRedeploy -and $StageOnly) {
+        if ($ForceRedeploy -and -not $CommitStaged -and -not $SkipBuild) {
             if ([string]$output.DistributionId -notmatch '^[A-Z0-9]+$') {
                 throw 'CloudFormation outputs do not expose the CloudFront distribution ID required for a forced replacement.'
             }

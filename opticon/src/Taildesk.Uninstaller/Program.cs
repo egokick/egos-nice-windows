@@ -80,6 +80,7 @@ internal static class Program
         await RunIgnoreAsync("net.exe", "user", "OpticonRemoteAdmin", "/delete");
 
         StopOpticonProcesses();
+        await WaitForServiceDeletionAsync();
         await RunIgnoreAsync(FindTailscale(), "logout");
         await UninstallMsiAsync("RustDesk", "RustDesk Remote Desktop");
         await UninstallMsiAsync("Tailscale");
@@ -96,6 +97,17 @@ internal static class Program
         DeleteFixedRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Taildesk"));
         DeleteFixedRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Taildesk"));
         DeleteFixedRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Opticon"));
+    }
+
+    private static async Task WaitForServiceDeletionAsync()
+    {
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            var result = await RunAsync("sc.exe", "query", ServiceName);
+            if (result.ExitCode != 0) return;
+            await Task.Delay(500);
+        }
+        throw new InvalidOperationException($"Windows did not remove the {ServiceName} service within 15 seconds.");
     }
 
     private static void StopOpticonProcesses()

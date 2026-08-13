@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +21,12 @@ import (
 
 var testProductionSourceKeyID = strings.Repeat("A", 40)
 var testProductionProductSigner = strings.Repeat("C", 40)
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 func init() {
 	trustedSourceManifestKeyID = testProductionSourceKeyID
@@ -89,12 +96,13 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	}
 	landing := landingResult.Body.String()
 	if !strings.Contains(landing, "Mom &amp; Dad PC") || strings.Contains(landing, bundle.DownloadURL) ||
-		!strings.Contains(landing, bootstrap.DownloadURL) || !strings.Contains(landing, "crypto.subtle.digest") ||
+		strings.Contains(landing, bootstrap.DownloadURL) || !strings.Contains(landing, "crypto.subtle.digest") ||
 		!strings.Contains(landing, "URL.createObjectURL(blob)") || strings.Contains(landing, "ExecutionPolicy") {
 		t.Fatal("landing page did not offer exactly one pinned signed installer safely")
 	}
-	if !strings.Contains(landingResult.Header().Get("Content-Security-Policy"), "connect-src https://d111.cloudfront.net") {
-		t.Fatal("landing page did not permit only the pinned CloudFront release origin")
+	if !strings.Contains(landingResult.Header().Get("Content-Security-Policy"), "connect-src 'self'") ||
+		!strings.Contains(landing, "/opticon/i/"+publicID+"/bootstrap") {
+		t.Fatal("landing page did not use the same-origin signed-bootstrap relay")
 	}
 	if strings.Contains(landing, "private-fragment-test") {
 		t.Fatal("landing page leaked a fragment key")
@@ -109,6 +117,24 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	g.ServeHTTP(downloadResult, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID+"/invite.tdinvite", nil))
 	if downloadResult.Code != http.StatusOK || !bytes.Equal(downloadResult.Body.Bytes(), ciphertext) {
 		t.Fatal("encrypted invitation download changed")
+	}
+	bootstrapBytes := bytes.Repeat([]byte{0x7a}, int(bootstrap.Size))
+	g.downloadClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != bootstrap.DownloadURL {
+			t.Fatalf("bootstrap relay requested the wrong artifact: %s", request.URL)
+		}
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			ContentLength: bootstrap.Size,
+			Header:        http.Header{"X-Amz-Meta-Sha256": []string{bootstrap.SHA256}},
+			Body:          io.NopCloser(bytes.NewReader(bootstrapBytes)),
+		}, nil
+	})}
+	bootstrapResult := httptest.NewRecorder()
+	g.ServeHTTP(bootstrapResult, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID+"/bootstrap", nil))
+	if bootstrapResult.Code != http.StatusOK || !bytes.Equal(bootstrapResult.Body.Bytes(), bootstrapBytes) ||
+		bootstrapResult.Header().Get("Content-Type") != "application/vnd.microsoft.portable-executable" {
+		t.Fatal("same-origin bootstrap relay did not return the exact declared installer")
 	}
 
 	deleteRequest := signedRouteRequest(secret, http.MethodDelete, adminPath, "delete-nonce-0123456789012", nil)
