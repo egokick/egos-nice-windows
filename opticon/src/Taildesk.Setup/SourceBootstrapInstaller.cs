@@ -97,6 +97,13 @@ internal static class SourceBootstrapInstaller
         if (validation.IsEnabled(ClientInstallValidationStep.PayloadAuthenticity))
             await ProductSigning.VerifyAuthenticodeAsync(launcherPath);
 
+        // Starting this signed requireAdministrator launcher and accepting its
+        // Windows UAC prompt authorizes the complete Opticon installation,
+        // including conditional Tailscale replacement or reauthentication.
+        // Resolve prerequisites before the long download/build so no separate
+        // routine application-consent prompt is needed later.
+        var dotnet = await RequireSdkAsync(invite.SdkVersion, directory, validation, report);
+
         var sourceArchive = Path.Combine(directory, invite.SourceFile);
         var selectedSourceArchive = ResolveSourceArchive(bootstrap, launcherPath, invite);
         if (selectedSourceArchive is null)
@@ -137,8 +144,6 @@ internal static class SourceBootstrapInstaller
         if (validation.IsEnabled(ClientInstallValidationStep.InvitationConstraints)
             && !invite.TargetRuntimes.Contains(targetRuntime, StringComparer.Ordinal))
             throw new PlatformNotSupportedException("The signed source release does not support this Windows architecture.");
-        var dotnet = await RequireSdkAsync(invite.SdkVersion, directory, validation, report);
-
         report($"Building Opticon {invite.ReleaseVersion} locally with an approved .NET 10 SDK...");
         var installer = Path.Combine(sourceDirectory, "Install-OpticonFromSource.ps1");
         var childEnvironment = BuildSanitizedEnvironment(directory, dotnet, validation);
@@ -188,6 +193,7 @@ internal static class SourceBootstrapInstaller
             invitePath,
             bootstrap.PrivateKey,
             childEnvironment,
+            tailscaleAuthorizationApproved: true,
             report);
     }
 
@@ -197,19 +203,24 @@ internal static class SourceBootstrapInstaller
         string invitePath,
         string inviteKey,
         IReadOnlyDictionary<string, string?> childEnvironment,
+        bool tailscaleAuthorizationApproved,
         Action<string> report)
     {
         var setupEnvironment = new Dictionary<string, string?>(
             childEnvironment, StringComparer.OrdinalIgnoreCase)
         {
             [HostedBootstrapper.InvitePathEnvironmentVariable] = invitePath,
-            [HostedBootstrapper.InviteKeyEnvironmentVariable] = inviteKey
+            [HostedBootstrapper.InviteKeyEnvironmentVariable] = inviteKey,
+            [HostedBootstrapper.TailscaleAuthorizationEnvironmentVariable] =
+                tailscaleAuthorizationApproved ? "1" : null
         };
+        report("The elevated Opticon Setup is continuing in a second visible window...");
         var result = await ProcessRunner.RunAsync(
             setup,
             [$"--source-attestation={attestation}", "--replace-existing"],
             timeout: null,
             cancellationToken: CancellationToken.None,
+            showWindow: true,
             environment: setupEnvironment,
             clearEnvironment: true);
         if (!IsSuccessfulSetupHandoffExitCode(result.ExitCode))

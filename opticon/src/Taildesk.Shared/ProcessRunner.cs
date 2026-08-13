@@ -39,15 +39,16 @@ public static class ProcessRunner
         IReadOnlyDictionary<string, string?>? environment = null,
         bool clearEnvironment = false,
         string? workingDirectory = null,
-        IProgress<string>? outputProgress = null)
+        IProgress<string>? outputProgress = null,
+        bool showWindow = false)
     {
         var start = new ProcessStartInfo(executable)
         {
             UseShellExecute = false,
             RedirectStandardOutput = captureOutput,
             RedirectStandardError = captureOutput,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden
+            CreateNoWindow = !showWindow,
+            WindowStyle = showWindow ? ProcessWindowStyle.Normal : ProcessWindowStyle.Hidden
         };
         if (!string.IsNullOrWhiteSpace(workingDirectory))
             start.WorkingDirectory = Path.GetFullPath(workingDirectory);

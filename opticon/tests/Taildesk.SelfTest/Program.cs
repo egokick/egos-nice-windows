@@ -1693,6 +1693,13 @@ static void TestReleaseDistributionDesign()
         ? -1
         : sourceBootstrap.IndexOf(
             "timeout: null", setupLaunched, StringComparison.Ordinal);
+    var trustedLauncher = sourceBootstrap.IndexOf(
+        "ProductSigning.VerifyAuthenticodeAsync(launcherPath)", StringComparison.Ordinal);
+    var earlySdkPreparation = trustedLauncher < 0
+        ? -1
+        : sourceBootstrap.IndexOf("RequireSdkAsync", trustedLauncher, StringComparison.Ordinal);
+    var sourceArchiveDownload = sourceBootstrap.IndexOf(
+        "Downloading the hash-pinned Opticon source archive", StringComparison.Ordinal);
     Assert(hostedBootstrap.Contains("SourceBootstrapInstaller.RunAsync", StringComparison.Ordinal)
            && hostedBootstrap.Contains("IsSourceLauncher", StringComparison.Ordinal)
            && hostedBootstrap.Contains("ParseSourceLaunch", StringComparison.Ordinal)
@@ -1714,6 +1721,16 @@ static void TestReleaseDistributionDesign()
            && !sourceInstaller.Contains("InviteKey", StringComparison.Ordinal)
            && buildDeadline >= 0 && setupLaunched > buildDeadline
            && setupWithoutDeadline > setupLaunched
+           && sourceBootstrap.Contains("showWindow: true", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("second visible window", StringComparison.Ordinal)
+           && trustedLauncher >= 0
+           && earlySdkPreparation > trustedLauncher
+           && sourceArchiveDownload > earlySdkPreparation
+           && sourceBootstrap.Contains("tailscaleAuthorizationApproved: true", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("TailscaleAuthorizationEnvironmentVariable", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("accepting its", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("Windows UAC prompt authorizes the complete Opticon installation", StringComparison.Ordinal)
+           && !sourceBootstrap.Contains("ConfirmInstallPlan", StringComparison.Ordinal)
            && sourceBootstrap.Contains("\"--replace-existing\"", StringComparison.Ordinal)
            && sourceBootstrap.Contains("exitCode is 0 or 3010", StringComparison.Ordinal)
            && activatedSource >= 0
@@ -1729,8 +1746,12 @@ static void TestReleaseDistributionDesign()
            && setupWindow.Contains("HostedBootstrapper.IsSourceLauncher", StringComparison.Ordinal)
            && setupWindow.Contains("argument.Equals(\"--replace-existing\"", StringComparison.Ordinal)
            && Read("src", "Taildesk.Setup", "SourceLauncherPrompt.cs").Contains("ReadInvitationUrl", StringComparison.Ordinal)
+           && !Read("src", "Taildesk.Setup", "SourceLauncherPrompt.cs").Contains("Approve Opticon installation", StringComparison.Ordinal)
+           && Read("src", "Taildesk.Setup", "app.manifest").Contains("requestedExecutionLevel level=\"requireAdministrator\"", StringComparison.Ordinal)
            && setupWindow.Contains("GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)", StringComparison.Ordinal)
            && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal)
+           && setupWindow.Contains("_tailscaleAuthorizationApproved", StringComparison.Ordinal)
+           && setupWindow.Contains("The installer authorization handoff was not honored", StringComparison.Ordinal)
            && setupWindow.Contains("Plaintext and legacy local invitation files are no longer accepted", StringComparison.Ordinal)
            && !setupWindow.Contains("DeserializeAsync<InvitePayload>", StringComparison.Ordinal)
            && setupWindow.Contains("new InstallCoordinator(", StringComparison.Ordinal)
@@ -1738,6 +1759,7 @@ static void TestReleaseDistributionDesign()
            && !setupWindow.Contains("new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)", StringComparison.Ordinal)
            && setupWindow.Contains("Environment.ExitCode = 1", StringComparison.Ordinal)
            && setupWindow.Contains("MarkAutomaticInstallSucceeded", StringComparison.Ordinal)
+           && setupWindow.Contains("CloseSuccessfulAutomaticInstall", StringComparison.Ordinal)
            && setupWindow.Contains("ConfigureFailureAction(_sourceAttestedAutomaticInstall)", StringComparison.Ordinal)
            && setupWindow.Contains("This window will not reuse rolled-back source trust", StringComparison.Ordinal)
            && setupWindow.Contains("FileMode.CreateNew", StringComparison.Ordinal)
@@ -3021,6 +3043,10 @@ static void TestOpenSshRecoveryDesign()
         "the signed inner release manifest must include the root Setup executable");
     Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.2\"", StringComparison.Ordinal),
         "the hosted release must permit a watchdog-capable Guardian to install the Agent that performs signed Guardian reconciliation");
+    Assert(bundleBuilder.Contains("function Remove-OpticonSdkAnchor", StringComparison.Ordinal)
+           && bundleBuilder.Contains("Remove-OpticonSdkAnchor -Path $sdkAnchor", StringComparison.Ordinal)
+           && bundleBuilder.Contains("cleanup must never", StringComparison.Ordinal),
+        "transient SDK staging cleanup must not mark a completed signed source release as failed");
     var guardianUpdateManager = ReadSource("src", "Taildesk.Agent", "UpdateManager.cs");
     Assert(guardianUpdateManager.Contains("VerifyAndExtractGuardianAsync", StringComparison.Ordinal)
            && guardianUpdateManager.Contains("StableGuardianMaintenance.ReconcileSignedReleaseAsync", StringComparison.Ordinal)

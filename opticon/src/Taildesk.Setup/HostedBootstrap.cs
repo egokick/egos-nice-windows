@@ -17,6 +17,8 @@ internal static class HostedBootstrapper
     private const string Origin = "https://taildesk-egokick-control.fly.dev";
     internal const string InvitePathEnvironmentVariable = "OPTICON_HOSTED_INVITE_PATH";
     internal const string InviteKeyEnvironmentVariable = "OPTICON_HOSTED_INVITE_KEY";
+    internal const string TailscaleAuthorizationEnvironmentVariable =
+        "OPTICON_TAILSCALE_AUTHORIZATION_APPROVED";
     private static readonly Regex PublicIdPattern = new("^[A-Za-z0-9_-]{32}$", RegexOptions.CultureInvariant);
     private static readonly Regex PrivateKeyPattern = new("^[A-Za-z0-9_-]{43}$", RegexOptions.CultureInvariant);
     private static readonly Regex BoundSourceLauncherPattern = new(

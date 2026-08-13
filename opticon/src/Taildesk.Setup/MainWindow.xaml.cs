@@ -15,6 +15,7 @@ public partial class MainWindow : Window
     private bool _maintenanceMode;
     private bool _sourceLauncherMode;
     private bool _sourceAttestedAutomaticInstall;
+    private bool _tailscaleAuthorizationApproved;
     private SetupResumeContext? _resumeContext;
     private string? _sourceAttestationPath;
     private MaintenanceExpectedTarget? _maintenanceTarget;
@@ -55,11 +56,25 @@ public partial class MainWindow : Window
             _sourceAttestedAutomaticInstall = arguments.Any(argument =>
                 argument.StartsWith("--source-attestation=", StringComparison.OrdinalIgnoreCase))
                                              || _resumeContext is not null;
+            var tailscaleApproval = Environment.GetEnvironmentVariable(
+                HostedBootstrapper.TailscaleAuthorizationEnvironmentVariable);
+            Environment.SetEnvironmentVariable(
+                HostedBootstrapper.TailscaleAuthorizationEnvironmentVariable, null);
+            if (tailscaleApproval is not null && tailscaleApproval != "1")
+                throw new InvalidDataException("The installer Tailscale authorization is malformed.");
+            _tailscaleAuthorizationApproved = tailscaleApproval == "1";
             if (_sourceAttestedAutomaticInstall)
                 Environment.ExitCode = 1;
             if (replaceExisting && (_resumeContext is not null || !_sourceAttestedAutomaticInstall))
                 throw new InvalidDataException(
                     "Existing-install replacement is allowed only for the initial authenticated source-build handoff.");
+            if (_tailscaleAuthorizationApproved
+                && (!replaceExisting || !_sourceAttestedAutomaticInstall || _resumeContext is not null))
+                throw new InvalidDataException(
+                    "Installer authorization is allowed only on the initial authenticated source-build handoff.");
+            if (replaceExisting && !_tailscaleAuthorizationApproved)
+                throw new InvalidDataException(
+                    "The initial authenticated source-build handoff is missing its installer authorization.");
             AppendLog($"Opticon Setup {typeof(MainWindow).Assembly.GetName().Version} started.");
             AppendLog("Executable: " + (Environment.ProcessPath ?? "unavailable"));
             AppendLog("Launch inputs: " + DescribeLaunchInputs(arguments));
@@ -219,7 +234,7 @@ public partial class MainWindow : Window
             {
                 var installer = new InstallCoordinator(
                     _invite!, AppContext.BaseDirectory, progress,
-                    allowTailscaleReauthentication: false,
+                    allowTailscaleReauthentication: _tailscaleAuthorizationApproved,
                     resumeContext: GetContinuationContext());
                 var result = await installer.InstallAsync(_cancellation.Token);
                 installResult = result;
@@ -238,6 +253,7 @@ public partial class MainWindow : Window
             {
                 try { File.Delete(_invitePath); } catch { }
             }
+            CloseSuccessfulAutomaticInstall();
         }
         catch (SetupRebootRequiredException exception)
         {
@@ -251,10 +267,21 @@ public partial class MainWindow : Window
             InstallButton.IsEnabled = true;
             InstallButton.Click -= InstallButton_Click;
             InstallButton.Click += (_, _) => Close();
+            CloseSuccessfulAutomaticInstall();
         }
         catch (ExistingTailscaleSessionException exception)
         {
             AppendLog("NOTICE: " + exception.Message);
+            if (_sourceAttestedAutomaticInstall)
+            {
+                TryRollbackSourceProvenance();
+                StatusText.Text = "Installation stopped. The installer authorization handoff was not honored.";
+                AppendException(new InvalidOperationException(
+                    "The authenticated source install requested a second Tailscale decision after Windows approved the installer.",
+                    exception));
+                ConfigureFailureAction(requireRelaunch: true);
+                return;
+            }
             var answer = MessageBox.Show(
                 exception.Message + "\n\nThis disconnects the current Tailscale identity before joining the Opticon private network. Continue?",
                 "Re-enroll Tailscale", MessageBoxButton.YesNo, MessageBoxImage.Warning);
@@ -279,6 +306,7 @@ public partial class MainWindow : Window
                     {
                         try { File.Delete(_invitePath); } catch { }
                     }
+                    CloseSuccessfulAutomaticInstall();
                     return;
                 }
                 catch (Exception retryException)
@@ -353,6 +381,12 @@ public partial class MainWindow : Window
     {
         if (_sourceAttestedAutomaticInstall)
             Environment.ExitCode = 0;
+    }
+
+    private void CloseSuccessfulAutomaticInstall()
+    {
+        if (_sourceAttestedAutomaticInstall && Environment.ExitCode is 0 or 3010)
+            Close();
     }
 
     private void ApplyInstallResult(InstallResult result)

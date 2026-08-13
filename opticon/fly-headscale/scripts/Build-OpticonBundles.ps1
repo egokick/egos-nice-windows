@@ -4,7 +4,7 @@ param(
     [string]$Runtime = "win-x64",
     [ValidateSet("Production", "OwnerManaged")]
     [string]$SigningProfile = "Production",
-    [string]$Version = "1.2.18",
+    [string]$Version = "1.2.19",
     [string]$MinimumGuardianVersion = "1.1.2",
     # SourceOnly is the v2 release path: it produces exactly one signed source
     # archive and deliberately emits no standalone bundle/bootstrap artifact.
@@ -640,6 +640,28 @@ function Invoke-StableDotNet10 {
         if ($CaptureOutput) { return $stdout }
         if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host $stdout.TrimEnd() }
     } finally { $process.Dispose() }
+}
+
+function Remove-OpticonSdkAnchor {
+    param([Parameter(Mandatory)][string]$Path)
+
+    # The archive and its manifests are atomically verified and persisted before
+    # this finally block runs. Windows Defender or a child tool can briefly hold
+    # a file beneath this per-build temporary directory, so cleanup must never
+    # turn an otherwise completed signed release into a failed deployment.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            if (-not (Test-Path -LiteralPath $Path)) { return }
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -eq 3) {
+                Write-Warning "Could not remove temporary Opticon SDK directory '$Path'. It contains only isolated build staging files and can be removed after the locking process releases it: $($_.Exception.Message)"
+                return
+            }
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
 }
 
 $installedSdks = @((Invoke-StableDotNet10 -Arguments @('--list-sdks') -CaptureOutput) -split "`r?`n")
@@ -1303,5 +1325,5 @@ if ($SourceOnly) {
     if (Get-Variable -Name productCertificate -ErrorAction SilentlyContinue) { $productCertificate.Dispose() }
     if (Get-Variable -Name legacyMigrationCertificate -ErrorAction SilentlyContinue) { $legacyMigrationCertificate.Dispose() }
     $packageBuildLock.Dispose()
-    if (Test-Path -LiteralPath $sdkAnchor) { Remove-Item -LiteralPath $sdkAnchor -Recurse -Force -ErrorAction SilentlyContinue }
+    Remove-OpticonSdkAnchor -Path $sdkAnchor
 }
