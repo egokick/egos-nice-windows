@@ -173,6 +173,39 @@ represented as publicly trusted software.
 
 Hosted invitations no longer carry prebuilt Agent binaries. The invitation pins the exact bootstrap and source archive by version, filename, size, SHA-256, signing profile, source-release key, product signer, stable .NET 10 SDK policy, output runtime pack, and target runtime. The recipient verifies and builds that source locally with any stable .NET 10 SDK (`10.*.*`), after an explicit install prompt if none is present, and Setup then enrolls the device into the private mesh using the encrypted one-time invitation.
 
+## Required E2E gate for installer-impacting changes
+
+Any change that can affect release construction, deployment, invitation creation
+or acceptance, source bootstrap, Setup, Tailscale enrollment, dependency
+installation, device enrollment, or how an enrolled device appears in Command
+Center **must pass the full local Docker E2E before the change is considered
+complete or releasable**.
+
+From an elevated PowerShell in the `opticon` directory, with the normal signing
+certificates available, run:
+
+```powershell
+.\tests\Test-OpticonLocalDockerE2E.ps1
+```
+
+The final pre-merge/pre-release run must not use `-SkipReleaseBuild`: it must
+build and sign the exact changed checkout. A pass ends with both of these lines:
+
+```text
+PASS Command Center displays Opticon Docker E2E device ... as connected (Tailscale only).
+PASS Opticon local Docker E2E: built/deployed source, accepted invite, connected device, and Command Center visibility verified.
+```
+
+Do not waive a failure as "Docker-only" without first identifying the precise
+platform boundary. Changes to Windows-only behavior—UAC/elevation, MSI and
+dependency installation, Windows services/tasks/firewall, RustDesk, filesystem
+ACLs, or the WPF Setup UI—also require an attended Windows installation smoke
+test because a Linux container cannot execute those mechanisms.
+
+See [`tests/Opticon.LocalE2E.Docker/README.md`](tests/Opticon.LocalE2E.Docker/README.md)
+for the trigger checklist, prerequisites, theory, exact production paths under
+test, deliberate divergences, iteration mode, and pass criteria.
+
 Developer packages require explicit, separate development certificates plus `-BuildProfile Developer -SkipTargetReleaseDeployment`; their filename contains `DEV-UNTRUSTED` and they cannot be published. A skipped production build does not make that version available through **Update Opticon**.
 
 For deeper implementation details, continue with `docs\ARCHITECTURE.md` and `docs\SECURITY.md`, then read the code under `src\Taildesk.Admin`, `src\Taildesk.Agent`, `src\Taildesk.Setup`, and `src\Taildesk.Shared`.

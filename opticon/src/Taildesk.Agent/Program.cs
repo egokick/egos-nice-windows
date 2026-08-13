@@ -19,12 +19,24 @@ if (!OperatingSystem.IsWindows())
     return;
 }
 
+if (args.Length == 1 && args[0].Equals("--service", StringComparison.Ordinal))
+{
+    Environment.ExitCode = WindowsServiceHost.Run(RunAgentAsync);
+    return;
+}
+
 if (args.Length != 0)
 {
-    Console.Error.WriteLine("Taildesk Agent does not accept command-line configuration paths.");
+    Console.Error.WriteLine("Taildesk Agent accepts only --service.");
     Environment.ExitCode = 2;
     return;
 }
+
+await RunAgentAsync(CancellationToken.None);
+return;
+
+async Task RunAgentAsync(CancellationToken serviceStoppingToken)
+{
 MachineStorageSecurity.EnsureOpticonMachineState();
 var configStore = new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile);
 var config = await configStore.LoadAsync();
@@ -51,7 +63,7 @@ if (!RemoteAdministrationProtocol.IsTailscaleIpv4(config.BindAddress)
 for (var attempt = 0; attempt < 120 && !AddressIsAssigned(configuredAddress); attempt++)
 {
     if (attempt == 0) Console.WriteLine("Waiting for the Tailscale interface…");
-    await Task.Delay(TimeSpan.FromSeconds(2.5));
+    await Task.Delay(TimeSpan.FromSeconds(2.5), serviceStoppingToken);
 }
 if (!AddressIsAssigned(configuredAddress))
 {
@@ -59,7 +71,7 @@ if (!AddressIsAssigned(configuredAddress))
     return;
 }
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder([]);
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Listen(configuredAddress, config.ApiPort);
@@ -446,7 +458,19 @@ app.MapPost("/api/v1/update/guardian", async (OpticonUpdateRequest request, Upda
 app.MapPost("/api/v1/update/source/guardian", async (SourceUpdateRequest request, UpdateManager updates, CancellationToken cancellationToken) =>
     Results.Ok(await updates.ReconcileSourceGuardianAsync(request, cancellationToken)));
 
-await app.RunAsync();
+await app.StartAsync(serviceStoppingToken);
+try
+{
+    await Task.Delay(Timeout.InfiniteTimeSpan, serviceStoppingToken);
+}
+catch (OperationCanceledException) when (serviceStoppingToken.IsCancellationRequested)
+{
+}
+finally
+{
+    await app.StopAsync(CancellationToken.None);
+}
+}
 
 static string ContentType(string path) => Path.GetExtension(path).ToLowerInvariant() switch
 {

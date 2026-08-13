@@ -61,10 +61,9 @@ public sealed class InviteBundleService
 
         progress?.Report("Checking the private network...");
         var expectedTailnet = await _tailnetResolver(cancellationToken);
-        progress?.Report("Pinning this invitation to the exact authenticated source release...");
-        var sourceRelease = await new OpticonSourceReleaseClient().GetCurrentAsync(_state.Config, cancellationToken);
-        if (!string.Equals(sourceRelease.InstallProtocol, InvitationPolicy.SourceInstallProtocol, StringComparison.Ordinal))
-            throw new InvalidDataException("The published source release does not use the supported source-only install protocol.");
+        progress?.Report("Pinning this invitation to the exact signed device bundle...");
+        var deviceRelease = await new OpticonDeviceReleaseClient().GetCurrentAsync(
+            _state.Config, role, cancellationToken);
         var expires = InvitationPolicy.CreateDefaultExpiry();
         progress?.Report("Creating the one-use network key...");
         var authKey = await _headscale.CreateInviteKeyAsync(role, advertiseExitNode, $"Opticon invite for {deviceName}", expires, cancellationToken);
@@ -87,19 +86,21 @@ public sealed class InviteBundleService
             ControllerToken = controllerToken,
             CoordinatorUrl = _state.Config.CoordinatorUrl,
             ExpectedTailnet = expectedTailnet,
-            ReleaseVersion = sourceRelease.Version,
-            SourceSha256 = sourceRelease.Sha256,
-            SourceFile = sourceRelease.File,
-            SourceSize = sourceRelease.Size,
-            SourceManifestSha256 = sourceRelease.SourceManifestSha256,
-            SourceManifestKeyId = sourceRelease.SourceManifestKeyId,
-            SigningProfile = sourceRelease.SigningProfile,
-            ProductSignerThumbprint = sourceRelease.ProductSignerThumbprint,
-            SdkVersion = sourceRelease.SdkVersion,
-            RuntimeVersion = sourceRelease.RuntimeVersion,
-            TargetRuntimes = sourceRelease.TargetRuntimes.ToArray(),
-            InstallProtocol = sourceRelease.InstallProtocol,
-            ClientInstallValidation = sourceRelease.ClientInstallValidation.Clone(),
+            ReleaseVersion = deviceRelease.Version,
+            SourceManifestKeyId = deviceRelease.SourceReleaseKeyId,
+            SigningProfile = deviceRelease.SigningProfile,
+            ProductSignerThumbprint = deviceRelease.ProductSignerThumbprint,
+            InstallProtocol = InvitationPolicy.BinaryInstallProtocol,
+            BundleFile = deviceRelease.BundleFile,
+            BundleSize = deviceRelease.BundleSize,
+            BundleSha256 = deviceRelease.BundleSha256,
+            BundleArchitecture = deviceRelease.Architecture,
+            BundleDownloadUrl = deviceRelease.BundleDownloadUri.AbsoluteUri,
+            BootstrapVersion = deviceRelease.Version,
+            BootstrapFile = deviceRelease.BootstrapFile,
+            BootstrapSize = deviceRelease.BootstrapSize,
+            BootstrapSha256 = deviceRelease.BootstrapSha256,
+            BootstrapSignerThumbprint = deviceRelease.BootstrapSignerThumbprint,
             AdvertiseExitNode = advertiseExitNode,
             AllowedRoots = selectedRoots
         };
@@ -117,18 +118,21 @@ public sealed class InviteBundleService
             ExpiresAt = expires,
             AdvertiseExitNode = advertiseExitNode,
             TailscaleKeyId = authKey.Id,
-            ReleaseVersion = sourceRelease.Version,
-            SourceSha256 = sourceRelease.Sha256,
-            SourceFile = sourceRelease.File,
-            SourceSize = sourceRelease.Size,
-            SourceManifestSha256 = sourceRelease.SourceManifestSha256,
-            SourceManifestKeyId = sourceRelease.SourceManifestKeyId,
-            SigningProfile = sourceRelease.SigningProfile,
-            ProductSignerThumbprint = sourceRelease.ProductSignerThumbprint,
-            SdkVersion = sourceRelease.SdkVersion,
-            RuntimeVersion = sourceRelease.RuntimeVersion,
-            TargetRuntimes = sourceRelease.TargetRuntimes.ToArray(),
-            InstallProtocol = sourceRelease.InstallProtocol
+            ReleaseVersion = deviceRelease.Version,
+            SourceManifestKeyId = deviceRelease.SourceReleaseKeyId,
+            SigningProfile = deviceRelease.SigningProfile,
+            ProductSignerThumbprint = deviceRelease.ProductSignerThumbprint,
+            InstallProtocol = InvitationPolicy.BinaryInstallProtocol,
+            BundleFile = deviceRelease.BundleFile,
+            BundleSize = deviceRelease.BundleSize,
+            BundleSha256 = deviceRelease.BundleSha256,
+            BundleArchitecture = deviceRelease.Architecture,
+            BundleDownloadUrl = deviceRelease.BundleDownloadUri.AbsoluteUri,
+            BootstrapVersion = deviceRelease.Version,
+            BootstrapFile = deviceRelease.BootstrapFile,
+            BootstrapSize = deviceRelease.BootstrapSize,
+            BootstrapSha256 = deviceRelease.BootstrapSha256,
+            BootstrapSignerThumbprint = deviceRelease.BootstrapSignerThumbprint
         };
 
         HostedInvitePublication? publication = null;

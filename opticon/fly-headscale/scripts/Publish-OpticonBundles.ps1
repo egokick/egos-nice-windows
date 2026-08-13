@@ -1571,7 +1571,7 @@ if ($SourceOnly) {
     $bundles = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBundle" })
     $bootstraps = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonBootstrap" })
     $sources = @($releaseArtifacts | Where-Object { $_.product -eq "OpticonSource" })
-    if ($bundles.Count -ne 2 -or $bootstraps.Count -ne 1 -or $sources.Count -ne 1) { throw "Build did not produce two bundles, one bootstrap, and one source archive for $version." }
+    if ($bundles.Count -ne 2 -or $bootstraps.Count -ne 1 -or $sources.Count -ne 0) { throw "Build did not produce exactly two device bundles and one signed installer for $version." }
     foreach ($bundle in $bundles) {
         $actualLegacyMigrationSigner = Get-ArtifactString $bundle 'legacyMigrationSignerThumbprint'
         if ($isLegacyMigration) {
@@ -1587,7 +1587,6 @@ if ($SourceOnly) {
         throw 'The source bootstrap outer signer pin does not match the production product signer.'
     }
     Assert-ProductSignature -Path $bootstrapPath
-    Assert-OpticonSourceArchive -Path (Get-LocalArtifactPath ([string]$sources[0].file)) -Record $sources[0]
     foreach ($bundle in @($allOpticonArtifacts | Where-Object { $_.product -eq 'OpticonBundle' })) {
         Assert-OpticonBundleArchive -Path (Get-LocalArtifactPath ([string]$bundle.file)) -Record $bundle
     }
@@ -1661,7 +1660,7 @@ try {
             $objectExists = $existingHeadResult.ExitCode -eq 0
         } finally { $ErrorActionPreference = $savedPreference }
         if ($objectExists) {
-            if ($ForceRedeploy -and $StageOnly -and $isStagedSourceArchive) {
+            if ($ForceRedeploy -and $StageOnly) {
                 $putResult = Invoke-AwsCli -MaximumAttempts 3 -Arguments @('s3api', 'put-object', '--bucket', $bucket, '--key', $key,
                     '--body', $path, '--content-type', $contentType, '--cache-control', 'no-cache',
                     '--server-side-encryption', 'AES256', '--checksum-algorithm', 'SHA256', '--metadata', $objectMetadata,
@@ -1771,8 +1770,8 @@ if (-not $SkipManifestPublish) {
             throw 'Fly accepted the source-only manifest but did not serve exactly one CloudFront source archive.'
         }
     } else {
-        $liveRelease = @($live.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap", "OpticonSource") })
-        if ($liveRelease.Count -ne 4 -or @($liveRelease | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.downloadUrl) }).Count -ne 0) {
+        $liveRelease = @($live.artifacts | Where-Object { $_.version -eq $version -and $_.product -in @("OpticonBundle", "OpticonBootstrap") })
+        if ($liveRelease.Count -ne 3 -or @($liveRelease | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.downloadUrl) }).Count -ne 0) {
             throw "Fly accepted the manifest but did not serve the complete CloudFront release."
         }
     }

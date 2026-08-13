@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	releaseProtocolVersion    = 3
+	releaseProtocolVersion    = 4
 	adminPrefix               = "/opticon/v1/headscale/"
 	artifactPrefix            = "/opticon/artifacts/v1/"
 	inviteAdminPrefix         = "/opticon/v1/invitations/"
@@ -42,6 +42,7 @@ const (
 	invitePublicPrefix        = "/opticon/i/"
 	maxInviteBody             = 64 << 10
 	maxBundleChunk            = 4 << 20
+	maxBundleArtifactBytes    = 512 << 20
 	maxAdminBody              = 1 << 20
 	maxParallelKeyRevocations = 4
 	maxBootstrapArtifactBytes = 128 << 20
@@ -49,6 +50,7 @@ const (
 	pinnedRuntimeVersion      = "10.0.10"
 	sourceOnlyManifestSchema  = 2
 	sourceInstallProtocol     = "source-v1"
+	binaryInstallProtocol     = "binary-v1"
 	invitationSigningKeyID    = "FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53"
 	// The retired invitation signer is allowed only for this immutable ACL
 	// transition package. It is never a general release signing channel.
@@ -510,6 +512,11 @@ type hostedInvite struct {
 	BootstrapSize        int64    `json:"bootstrapSize"`
 	BootstrapSHA256      string   `json:"bootstrapSha256"`
 	BootstrapSigner      string   `json:"bootstrapSignerThumbprint"`
+	BundleFile           string   `json:"bundleFile"`
+	BundleSize           int64    `json:"bundleSize"`
+	BundleSHA256         string   `json:"bundleSha256"`
+	BundleArchitecture   string   `json:"bundleArchitecture"`
+	BundleDownloadURL    string   `json:"bundleDownloadUrl"`
 	// TailscaleKeyID is non-secret operational metadata. It lets the gateway
 	// revoke the one-use Headscale key before deleting a hosted invitation when
 	// a source release must be replaced. The encrypted invitation remains the
@@ -541,6 +548,7 @@ type releaseInvitationSummary struct {
 	ExpiresAt       time.Time `json:"expiresAt"`
 	ReleaseVersion  string    `json:"releaseVersion"`
 	SourceFile      string    `json:"sourceFile"`
+	BundleFile      string    `json:"bundleFile"`
 	InstallProtocol string    `json:"installProtocol"`
 	CanRevoke       bool      `json:"canRevoke"`
 	BlockedReason   string    `json:"blockedReason,omitempty"`
@@ -619,7 +627,7 @@ func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request)
 	}
 	available := make([]bundleArtifact, 0, len(manifest.Artifacts))
 	for _, artifact := range manifest.Artifacts {
-		if artifact.Product != "OpticonBundle" || g.bundleIsAvailable(artifact) {
+		if artifact.Product != "OpticonBundle" || validCloudFrontDownloadURL(artifact) || g.bundleIsAvailable(artifact) {
 			available = append(available, artifact)
 		}
 	}
@@ -992,6 +1000,7 @@ func (g *gateway) buildReleasePreflight(targetVersion string, now time.Time, for
 			ExpiresAt:       item.Invite.ExpiresAt,
 			ReleaseVersion:  item.Invite.ReleaseVersion,
 			SourceFile:      item.Invite.SourceFile,
+			BundleFile:      item.Invite.BundleFile,
 			InstallProtocol: item.Invite.InstallProtocol,
 			CanRevoke:       canRevoke,
 		}
@@ -1044,7 +1053,7 @@ func (g *gateway) activeReleaseInvitesLocked(now time.Time) ([]activeReleaseInvi
 		if !invite.ExpiresAt.After(now) || invite.ReleaseVersion == "" {
 			continue
 		}
-		if invite.InstallProtocol != "" && invite.InstallProtocol != sourceInstallProtocol {
+		if invite.InstallProtocol != sourceInstallProtocol && invite.InstallProtocol != binaryInstallProtocol {
 			return nil, errors.New("an invitation record has an unsupported install protocol")
 		}
 		result = append(result, activeReleaseInvite{
@@ -1168,7 +1177,6 @@ func completeCloudFrontRelease(manifest artifactManifest, version string) bool {
 	}
 	roles := make(map[string]bool)
 	bootstrapCount := 0
-	sourceCount := 0
 	for _, artifact := range manifest.Artifacts {
 		if artifact.Version != version {
 			continue
@@ -1185,13 +1193,11 @@ func completeCloudFrontRelease(manifest artifactManifest, version string) bool {
 			}
 			bootstrapCount++
 		case "OpticonSource":
-			if !validSourceArtifact(artifact) {
-				return false
-			}
-			sourceCount++
+			// Binary device releases do not publish or depend on source archives.
+			return false
 		}
 	}
-	return len(roles) == 2 && roles["ManagedOnly"] && roles["ControllerAndManaged"] && bootstrapCount == 1 && sourceCount == 1
+	return len(roles) == 2 && roles["ManagedOnly"] && roles["ControllerAndManaged"] && bootstrapCount == 1
 }
 
 func highestBundleVersion(manifest artifactManifest) (string, bool) {
@@ -1243,7 +1249,7 @@ func samePinnedDependencies(left, right artifactManifest) bool {
 		return true
 	}
 	if left.SchemaVersion == sourceOnlyManifestSchema {
-		return false
+		return true
 	}
 	encode := func(manifest artifactManifest) map[string]string {
 		result := make(map[string]string)
@@ -1455,6 +1461,7 @@ func (g *gateway) invitationInventory(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:       invite.ExpiresAt,
 			ReleaseVersion:  invite.ReleaseVersion,
 			SourceFile:      invite.SourceFile,
+			BundleFile:      invite.BundleFile,
 			InstallProtocol: invite.InstallProtocol,
 			CanRevoke:       canRevoke,
 		}
@@ -1507,34 +1514,46 @@ func (g *gateway) invitationAdmin(w http.ResponseWriter, r *http.Request) {
 			invite.CreatedAt = now.UTC()
 		}
 		sourceOnly := invite.InstallProtocol == sourceInstallProtocol
-		legacyBootstrap := invite.InstallProtocol == ""
+		binary := invite.InstallProtocol == binaryInstallProtocol
 		if strings.TrimSpace(invite.DeviceName) == "" || (invite.Role != "ManagedOnly" && invite.Role != "ControllerAndManaged") ||
 			!invite.ExpiresAt.After(now) || invite.ExpiresAt.After(now.Add(366*24*time.Hour)) || len(invite.Ciphertext) < 64 || len(invite.Ciphertext) > maxInviteBody ||
-			!inviteHashPattern.MatchString(strings.ToLower(invite.SourceSHA256)) || !inviteHashPattern.MatchString(strings.ToLower(invite.SourceManifestSHA256)) ||
-			invite.SourceSize <= 0 || invite.SDKVersion != pinnedSDKVersion || invite.RuntimeVersion != pinnedRuntimeVersion || !supportedTargetRuntimes(invite.TargetRuntimes) ||
 			invite.SigningProfile != trustedSigningProfile || invite.SourceManifestKeyID != trustedSourceManifestKeyID ||
-			invite.ProductSigner != trustedProductSignerThumbprint || len(invite.TailscaleKeyID) > 512 || strings.ContainsAny(invite.TailscaleKeyID, "\r\n") || (!sourceOnly && !legacyBootstrap) ||
+			invite.ProductSigner != trustedProductSignerThumbprint || len(invite.TailscaleKeyID) > 512 || strings.ContainsAny(invite.TailscaleKeyID, "\r\n") || (!sourceOnly && !binary) ||
 			invite.CreatedAt.After(now.Add(5*time.Minute)) || invite.CreatedAt.After(invite.ExpiresAt) {
 			http.Error(w, "invalid invitation", http.StatusBadRequest)
 			return
 		}
 		if sourceOnly {
+			if !inviteHashPattern.MatchString(strings.ToLower(invite.SourceSHA256)) || !inviteHashPattern.MatchString(strings.ToLower(invite.SourceManifestSHA256)) ||
+				invite.SourceSize <= 0 || invite.SDKVersion != pinnedSDKVersion || invite.RuntimeVersion != pinnedRuntimeVersion || !supportedTargetRuntimes(invite.TargetRuntimes) ||
+				invite.BundleFile != "" || invite.BundleSize != 0 || invite.BundleSHA256 != "" || invite.BundleArchitecture != "" || invite.BundleDownloadURL != "" {
+				http.Error(w, "invalid source invitation", http.StatusBadRequest)
+				return
+			}
 			if invite.BootstrapVersion != "" || invite.BootstrapFile != "" || invite.BootstrapSize != 0 ||
 				invite.BootstrapSHA256 != "" || invite.BootstrapSigner != "" {
 				http.Error(w, "source-only invitation carries a release bootstrap", http.StatusBadRequest)
 				return
 			}
-		} else if invite.BootstrapSigner != invite.ProductSigner || invite.BootstrapVersion != invite.ReleaseVersion ||
+			if _, err := g.sourceForInvite(invite); err != nil {
+				http.Error(w, "invitation source release is unavailable", http.StatusConflict)
+				return
+			}
+		} else if invite.SourceFile != "" || invite.SourceSize != 0 || invite.SourceSHA256 != "" || invite.SourceManifestSHA256 != "" ||
+			invite.SDKVersion != "" || invite.RuntimeVersion != "" || invite.TargetRuntime != "" || len(invite.TargetRuntimes) != 0 ||
+			invite.BootstrapSigner != invite.ProductSigner || invite.BootstrapVersion != invite.ReleaseVersion ||
 			invite.BootstrapFile != "opticon-bootstrap-"+invite.ReleaseVersion+".exe" || invite.BootstrapSize <= 0 || invite.BootstrapSize > maxBootstrapArtifactBytes ||
-			!inviteHashPattern.MatchString(strings.ToLower(invite.BootstrapSHA256)) || !publisherThumbprintPattern.MatchString(invite.BootstrapSigner) {
+			!inviteHashPattern.MatchString(strings.ToLower(invite.BootstrapSHA256)) || !publisherThumbprintPattern.MatchString(invite.BootstrapSigner) ||
+			invite.BundleFile != bundleFileForRole(invite.ReleaseVersion, invite.Role) || invite.BundleSize <= 0 || invite.BundleSize > maxBundleArtifactBytes ||
+			!inviteHashPattern.MatchString(strings.ToLower(invite.BundleSHA256)) || invite.BundleArchitecture != "x64" || invite.BundleDownloadURL == "" {
 			http.Error(w, "invalid invitation", http.StatusBadRequest)
 			return
 		}
-		if _, err := g.sourceForInvite(invite); err != nil {
-			http.Error(w, "invitation source release is unavailable", http.StatusConflict)
-			return
-		}
-		if !sourceOnly {
+		if binary {
+			if _, err := g.bundleForInvite(invite); err != nil {
+				http.Error(w, "invitation device bundle is unavailable", http.StatusConflict)
+				return
+			}
 			if _, err := g.bootstrapForInvite(invite); err != nil {
 				http.Error(w, "invitation bootstrap release is unavailable", http.StatusConflict)
 				return
@@ -1797,6 +1816,20 @@ func (g *gateway) publicInvitation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "This legacy invitation cannot install software. Ask the command center for a new source-build invitation.", http.StatusGone)
 		return
 	}
+	if invite.InstallProtocol == binaryInstallProtocol {
+		bundle, bundleErr := g.bundleForInvite(invite)
+		if bundleErr != nil {
+			http.Error(w, "This invitation's exact Opticon device bundle is unavailable.", http.StatusServiceUnavailable)
+			return
+		}
+		bootstrap, bootstrapErr := g.bootstrapForInvite(invite)
+		if bootstrapErr != nil {
+			http.Error(w, "This invitation's signed installer is unavailable.", http.StatusServiceUnavailable)
+			return
+		}
+		g.binaryInvitationLandingSecure(w, r, parts[0], invite, bundle, bootstrap)
+		return
+	}
 	source, err := g.sourceForInvite(invite)
 	if err != nil {
 		http.Error(w, "This invitation's exact Opticon source release is unavailable.", http.StatusServiceUnavailable)
@@ -1917,6 +1950,40 @@ func (g *gateway) sourceForInvite(invite hostedInvite) (bundleArtifact, error) {
 		return bundleArtifact{}, err
 	}
 	return sourceForInviteInManifest(invite, manifest)
+}
+
+func bundleFileForRole(version, role string) string {
+	suffix := "managed"
+	if role == "ControllerAndManaged" {
+		suffix = "controller"
+	}
+	return "opticon-bundle-" + version + "-" + suffix + "-win-x64.zip"
+}
+
+func (g *gateway) bundleForInvite(invite hostedInvite) (bundleArtifact, error) {
+	manifest, err := g.readArtifactManifest()
+	if err != nil {
+		return bundleArtifact{}, err
+	}
+	return bundleForInviteInManifest(invite, manifest)
+}
+
+func bundleForInviteInManifest(invite hostedInvite, manifest artifactManifest) (bundleArtifact, error) {
+	if _, valid := parseSemanticVersion(invite.ReleaseVersion); !valid || strings.ContainsAny(invite.ReleaseVersion, "-+") ||
+		invite.BundleFile != bundleFileForRole(invite.ReleaseVersion, invite.Role) || invite.BundleArchitecture != "x64" ||
+		invite.BundleSize <= 0 || invite.BundleSize > maxBundleArtifactBytes || !inviteHashPattern.MatchString(strings.ToLower(invite.BundleSHA256)) {
+		return bundleArtifact{}, errors.New("invitation device bundle metadata is invalid")
+	}
+	for _, artifact := range manifest.Artifacts {
+		if validBundleArtifact(artifact) && validProductionArtifactTrust(artifact) && validCloudFrontDownloadURL(artifact) &&
+			artifact.Version == invite.ReleaseVersion && artifact.Role == invite.Role && artifact.Architecture == invite.BundleArchitecture &&
+			artifact.File == invite.BundleFile && artifact.Size == invite.BundleSize && artifact.DownloadURL == invite.BundleDownloadURL &&
+			artifact.SigningProfile == invite.SigningProfile && artifact.SourceManifestKeyID == invite.SourceManifestKeyID && artifact.ProductSigner == invite.ProductSigner &&
+			hmac.Equal([]byte(strings.ToLower(artifact.SHA256)), []byte(strings.ToLower(invite.BundleSHA256))) {
+			return artifact, nil
+		}
+	}
+	return bundleArtifact{}, errors.New("invitation device bundle is not published")
 }
 
 func sourceForInviteInManifest(invite hostedInvite, manifest artifactManifest) (bundleArtifact, error) {
@@ -2051,6 +2118,22 @@ func (g *gateway) sourceOnlyInvitationLandingSecure(w http.ResponseWriter, r *ht
 	}
 	launcherPath := invitePublicPrefix + url.PathEscape(publicID) + "/launcher"
 	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}.download{display:inline-block;background:#52d39a;color:#08130e;text-decoration:none;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px}.disabled{pointer-events:none;opacity:.45}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Opticon <code>%s</code> is ready to build and install.</p><p><a id="install" class="download" href="%s">Download signed installer</a></p><p id="status" class="muted">Download the installer, then double-click it. Windows will ask for administrator approval. No ZIP extraction or invitation paste is needed.</p><p class="muted">The signed installer downloads a private source link valid for 30 minutes, then verifies the invitation, source SHA-256, signed manifest, and approved .NET 10 SDK before building.</p><p class="muted">Source SHA-256: <code>%s</code><br>Requires a stable .NET SDK matching <code>%s</code>. Invitation expires <code>%s</code>.</p><script>const key=location.hash.slice(1),install=document.getElementById('install'),status=document.getElementById('status');if(!/^[A-Za-z0-9_-]{43}$/.test(key)){install.removeAttribute('href');install.classList.add('disabled');status.textContent='This invitation link is incomplete. Ask the command center for a new link.'}else{install.download='Install-Opticon-%s--'+key+'--%s.exe'}</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(source.Version), html.EscapeString(launcherPath), html.EscapeString(strings.ToLower(source.SHA256)), html.EscapeString(source.SDKVersion), invite.ExpiresAt.Local().Format(time.RFC1123), publicID, strings.ToLower(source.SourceLauncherSHA256))
+	_, _ = io.WriteString(w, page)
+}
+
+func (g *gateway) binaryInvitationLandingSecure(w http.ResponseWriter, r *http.Request, publicID string, invite hostedInvite, bundle, bootstrap bundleArtifact) {
+	parsed, err := url.Parse(bootstrap.DownloadURL)
+	if err != nil || !parsed.IsAbs() {
+		http.Error(w, "This invitation's signed installer is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src "+origin+"; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+	if r.Method == http.MethodHead {
+		return
+	}
+	page := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Opticon invitation</title><style>body{font:18px Segoe UI,sans-serif;background:#111316;color:#edf1f5;max-width:720px;margin:10vh auto;padding:28px}button{background:#52d39a;color:#08130e;border:0;padding:14px 20px;font-weight:700;font-size:17px;border-radius:6px;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.muted{color:#9da7b1}code{color:#52d39a;overflow-wrap:anywhere;user-select:all}</style></head><body><h1>Install Opticon</h1><p>This private invitation is for <strong>%s</strong>.</p><p>Opticon <code>%s</code> is ready.</p><button id="download">Download signed installer</button><p id="status" class="muted">Download the installer, open it, and approve the Windows administrator prompt.</p><p class="muted">The installer verifies this invitation and the signed device bundle before installing Opticon. No ZIP extraction, SDK, source build, or invitation paste is required.</p><p class="muted">Device bundle SHA-256: <code>%s</code><br>Installer SHA-256: <code>%s</code><br>Invitation expires <code>%s</code>.</p><script>const key=location.hash.slice(1),button=document.getElementById('download'),status=document.getElementById('status');let active=false;function save(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000)}async function download(){if(active)return;if(!/^[A-Za-z0-9_-]{43}$/.test(key)){status.textContent='This invitation link is incomplete. Ask the command center for a new link.';button.disabled=true;return}active=true;button.disabled=true;status.textContent='Downloading and verifying the signed installer...';try{if(!globalThis.crypto||!crypto.subtle)throw new Error('Use current Microsoft Edge or Chrome; WebCrypto SHA-256 is unavailable.');const r=await fetch(%q,{credentials:'omit'});if(!r.ok)throw new Error('Installer returned HTTP '+r.status+'.');const b=await r.blob();if(b.size!==%d)throw new Error('Installer size is invalid.');const d=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await b.arrayBuffer()))).map(v=>v.toString(16).padStart(2,'0')).join('');if(d!==%q)throw new Error('Installer SHA-256 is invalid.');save(b,'Install-Opticon-%s--'+key+'--%s.exe');status.textContent='Installer verified and downloaded. Open it to install Opticon.'}catch(e){status.textContent=String(e&&e.message||e).slice(0,240)+' No unsigned fallback is offered.';button.disabled=false}finally{active=false}}button.addEventListener('click',download)</script></body></html>`, html.EscapeString(invite.DeviceName), html.EscapeString(bundle.Version), html.EscapeString(strings.ToLower(bundle.SHA256)), html.EscapeString(strings.ToLower(bootstrap.SHA256)), invite.ExpiresAt.Local().Format(time.RFC1123), bootstrap.DownloadURL, bootstrap.Size, strings.ToLower(bootstrap.SHA256), publicID, strings.ToLower(bootstrap.SHA256))
 	_, _ = io.WriteString(w, page)
 }
 

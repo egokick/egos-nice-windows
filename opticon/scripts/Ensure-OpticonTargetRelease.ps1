@@ -11,11 +11,10 @@ param(
     [string]$ClientInstallValidationBase64 = '',
     [switch]$ForceRedeploy,
     [switch]$CheckOnly,
-    # Build/upload/verify the immutable source release, but leave the live
+    # Build/upload/verify the immutable device bundles, but leave the live
     # invitation manifest untouched until a later explicit commit.
     [switch]$StageOnly,
-    # Commit the exact local-or-S3 source stage receipt without rebuilding or
-    # uploading a replacement archive.
+    # Publish the locally verified device-bundle manifest without rebuilding.
     [switch]$CommitStaged
 )
 
@@ -25,7 +24,7 @@ if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -lt [Vers
 }
 Add-Type -AssemblyName System.Net.Http
 $opticonRoot = Split-Path $PSScriptRoot -Parent
-$publisher = Join-Path $opticonRoot 'fly-headscale\scripts\Publish-OpticonSourceRelease.ps1'
+$publisher = Join-Path $opticonRoot 'fly-headscale\scripts\Publish-OpticonBundles.ps1'
 
 function Get-SourceVersion {
     $propertiesPath = Join-Path $opticonRoot 'Directory.Build.props'
@@ -82,22 +81,20 @@ function Get-ReleaseManifest {
 }
 
 function Test-CompleteRelease($Manifest, [string]$ReleaseVersion) {
-    if ([int]$Manifest.schemaVersion -ne 2) { return $false }
+    if ([int]$Manifest.schemaVersion -ne 1) { return $false }
     $release = @($Manifest.artifacts | Where-Object { $_.version -eq $ReleaseVersion })
-    if ($release.Count -ne 1 -or @($Manifest.artifacts | Where-Object { $_.product -ne 'OpticonSource' }).Count -ne 0) { return $false }
-    $artifact = $release[0]
-    if ($artifact.product -ne 'OpticonSource' -or $artifact.architecture -ne 'source' -or
-        $artifact.file -ne "opticon-source-$ReleaseVersion.zip" -or [long]$artifact.size -le 0 -or
-        [string]$artifact.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
-        [string]$artifact.sourceManifestSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
-        [string]$artifact.sdkVersion -ne '10.*.*' -or [string]$artifact.runtimeVersion -ne '10.0.10' -or
-        @($artifact.targetRuntimes).Count -ne 2 -or [string]$artifact.targetRuntimes[0] -ne 'win-x64' -or
-        [string]$artifact.targetRuntimes[1] -ne 'win-arm64') {
-        return $false
+    $bundles = @($release | Where-Object { $_.product -eq 'OpticonBundle' })
+    $bootstraps = @($release | Where-Object { $_.product -eq 'OpticonBootstrap' })
+    if ($release.Count -ne 3 -or $bundles.Count -ne 2 -or $bootstraps.Count -ne 1 -or
+        @($bundles.role | Sort-Object -Unique).Count -ne 2 -or
+        @($bundles | Where-Object { $_.architecture -ne 'x64' }).Count -ne 0) { return $false }
+    foreach ($artifact in $release) {
+        if ([long]$artifact.size -le 0 -or [string]$artifact.sha256 -notmatch '^[0-9a-fA-F]{64}$') { return $false }
+        try { $download = [Uri][string]$artifact.downloadUrl } catch { return $false }
+        if (-not $download.IsAbsoluteUri -or $download.Scheme -ne 'https' -or
+            $download.AbsolutePath -ne "/opticon/releases/$ReleaseVersion/$($artifact.file)") { return $false }
     }
-    try { $download = [Uri][string]$artifact.downloadUrl } catch { return $false }
-    return $download.IsAbsoluteUri -and $download.Scheme -eq 'https' -and
-        $download.AbsolutePath -eq "/opticon/releases/$ReleaseVersion/$($artifact.file)"
+    return $true
 }
 
 if ([string]::IsNullOrWhiteSpace($Version)) { $Version = Get-SourceVersion }
@@ -118,7 +115,7 @@ if (-not $ForceRedeploy -and $null -ne $manifest -and (Test-CompleteRelease $man
 }
 
 $newer = if ($null -eq $manifest) { @() } else { @($manifest.artifacts |
-    Where-Object { $_.product -eq 'OpticonSource' -and $_.version -match '^\d+\.\d+\.\d+$' } |
+    Where-Object { $_.product -eq 'OpticonBundle' -and $_.version -match '^\d+\.\d+\.\d+$' } |
     ForEach-Object { [Version]$_.version } |
     Where-Object { $_ -gt [Version]$Version }) }
 if ($newer.Count -ne 0) {
@@ -134,7 +131,7 @@ if ($CheckOnly) {
         [string]::IsNullOrWhiteSpace($ProductCertificateThumbprint) -or
         [string]::IsNullOrWhiteSpace($Rfc3161TimestampUrl) -or
         [string]::IsNullOrWhiteSpace($SignToolPath)) {
-        throw 'Source-only target readiness requires explicit source-release/product certificate thumbprints, RFC3161 URL, and SignToolPath.'
+        throw 'Device-bundle readiness requires explicit release/product certificate thumbprints, RFC3161 URL, and SignToolPath.'
     }
     # Delegate the non-mutating identity, AWS, CloudFormation, .NET, signing,
     # and DPAPI checks to the same publisher that performs the real release.
@@ -160,7 +157,7 @@ if ([string]::IsNullOrWhiteSpace($SourceReleaseCertificateThumbprint) -or
     [string]::IsNullOrWhiteSpace($ProductCertificateThumbprint) -or
     [string]::IsNullOrWhiteSpace($Rfc3161TimestampUrl) -or
     [string]::IsNullOrWhiteSpace($SignToolPath)) {
-    throw 'Source-only target deployment requires explicit source-release/product certificate thumbprints, RFC3161 URL, and SignToolPath.'
+    throw 'Device-bundle deployment requires explicit release/product certificate thumbprints, RFC3161 URL, and SignToolPath.'
 }
 $publisherArguments = @{
     Version = $Version
@@ -174,17 +171,17 @@ $publisherArguments = @{
     ForceRedeploy = $ForceRedeploy
 }
 if ($StageOnly) {
-    Write-Host "Staging immutable Opticon target source release $Version; the live invitation manifest will remain unchanged." -ForegroundColor Yellow
-    $publisherArguments.StageOnly = $true
+    Write-Host "Staging immutable Opticon device bundles $Version; the live invitation manifest will remain unchanged." -ForegroundColor Yellow
+    $publisherArguments.SkipManifestPublish = $true
 } elseif ($CommitStaged) {
-    Write-Host "Committing the verified staged Opticon target source release $Version without rebuilding or uploading a replacement." -ForegroundColor Yellow
-    $publisherArguments.CommitStaged = $true
+    Write-Host "Publishing the verified staged Opticon device-bundle manifest $Version without rebuilding." -ForegroundColor Yellow
+    $publisherArguments.SkipBuild = $true
 } else {
-    Write-Host "Opticon target release $Version is absent, incomplete, or unservable; publishing the one source archive now." -ForegroundColor Yellow
+    Write-Host "Opticon target release $Version is absent, incomplete, or unservable; publishing the signed device bundles now." -ForegroundColor Yellow
 }
 & $publisher @publisherArguments
 if ($StageOnly) {
-    Write-Host "Opticon target release $Version is staged and fully verified; its live invitation manifest is unchanged." -ForegroundColor Green
+    Write-Host "Opticon device bundles $Version are staged and fully verified; the live invitation manifest is unchanged." -ForegroundColor Green
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false; Staged = $true }
     return
 }

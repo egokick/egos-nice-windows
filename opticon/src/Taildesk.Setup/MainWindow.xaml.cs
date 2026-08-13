@@ -82,7 +82,7 @@ public partial class MainWindow : Window
             {
                 Environment.ExitCode = 1;
                 var bootstrap = HostedBootstrapper.ParseSourceLaunch(arguments, Environment.ProcessPath);
-                StatusText.Text = "Verifying the pinned Opticon source release...";
+                StatusText.Text = "Verifying the signed Opticon device installer...";
                 var handoffExitCode = await HostedBootstrapper.LaunchSourceOnlyAsync(bootstrap, message =>
                 {
                     StatusText.Text = message;

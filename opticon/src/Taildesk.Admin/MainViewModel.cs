@@ -925,15 +925,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 OpticonVersion, prerequisites, validationPolicy, forceRedeploy, cancellationToken);
             CompleteReleaseDeploymentStep(1, "Publisher prerequisites are ready.");
 
-            StartReleaseDeploymentStep(2, "Building and signing the source archive, uploading it to S3, invalidating CloudFront, and verifying the full download.");
+            StartReleaseDeploymentStep(2, "Building and signing the device bundles, uploading them to S3, invalidating CloudFront, and verifying every full download.");
             var stageProgress = new Progress<string>(message =>
             {
                 if (!message.StartsWith("[publisher] ", StringComparison.Ordinal)) Status = message;
-                AddReleaseDeploymentLog("Build, sign, upload, and verify the source archive: " + message);
+                AddReleaseDeploymentLog("Build, sign, upload, and verify the device bundles: " + message);
             });
             await RunReleaseStepWithHeartbeatAsync(2, () => _releaseDeployment.StageAsync(OpticonVersion,
                 prerequisites, validationPolicy, forceRedeploy, stageProgress, cancellationToken), cancellationToken);
-            CompleteReleaseDeploymentStep(2, "Replacement source release is staged and verified.");
+            CompleteReleaseDeploymentStep(2, "Replacement device bundles are staged and verified.");
 
             StartReleaseDeploymentStep(3, "Deploying the Fly gateway and verifying every pinned network and remote-access installer.");
             var gatewayProgress = new Progress<string>(message =>
@@ -967,10 +967,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ApplyReleasePreflight(verified);
             if (!verified.AlreadyDeployed)
                 throw new InvalidOperationException(
-                    "The publisher completed, but the live invite manifest does not contain the exact Command Center source release.");
+                    "The publisher completed, but the live invite manifest does not contain the exact Command Center device release.");
             CompleteReleaseDeploymentStep(5, "Live manifest, CloudFront artifact, and gateway release were verified.");
             Status = $"Invite release {verified.DeployedVersion} is deployed and ready for new invitations";
-            Log($"Published verified invite source release {verified.DeployedVersion}; the live manifest and CloudFront artifact were rechecked.");
+            Log($"Published verified invite device release {verified.DeployedVersion}; the live manifest and CloudFront artifacts were rechecked.");
         }
         catch (Exception exception)
         {

@@ -8,6 +8,7 @@ public static class InvitationPolicy
     public const int PreviousBootstrapPinnedSourceBuildSchemaVersion = 5;
     public const int HostedLinkSchemaVersion = 6;
     public const string SourceInstallProtocol = "source-v1";
+    public const string BinaryInstallProtocol = "binary-v1";
     public const int DefaultLifetimeDays = 14;
     public const int MaximumLifetimeDays = 365;
 

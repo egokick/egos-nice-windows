@@ -57,11 +57,10 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	}
 	bundleBytes := []byte("signed reusable bundle fixture")
 	bundleHash := sha256.Sum256(bundleBytes)
-	bundle := bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.0.0-managed-win-x64.zip", Size: int64(len(bundleBytes)), SHA256: hex.EncodeToString(bundleHash[:])}
+	bundle := productionArtifact(bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.0.0-managed-win-x64.zip", Size: int64(len(bundleBytes)), SHA256: hex.EncodeToString(bundleHash[:]), DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.0.0/opticon-bundle-1.0.0-managed-win-x64.zip"})
 	hash := strings.Repeat("b", 64)
 	bootstrap := productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.0.0", Architecture: "x64", File: "opticon-bootstrap-1.0.0.exe", Size: 20, SHA256: hash, SignerThumbprint: strings.Repeat("C", 40), DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.0.0/opticon-bootstrap-1.0.0.exe"})
-	source := productionArtifact(bundleArtifact{Product: "OpticonSource", Version: "1.0.0", Architecture: "source", File: "opticon-source-1.0.0.zip", Size: 2048, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.0.0/opticon-source-1.0.0.zip", SDKVersion: pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion, TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash})
-	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{bundle, bootstrap, source}})
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{bundle, bootstrap}})
 	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -71,10 +70,10 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	g := &gateway{adminSecret: secret, inviteDir: inviteDir, artifactDir: artifactDir, bundleDir: bundleDir, publicOrigin: "https://opticon.example.test", nonces: make(map[string]time.Time)}
-	publicID := strings.Repeat("A", 24)
+	publicID := strings.Repeat("A", 32)
 	idHash := sha256.Sum256([]byte(publicID))
 	ciphertext := bytes.Repeat([]byte{0x5a}, 96)
-	upload, _ := json.Marshal(productionInvite(hostedInvite{DeviceName: "Mom & Dad PC", Role: "ManagedOnly", ExpiresAt: time.Now().Add(14 * 24 * time.Hour), ReleaseVersion: source.Version, SourceSHA256: source.SHA256, SourceFile: source.File, SourceSize: source.Size, SourceManifestSHA256: source.SourceManifestSHA256, SDKVersion: source.SDKVersion, RuntimeVersion: source.RuntimeVersion, TargetRuntimes: source.TargetRuntimes, BootstrapVersion: bootstrap.Version, BootstrapFile: bootstrap.File, BootstrapSize: bootstrap.Size, BootstrapSHA256: bootstrap.SHA256, BootstrapSigner: bootstrap.SignerThumbprint, Ciphertext: ciphertext}))
+	upload, _ := json.Marshal(productionInvite(hostedInvite{DeviceName: "Mom & Dad PC", Role: "ManagedOnly", ExpiresAt: time.Now().Add(14 * 24 * time.Hour), InstallProtocol: binaryInstallProtocol, ReleaseVersion: bundle.Version, BundleFile: bundle.File, BundleSize: bundle.Size, BundleSHA256: bundle.SHA256, BundleArchitecture: bundle.Architecture, BundleDownloadURL: bundle.DownloadURL, BootstrapVersion: bootstrap.Version, BootstrapFile: bootstrap.File, BootstrapSize: bootstrap.Size, BootstrapSHA256: bootstrap.SHA256, BootstrapSigner: bootstrap.SignerThumbprint, Ciphertext: ciphertext}))
 	adminPath := inviteAdminPrefix + hex.EncodeToString(idHash[:])
 	put := signedRouteRequest(secret, http.MethodPut, adminPath, "put-nonce-012345678901234", upload)
 	putResult := httptest.NewRecorder()
@@ -89,10 +88,10 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 		t.Fatalf("landing returned %d", landingResult.Code)
 	}
 	landing := landingResult.Body.String()
-	if !strings.Contains(landing, "Mom &amp; Dad PC") || !strings.Contains(landing, source.DownloadURL) ||
+	if !strings.Contains(landing, "Mom &amp; Dad PC") || strings.Contains(landing, bundle.DownloadURL) ||
 		!strings.Contains(landing, bootstrap.DownloadURL) || !strings.Contains(landing, "crypto.subtle.digest") ||
 		!strings.Contains(landing, "URL.createObjectURL(blob)") || strings.Contains(landing, "ExecutionPolicy") {
-		t.Fatal("landing page did not offer the pinned source and signed bootstrap safely")
+		t.Fatal("landing page did not offer exactly one pinned signed installer safely")
 	}
 	if !strings.Contains(landingResult.Header().Get("Content-Security-Policy"), "connect-src https://d111.cloudfront.net") {
 		t.Fatal("landing page did not permit only the pinned CloudFront release origin")
@@ -602,7 +601,8 @@ func TestPublicManifestOnlyAdvertisesFinalizedBundlesAndPreservesPins(t *testing
 	dependency := bundleArtifact{Product: "Tailscale", Version: "1.2.3", Architecture: "x64", File: "tailscale.msi", Size: 50, SHA256: hash, SignerThumbprint: "PINNED-SIGNER"}
 	ready := bundleArtifact{Product: "OpticonBundle", Version: "1.1.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.1.0-managed-win-x64.zip", Size: 16, SHA256: hash}
 	pending := bundleArtifact{Product: "OpticonBundle", Version: "1.2.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.2.0-managed-win-x64.zip", Size: 16, SHA256: hash}
-	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{dependency, ready, pending}})
+	remote := bundleArtifact{Product: "OpticonBundle", Version: "1.3.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.3.0-managed-win-x64.zip", Size: 16, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.3.0/opticon-bundle-1.3.0-managed-win-x64.zip"}
+	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{dependency, ready, pending, remote}})
 	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -626,14 +626,17 @@ func TestPublicManifestOnlyAdvertisesFinalizedBundlesAndPreservesPins(t *testing
 	if published.SchemaVersion != 1 {
 		t.Fatalf("schema version changed to %d", published.SchemaVersion)
 	}
-	if len(published.Artifacts) != 2 {
-		t.Fatalf("published %d records instead of dependency plus finalized bundle", len(published.Artifacts))
+	if len(published.Artifacts) != 3 {
+		t.Fatalf("published %d records instead of dependency plus local and CloudFront bundles", len(published.Artifacts))
 	}
 	if published.Artifacts[0].SignerThumbprint != dependency.SignerThumbprint {
 		t.Fatal("dependency signer pin was stripped")
 	}
 	if published.Artifacts[1].File != ready.File {
 		t.Fatalf("unexpected bundle was published: %s", published.Artifacts[1].File)
+	}
+	if published.Artifacts[2].File != remote.File {
+		t.Fatalf("immutable CloudFront bundle was hidden: %s", published.Artifacts[2].File)
 	}
 	if strings.Contains(get.Body.String(), pending.File) {
 		t.Fatal("not-yet-finalized bundle was advertised")
@@ -681,7 +684,6 @@ func TestAuthenticatedManifestPublicationIsAtomicPersistentAndReplaySafe(t *test
 		{Product: "OpticonBundle", Version: "1.1.18", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.1.18-managed-win-x64.zip", Size: 11, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.18/opticon-bundle-1.1.18-managed-win-x64.zip"},
 		{Product: "OpticonBundle", Version: "1.1.18", Role: "ControllerAndManaged", Architecture: "x64", File: "opticon-bundle-1.1.18-controller-win-x64.zip", Size: 21, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.18/opticon-bundle-1.1.18-controller-win-x64.zip"},
 		productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.1.18", Architecture: "x64", File: "opticon-bootstrap-1.1.18.exe", Size: 7, SHA256: hash, SignerThumbprint: strings.Repeat("C", 40), DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.18/opticon-bootstrap-1.1.18.exe"}),
-		productionArtifact(bundleArtifact{Product: "OpticonSource", Version: "1.1.18", Architecture: "source", File: "opticon-source-1.1.18.zip", Size: 30, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.18/opticon-source-1.1.18.zip", SDKVersion: pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion, TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash}),
 	}}
 	body, _ := json.Marshal(next)
 	secret := []byte("0123456789abcdef0123456789abcdef")
@@ -904,7 +906,6 @@ func TestAuthenticatedManifestPublicationCanRotateAnObsoleteTrustDomain(t *testi
 		{Product: "OpticonBundle", Version: "1.1.39", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.1.39-managed-win-x64.zip", Size: 11, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.39/opticon-bundle-1.1.39-managed-win-x64.zip"},
 		{Product: "OpticonBundle", Version: "1.1.39", Role: "ControllerAndManaged", Architecture: "x64", File: "opticon-bundle-1.1.39-controller-win-x64.zip", Size: 21, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.39/opticon-bundle-1.1.39-controller-win-x64.zip"},
 		productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.1.39", Architecture: "x64", File: "opticon-bootstrap-1.1.39.exe", Size: 7, SHA256: hash, SignerThumbprint: strings.Repeat("C", 40), DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.39/opticon-bootstrap-1.1.39.exe"}),
-		productionArtifact(bundleArtifact{Product: "OpticonSource", Version: "1.1.39", Architecture: "source", File: "opticon-source-1.1.39.zip", Size: 30, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.1.39/opticon-source-1.1.39.zip", SDKVersion: pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion, TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash}),
 	}}
 	body, _ := json.Marshal(next)
 	secret := []byte("0123456789abcdef0123456789abcdef")

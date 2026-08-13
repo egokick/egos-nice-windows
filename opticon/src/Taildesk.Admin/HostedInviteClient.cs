@@ -27,6 +27,16 @@ internal sealed record HostedInviteUpload(
     string RuntimeVersion,
     string[] TargetRuntimes,
     string InstallProtocol,
+    string BundleFile,
+    long BundleSize,
+    string BundleSha256,
+    string BundleArchitecture,
+    string BundleDownloadUrl,
+    string BootstrapVersion,
+    string BootstrapFile,
+    long BootstrapSize,
+    string BootstrapSha256,
+    string BootstrapSignerThumbprint,
     string TailscaleKeyId,
     byte[] Ciphertext);
 
@@ -62,7 +72,11 @@ public sealed class HostedInviteClient
             payload.ReleaseVersion, payload.SourceSha256, payload.SourceFile, payload.SourceSize,
             payload.SourceManifestSha256, payload.SourceManifestKeyId,
             payload.SigningProfile, payload.ProductSignerThumbprint, payload.SdkVersion,
-            payload.RuntimeVersion, payload.TargetRuntimes, payload.InstallProtocol, tailscaleKeyId, encryptedEnvelope);
+            payload.RuntimeVersion, payload.TargetRuntimes, payload.InstallProtocol,
+            payload.BundleFile, payload.BundleSize, payload.BundleSha256, payload.BundleArchitecture,
+            payload.BundleDownloadUrl, payload.BootstrapVersion, payload.BootstrapFile, payload.BootstrapSize,
+            payload.BootstrapSha256, payload.BootstrapSignerThumbprint,
+            tailscaleKeyId, encryptedEnvelope);
         var body = JsonSerializer.SerializeToUtf8Bytes(upload, JsonDefaults.Options);
         var uri = BuildUri(InviteAdminPath + idHash);
         Exception? lastError = null;
@@ -99,7 +113,8 @@ public sealed class HostedInviteClient
                 && string.Equals(stored.Role, payload.Role.ToString(), StringComparison.Ordinal)
                 && stored.ExpiresAt == payload.ExpiresAt
                 && string.Equals(stored.ReleaseVersion, payload.ReleaseVersion, StringComparison.Ordinal)
-                && string.Equals(stored.SourceFile, payload.SourceFile, StringComparison.Ordinal))
+                && string.Equals(stored.SourceFile, payload.SourceFile, StringComparison.Ordinal)
+                && string.Equals(stored.BundleFile, payload.BundleFile, StringComparison.Ordinal))
                 return BuildPublication(uri, publicId, fragmentKey, idHash);
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested && exception is HttpRequestException or TaskCanceledException)

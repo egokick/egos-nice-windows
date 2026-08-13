@@ -125,6 +125,16 @@ public sealed class InviteRecord
     public string TargetRuntime { get; set; } = string.Empty;
     public string[] TargetRuntimes { get; set; } = [];
     public string InstallProtocol { get; set; } = InvitationPolicy.SourceInstallProtocol;
+    public string BundleFile { get; set; } = string.Empty;
+    public long BundleSize { get; set; }
+    public string BundleSha256 { get; set; } = string.Empty;
+    public string BundleArchitecture { get; set; } = string.Empty;
+    public string BundleDownloadUrl { get; set; } = string.Empty;
+    public string BootstrapVersion { get; set; } = string.Empty;
+    public string BootstrapFile { get; set; } = string.Empty;
+    public long BootstrapSize { get; set; }
+    public string BootstrapSha256 { get; set; } = string.Empty;
+    public string BootstrapSignerThumbprint { get; set; } = string.Empty;
 
     // Gateway-only rows are synthesized by the primary Command Center from
     // authenticated, sanitized inventory. They are deliberately never written
@@ -182,6 +192,16 @@ public sealed class InvitePayload
     public string TargetRuntime { get; set; } = string.Empty;
     public string[] TargetRuntimes { get; set; } = [];
     public string InstallProtocol { get; set; } = InvitationPolicy.SourceInstallProtocol;
+    public string BundleFile { get; set; } = string.Empty;
+    public long BundleSize { get; set; }
+    public string BundleSha256 { get; set; } = string.Empty;
+    public string BundleArchitecture { get; set; } = string.Empty;
+    public string BundleDownloadUrl { get; set; } = string.Empty;
+    public string BootstrapVersion { get; set; } = string.Empty;
+    public string BootstrapFile { get; set; } = string.Empty;
+    public long BootstrapSize { get; set; }
+    public string BootstrapSha256 { get; set; } = string.Empty;
+    public string BootstrapSignerThumbprint { get; set; } = string.Empty;
     public ClientInstallValidationPolicy ClientInstallValidation { get; set; } = new();
     public bool AdvertiseExitNode { get; set; }
     public string[] AllowedRoots { get; set; } = ["Desktop", "Documents", "Downloads", "Pictures", "Videos"];

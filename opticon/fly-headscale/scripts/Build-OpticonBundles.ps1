@@ -718,33 +718,6 @@ foreach ($artifact in @($manifest.artifacts)) {
 if ($retiredObsoleteLegacyMigrationArtifacts.Count -gt 0) {
     $manifest.artifacts = @($normalizedArtifacts)
 }
-if (-not $SourceOnly) {
-    $dependencies = @($manifest.artifacts | Where-Object { $_.product -in @("Tailscale", "RustDesk") })
-    if ($dependencies.Count -ne 4) { throw "The release manifest must declare four pinned dependency installers." }
-    $expectedDependencies = @{
-        'Tailscale|x64' = $true; 'Tailscale|arm64' = $true
-        'RustDesk|x64' = $true; 'RustDesk|arm64' = $true
-    }
-    $seenDependencies = @{}
-    foreach ($artifact in $dependencies) {
-        $dependencyKey = '{0}|{1}' -f ([string]$artifact.product), ([string]$artifact.architecture)
-        if (-not $expectedDependencies.ContainsKey($dependencyKey) -or $seenDependencies.ContainsKey($dependencyKey)) {
-            throw "The release manifest has a missing, duplicate, or unsupported dependency tuple: $dependencyKey"
-        }
-        $seenDependencies[$dependencyKey] = $true
-        $path = Get-LocalArtifactPath ([string]$artifact.file)
-        $file = Get-Item -LiteralPath $path
-        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-        if ($file.Length -ne [long]$artifact.size -or $hash -ne [string]$artifact.sha256 -or
-            [string]$artifact.sha256 -notmatch '^[a-f0-9]{64}$' -or
-            [string]$artifact.signerThumbprint -notmatch '^[A-F0-9]{40}$') {
-            throw "Release dependency verification failed for $($artifact.file)."
-        }
-        Assert-PinnedDependencySignature -Path $path -ExpectedThumbprint ([string]$artifact.signerThumbprint)
-    }
-    if ($seenDependencies.Count -ne $expectedDependencies.Count) { throw 'The release manifest omits a required dependency architecture.' }
-}
-
 $existingBundles = @($manifest.artifacts | Where-Object {
     $_.product -eq "OpticonBundle" -and (Test-ProductionArtifactTrust $_)
 })
@@ -817,10 +790,7 @@ $executables = if ($SourceOnly) {
     [ordered]@{
         Setup = "Taildesk.Setup.exe"
         Agent = "Taildesk.Agent.exe"
-        Admin = "Opticon.exe"
-        Cli = "opticon.exe"
-        UpdateGuardian = "Taildesk.UpdateGuardian.exe"
-        RouteKeeper = "Taildesk.RouteKeeper.exe"
+        Uninstaller = "Uninstall-Opticon.exe"
     }
 }
 foreach ($component in $executables.Keys) {
@@ -892,7 +862,7 @@ if (-not $SourceOnly) {
     }
     $existingBootstraps = @($manifest.artifacts | Where-Object { $_.product -eq 'OpticonBootstrap' -and $_.version -eq $Version })
     if ($existingBootstraps.Count -gt 1) { throw "The outer manifest declares bootstrap release $Version more than once." }
-    if ($existingBootstraps.Count -eq 1 -and (([long]$existingBootstraps[0].size -ne [long]$bootstrapRecord.size) -or
+    if (-not $ForceRedeploy -and $existingBootstraps.Count -eq 1 -and (([long]$existingBootstraps[0].size -ne [long]$bootstrapRecord.size) -or
         -not ([string]$existingBootstraps[0].sha256).Equals([string]$bootstrapRecord.sha256, [StringComparison]::OrdinalIgnoreCase) -or
         -not ([string]$existingBootstraps[0].signerThumbprint).Equals([string]$bootstrapRecord.signerThumbprint, [StringComparison]::OrdinalIgnoreCase))) {
         Remove-Item -LiteralPath $bootstrapTemporary -Force
@@ -905,8 +875,7 @@ function Write-SignedReleaseManifest {
     param(
         [Parameter(Mandatory)][string]$Stage,
         [Parameter(Mandatory)][string]$Role,
-        [Parameter(Mandatory)][string]$Architecture,
-        [Parameter(Mandatory)][bool]$IncludeAdmin
+        [Parameter(Mandatory)][string]$Architecture
     )
 
     $stagePrefix = [IO.Path]::GetFullPath($Stage).TrimEnd(
@@ -919,9 +888,8 @@ function Write-SignedReleaseManifest {
     $candidates = @((Get-Item -LiteralPath $setupPath))
     $roots = @(
         (Join-Path $Stage "Payload\Agent"),
-        (Join-Path $Stage "Payload\UpdateGuardian")
+        (Join-Path $Stage "Payload\Uninstall")
     )
-    if ($IncludeAdmin) { $roots += (Join-Path $Stage "Payload\Admin") }
     foreach ($root in $roots) {
         if (-not (Test-Path -LiteralPath $root -PathType Container)) {
             throw "The release payload directory $root is missing."
@@ -985,25 +953,17 @@ function Write-SignedReleaseManifest {
 $records = @()
 if (-not $SourceOnly) {
     $definitions = @(
-        @{ Role = "ManagedOnly"; Suffix = "managed"; IncludeAdmin = $false },
-        @{ Role = "ControllerAndManaged"; Suffix = "controller"; IncludeAdmin = $true }
+        @{ Role = "ManagedOnly"; Suffix = "managed" },
+        @{ Role = "ControllerAndManaged"; Suffix = "controller" }
     )
 foreach ($definition in $definitions) {
     $stage = Join-Path $stageRoot $definition.Suffix
     New-Item -Path (Join-Path $stage "Payload\Agent") -ItemType Directory -Force | Out-Null
-    New-Item -Path (Join-Path $stage "Payload\UpdateGuardian") -ItemType Directory -Force | Out-Null
+    New-Item -Path (Join-Path $stage "Payload\Uninstall") -ItemType Directory -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $stage
-    Copy-Item -Path (Join-Path $buildRoot "Agent\*") -Destination (Join-Path $stage "Payload\Agent") -Recurse -Force
-    Copy-Item -Path (Join-Path $buildRoot "UpdateGuardian\*") -Destination (Join-Path $stage "Payload\UpdateGuardian") -Recurse -Force
-    if ($definition.IncludeAdmin) {
-        New-Item -Path (Join-Path $stage "Payload\Admin") -ItemType Directory -Force | Out-Null
-        Copy-Item -Path (Join-Path $buildRoot "Admin\*") -Destination (Join-Path $stage "Payload\Admin") -Recurse -Force
-        New-Item -Path (Join-Path $stage "Payload\Admin\Cli") -ItemType Directory -Force | Out-Null
-        Copy-Item -Path (Join-Path $buildRoot "Cli\*") -Destination (Join-Path $stage "Payload\Admin\Cli") -Recurse -Force
-        New-Item -Path (Join-Path $stage "Payload\Admin\Tools") -ItemType Directory -Force | Out-Null
-        Copy-Item -Path (Join-Path $buildRoot "RouteKeeper\*") -Destination (Join-Path $stage "Payload\Admin\Tools") -Recurse -Force
-    }
-    Write-SignedReleaseManifest -Stage $stage -Role $definition.Role -Architecture "x64" -IncludeAdmin $definition.IncludeAdmin
+    Copy-Item -LiteralPath (Join-Path $buildRoot "Agent\Taildesk.Agent.exe") -Destination (Join-Path $stage "Payload\Agent")
+    Copy-Item -LiteralPath (Join-Path $buildRoot "Uninstaller\Uninstall-Opticon.exe") -Destination (Join-Path $stage "Payload\Uninstall")
+    Write-SignedReleaseManifest -Stage $stage -Role $definition.Role -Architecture "x64"
     $fileName = "opticon-bundle-$Version-$($definition.Suffix)-$Runtime.zip"
     $destination = Join-Path $artifactDirectory $fileName
     $temporaryDestination = "$destination.new.zip"
@@ -1022,7 +982,7 @@ foreach ($definition in $definitions) {
         $_.role -eq $record.role -and $_.architecture -eq $record.architecture -and $_.version -eq $record.version
     })
     if ($sameRelease.Count -gt 1) { throw "The outer manifest declares $($record.role) $Version more than once." }
-    if ($sameRelease.Count -eq 1 -and
+    if (-not $ForceRedeploy -and $sameRelease.Count -eq 1 -and
         (([long]$sameRelease[0].size -ne [long]$record.size) -or
          -not ([string]$sameRelease[0].sha256).Equals([string]$record.sha256, [StringComparison]::OrdinalIgnoreCase))) {
         Remove-Item -LiteralPath $temporaryDestination -Force
@@ -1033,6 +993,9 @@ foreach ($definition in $definitions) {
 }
 }
 
+# The source-only publisher remains available for legacy release maintenance,
+# but the device-bundle publisher deliberately skips every source-build input.
+if ($SourceOnly) {
 # Build a separate, immutable source archive.  Only this explicit allowlist is
 # shipped; bin/obj/artifacts, local configuration, credentials, and repository
 # metadata can never enter the source release by accident.
@@ -1111,7 +1074,7 @@ foreach ($package in $offlinePackages) {
 }
 New-Item -Path (Join-Path $sourceStage 'assets') -ItemType Directory -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'assets\opticon.ico') -Destination (Join-Path $sourceStage 'assets\opticon.ico')
-$sourceProjects = @('Taildesk.Shared', 'Taildesk.Setup', 'Taildesk.Agent', 'Taildesk.UpdateGuardian', 'Taildesk.Admin', 'Taildesk.Cli', 'Taildesk.RouteKeeper')
+$sourceProjects = @('Taildesk.Shared', 'Taildesk.Setup', 'Taildesk.Agent', 'Taildesk.Uninstaller', 'Taildesk.UpdateGuardian', 'Taildesk.Admin', 'Taildesk.Cli', 'Taildesk.RouteKeeper')
 foreach ($projectName in $sourceProjects) {
     $sourceProject = Join-Path $repo "src\$projectName"
     $targetProject = Join-Path $sourceStage "src\$projectName"
@@ -1234,6 +1197,7 @@ if ($SourceOnly) {
         Remove-Item -LiteralPath $retiredLauncher.FullName -Force
     }
 }
+}
 
 if ($SourceOnly) {
     # Schema 2 is intentionally an all-source manifest. Existing binary,
@@ -1245,6 +1209,7 @@ if ($SourceOnly) {
         artifacts = @($sourceRecord)
     }
 } else {
+$manifest.schemaVersion = 1
 $candidates = @($existingBundles | Where-Object {
     $existing = $_
     -not ($records | Where-Object {
@@ -1292,11 +1257,7 @@ $retainedBootstraps = @($manifest.artifacts | Where-Object {
     (Test-ProductionArtifactTrust $_) -and
     (Get-ArtifactString $_ 'signerThumbprint') -eq $ProductCertificateThumbprint
 })
-$retainedSources = @($manifest.artifacts | Where-Object {
-    $_.product -eq 'OpticonSource' -and $_.version -ne $Version -and
-    (Test-ProductionArtifactTrust $_)
-})
-foreach ($artifact in @($retainedBootstraps) + @($retainedSources)) {
+foreach ($artifact in @($retainedBootstraps)) {
     if ([string]::IsNullOrWhiteSpace([string]$artifact.downloadUrl)) {
         $path = Get-LocalArtifactPath ([string]$artifact.file)
         $file = Get-Item -LiteralPath $path
@@ -1306,7 +1267,7 @@ foreach ($artifact in @($retainedBootstraps) + @($retainedSources)) {
         }
     }
 }
-$manifest.artifacts = @($manifest.artifacts | Where-Object { $_.product -notin @("OpticonBundle", "OpticonBootstrap", "OpticonSource") }) + @($retained) + @($retainedBootstraps) + @($bootstrapRecord) + @($retainedSources) + @($sourceRecord)
+$manifest.artifacts = @($manifest.artifacts | Where-Object { $_.product -notin @("OpticonBundle", "OpticonBootstrap", "OpticonSource") }) + @($retained) + @($retainedBootstraps) + @($bootstrapRecord)
 }
 $json = $manifest | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($manifestPath, $json, (New-Object Text.UTF8Encoding($false)))

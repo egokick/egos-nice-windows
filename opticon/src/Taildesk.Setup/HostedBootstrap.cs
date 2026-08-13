@@ -26,8 +26,8 @@ internal static class HostedBootstrapper
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// The source archive contains this publisher-signed launcher. The invite
-    /// page may also serve the exact same bytes under an invitation-bound local
+    /// The release publishes this signed launcher. The invite page serves the
+    /// exact same bytes under an invitation-bound local
     /// filename. The fragment key is placed into that filename by browser-side
     /// JavaScript and is never sent to the gateway.
     /// </summary>
@@ -43,10 +43,10 @@ internal static class HostedBootstrapper
         string? executablePath)
     {
         if (!IsSourceLauncher(executablePath))
-            throw new InvalidDataException("The source-only installer must be launched from OpticonSourceLauncher.exe.");
+            throw new InvalidDataException("The Opticon installer filename is invalid. Download it from a current invitation link.");
         if (arguments.Any(argument => !argument.StartsWith("--invite-url=", StringComparison.OrdinalIgnoreCase)
                                       && !argument.StartsWith("--source-archive=", StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidDataException("The source-only launcher accepts only --invite-url and --source-archive.");
+            throw new InvalidDataException("The Opticon installer accepts only its invitation URL.");
         var bound = BoundSourceLauncherPattern.Match(Path.GetFileName(executablePath) ?? string.Empty);
         var invitationUrl = ReadOptionalArgument(arguments, "--invite-url=")
                             ?? (bound.Success
@@ -60,11 +60,11 @@ internal static class HostedBootstrapper
             || !invitation.AbsolutePath.StartsWith("/opticon/i/", StringComparison.Ordinal)
             || invitation.AbsolutePath["/opticon/i/".Length..].Contains('/')
             || invitation.Fragment.Length <= 1)
-            throw new InvalidDataException("The source-only launcher was not given a canonical Opticon invitation URL.");
+            throw new InvalidDataException("The installer was not given a canonical Opticon invitation URL.");
         var publicId = invitation.AbsolutePath["/opticon/i/".Length..];
         var privateKey = invitation.Fragment[1..];
         if (!PublicIdPattern.IsMatch(publicId) || !PrivateKeyPattern.IsMatch(privateKey))
-            throw new InvalidDataException("The source-only launcher invitation URL is malformed.");
+            throw new InvalidDataException("The installer invitation URL is malformed.");
         if (sourceArchive is not null)
         {
             sourceArchive = Path.GetFullPath(sourceArchive);
@@ -78,16 +78,14 @@ internal static class HostedBootstrapper
 
     internal static async Task<int> LaunchSourceOnlyAsync(SourceBootstrapRequest bootstrap, Action<string> report)
     {
-        var launcherPath = Environment.ProcessPath
-                           ?? throw new InvalidOperationException("The Opticon source launcher path is unavailable.");
-        return await SourceBootstrapInstaller.RunAsync(bootstrap, launcherPath, report);
+        return await SimpleDeviceInstaller.RunAsync(bootstrap, report);
     }
 
     private static string? ReadOptionalArgument(IReadOnlyList<string> arguments, string prefix)
     {
         var matches = arguments.Where(argument => argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToArray();
         if (matches.Length > 1 || (matches.Length == 1 && string.IsNullOrWhiteSpace(matches[0][prefix.Length..])))
-            throw new InvalidDataException($"The source-only launcher accepts at most one {prefix[..^1]} argument.");
+            throw new InvalidDataException($"The Opticon installer accepts at most one {prefix[..^1]} argument.");
         return matches.Length == 0 ? null : matches[0][prefix.Length..].Trim('"');
     }
 

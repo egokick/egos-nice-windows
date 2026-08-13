@@ -12,7 +12,7 @@ namespace Taildesk.Shared;
 /// to that signer's encrypted hash. All identity decisions come from native
 /// provider/message state; no path-based certificate lookup is used.
 /// </summary>
-internal static class BoundWindowsProductSignatureVerifier
+public static class BoundWindowsProductSignatureVerifier
 {
     private const int Success = 0;
     private const int CertificateUntrustedRoot = unchecked((int)0x800B0109);

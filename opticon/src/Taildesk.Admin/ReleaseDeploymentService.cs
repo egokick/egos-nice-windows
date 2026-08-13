@@ -40,6 +40,7 @@ public sealed class ReleaseInvitationSummary
     public DateTimeOffset ExpiresAt { get; set; }
     public string ReleaseVersion { get; set; } = string.Empty;
     public string SourceFile { get; set; } = string.Empty;
+    public string BundleFile { get; set; } = string.Empty;
     public string InstallProtocol { get; set; } = string.Empty;
     public bool CanRevoke { get; set; }
     public string BlockedReason { get; set; } = string.Empty;
@@ -60,14 +61,14 @@ public sealed record DeployedReleaseArtifactRow(
 
 /// <summary>
 /// Calls the gateway's signed preflight/revocation endpoints and delegates the
-/// actual S3/CloudFront publish to the existing, audited source-release script.
+/// actual S3/CloudFront publish to the existing audited release script.
 /// This process never receives AWS credentials or private signing material as
 /// command-line arguments; the established publisher obtains them from the
 /// operator's normal secure Windows/AWS configuration.
 /// </summary>
 public sealed class ReleaseDeploymentService
 {
-    public const int RequiredGatewayReleaseProtocol = 3;
+    public const int RequiredGatewayReleaseProtocol = 4;
     private const string ReleaseScriptRelativePath = "scripts\\Ensure-OpticonTargetRelease.ps1";
     private const string PublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonSourceRelease.ps1";
     private const string BundlePublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonBundles.ps1";
@@ -123,10 +124,8 @@ public sealed class ReleaseDeploymentService
     }
 
     /// <summary>
-    /// Publishes the gateway image after a source archive has been staged. The
-    /// source-only invitation's signed launcher is a sidecar copied into that
-    /// image, so a source release cannot become live until this deployment has
-    /// completed successfully.
+    /// Publishes the gateway image after the device bundles have been staged,
+    /// before the new binary manifest is made live.
     /// </summary>
     public async Task DeployGatewayForStagedReleaseAsync(
         string targetVersion,
@@ -159,7 +158,7 @@ public sealed class ReleaseDeploymentService
     }
 
     /// <summary>
-    /// Builds, signs, uploads, and fully verifies the immutable source archive
+    /// Builds, signs, uploads, and fully verifies the immutable device bundles
     /// without changing the live invite manifest. This must finish before any
     /// accepted invitation is revoked, so a build/S3/CloudFront failure leaves
     /// the previous invite release completely usable.
@@ -175,7 +174,7 @@ public sealed class ReleaseDeploymentService
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
         ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
-        progress?.Report($"Staging and verifying immutable source release {normalizedTarget}…");
+        progress?.Report($"Staging and verifying signed device bundles {normalizedTarget}…");
         var publisherOutput = progress is null ? null : new Progress<string>(line => progress.Report("[publisher] " + line));
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
@@ -186,8 +185,8 @@ public sealed class ReleaseDeploymentService
             outputProgress: publisherOutput);
         if (!result.Succeeded)
             throw new InvalidOperationException(
-                "The Opticon source archive could not be staged and verified. " + DescribePublisherFailure(result));
-        progress?.Report($"Immutable source release {normalizedTarget} is staged and verified.");
+                "The Opticon device bundles could not be staged and verified. " + DescribePublisherFailure(result));
+        progress?.Report($"Signed device bundles {normalizedTarget} are staged and verified.");
     }
 
     public async Task PublishAsync(
@@ -203,7 +202,7 @@ public sealed class ReleaseDeploymentService
         ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
         await VerifyStagedPublisherAsync(prerequisites, normalizedTarget, cancellationToken);
 
-        progress?.Report($"Committing staged source release {normalizedTarget} to the invite manifest…");
+        progress?.Report($"Publishing staged device bundles {normalizedTarget} to the invite manifest…");
         var environment = PublisherEnvironment(prerequisites);
         var publisherOutput = progress is null ? null : new Progress<string>(line => progress.Report("[publisher] " + line));
         var result = await ProcessRunner.RunAsync(
@@ -216,7 +215,7 @@ public sealed class ReleaseDeploymentService
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The verified Opticon staged-release commit did not complete. " + DescribePublisherFailure(result));
-        progress?.Report($"Source release {normalizedTarget} was committed and verified.");
+        progress?.Report($"Device release {normalizedTarget} was published and verified.");
     }
 
     public async Task VerifyPublisherReadinessAsync(
@@ -493,41 +492,9 @@ public sealed class ReleaseDeploymentService
 
     private static string CreateGatewayDeployIgnoreFile(string gatewayDirectory)
     {
-        var manifestPath = RequireRegularFile(
-            Path.Combine(gatewayDirectory, "artifacts", "manifest.json"), "Opticon gateway release manifest");
-        using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
-        var root = manifest.RootElement;
-        if (!root.TryGetProperty("schemaVersion", out var schemaVersion)
-            || schemaVersion.GetInt32() != 2
-            || !root.TryGetProperty("artifacts", out var artifacts)
-            || artifacts.ValueKind != JsonValueKind.Array)
-            throw new InvalidDataException("The gateway release manifest is not a source-only manifest.");
-
-        var sourceLaunchers = artifacts.EnumerateArray()
-            .Where(artifact => artifact.TryGetProperty("product", out var product)
-                               && product.GetString() == "OpticonSource")
-            .Select(artifact => artifact.TryGetProperty("sourceLauncherFile", out var launcher)
-                ? launcher.GetString() ?? string.Empty
-                : string.Empty)
-            .ToArray();
-        if (sourceLaunchers.Length != 1
-            || !System.Text.RegularExpressions.Regex.IsMatch(
-                sourceLaunchers[0], @"^opticon-source-launcher-[0-9]+\.[0-9]+\.[0-9]+\.exe$",
-                System.Text.RegularExpressions.RegexOptions.CultureInvariant))
-            throw new InvalidDataException("The source-only manifest does not declare exactly one safe gateway launcher.");
-        _ = RequireRegularFile(
-            Path.Combine(gatewayDirectory, "artifacts", sourceLaunchers[0]), "active Opticon source launcher");
-
         var baseIgnore = RequireRegularFile(Path.Combine(gatewayDirectory, ".dockerignore"), "Opticon gateway Docker ignore file");
         var temporary = Path.Combine(Path.GetTempPath(), $"opticon-fly-{Guid.NewGuid():N}.dockerignore");
-        var lines = new[]
-        {
-            File.ReadAllText(baseIgnore).TrimEnd(),
-            "# Include only the launcher selected by the current source-only manifest.",
-            "artifacts/opticon-source-launcher-*.exe",
-            $"!artifacts/{sourceLaunchers[0]}"
-        };
-        File.WriteAllText(temporary, string.Join(Environment.NewLine, lines) + Environment.NewLine, new UTF8Encoding(false));
+        File.WriteAllText(temporary, File.ReadAllText(baseIgnore).TrimEnd() + Environment.NewLine, new UTF8Encoding(false));
         return temporary;
     }
 
@@ -681,7 +648,7 @@ public sealed class ReleaseDeploymentService
             || preflight.GatewayReleaseProtocol < 0
             || !string.Equals(preflight.TargetVersion, targetVersion, StringComparison.Ordinal)
             || preflight.Manifest is null
-            || preflight.Manifest.SchemaVersion != 2
+            || preflight.Manifest.SchemaVersion is not (1 or 2)
             || preflight.Manifest.Artifacts.Count == 0)
             throw new InvalidDataException("The Opticon release gateway returned an unsupported deployment preflight.");
 
@@ -689,24 +656,52 @@ public sealed class ReleaseDeploymentService
         if (!preflight.Manifest.Artifacts.Any(item => string.Equals(item.Version, deployed, StringComparison.Ordinal)))
             throw new InvalidDataException("The Opticon release gateway preflight has no deployed artifact for its reported version.");
 
-        foreach (var artifact in preflight.Manifest.Artifacts)
+        if (preflight.Manifest.SchemaVersion == 2)
         {
-            var version = NormalizeStableVersion(artifact.Version);
-            if (!string.Equals(artifact.Product, "OpticonSource", StringComparison.Ordinal)
-                || !string.Equals(artifact.Architecture, "source", StringComparison.Ordinal)
-                || !string.Equals(artifact.File, $"opticon-source-{version}.zip", StringComparison.Ordinal)
-                || artifact.Size is < 1024 or > 256L * 1024 * 1024
-                || !IsSha256(artifact.Sha256)
-                || !IsSha256(artifact.SourceManifestSha256)
-                || !string.Equals(artifact.SdkVersion, OpticonSourceReleaseClient.SupportedSdkVersion, StringComparison.Ordinal)
-                || !string.Equals(artifact.RuntimeVersion, OpticonSourceReleaseClient.SupportedRuntimeVersion, StringComparison.Ordinal)
-                || !string.Equals(artifact.SourceManifestKeyId, SourceReleaseSigning.KeyId, StringComparison.Ordinal)
-                || !string.Equals(artifact.SigningProfile, BuildSigningTrust.ProfileName, StringComparison.Ordinal)
-                || !string.Equals(artifact.ProductSignerThumbprint, ProductSigning.CertificateThumbprint, StringComparison.Ordinal)
-                || artifact.TargetRuntimes is null
-                || !artifact.TargetRuntimes.SequenceEqual(["win-x64", "win-arm64"], StringComparer.Ordinal)
-                || !IsImmutableCloudFrontUrl(artifact.DownloadUrl, version, artifact.File))
-                throw new InvalidDataException("The Opticon release gateway preflight contains invalid source artifact metadata.");
+            foreach (var artifact in preflight.Manifest.Artifacts)
+            {
+                var version = NormalizeStableVersion(artifact.Version);
+                if (!string.Equals(artifact.Product, "OpticonSource", StringComparison.Ordinal)
+                    || !string.Equals(artifact.Architecture, "source", StringComparison.Ordinal)
+                    || !string.Equals(artifact.File, $"opticon-source-{version}.zip", StringComparison.Ordinal)
+                    || artifact.Size is < 1024 or > 256L * 1024 * 1024
+                    || !IsSha256(artifact.Sha256)
+                    || !IsSha256(artifact.SourceManifestSha256)
+                    || !string.Equals(artifact.SourceManifestKeyId, SourceReleaseSigning.KeyId, StringComparison.Ordinal)
+                    || !string.Equals(artifact.SigningProfile, BuildSigningTrust.ProfileName, StringComparison.Ordinal)
+                    || !string.Equals(artifact.ProductSignerThumbprint, ProductSigning.CertificateThumbprint, StringComparison.Ordinal)
+                    || !IsImmutableCloudFrontUrl(artifact.DownloadUrl, version, artifact.File))
+                    throw new InvalidDataException("The Opticon release gateway preflight contains invalid legacy source artifact metadata.");
+            }
+        }
+        else
+        {
+            var release = preflight.Manifest.Artifacts.Where(artifact =>
+                string.Equals(artifact.Version, deployed, StringComparison.Ordinal)
+                && artifact.Product is "OpticonBundle" or "OpticonBootstrap").ToArray();
+            var bundles = release.Where(artifact => artifact.Product == "OpticonBundle").ToArray();
+            var bootstraps = release.Where(artifact => artifact.Product == "OpticonBootstrap").ToArray();
+            if (release.Length != 3 || bundles.Length != 2 || bootstraps.Length != 1
+                || bundles.Select(item => item.Role).ToHashSet().Count != 2
+                || !bundles.Any(item => item.Role == DeviceRole.ManagedOnly)
+                || !bundles.Any(item => item.Role == DeviceRole.ControllerAndManaged)
+                || bootstraps[0].Role is not null)
+                throw new InvalidDataException("The Opticon release gateway preflight is missing the current device bundles or installer.");
+            foreach (var artifact in release)
+            {
+                var suffix = artifact.Role == DeviceRole.ManagedOnly ? "managed" : "controller";
+                var expectedFile = artifact.Product == "OpticonBundle"
+                    ? $"opticon-bundle-{deployed}-{suffix}-win-x64.zip"
+                    : $"opticon-bootstrap-{deployed}.exe";
+                if (artifact.Architecture != "x64" || artifact.File != expectedFile
+                    || artifact.Size is < 1024 or > 512L * 1024 * 1024 || !IsSha256(artifact.Sha256)
+                    || artifact.SourceManifestKeyId != SourceReleaseSigning.KeyId
+                    || artifact.SigningProfile != BuildSigningTrust.ProfileName
+                    || artifact.ProductSignerThumbprint != ProductSigning.CertificateThumbprint
+                    || (artifact.Product == "OpticonBootstrap" && artifact.SignerThumbprint != ProductSigning.CertificateThumbprint)
+                    || !IsImmutableCloudFrontUrl(artifact.DownloadUrl, deployed, artifact.File))
+                    throw new InvalidDataException("The Opticon release gateway preflight contains invalid device artifact metadata.");
+            }
         }
 
         if (preflight.AlreadyDeployed != (!preflight.ForceRedeploy
