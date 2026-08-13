@@ -4,7 +4,7 @@ param(
     [string]$Runtime = "win-x64",
     [ValidateSet("Production", "OwnerManaged")]
     [string]$SigningProfile = "Production",
-    [string]$Version = "1.2.21",
+    [string]$Version = "1.2.22",
     [string]$MinimumGuardianVersion = "1.1.2",
     # SourceOnly is the v2 release path: it produces exactly one signed source
     # archive and deliberately emits no standalone bundle/bootstrap artifact.
@@ -790,6 +790,7 @@ $executables = if ($SourceOnly) {
     [ordered]@{
         Setup = "Taildesk.Setup.exe"
         Agent = "Taildesk.Agent.exe"
+        UpdateGuardian = "Taildesk.UpdateGuardian.exe"
         Uninstaller = "Uninstall-Opticon.exe"
     }
 }
@@ -888,6 +889,7 @@ function Write-SignedReleaseManifest {
     $candidates = @((Get-Item -LiteralPath $setupPath))
     $roots = @(
         (Join-Path $Stage "Payload\Agent"),
+        (Join-Path $Stage "Payload\UpdateGuardian"),
         (Join-Path $Stage "Payload\Uninstall")
     )
     foreach ($root in $roots) {
@@ -959,9 +961,11 @@ if (-not $SourceOnly) {
 foreach ($definition in $definitions) {
     $stage = Join-Path $stageRoot $definition.Suffix
     New-Item -Path (Join-Path $stage "Payload\Agent") -ItemType Directory -Force | Out-Null
+    New-Item -Path (Join-Path $stage "Payload\UpdateGuardian") -ItemType Directory -Force | Out-Null
     New-Item -Path (Join-Path $stage "Payload\Uninstall") -ItemType Directory -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $buildRoot "Setup\Taildesk.Setup.exe") -Destination $stage
     Copy-Item -LiteralPath (Join-Path $buildRoot "Agent\Taildesk.Agent.exe") -Destination (Join-Path $stage "Payload\Agent")
+    Copy-Item -LiteralPath (Join-Path $buildRoot "UpdateGuardian\Taildesk.UpdateGuardian.exe") -Destination (Join-Path $stage "Payload\UpdateGuardian")
     Copy-Item -LiteralPath (Join-Path $buildRoot "Uninstaller\Uninstall-Opticon.exe") -Destination (Join-Path $stage "Payload\Uninstall")
     Write-SignedReleaseManifest -Stage $stage -Role $definition.Role -Architecture "x64"
     $fileName = "opticon-bundle-$Version-$($definition.Suffix)-$Runtime.zip"

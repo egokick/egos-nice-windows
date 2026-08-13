@@ -95,6 +95,11 @@ internal static class SimpleDeviceInstaller
                     TimeSpan.FromSeconds(30), cancellationToken),
                 "Tailscale could not apply exit-node advertisement policy");
 
+            report("Preparing secure recovery...");
+            await InstallCoordinator.EnsureOpenSshServerCapabilityAsync(cancellationToken);
+            if (invite.Role == DeviceRole.ControllerAndManaged)
+                await InstallCoordinator.EnsureOpenSshClientCapabilityAsync(cancellationToken);
+
             report("Installing remote access...");
             var rustDeskArtifact = DependencyArtifacts.RustDesk(architecture);
             var rustDeskInstaller = await DownloadDependencyAsync(http, staging, rustDeskArtifact, cancellationToken);
@@ -120,9 +125,11 @@ internal static class SimpleDeviceInstaller
             RequireSuccess(await ProcessRunner.RunAsync("sc.exe", ["start", "RustDesk"],
                 TimeSpan.FromSeconds(30), cancellationToken), "RustDesk could not start");
 
-            report("Installing Opticon Agent...");
+            report("Installing Opticon Agent and recovery guardian...");
             var sourceAgent = Path.Combine(release, "Payload", "Agent", "Taildesk.Agent.exe");
+            var sourceGuardian = Path.Combine(release, "Payload", "UpdateGuardian", "Taildesk.UpdateGuardian.exe");
             var sourceUninstaller = Path.Combine(release, "Payload", "Uninstall", "Uninstall-Opticon.exe");
+            await InstallGuardianAsync(sourceGuardian, cancellationToken);
             Directory.CreateDirectory(AppPaths.AgentInstallDirectory);
             var installedAgent = Path.Combine(AppPaths.AgentInstallDirectory, "Taildesk.Agent.exe");
             File.Copy(sourceAgent, installedAgent, overwrite: false);
@@ -209,11 +216,12 @@ internal static class SimpleDeviceInstaller
         Directory.CreateDirectory(destination);
         using var archive = ZipFile.OpenRead(archivePath);
         var files = archive.Entries.Where(entry => !string.IsNullOrEmpty(entry.Name)).ToArray();
-        if (files.Length != 5) throw new InvalidDataException("The Opticon device bundle has an invalid file count.");
+        if (files.Length != 6) throw new InvalidDataException("The Opticon device bundle has an invalid file count.");
         var entries = files.ToDictionary(entry => Normalize(entry.FullName), StringComparer.Ordinal);
         var expected = new HashSet<string>(StringComparer.Ordinal)
         {
             "Taildesk.Setup.exe", "Payload/Agent/Taildesk.Agent.exe",
+            "Payload/UpdateGuardian/Taildesk.UpdateGuardian.exe",
             "Payload/Uninstall/Uninstall-Opticon.exe", "release-manifest.json", "release-manifest.sig"
         };
         if (!entries.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(expected))
@@ -442,6 +450,50 @@ internal static class SimpleDeviceInstaller
         RequireSuccess(await ProcessRunner.RunAsync("sc.exe",
             ["failure", AgentServiceName, "reset=", "86400", "actions=", "restart/60000/restart/60000/restart/60000"],
             TimeSpan.FromSeconds(20), cancellationToken), "Windows could not configure Agent service recovery");
+    }
+
+    private static async Task InstallGuardianAsync(string source, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(source))
+            throw new FileNotFoundException("The signed Update Guardian payload is missing.", source);
+        await ProductSigning.VerifyAuthenticodeAsync(source, cancellationToken);
+        var version = UpdatePackageVerifier.ParseVersion(UpdatePackageVerifier.NormalizeVersion(
+            FileVersionInfo.GetVersionInfo(source).ProductVersion ?? string.Empty));
+        if (!RemoteAdministrationProtocol.SupportsGuardianWatchdog(version))
+            throw new InvalidDataException(
+                $"The signed Update Guardian {version} does not support the required watchdog contract.");
+
+        Directory.CreateDirectory(AppPaths.UpdateGuardianInstallDirectory);
+        var installed = Path.Combine(AppPaths.UpdateGuardianInstallDirectory, "Taildesk.UpdateGuardian.exe");
+        File.Copy(source, installed, overwrite: false);
+        await ProductSigning.VerifyAuthenticodeAsync(installed, cancellationToken);
+
+        RequireSuccess(await ProcessRunner.RunAsync("schtasks.exe",
+                ["/Create", "/TN", RemoteAdministrationProtocol.GuardianTaskName,
+                    "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", $"\"{installed}\"", "/F"],
+                TimeSpan.FromSeconds(30), cancellationToken),
+            "Windows could not create the fail-safe Update Guardian task");
+        RequireSuccess(await ProcessRunner.RunAsync("schtasks.exe",
+                ["/Create", "/TN", RemoteAdministrationProtocol.GuardianWatchdogTaskName,
+                    "/SC", "MINUTE", "/MO", "1", "/RU", "SYSTEM", "/RL", "HIGHEST",
+                    "/TR", $"\"{installed}\" {RemoteAdministrationProtocol.GuardianWatchdogArgument}", "/F"],
+                TimeSpan.FromSeconds(30), cancellationToken),
+            "Windows could not create the Update Guardian watchdog task");
+
+        var taskSettings =
+            "$boot=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries " +
+            "-StartWhenAvailable -RestartCount 20 -RestartInterval (New-TimeSpan -Minutes 1) " +
+            "-ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew; " +
+            $"Set-ScheduledTask -TaskName '{RemoteAdministrationProtocol.GuardianTaskName}' -Settings $boot | Out-Null; " +
+            "$watchdog=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries " +
+            "-ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew; " +
+            $"Set-ScheduledTask -TaskName '{RemoteAdministrationProtocol.GuardianWatchdogTaskName}' -Settings $watchdog | Out-Null";
+        var powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+        RequireSuccess(await ProcessRunner.RunAsync(powershell,
+                ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted", "-Command", taskSettings],
+                TimeSpan.FromSeconds(30), cancellationToken),
+            "Windows could not configure the Update Guardian recovery tasks");
     }
 
     private static void RegisterUninstaller(string executable, string version)

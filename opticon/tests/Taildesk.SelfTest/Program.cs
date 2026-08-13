@@ -41,6 +41,7 @@ var tests = new (string Name, Action Body)[]
     ("invitation storage rejects OneDrive", TestPrivateStorage),
     ("dependency downloads are version and hash pinned", TestDependencyPins),
     ("simple installation detaches RustDesk's resident password helper", TestSimpleInstallerRustDeskLifecycle),
+    ("binary invitations install Guardian-backed SSH recovery", TestSimpleInstallerGuardianRecovery),
     ("Tailscale enrollment resets stale settings before applying invitation policy", TestTailscaleEnrollmentArguments),
     ("process runner supports commands with inherited standard handles", TestProcessRunnerWithoutCapture),
     ("process runner applies an exact working directory", TestProcessRunnerWorkingDirectory),
@@ -328,7 +329,8 @@ static void TestInstallerConvergenceContracts()
     Assert(installer.Contains("MachineInstallTransactionPersistence.RecordTailscaleDecision", StringComparison.Ordinal)
            && installer.Contains("TryReadTailscaleStatusAsync", StringComparison.Ordinal)
            && installer.Contains("IsOpticonOwnedAgentTask", StringComparison.Ordinal)
-           && installer.Contains("group=Opticon", StringComparison.Ordinal)
+           && !installer.Contains("\"group=Opticon\"", StringComparison.Ordinal)
+           && installer.Contains("name=Taildesk Agent (Tailscale only)", StringComparison.Ordinal)
            && !installer.Contains("\"name=all\", $\"program={rustDesk}\"", StringComparison.Ordinal)
            && installer.Contains("IsExactFirewallConfigurationAsync", StringComparison.Ordinal),
         "installer does not retain the required Tailscale, task, or owned-firewall convergence behavior");
@@ -941,6 +943,16 @@ static void TestSimpleInstallerRustDeskLifecycle()
     Assert(!simpleInstaller.Contains("\"group=Opticon\"", StringComparison.Ordinal),
         "the simple installer must not pass the unsupported group argument to netsh add rule");
 }
+static void TestSimpleInstallerGuardianRecovery()
+{
+    var simpleInstaller = ReadSource("src", "Taildesk.Setup", "SimpleDeviceInstaller.cs");
+    Assert(simpleInstaller.Contains("\"Payload\", \"UpdateGuardian\", \"Taildesk.UpdateGuardian.exe\"", StringComparison.Ordinal)
+           && simpleInstaller.Contains("InstallGuardianAsync(sourceGuardian", StringComparison.Ordinal)
+           && simpleInstaller.Contains("EnsureOpenSshServerCapabilityAsync", StringComparison.Ordinal)
+           && simpleInstaller.Contains("GuardianTaskName", StringComparison.Ordinal)
+           && simpleInstaller.Contains("GuardianWatchdogTaskName", StringComparison.Ordinal),
+        "the binary invitation installer must provision the stable Guardian, its SYSTEM tasks, and OpenSSH recovery dependency");
+}
 static void TestTailscaleEnrollmentArguments()
 {
     var arguments = TailscaleCommandLine.BuildEnrollmentArguments(
@@ -1090,7 +1102,7 @@ static void TestRustDeskInstallerProfiles()
            && source.Contains("RequireFirewallProfilesSecureAsync", StringComparison.Ordinal)
            && source.Contains("DefaultInboundAction.ToString() -ne 'Block'", StringComparison.Ordinal)
            && source.Contains("AssertExactFirewallConfigurationAsync", StringComparison.Ordinal)
-           && source.Contains("group=Opticon", StringComparison.Ordinal)
+           && !source.Contains("\"group=Opticon\"", StringComparison.Ordinal)
            && source.Contains("IsExactFirewallConfigurationAsync", StringComparison.Ordinal),
         "RustDesk can start before exact firewall isolation and enabled default-block profiles are verified");
     Assert(source.Contains("InstalledDependencyMatchesAsync", StringComparison.Ordinal)
@@ -3139,11 +3151,20 @@ static void TestOpenSshRecoveryDesign()
     var bundleBuilder = ReadSource("fly-headscale", "scripts", "Build-OpticonBundles.ps1");
     var releaseVersion = System.Text.RegularExpressions.Regex.Match(
         ReadSource("Directory.Build.props"), @"<Version>([^<]+)</Version>").Groups[1].Value;
+    var sourceReleaseBuilder = ReadSource("fly-headscale", "scripts", "Build-OpticonSourceRelease.ps1");
+    var sourceReleasePublisher = ReadSource("fly-headscale", "scripts", "Publish-OpticonSourceRelease.ps1");
     Assert(bundleBuilder.Contains($"[string]$Version = \"{releaseVersion}\"", StringComparison.Ordinal),
         "the checked-in hosted release default must match the product version");
+    Assert(sourceReleaseBuilder.Contains($"[string]$Version = '{releaseVersion}'", StringComparison.Ordinal)
+           && sourceReleasePublisher.Contains($"[string]$Version = '{releaseVersion}'", StringComparison.Ordinal),
+        "every checked-in source-release entry point must match the product version");
     Assert(bundleBuilder.Contains("$setupPath", StringComparison.Ordinal)
            && bundleBuilder.Contains("Get-Item -LiteralPath $setupPath", StringComparison.Ordinal),
         "the signed inner release manifest must include the root Setup executable");
+    Assert(bundleBuilder.Contains("UpdateGuardian = \"Taildesk.UpdateGuardian.exe\"", StringComparison.Ordinal)
+           && bundleBuilder.Contains("Payload\\UpdateGuardian", StringComparison.Ordinal)
+           && bundleBuilder.Contains("UpdateGuardian\\Taildesk.UpdateGuardian.exe", StringComparison.Ordinal),
+        "the signed binary device bundle must carry the stable Update Guardian used by SSH recovery");
     Assert(bundleBuilder.Contains("[string]$MinimumGuardianVersion = \"1.1.2\"", StringComparison.Ordinal),
         "the hosted release must permit a watchdog-capable Guardian to install the Agent that performs signed Guardian reconciliation");
     Assert(bundleBuilder.Contains("function Remove-OpticonSdkAnchor", StringComparison.Ordinal)

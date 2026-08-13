@@ -2865,30 +2865,35 @@ public sealed class InstallCoordinator
         await RequireFirewallProfilesSecureAsync(cancellationToken);
         _progress.Report(new InstallProgress(80, "Restricting inbound access to the Tailscale interface…"));
         var agent = Path.Combine(AppPaths.InstallDirectory, "Agent", "Taildesk.Agent.exe");
-        // The Opticon group is the ownership boundary.  Never delete all rules
-        // for a program: administrators may intentionally have their own
-        // RustDesk or Agent policy that must survive an Opticon repair.
-        _ = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "delete", "rule", "group=Opticon"],
-            TimeSpan.FromSeconds(20), cancellationToken);
+        // Exact Opticon rule names are the ownership boundary. Never delete
+        // all rules for a program: administrators may intentionally have
+        // their own RustDesk or Agent policy that must survive a repair.
+        foreach (var ruleName in new[]
+                 {
+                     "Taildesk Agent (Tailscale only)", "RustDesk Direct (Tailscale only)",
+                     "RustDesk External IPv4 Block", "RustDesk External IPv6 Block"
+                 })
+            _ = await RunSystemToolAsync("netsh.exe",
+                ["advfirewall", "firewall", "delete", "rule", $"name={ruleName}"],
+                TimeSpan.FromSeconds(20), cancellationToken);
 
         var agentRule = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=Taildesk Agent (Tailscale only)", "group=Opticon", "dir=in", "action=allow", "protocol=TCP", "localport=45831", $"localip={tailscaleIp}", "remoteip=100.64.0.0/10", $"program={agent}", "profile=any", "enable=yes"],
+            ["advfirewall", "firewall", "add", "rule", "name=Taildesk Agent (Tailscale only)", "dir=in", "action=allow", "protocol=TCP", "localport=45831", $"localip={tailscaleIp}", "remoteip=100.64.0.0/10", $"program={agent}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(agentRule, "Could not create the Opticon agent firewall rule");
 
         var rustDeskRule = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=RustDesk Direct (Tailscale only)", "group=Opticon", "dir=in", "action=allow", "protocol=TCP", "localport=21118", $"localip={tailscaleIp}", "remoteip=100.64.0.0/10", $"program={rustDesk}", "profile=any", "enable=yes"],
+            ["advfirewall", "firewall", "add", "rule", "name=RustDesk Direct (Tailscale only)", "dir=in", "action=allow", "protocol=TCP", "localport=21118", $"localip={tailscaleIp}", "remoteip=100.64.0.0/10", $"program={rustDesk}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(rustDeskRule, "Could not create the RustDesk firewall rule");
 
         var rustDeskExternalV4Block = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=RustDesk External IPv4 Block", "group=Opticon", "dir=out", "action=block", "remoteip=0.0.0.0-100.63.255.255,100.128.0.0-255.255.255.255", $"program={rustDesk}", "profile=any", "enable=yes"],
+            ["advfirewall", "firewall", "add", "rule", "name=RustDesk External IPv4 Block", "dir=out", "action=block", "remoteip=0.0.0.0-100.63.255.255,100.128.0.0-255.255.255.255", $"program={rustDesk}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(rustDeskExternalV4Block, "Could not block RustDesk from non-Tailscale IPv4 destinations");
 
         var rustDeskExternalV6Block = await RunSystemToolAsync("netsh.exe",
-            ["advfirewall", "firewall", "add", "rule", "name=RustDesk External IPv6 Block", "group=Opticon", "dir=out", "action=block", "remoteip=::/1,8000::/1", $"program={rustDesk}", "profile=any", "enable=yes"],
+            ["advfirewall", "firewall", "add", "rule", "name=RustDesk External IPv6 Block", "dir=out", "action=block", "remoteip=::/1,8000::/1", $"program={rustDesk}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
         EnsureSuccess(rustDeskExternalV6Block, "Could not block RustDesk from external IPv6 destinations");
         await AssertExactFirewallConfigurationAsync(tailscaleIp, rustDesk, cancellationToken);
@@ -2909,12 +2914,12 @@ public sealed class InstallCoordinator
         _ = await RunSystemToolAsync(
             "netsh.exe",
             ["advfirewall", "firewall", "delete", "rule",
-                "name=Taildesk Agent (Tailscale only)", "group=Opticon"],
+                "name=Taildesk Agent (Tailscale only)"],
             TimeSpan.FromSeconds(20), cancellationToken);
         var added = await RunSystemToolAsync(
             "netsh.exe",
             ["advfirewall", "firewall", "add", "rule",
-                "name=Taildesk Agent (Tailscale only)", "group=Opticon", "dir=in",
+                "name=Taildesk Agent (Tailscale only)", "dir=in",
                 "action=allow", "protocol=TCP", "localport=45831", $"localip={tailscaleIp}",
                 "remoteip=100.64.0.0/10", $"program={agent}", "profile=any", "enable=yes"],
             TimeSpan.FromSeconds(30), cancellationToken);
@@ -2924,7 +2929,7 @@ public sealed class InstallCoordinator
             "param([string]$ip,[string]$agent);$ErrorActionPreference='Stop';" +
             "$rules=@(Get-NetFirewallRule -DisplayName 'Taildesk Agent (Tailscale only)' -ErrorAction Stop);" +
             "if($rules.Count -ne 1){throw 'Agent firewall rule count drifted'};$r=$rules[0];" +
-            "if(-not $r.Enabled -or $r.Direction.ToString() -ne 'Inbound' -or $r.Action.ToString() -ne 'Allow' -or $r.Profile.ToString() -ne 'Any' -or $r.Group -ne 'Opticon'){throw 'Agent firewall rule contract drifted'};" +
+            "if(-not $r.Enabled -or $r.Direction.ToString() -ne 'Inbound' -or $r.Action.ToString() -ne 'Allow' -or $r.Profile.ToString() -ne 'Any'){throw 'Agent firewall rule contract drifted'};" +
             "$app=@(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r);if($app.Count -ne 1 -or -not $app[0].Program.Equals($agent,[StringComparison]::OrdinalIgnoreCase)){throw 'Agent firewall application drifted'};" +
             "$pf=@(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r);if($pf.Count -ne 1 -or $pf[0].Protocol.ToString() -ne 'TCP' -or $pf[0].LocalPort.ToString() -ne '45831'){throw 'Agent firewall port drifted'};" +
             "$af=@(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r);$remote=(@($af[0].RemoteAddress)-join ',');$local=(@($af[0].LocalAddress)-join ',');" +
@@ -2975,7 +2980,7 @@ public sealed class InstallCoordinator
             : InstallerEnsureResult.Repaired(
                 "EnsureFirewallPolicyAsync",
                 "Exactly the Opticon-owned firewall rules are present and restricted to the authenticated Tailscale identity.",
-                "Recreated the Opticon firewall rule group without touching user-owned rules.");
+                "Recreated the exact Opticon firewall rules without touching user-owned rules.");
         await RecordEnsureOutcomeAsync(result, cancellationToken,
             wasReady ? null : "OpticonFirewallRules");
         return result;
@@ -3025,7 +3030,7 @@ public sealed class InstallCoordinator
             "param([string]$ip,[string]$rust,[string]$agent);$ErrorActionPreference='Stop';" +
             "function Check([string]$name,[string]$direction,[string]$action,[string]$program,[string]$protocol,[string]$port,[string]$remote,[string]$local){" +
             "$rules=@(Get-NetFirewallRule -DisplayName $name -ErrorAction Stop);if($rules.Count -ne 1){throw ('Firewall rule count drifted: '+$name)};$r=$rules[0];" +
-            "if(-not $r.Enabled -or $r.Direction.ToString() -ne $direction -or $r.Action.ToString() -ne $action -or $r.Profile.ToString() -ne 'Any' -or $r.Group -ne 'Opticon'){throw ('Firewall rule contract drifted: '+$name)};" +
+            "if(-not $r.Enabled -or $r.Direction.ToString() -ne $direction -or $r.Action.ToString() -ne $action -or $r.Profile.ToString() -ne 'Any'){throw ('Firewall rule contract drifted: '+$name)};" +
             "$app=@(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r);if($app.Count -ne 1 -or -not $app[0].Program.Equals($program,[StringComparison]::OrdinalIgnoreCase)){throw ('Firewall application drifted: '+$name)};" +
             "$pf=@(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r);if($pf.Count -ne 1 -or $pf[0].Protocol.ToString() -ne $protocol -or ($port -and $pf[0].LocalPort.ToString() -ne $port)){throw ('Firewall port drifted: '+$name)};" +
             "$af=@(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r);$actual=(@($af[0].RemoteAddress) -join ',');$actualLocal=(@($af[0].LocalAddress) -join ',');if($af.Count -ne 1 -or -not (($remote -split '\\|') -contains $actual) -or ($local -and $actualLocal -ne $local)){throw ('Firewall address drifted: '+$name)}};" +
