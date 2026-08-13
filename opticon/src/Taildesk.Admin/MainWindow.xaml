@@ -415,7 +415,7 @@
                                         <Button Content="{Binding ReleaseDeploymentLogsToggleText}" Click="ToggleReleaseDeploymentLogs_Click" />
                                         <Button Margin="8,0,0,0" Content="Copy displayed logs" Click="CopyReleaseDeploymentLogs_Click" />
                                     </StackPanel>
-                                    <TextBox Margin="0,7,0,0" Text="{Binding ReleaseDeploymentLogText}" MaxHeight="220" MinHeight="94"
+                                    <TextBox Margin="0,7,0,0" Text="{Binding ReleaseDeploymentLogText, Mode=OneWay}" MaxHeight="220" MinHeight="94"
                                              IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
                                              Background="#0D0F12" BorderBrush="{StaticResource BorderBrush}" Foreground="#C8D0D8"
                                              FontFamily="Cascadia Mono,Consolas" FontSize="11" />

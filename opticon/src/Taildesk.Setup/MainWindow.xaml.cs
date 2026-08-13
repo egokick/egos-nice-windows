@@ -13,6 +13,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _cancellation;
     private bool _installationRunning;
     private bool _maintenanceMode;
+    private bool _sourceLauncherMode;
     private bool _sourceAttestedAutomaticInstall;
     private SetupResumeContext? _resumeContext;
     private string? _sourceAttestationPath;
@@ -42,6 +43,9 @@ public partial class MainWindow : Window
         try
         {
             var arguments = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            _sourceLauncherMode = HostedBootstrapper.IsSourceLauncher(Environment.ProcessPath);
+            var replaceExisting = arguments.Any(argument =>
+                argument.Equals("--replace-existing", StringComparison.OrdinalIgnoreCase));
             if (arguments.Any(argument => argument.Equals("--resume", StringComparison.OrdinalIgnoreCase)))
             {
                 _resumeContext = await SetupResumeCoordinator.LoadForCurrentProcessAsync(CancellationToken.None)
@@ -53,20 +57,23 @@ public partial class MainWindow : Window
                                              || _resumeContext is not null;
             if (_sourceAttestedAutomaticInstall)
                 Environment.ExitCode = 1;
+            if (replaceExisting && (_resumeContext is not null || !_sourceAttestedAutomaticInstall))
+                throw new InvalidDataException(
+                    "Existing-install replacement is allowed only for the initial authenticated source-build handoff.");
             AppendLog($"Opticon Setup {typeof(MainWindow).Assembly.GetName().Version} started.");
             AppendLog("Executable: " + (Environment.ProcessPath ?? "unavailable"));
             AppendLog("Launch inputs: " + DescribeLaunchInputs(arguments));
-            if (HostedBootstrapper.IsSourceLauncher(Environment.ProcessPath))
+            if (_sourceLauncherMode)
             {
                 Environment.ExitCode = 1;
                 var bootstrap = HostedBootstrapper.ParseSourceLaunch(arguments, Environment.ProcessPath);
                 StatusText.Text = "Verifying the pinned Opticon source release...";
-                await HostedBootstrapper.LaunchSourceOnlyAsync(bootstrap, message =>
+                var handoffExitCode = await HostedBootstrapper.LaunchSourceOnlyAsync(bootstrap, message =>
                 {
                     StatusText.Text = message;
                     AppendLog(message);
                 });
-                Environment.ExitCode = 0;
+                Environment.ExitCode = handoffExitCode;
                 Close();
                 return;
             }
@@ -125,6 +132,26 @@ public partial class MainWindow : Window
                     _sourceAttestationPath ?? string.Empty, _invitePath, _invite, AppContext.BaseDirectory,
                     validation, CancellationToken.None);
                 AppendLog($"Authenticated local source build {_invite.ReleaseVersion} was reverified after elevation.");
+                if (replaceExisting)
+                {
+                    var replacingValidatedLegacyInstallation =
+                        await LegacyOpticonRemoval.PreflightLegacyInstallationIfPresentAsync();
+                    var replacementPreflight = await SetupPreflight.DiscoverElevatedAsync(
+                        _invite,
+                        AppContext.BaseDirectory,
+                        CancellationToken.None,
+                        replacingValidatedLegacyInstallation);
+                    ReportReplacementPreflight(replacementPreflight);
+                    if (replacementPreflight.IsBlocked)
+                        throw new SetupPreflightBlockedException(replacementPreflight);
+                    AppendLog(
+                        "Elevated replacement preflight completed without changing installed files or tasks.");
+                    await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync(message =>
+                    {
+                        StatusText.Text = message;
+                        AppendLog(message);
+                    });
+                }
             }
             else if (sourceAttestationArgument is not null)
             {
@@ -141,11 +168,16 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            InstallButton.IsEnabled = false;
+            if (_sourceAttestedAutomaticInstall)
+                TryRollbackSourceProvenance();
             StatusText.Text = _maintenanceMode
                 ? "Maintenance could not validate this selected device."
                 : "The invitation cannot be used.";
             AppendException(exception);
+            if (_sourceLauncherMode || _sourceAttestedAutomaticInstall)
+                ConfigureFailureAction(requireRelaunch: true);
+            else
+                InstallButton.IsEnabled = false;
         }
     }
 
@@ -173,6 +205,7 @@ public partial class MainWindow : Window
 
         try
         {
+            InstallResult? installResult = null;
             if (_maintenanceMode)
             {
                 var maintenance = new MaintenanceBootstrapCoordinator(
@@ -188,17 +221,20 @@ public partial class MainWindow : Window
                     _invite!, AppContext.BaseDirectory, progress,
                     allowTailscaleReauthentication: false,
                     resumeContext: GetContinuationContext());
-                await installer.InstallAsync(_cancellation.Token);
+                var result = await installer.InstallAsync(_cancellation.Token);
+                installResult = result;
                 await ClearResumeContinuationAsync();
-                MarkAutomaticInstallSucceeded();
-                StatusText.Text = "Connected. This machine is ready.";
+                ApplyInstallResult(result);
             }
-            AppendLog("Setup finished successfully.");
+            AppendLog(_maintenanceMode
+                ? "Setup finished successfully."
+                : "Setup finished. Review any warnings above.");
             InstallButton.Content = "Close";
             InstallButton.IsEnabled = true;
             InstallButton.Click -= InstallButton_Click;
             InstallButton.Click += (_, _) => Close();
-            if (!_maintenanceMode)
+            if (!_maintenanceMode && installResult is not null
+                && CanDiscardInvitation(installResult))
             {
                 try { File.Delete(_invitePath); } catch { }
             }
@@ -230,17 +266,19 @@ public partial class MainWindow : Window
                         _invite!, AppContext.BaseDirectory, progress,
                         allowTailscaleReauthentication: true,
                         resumeContext: GetContinuationContext());
-                    await installer.InstallAsync(_cancellation.Token);
+                    var result = await installer.InstallAsync(_cancellation.Token);
                     await ClearResumeContinuationAsync();
-                    MarkAutomaticInstallSucceeded();
-                    AppendLog("Setup finished successfully.");
+                    ApplyInstallResult(result);
+                    AppendLog("Setup finished. Review any warnings above.");
                     InstallProgress.Value = 100;
-                    StatusText.Text = "Connected. This machine is ready.";
                     InstallButton.Content = "Close";
                     InstallButton.IsEnabled = true;
                     InstallButton.Click -= InstallButton_Click;
                     InstallButton.Click += (_, _) => Close();
-                    try { File.Delete(_invitePath); } catch { }
+                    if (CanDiscardInvitation(result))
+                    {
+                        try { File.Delete(_invitePath); } catch { }
+                    }
                     return;
                 }
                 catch (Exception retryException)
@@ -251,16 +289,14 @@ public partial class MainWindow : Window
                 }
             }
             TryRollbackSourceProvenance();
-            InstallButton.Content = "Try again";
-            InstallButton.IsEnabled = true;
+            ConfigureFailureAction(_sourceAttestedAutomaticInstall);
         }
         catch (Exception exception)
         {
             TryRollbackSourceProvenance();
             StatusText.Text = "Installation stopped. See the error below.";
             AppendException(exception);
-            InstallButton.Content = "Try again";
-            InstallButton.IsEnabled = true;
+            ConfigureFailureAction(_sourceAttestedAutomaticInstall);
         }
         finally
         {
@@ -275,11 +311,89 @@ public partial class MainWindow : Window
         catch (Exception exception) { AppendLog("WARNING: protected source provenance rollback failed: " + exception.Message); }
     }
 
+    private void ConfigureFailureAction(bool requireRelaunch)
+    {
+        InstallButton.Click -= InstallButton_Click;
+        InstallButton.Click -= CloseAfterFailure_Click;
+        if (requireRelaunch)
+        {
+            AppendLog(
+                "RETRY REQUIRED: Close Setup and launch the authenticated invitation installer again. " +
+                "This window will not reuse rolled-back source trust.");
+            InstallButton.Content = "Close";
+            InstallButton.Click += CloseAfterFailure_Click;
+        }
+        else
+        {
+            InstallButton.Content = "Try again";
+            InstallButton.Click += InstallButton_Click;
+        }
+        InstallButton.IsEnabled = true;
+    }
+
+    private void CloseAfterFailure_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void ReportReplacementPreflight(InstallerPreflightReport report)
+    {
+        foreach (var finding in report.Findings)
+        {
+            var prefix = finding.Severity switch
+            {
+                InstallerPreflightSeverity.Blocked => "Blocked",
+                InstallerPreflightSeverity.Repair => "Planned repair",
+                _ => "Preflight"
+            };
+            var message = $"{prefix}: {finding.Area} — {finding.Detail}";
+            StatusText.Text = message;
+            AppendLog(message);
+        }
+    }
+
     private void MarkAutomaticInstallSucceeded()
     {
         if (_sourceAttestedAutomaticInstall)
             Environment.ExitCode = 0;
     }
+
+    private void ApplyInstallResult(InstallResult result)
+    {
+        foreach (var warning in result.Warnings)
+            AppendLog($"DEFERRED REPAIR: {warning.Operation} — {warning.Detail}");
+        if (result.RemoteDesktopReady)
+        {
+            MarkAutomaticInstallSucceeded();
+            StatusText.Text = result.HasWarnings
+                ? "Remote desktop is ready. Some management components need repair; see the log."
+                : "Connected. This machine is ready.";
+            return;
+        }
+        if (result.MeshConnected && result.AgentReady && result.SshRecoveryReady)
+        {
+            MarkAutomaticInstallSucceeded();
+            StatusText.Text =
+                "Mesh and SSH recovery are ready. Direct remote desktop needs repair; see the log.";
+            return;
+        }
+        if (result.MeshConnected)
+        {
+            // The device is reachable on the private mesh but does not yet
+            // have a proven interactive recovery channel. Preserve the build
+            // and invitation for repair, and make the incomplete exit status
+            // visible to the source launcher/automation.
+            StatusText.Text =
+                "The private mesh is connected, but remote access still needs repair; see the log.";
+            return;
+        }
+        throw new InvalidOperationException(
+            "Setup finished without establishing the private Opticon mesh.");
+    }
+
+    private static bool HasUsableRecoveryChannel(InstallResult result) =>
+        result.RemoteDesktopReady
+        || (result.MeshConnected && result.AgentReady && result.SshRecoveryReady);
+
+    private static bool CanDiscardInvitation(InstallResult result) =>
+        HasUsableRecoveryChannel(result) && !result.HasWarnings;
 
     private async Task ClearResumeContinuationAsync()
     {

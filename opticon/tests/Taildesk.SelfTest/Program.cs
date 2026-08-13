@@ -31,6 +31,7 @@ var tests = new (string Name, Action Body)[]
     ("process runner applies its deadline to inherited output handles", TestProcessRunnerStreamDeadline),
     ("machine install crash recovery is exact-source bound and roll-forward only", TestMachineInstallCrashRecovery),
     ("installer convergence records verified repairs and plans every discovered repair", TestInstallerConvergenceContracts),
+    ("SYSTEM scheduled-task XML uses the Windows-compatible principal schema", TestSystemTaskXmlContracts),
     ("RustDesk managed-host hardening is complete and idempotent", TestRustDeskHardening),
     ("RustDesk virtual-display privacy is opt-in", TestRustDeskVirtualDisplayDefault),
     ("RustDesk remote sessions pass the saved password to the native connection command", TestRustDeskRemoteSessionLaunch),
@@ -198,6 +199,34 @@ static void TestInstallerConvergenceContracts()
            && string.IsNullOrEmpty(blocked.Postcondition),
         "installer ensure operations do not expose the Ready/Repaired/Blocked contract");
 
+    var degraded = new Taildesk.Setup.InstallResult(
+        MeshConnected: true,
+        RemoteDesktopReady: false,
+        AgentReady: true,
+        SshRecoveryReady: true,
+        EnrollmentConfirmed: false,
+        Warnings: [new Taildesk.Setup.InstallWarning("Direct remote desktop", "repair")]);
+    Assert(degraded.MeshConnected && !degraded.RemoteDesktopReady
+           && degraded.AgentReady && degraded.SshRecoveryReady
+           && !degraded.EnrollmentConfirmed && degraded.HasWarnings
+           && degraded.Warnings.Single().Operation == "Direct remote desktop"
+           && degraded.Warnings.Single().Detail == "repair",
+        "degraded Setup completion does not preserve exact recovery channels and warnings");
+
+    var sourceBootstrapType = typeof(Taildesk.Setup.InstallCoordinator).Assembly.GetType(
+        "Taildesk.Setup.SourceBootstrapInstaller", throwOnError: true)!;
+    var setupHandoffExitPolicy = sourceBootstrapType.GetMethod(
+        "IsSuccessfulSetupHandoffExitCode",
+        BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("missing source Setup handoff exit policy");
+    bool AcceptsSetupExitCode(int exitCode) =>
+        setupHandoffExitPolicy.Invoke(null, [exitCode]) as bool? == true;
+    Assert(AcceptsSetupExitCode(0)
+           && AcceptsSetupExitCode(3010)
+           && !AcceptsSetupExitCode(1)
+           && !AcceptsSetupExitCode(-1),
+        "source handoff does not distinguish success/reboot from Setup failure");
+
     var report = new InstallerPreflightReport();
     report.Add(new InstallerPreflightFinding(
         InstallerPreflightScope.Unelevated,
@@ -252,8 +281,23 @@ static void TestInstallerConvergenceContracts()
     var bootstrap = ReadSource("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
     var provenance = ReadSource("src", "Taildesk.Shared", "SourceBuildProvenance.cs");
     var resume = ReadSource("src", "Taildesk.Setup", "SetupResumeCoordinator.cs");
+    var setupWindow = ReadSource("src", "Taildesk.Setup", "MainWindow.xaml.cs");
+    var preflight = ReadSource("src", "Taildesk.Setup", "SetupPreflight.cs");
+    var maintenance = ReadSource("src", "Taildesk.Setup", "MaintenanceBootstrapCoordinator.cs");
     var profile = ReadSource("src", "Taildesk.Setup", "InteractiveUserProfile.cs");
     var agent = ReadSource("src", "Taildesk.Agent", "Program.cs");
+    var restoreAgentTaskStart = installer.IndexOf(
+        "private static async Task RestoreAgentTaskSnapshotAsync", StringComparison.Ordinal);
+    var restoreAgentTaskEnd = restoreAgentTaskStart < 0
+        ? -1
+        : installer.IndexOf(
+            "private async Task FinalizeAgentInstallTransactionAsync",
+            restoreAgentTaskStart,
+            StringComparison.Ordinal);
+    var restoreAgentTask = restoreAgentTaskStart >= 0
+                           && restoreAgentTaskEnd > restoreAgentTaskStart
+        ? installer[restoreAgentTaskStart..restoreAgentTaskEnd]
+        : string.Empty;
     foreach (var operation in new[]
              {
                  "EnsureBuildEnvironmentAsync", "EnsureProtectedStorageAsync",
@@ -283,8 +327,15 @@ static void TestInstallerConvergenceContracts()
     Assert(resume.Contains("MachineJsonFileStore<SetupResumeState>", StringComparison.Ordinal)
            && resume.Contains("SecretProtector.Protect", StringComparison.Ordinal)
            && resume.Contains("--resume", StringComparison.Ordinal)
-           && resume.Contains("BootTrigger", StringComparison.Ordinal)
            && resume.Contains("LogonTrigger", StringComparison.Ordinal)
+           && !resume.Contains("new XElement(task + \"BootTrigger\"", StringComparison.Ordinal)
+           && resume.Contains("new XElement(task + \"Delay\", \"PT15S\")", StringComparison.Ordinal)
+           && resume.Contains("new XElement(task + \"ExecutionTimeLimit\", \"PT2H\")", StringComparison.Ordinal)
+           && resume.Contains("ApplyFallbackSettingsAsync", StringComparison.Ordinal)
+           && resume.Contains("\"/SC\", \"ONLOGON\", \"/DELAY\", \"0000:15\"", StringComparison.Ordinal)
+           && resume.Contains("RemoveFailedRegistrationAsync", StringComparison.Ordinal)
+           && resume.Contains("RequireResumeTaskAsync", StringComparison.Ordinal)
+           && !resume.Contains("new XElement(task + \"LogonType\", \"ServiceAccount\")", StringComparison.Ordinal)
            && !resume.Contains("new XElement(task + \"Arguments\", context.InviteKey)", StringComparison.Ordinal),
         "reboot continuation does not keep invite secrets out of task arguments or retry after logon");
     Assert(profile.Contains("ResolveFinalDirectoryTarget", StringComparison.Ordinal)
@@ -293,6 +344,196 @@ static void TestInstallerConvergenceContracts()
         "interactive profile resolution does not support missing folders, redirects, and reboot resume");
     Assert(!agent.Contains("config.SharedRoots.Count == 0", StringComparison.Ordinal),
         "an Agent with no optional shared folders still exits instead of providing remote recovery");
+    Assert(installer.Contains("public sealed record InstallResult", StringComparison.Ordinal)
+           && installer.Contains("remoteDesktopReady = true", StringComparison.Ordinal)
+           && installer.Contains("ContainRustDeskAfterFailedSetupAsync", StringComparison.Ordinal)
+           && installer.Contains("EnsureAgentFirewallPolicyAsync", StringComparison.Ordinal)
+           && installer.Contains("CommitPendingEnrollmentAsync", StringComparison.Ordinal)
+           && installer.Contains("catch (TimeoutException timeout)", StringComparison.Ordinal)
+           && installer.Contains("_agentInstallCommitted = true", StringComparison.Ordinal)
+           && installer.Contains("CreateInstallResult", StringComparison.Ordinal)
+           && installer.Contains("_warnings.ToArray()", StringComparison.Ordinal)
+           && installer.Contains("RegisterAgentTaskWithCommandLineFallbackAsync", StringComparison.Ordinal)
+           && restoreAgentTask.Contains("RegisterExactAgentTaskAsync", StringComparison.Ordinal)
+           && !restoreAgentTask.Contains("ImportAgentTaskXmlAsync", StringComparison.Ordinal)
+           && installer.Contains("|| state.DeviceId == Guid.Empty", StringComparison.Ordinal)
+           && !installer.Contains("new XElement(task + \"LogonType\", \"ServiceAccount\")", StringComparison.Ordinal)
+           && installer.Contains("BuildTaskPrincipal(task, \"S-1-5-18\", null, \"HighestAvailable\")", StringComparison.Ordinal),
+        "installer no longer preserves fail-soft recovery results or compatible SYSTEM task fallbacks");
+    Assert(preflight.Contains("\"Agent payload\"", StringComparison.Ordinal)
+           && preflight.Contains("\"Guardian payload\"", StringComparison.Ordinal)
+           && preflight.Contains("\"Controller payload\"", StringComparison.Ordinal)
+           && preflight.Contains("\"Interactive profile\"", StringComparison.Ordinal)
+           && preflight.Contains("\"Reboot state\"", StringComparison.Ordinal)
+           && maintenance.Contains("config.SharedRoots is null", StringComparison.Ordinal)
+           && !maintenance.Contains("config.SharedRoots.Count == 0", StringComparison.Ordinal),
+        "optional component, profile, reboot, or shared-root findings still block recovery installation");
+    Assert(setupWindow.Contains("var result = await installer.InstallAsync", StringComparison.Ordinal)
+           && setupWindow.Contains("ApplyInstallResult(result)", StringComparison.Ordinal)
+           && setupWindow.Contains("DEFERRED REPAIR", StringComparison.Ordinal)
+           && setupWindow.Contains("HasUsableRecoveryChannel", StringComparison.Ordinal)
+           && setupWindow.Contains("if (!_maintenanceMode && installResult is not null", StringComparison.Ordinal),
+        "Setup UI does not distinguish recovery-ready warnings from mesh-only incomplete installation");
+}
+
+static void TestSystemTaskXmlContracts()
+{
+    static object? InvokeStatic(Type type, string methodName, params object[] arguments)
+    {
+        var method = type.GetMethod(
+            methodName,
+            BindingFlags.Static | BindingFlags.NonPublic)
+                     ?? throw new InvalidOperationException($"missing task helper {type.Name}.{methodName}");
+        return method.Invoke(null, arguments);
+    }
+
+    static string InvokeXmlBuilder(Type type, string methodName, params object[] arguments)
+    {
+        return InvokeStatic(type, methodName, arguments) as string
+               ?? throw new InvalidOperationException($"task XML builder {type.Name}.{methodName} returned no XML");
+    }
+
+    static void AssertAgentTaskRejected(Type type, string xml, string executable, string message)
+    {
+        try
+        {
+            _ = InvokeStatic(type, "RequireExactAgentTaskXml", xml, executable);
+        }
+        catch (TargetInvocationException exception) when (exception.InnerException is InvalidDataException)
+        {
+            return;
+        }
+        throw new InvalidOperationException(message);
+    }
+
+    static string PrincipalXml(string userId, string logonType, string runLevel)
+    {
+        XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+        return new XDocument(
+            new XElement(task + "Task", new XAttribute("version", "1.4"),
+                new XElement(task + "Principals",
+                    new XElement(task + "Principal", new XAttribute("id", "Author"),
+                        new XElement(task + "UserId", userId),
+                        new XElement(task + "LogonType", logonType),
+                        new XElement(task + "RunLevel", runLevel)))))
+            .ToString(SaveOptions.DisableFormatting);
+    }
+
+    var setupAssembly = typeof(Taildesk.Setup.InstallCoordinator).Assembly;
+    var coordinator = typeof(Taildesk.Setup.InstallCoordinator);
+    var resume = setupAssembly.GetType("Taildesk.Setup.SetupResumeCoordinator", throwOnError: true)!;
+    var executable = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "opticon-task-contract.exe"));
+    var documents = new[]
+    {
+        InvokeXmlBuilder(coordinator, "BuildExactAgentTaskXml", executable),
+        InvokeXmlBuilder(coordinator, "BuildRouteKeeperTaskXml", executable),
+        InvokeXmlBuilder(resume, "BuildTaskXml", executable)
+    };
+    XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+    foreach (var xml in documents)
+    {
+        var document = XDocument.Parse(xml, LoadOptions.None);
+        var principals = document.Root?.Element(task + "Principals")
+            ?.Elements(task + "Principal").ToArray() ?? [];
+        Assert(principals.Length == 1
+               && principals[0].Element(task + "UserId")?.Value == "S-1-5-18"
+               && principals[0].Element(task + "RunLevel")?.Value == "HighestAvailable"
+               && principals[0].Element(task + "LogonType") is null,
+            "generated SYSTEM task XML used the invalid ServiceAccount lexical value or lost its exact principal");
+    }
+
+    var legacySystemXml = "<?xml version=\"1.0\" encoding=\"utf-16\"?>" +
+                          PrincipalXml("S-1-5-18", "ServiceAccount", "HighestAvailable");
+    var normalizedSystemXml = InvokeXmlBuilder(
+        coordinator, "NormalizeSystemTaskXmlForImport", legacySystemXml);
+    var normalizedSystemDocument = XDocument.Parse(normalizedSystemXml);
+    var normalizedSystemPrincipal = normalizedSystemDocument.Root?
+        .Element(task + "Principals")?.Element(task + "Principal");
+    Assert(normalizedSystemDocument.Declaration?.Encoding == "utf-8"
+           && normalizedSystemPrincipal?.Element(task + "UserId")?.Value == "S-1-5-18"
+           && normalizedSystemPrincipal.Element(task + "RunLevel")?.Value == "HighestAvailable"
+           && normalizedSystemPrincipal.Element(task + "LogonType") is null,
+        "task import did not normalize its byte encoding or the XML-invalid SYSTEM logon type");
+
+    var interactiveXml = PrincipalXml(
+        "S-1-5-21-1-2-3-1001", "InteractiveToken", "LeastPrivilege");
+    var normalizedInteractiveXml = InvokeXmlBuilder(
+        coordinator, "NormalizeSystemTaskXmlForImport", interactiveXml);
+    var interactivePrincipal = XDocument.Parse(normalizedInteractiveXml).Root?
+        .Element(task + "Principals")?.Element(task + "Principal");
+    Assert(XDocument.Parse(normalizedInteractiveXml).Declaration?.Encoding == "utf-8"
+           && interactivePrincipal?.Element(task + "LogonType")?.Value == "InteractiveToken"
+           && interactivePrincipal.Element(task + "RunLevel")?.Value == "LeastPrivilege",
+        "SYSTEM snapshot normalization changed an interactive task principal");
+
+    var exactAgentXml = InvokeXmlBuilder(
+        coordinator, "BuildExactAgentTaskXml", executable);
+    _ = InvokeStatic(coordinator, "RequireExactAgentTaskXml", exactAgentXml, executable);
+    foreach (var elementName in new[] { "AllowStartOnDemand", "Enabled" })
+    {
+        var drifted = XDocument.Parse(exactAgentXml);
+        drifted.Root?.Element(task + "Settings")?.Element(task + elementName)?.SetValue("false");
+        AssertAgentTaskRejected(
+            coordinator,
+            drifted.ToString(SaveOptions.DisableFormatting),
+            executable,
+            $"exact Agent task validation accepted disabled {elementName}");
+    }
+    var disabledTrigger = XDocument.Parse(exactAgentXml);
+    disabledTrigger.Root?.Element(task + "Triggers")?.Element(task + "BootTrigger")?
+        .Element(task + "Enabled")?.SetValue("false");
+    AssertAgentTaskRejected(
+        coordinator,
+        disabledTrigger.ToString(SaveOptions.DisableFormatting),
+        executable,
+        "exact Agent task validation accepted a disabled boot trigger");
+
+    var minimallyOwned = (bool)(InvokeStatic(
+        coordinator, "IsMinimallyOwnedAgentTask",
+        disabledTrigger.ToString(SaveOptions.DisableFormatting), executable) ?? false);
+    var wrongExecutable = (bool)(InvokeStatic(
+        coordinator, "IsMinimallyOwnedAgentTask",
+        exactAgentXml, executable + ".unrelated") ?? false);
+    var wrongPrincipalDocument = XDocument.Parse(exactAgentXml);
+    wrongPrincipalDocument.Root?.Element(task + "Principals")?.Element(task + "Principal")?
+        .Element(task + "UserId")?.SetValue("S-1-5-21-1-2-3-1001");
+    var wrongPrincipal = (bool)(InvokeStatic(
+        coordinator, "IsMinimallyOwnedAgentTask",
+        wrongPrincipalDocument.ToString(SaveOptions.DisableFormatting), executable) ?? false);
+    Assert(minimallyOwned && !wrongExecutable && !wrongPrincipal,
+        "partial Agent-task cleanup does not retain exact path and SYSTEM-principal ownership boundaries");
+
+    var present = (bool)(InvokeStatic(
+        coordinator, "RequireTaskPresenceProbeResult", "Taildesk Agent",
+        new ProcessResult(0, string.Empty, string.Empty)) ?? false);
+    var absent = (bool)(InvokeStatic(
+        coordinator, "RequireTaskPresenceProbeResult", "Taildesk Agent",
+        new ProcessResult(3, string.Empty, string.Empty)) ?? true);
+    var queryFailureRejected = false;
+    try
+    {
+        _ = InvokeStatic(
+            coordinator, "RequireTaskPresenceProbeResult", "Taildesk Agent",
+            new ProcessResult(1, string.Empty, "ERROR: Access is denied."));
+    }
+    catch (TargetInvocationException exception) when (exception.InnerException is InvalidDataException)
+    {
+        queryFailureRejected = true;
+    }
+    var presenceScript = coordinator.GetField(
+        "TaskPresenceProbeScript", BindingFlags.Static | BindingFlags.NonPublic)?.GetRawConstantValue() as string
+        ?? throw new InvalidOperationException("missing fixed task-presence probe");
+    var installerSource = ReadSource("src", "Taildesk.Setup", "InstallerServices.cs");
+    Assert(present && !absent && queryFailureRejected
+           && presenceScript.Contains("Schedule.Service", StringComparison.Ordinal)
+           && presenceScript.Contains("$env:TAILDESK_EXPECTED_TASK_NAME", StringComparison.Ordinal)
+           && presenceScript.Contains("HResult -eq -2147024894", StringComparison.Ordinal)
+           && installerSource.Contains(
+               "!await IsTaskPresentAtFixedNameAsync(taskName, cancellationToken)",
+               StringComparison.Ordinal)
+           && !installerSource.Contains(
+               "The system cannot find the file specified", StringComparison.Ordinal),
+        "scheduled-task absence is locale-dependent or an arbitrary query failure can be mistaken for absence");
 }
 
 static void TestScheduledTransferCron()
@@ -1425,6 +1666,33 @@ static void TestReleaseDistributionDesign()
            && agent.Contains("AllowAutoRedirect = false", StringComparison.Ordinal)
            && agent.Contains("CheckCertificateRevocationList = true", StringComparison.Ordinal),
         "Agent release downloader does not retain the required direct HTTPS behavior");
+    var activatedSource = setupWindow.IndexOf(
+        "await SourceBuildProvenance.ActivateForSetupAsync", StringComparison.Ordinal);
+    var replacementPreflight = activatedSource < 0
+        ? -1
+        : setupWindow.IndexOf(
+            "SetupPreflight.DiscoverElevatedAsync", activatedSource, StringComparison.Ordinal);
+    var replacementBlockedCheck = replacementPreflight < 0
+        ? -1
+        : setupWindow.IndexOf(
+            "replacementPreflight.IsBlocked", replacementPreflight, StringComparison.Ordinal);
+    var delayedRemoval = setupWindow.IndexOf(
+        "await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync", StringComparison.Ordinal);
+    var installAfterRemoval = delayedRemoval < 0
+        ? -1
+        : setupWindow.IndexOf("await RunInstallAsync();", delayedRemoval, StringComparison.Ordinal);
+    var attestationWritten = sourceInstaller.IndexOf(
+        "$attestationPath = Join-Path $release", StringComparison.Ordinal);
+    var buildDeadline = sourceBootstrap.IndexOf(
+        "TimeSpan.FromMinutes(45)", StringComparison.Ordinal);
+    var setupLaunched = buildDeadline < 0
+        ? -1
+        : sourceBootstrap.IndexOf(
+            "RunAttestedSetupOutsideBuildDeadlineAsync", buildDeadline, StringComparison.Ordinal);
+    var setupWithoutDeadline = setupLaunched < 0
+        ? -1
+        : sourceBootstrap.IndexOf(
+            "timeout: null", setupLaunched, StringComparison.Ordinal);
     Assert(hostedBootstrap.Contains("SourceBootstrapInstaller.RunAsync", StringComparison.Ordinal)
            && hostedBootstrap.Contains("IsSourceLauncher", StringComparison.Ordinal)
            && hostedBootstrap.Contains("ParseSourceLaunch", StringComparison.Ordinal)
@@ -1440,13 +1708,26 @@ static void TestReleaseDistributionDesign()
            && sourceBootstrap.Contains("VerifyLauncherMatchesArchiveAsync", StringComparison.Ordinal)
            && sourceBootstrap.Contains("DownloadPresignedSourceAsync", StringComparison.Ordinal)
            && sourceBootstrap.Contains("TemporaryRedirect", StringComparison.Ordinal)
-           && sourceBootstrap.IndexOf("VerifyLauncherMatchesArchiveAsync", StringComparison.Ordinal)
-              < sourceBootstrap.IndexOf("LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync", StringComparison.Ordinal)
+           && !sourceBootstrap.Contains("LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync", StringComparison.Ordinal)
+           && attestationWritten >= 0
+           && !sourceInstaller.Contains("& $setup", StringComparison.Ordinal)
+           && !sourceInstaller.Contains("InviteKey", StringComparison.Ordinal)
+           && buildDeadline >= 0 && setupLaunched > buildDeadline
+           && setupWithoutDeadline > setupLaunched
+           && sourceBootstrap.Contains("\"--replace-existing\"", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("exitCode is 0 or 3010", StringComparison.Ordinal)
+           && activatedSource >= 0
+           && setupWindow.Contains("PreflightLegacyInstallationIfPresentAsync", StringComparison.Ordinal)
+           && replacementPreflight > activatedSource
+           && replacementBlockedCheck > replacementPreflight
+           && delayedRemoval > replacementBlockedCheck
+           && installAfterRemoval > delayedRemoval
            && sourceBootstrap.Contains("ResolveSourceArchive", StringComparison.Ordinal)
            && sourceBootstrap.Contains("SourceInstallProtocol", StringComparison.Ordinal)
            && !sourceBootstrap.Contains("MatchesBootstrap", StringComparison.Ordinal)
            && !sourceBootstrap.Contains("BootstrapSha256", StringComparison.Ordinal)
            && setupWindow.Contains("HostedBootstrapper.IsSourceLauncher", StringComparison.Ordinal)
+           && setupWindow.Contains("argument.Equals(\"--replace-existing\"", StringComparison.Ordinal)
            && Read("src", "Taildesk.Setup", "SourceLauncherPrompt.cs").Contains("ReadInvitationUrl", StringComparison.Ordinal)
            && setupWindow.Contains("GetEnvironmentVariable(HostedBootstrapper.InvitePathEnvironmentVariable)", StringComparison.Ordinal)
            && setupWindow.Contains("SetEnvironmentVariable(HostedBootstrapper.InviteKeyEnvironmentVariable, null)", StringComparison.Ordinal)
@@ -1457,6 +1738,8 @@ static void TestReleaseDistributionDesign()
            && !setupWindow.Contains("new InstallCoordinator(_invite!, Path.GetDirectoryName(_invitePath)", StringComparison.Ordinal)
            && setupWindow.Contains("Environment.ExitCode = 1", StringComparison.Ordinal)
            && setupWindow.Contains("MarkAutomaticInstallSucceeded", StringComparison.Ordinal)
+           && setupWindow.Contains("ConfigureFailureAction(_sourceAttestedAutomaticInstall)", StringComparison.Ordinal)
+           && setupWindow.Contains("This window will not reuse rolled-back source trust", StringComparison.Ordinal)
            && setupWindow.Contains("FileMode.CreateNew", StringComparison.Ordinal)
            && !setupWindow.Contains("SpecialFolder.LocalApplicationData", StringComparison.Ordinal)
            && setupWindow.Contains("private-key-redacted", StringComparison.Ordinal)
@@ -1482,7 +1765,12 @@ static void TestReleaseDistributionDesign()
            && legacyRemoval.Contains("DescribeCleanupPath(entry.Path)", StringComparison.Ordinal)
            && legacyRemoval.Contains("using handle access", StringComparison.Ordinal)
            && legacyRemoval.Contains("SetFileInformationByHandle", StringComparison.Ordinal)
+           && legacyRemoval.Contains("FileDispositionInformationEx", StringComparison.Ordinal)
+           && legacyRemoval.Contains("FileDispositionForceImageSectionCheck", StringComparison.Ordinal)
+           && legacyRemoval.Contains("IsTransientDeletionError", StringComparison.Ordinal)
             && legacyRemoval.Contains("PinnedDirectoryTree", StringComparison.Ordinal)
+           && legacyRemoval.Contains("DirectorySealStrength.PinnedHandleOnly", StringComparison.Ordinal)
+           && legacyRemoval.Contains("DirectorySealStrength.DaclOnly", StringComparison.Ordinal)
            && legacyRemoval.Contains("FileShareDelete", StringComparison.Ordinal)
             && legacyRemoval.Contains("FileReadAttributes | Synchronize", StringComparison.Ordinal)
             && legacyRemoval.Contains("Could not re-observe a pinned Opticon path safely", StringComparison.Ordinal)
@@ -1504,6 +1792,14 @@ static void TestReleaseDistributionDesign()
            && !legacyRemoval.Contains("FileVersionInfo", StringComparison.Ordinal)
            && legacyRemoval.Contains("Directory.EnumerateFiles(installDirectory, \"*.exe\", SearchOption.AllDirectories)", StringComparison.Ordinal)
            && legacyRemoval.Contains("image.StartsWith(canonicalRoot", StringComparison.Ordinal)
+           && legacyRemoval.Contains("QueryFullProcessImageNameW", StringComparison.Ordinal)
+           && legacyRemoval.Contains("quietPasses >= 2", StringComparison.Ordinal)
+           && legacyRemoval.Contains("result.ExitCode == 1", StringComparison.Ordinal)
+           && legacyRemoval.Contains("IsTaskPresentAtFixedNameAsync", StringComparison.Ordinal)
+           && legacyRemoval.Contains("Schedule.Service", StringComparison.Ordinal)
+           && legacyRemoval.Contains("-2147024894", StringComparison.Ordinal)
+           && legacyRemoval.Contains("TaskPresenceProbeAbsentExitCode", StringComparison.Ordinal)
+           && !legacyRemoval.Contains("cannot find", StringComparison.OrdinalIgnoreCase)
            && legacyRemoval.Contains("RemoteAdministrationProtocol.AgentTaskName", StringComparison.Ordinal)
            && legacyRemoval.Contains("RemoteAdministrationProtocol.SshSupervisorTaskName", StringComparison.Ordinal)
            && !legacyRemoval.Contains("TailscaleCli", StringComparison.Ordinal)
@@ -1558,8 +1854,9 @@ static void TestReleaseDistributionDesign()
            && builder.Contains("microsoft.aspnetcore.app.runtime.win-arm64", StringComparison.Ordinal)
            && builder.Contains("microsoft.netcore.app.host.win-arm64", StringComparison.Ordinal)
            && builder.Contains("microsoft.windows.sdk.net.ref", StringComparison.Ordinal)
-           && sourceInstaller.Contains("$setupExitCode -ne 0", StringComparison.Ordinal),
-        "the elevated source build does not isolate MSBuild/PowerShell, carry its signed offline feed, or propagate Setup failure");
+           && !sourceInstaller.Contains("$setupExitCode", StringComparison.Ordinal)
+           && sourceBootstrap.Contains("The attested Opticon Setup returned", StringComparison.Ordinal),
+        "the elevated source build does not isolate MSBuild/PowerShell, carry its signed offline feed, or safely propagate Setup handoff outcomes");
     Assert(sourceBootstrap.Contains("CompatibleSdkIsReadyAsync", StringComparison.Ordinal)
             && sourceBootstrap.Contains("cancellationToken => CompatibleSdkIsReadyAsync", StringComparison.Ordinal)
             && sdkRequirementDialog.Contains("Setup will detect it and resume automatically", StringComparison.Ordinal)
@@ -1595,18 +1892,19 @@ static void TestReleaseDistributionDesign()
              && setupWindow.Contains("TryRollbackSourceProvenance", StringComparison.Ordinal),
         "failed source reinstalls can replace current provenance or cannot validate exact rollback generations");
     Assert(!builder.Contains("reuseCommandCenterPublish", StringComparison.Ordinal)
-           && !builder.Contains("commandCenterPublish", StringComparison.Ordinal)
-           && builder.Contains("targetRuntimes = @('win-x64', 'win-arm64')", StringComparison.Ordinal)
-           && builder.Contains("safe.directory=$($script:trustedGitRoot.Replace('\\', '/'))", StringComparison.Ordinal)
-           && builder.Contains("The production hosted build resolved an unexpected Git root", StringComparison.Ordinal)
-           && builder.Contains("DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE", StringComparison.Ordinal)
+            && !builder.Contains("commandCenterPublish", StringComparison.Ordinal)
+            && builder.Contains("targetRuntimes = @('win-x64', 'win-arm64')", StringComparison.Ordinal)
+            && builder.Contains("safe.directory=$($script:trustedGitRoot.Replace('\\', '/'))", StringComparison.Ordinal)
+            && builder.Contains("DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE", StringComparison.Ordinal)
            && builder.Contains("DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK", StringComparison.Ordinal)
            && builder.Contains("-p:MSBuildEnableWorkloadResolver=false", StringComparison.Ordinal)
            && builder.Contains("USERPROFILE = $cliHome; HOME = $cliHome", StringComparison.Ordinal)
            && builder.Contains("APPDATA = $isolatedRoamingProfile; LOCALAPPDATA = $isolatedLocalProfile", StringComparison.Ordinal)
-           && builder.Contains("$retainedBootstraps", StringComparison.Ordinal)
-           && builder.Contains("$retainedSources", StringComparison.Ordinal)
-           && builder.Contains("The clean $component publish must contain only", StringComparison.Ordinal),
+            && builder.Contains("$retainedBootstraps", StringComparison.Ordinal)
+            && builder.Contains("$retainedSources", StringComparison.Ordinal)
+            && builder.Contains("retiredLauncher", StringComparison.Ordinal)
+            && builder.Contains("must never accumulate in the next Fly Docker context", StringComparison.Ordinal)
+            && builder.Contains("The clean $component publish must contain only", StringComparison.Ordinal),
          "release signing can still reuse ignored publish caches or accept undeclared output files");
 }
 
@@ -1738,6 +2036,11 @@ static void TestReleaseDeploymentSurface()
             && service.Contains("VerifyHostedDependenciesAsync", StringComparison.Ordinal)
             && service.Contains("DependencyArtifacts.All", StringComparison.Ordinal)
             && service.Contains("full byte-stream verification", StringComparison.Ordinal)
+            && service.Contains("CreateGatewayDeployIgnoreFile", StringComparison.Ordinal)
+            && service.Contains("artifacts/opticon-source-launcher-*.exe", StringComparison.Ordinal)
+            && service.Contains("!artifacts/{sourceLaunchers[0]}", StringComparison.Ordinal)
+            && service.Contains("\"--yes\", \"--ignorefile\", deployIgnoreFile", StringComparison.Ordinal)
+            && service.Contains("outputProgress: flyOutput", StringComparison.Ordinal)
              && service.Contains("source-only invitation's signed launcher is a sidecar", StringComparison.Ordinal)
             && service.Contains("-StageOnly", StringComparison.Ordinal)
             && service.Contains("-CommitStaged", StringComparison.Ordinal)
@@ -2980,6 +3283,16 @@ static void TestOpenSshRecoveryDesign()
            && installer.Contains("$start.Arguments", StringComparison.Ordinal)
            && installer.Contains("sanitized environment", StringComparison.Ordinal)
            && installer.Contains("$actualText.Equals", StringComparison.Ordinal)
+           && installer.Contains("New-RouteKeeperTaskXml", StringComparison.Ordinal)
+           && installer.Contains("Assert-ExactRouteKeeperTask", StringComparison.Ordinal)
+           && !installer.Contains("<LogonType>ServiceAccount</LogonType>", StringComparison.Ordinal)
+           && installer.Contains("(NodeText '/t:Task/t:Principals/t:Principal/t:LogonType').Length -ne 0", StringComparison.Ordinal)
+           && installer.Contains("$document.XmlResolver = $null", StringComparison.Ordinal)
+           && installer.Contains("$principal.RemoveChild($logonTypes[0])", StringComparison.Ordinal)
+           && installer.Contains("$triggerNodes | Where-Object", StringComparison.Ordinal)
+           && installer.Contains("UiNode '/t:Task/t:Triggers/t:LogonTrigger/t:Enabled'", StringComparison.Ordinal)
+           && installer.Contains("UiNode '/t:Task/t:Settings/t:AllowStartOnDemand'", StringComparison.Ordinal)
+           && installer.Contains("UiNode '/t:Task/t:Settings/t:Enabled'", StringComparison.Ordinal)
            && !installer.Contains("[Convert]::FromHexString", StringComparison.Ordinal)
            && !installer.Contains("$start.ArgumentList.Add", StringComparison.Ordinal),
         "the protected installer must run task and vendor commands through Windows PowerShell 5.1-compatible process APIs");

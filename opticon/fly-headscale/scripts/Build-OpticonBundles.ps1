@@ -1199,6 +1199,18 @@ if ($SourceOnly) {
         throw 'The staged one-click source launcher did not match the signed source archive.'
     }
     Move-FileReplacingWithRetry -Source $sourceLauncherTemporary -Destination $sourceLauncherDestination
+
+    # The gateway serves only the launcher named by its one live source-only
+    # manifest. Older launchers are immutable build outputs, not rollback
+    # inputs, and must never accumulate in the next Fly Docker context.
+    foreach ($retiredLauncher in @(Get-ChildItem -LiteralPath $artifactDirectory -File -Filter 'opticon-source-launcher-*.exe')) {
+        if ($retiredLauncher.Name -ceq [string]$sourceRecord.sourceLauncherFile) { continue }
+        if ($retiredLauncher.Name -notmatch '^opticon-source-launcher-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.exe$' -or
+            ($retiredLauncher.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "A retired source-launcher sidecar is unsafe and cannot be pruned: $($retiredLauncher.FullName)"
+        }
+        Remove-Item -LiteralPath $retiredLauncher.FullName -Force
+    }
 }
 
 if ($SourceOnly) {

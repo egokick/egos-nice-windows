@@ -74,11 +74,11 @@ internal static class HostedBootstrapper
             bound.Success ? bound.Groups["hash"].Value.ToLowerInvariant() : null);
     }
 
-    internal static async Task LaunchSourceOnlyAsync(SourceBootstrapRequest bootstrap, Action<string> report)
+    internal static async Task<int> LaunchSourceOnlyAsync(SourceBootstrapRequest bootstrap, Action<string> report)
     {
         var launcherPath = Environment.ProcessPath
                            ?? throw new InvalidOperationException("The Opticon source launcher path is unavailable.");
-        await SourceBootstrapInstaller.RunAsync(bootstrap, launcherPath, report);
+        return await SourceBootstrapInstaller.RunAsync(bootstrap, launcherPath, report);
     }
 
     private static string? ReadOptionalArgument(IReadOnlyList<string> arguments, string prefix)

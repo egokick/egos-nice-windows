@@ -16,6 +16,19 @@ namespace Taildesk.Setup;
 
 public sealed record InstallProgress(int Percent, string Message);
 
+public sealed record InstallWarning(string Operation, string Detail);
+
+public sealed record InstallResult(
+    bool MeshConnected,
+    bool RemoteDesktopReady,
+    bool AgentReady,
+    bool SshRecoveryReady,
+    bool EnrollmentConfirmed,
+    IReadOnlyList<InstallWarning> Warnings)
+{
+    public bool HasWarnings => Warnings.Count != 0;
+}
+
 public sealed class ExistingTailscaleSessionException : InvalidOperationException
 {
     public ExistingTailscaleSessionException(string message) : base(message) { }
@@ -34,6 +47,39 @@ public sealed class InstallCoordinator
         "Runs the protected Opticon background agent at system startup.";
     private const string RouteKeeperTaskName = "Taildesk Fly Route";
     private const string ControllerUiTaskName = "Opticon Command Center";
+    private const int TaskPresenceProbeAbsentExitCode = 3;
+    private const string TaskPresenceProbeScript = """
+        $ErrorActionPreference = 'Stop'
+        $service = $null
+        $folder = $null
+        $task = $null
+        try {
+            $service = New-Object -ComObject 'Schedule.Service'
+            $service.Connect()
+            $folder = $service.GetFolder('\')
+            try {
+                $task = $folder.GetTask($env:TAILDESK_EXPECTED_TASK_NAME)
+            } catch {
+                # HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND). PowerShell can
+                # surface this as COMException or FileNotFoundException. Every
+                # access, RPC, and other failure escapes and therefore fails
+                # the presence probe closed.
+                if ($_.Exception.HResult -eq -2147024894) { exit 3 }
+                throw
+            }
+            exit 0
+        } finally {
+            if ($null -ne $task) {
+                [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($task) | Out-Null
+            }
+            if ($null -ne $folder) {
+                [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($folder) | Out-Null
+            }
+            if ($null -ne $service) {
+                [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($service) | Out-Null
+            }
+        }
+        """;
     private const string FlyControllerIpv4 = "213.188.217.227";
 
     private readonly InvitePayload _invite;
@@ -50,6 +96,7 @@ public sealed class InstallCoordinator
     private MachineInstallTransactionJournal? _machineInstallTransaction;
     private bool _agentInstallCommitted;
     private bool _controllerTasksInstalled;
+    private readonly List<InstallWarning> _warnings = [];
 
     public InstallCoordinator(
         InvitePayload invite,
@@ -76,8 +123,15 @@ public sealed class InstallCoordinator
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Taildesk-Setup/1.0");
     }
 
-    public async Task InstallAsync(CancellationToken cancellationToken)
+    public async Task<InstallResult> InstallAsync(CancellationToken cancellationToken)
     {
+        _warnings.Clear();
+        var meshConnected = false;
+        var remoteDesktopReady = false;
+        var agentReady = false;
+        var sshRecoveryReady = false;
+        var enrollmentConfirmed = false;
+
         if (ValidationEnabled(ClientInstallValidationStep.InvitationConstraints))
             EnsureInviteIsValid();
         if (ValidationEnabled(ClientInstallValidationStep.SetupPreflight))
@@ -128,6 +182,11 @@ public sealed class InstallCoordinator
                 var installedState = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
                     .LoadAsync(cancellationToken);
                 RequireSafeInvitationResume(installedState);
+                if (installedState.CompletedInviteId == _invite.InviteId)
+                {
+                    completedEnrollmentState = installedState;
+                    canResumeExistingSession = true;
+                }
                 canResumeExistingSession = canResumeExistingSession
                                            || installedState.PendingInviteId == _invite.InviteId;
             }
@@ -137,25 +196,6 @@ public sealed class InstallCoordinator
             var payload = await EnsurePayloadVerifiedAsync(cancellationToken);
             var agentPayload = payload.AgentDirectory;
             var guardianPayload = payload.GuardianDirectory;
-
-            await RecoverAgentInstallTransactionAsync(agentPayload, cancellationToken);
-            if (File.Exists(AppPaths.AgentConfigFile))
-            {
-                var recoveredState = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
-                    .LoadAsync(cancellationToken);
-                RequireSafeInvitationResume(recoveredState);
-                if (recoveredState.CompletedInviteId == _invite.InviteId)
-                {
-                    // A completed receipt is not a reason to skip component
-                    // verification. Treat it as a no-reenrollment repair run:
-                    // Guardian, network, remote access, firewall, task, and
-                    // Agent drift are still checked below.
-                    completedEnrollmentState = recoveredState;
-                    canResumeExistingSession = true;
-                }
-                canResumeExistingSession = canResumeExistingSession
-                                           || recoveredState.PendingInviteId == _invite.InviteId;
-            }
 
             await EnsureMachineInstallTransactionAsync(sourceBinding, cancellationToken);
             if (corruptMachineJournalQuarantined)
@@ -178,14 +218,6 @@ public sealed class InstallCoordinator
             var buildEnvironment = await EnsureBuildEnvironmentAsync(sourceBinding, cancellationToken);
             await RecordEnsureOutcomeAsync(buildEnvironment, cancellationToken);
             await RecordEnsureOutcomeAsync(payload.Result, cancellationToken);
-            await EnsureInteractiveUserProfileAsync(cancellationToken);
-
-            // Prove or install the stable Guardian before changing recovery,
-            // network, remote-access, enrollment, or Agent state. A compatible
-            // signed Guardian remains pinned even when Setup itself is newer.
-            await EnsureGuardianAsync(guardianPayload, cancellationToken);
-            _progress.Report(new InstallProgress(7, "Checking the Windows OpenSSH recovery component…"));
-            await EnsureOpenSshAsync(cancellationToken);
             var reuseJournalNetworkComponent = RequireMachineInstallTransaction().Phase
                                                >= MachineInstallTransactionPhase.NetworkComponentReady;
             await AdvanceMachineInstallTransactionAsync(
@@ -199,80 +231,242 @@ public sealed class InstallCoordinator
             var tailscale = FindTailscale();
             var snapshot = await EnsureTailnetEnrollmentAsync(
                 tailscale, canResumeExistingSession, cancellationToken);
+            meshConnected = true;
 
-            var expectedRustDesk = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                "RustDesk", "rustdesk.exe");
-            if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
-                await ConfigureFirewallAsync(snapshot.Ip, expectedRustDesk, cancellationToken);
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.RemoteIsolationPrepared, cancellationToken);
-            var reuseJournalRemoteComponent = RequireMachineInstallTransaction().Phase
-                                               >= MachineInstallTransactionPhase.RemoteComponentReady;
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.RemoteComponentInstallStarted, cancellationToken);
-            var rustDeskInstallation = await EnsureRustDeskAsync(
-                tempDirectory, reuseJournalRemoteComponent, cancellationToken);
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.RemoteComponentReady, cancellationToken);
-            var rustDesk = rustDeskInstallation.Path;
-            if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
-                await EnsureFirewallPolicyAsync(snapshot.Ip, rustDesk, cancellationToken);
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.RemoteIsolationApplied, cancellationToken);
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.RemoteConfigurationStarted, cancellationToken);
-            await EnsureRustDeskListenerAsync(rustDesk, cancellationToken);
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.RemoteConfigured, cancellationToken);
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.AgentInstallStarted, cancellationToken);
-            if (completedEnrollmentState is null)
-                await EnsureAgentAsync(agentPayload, snapshot.Ip, cancellationToken);
+            ComponentInstallation? rustDeskInstallation = null;
+            string? rustDesk = null;
+            try
+            {
+                var expectedRustDesk = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                    "RustDesk", "rustdesk.exe");
+                if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
+                    await ConfigureFirewallAsync(snapshot.Ip, expectedRustDesk, cancellationToken);
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.RemoteIsolationPrepared, cancellationToken);
+                var reuseJournalRemoteComponent = RequireMachineInstallTransaction().Phase
+                                                   >= MachineInstallTransactionPhase.RemoteComponentReady;
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.RemoteComponentInstallStarted, cancellationToken);
+                rustDeskInstallation = await EnsureRustDeskAsync(
+                    tempDirectory, reuseJournalRemoteComponent, cancellationToken);
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.RemoteComponentReady, cancellationToken);
+                rustDesk = rustDeskInstallation.Path;
+                if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
+                    await EnsureFirewallPolicyAsync(snapshot.Ip, rustDesk, cancellationToken);
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.RemoteIsolationApplied, cancellationToken);
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.RemoteConfigurationStarted, cancellationToken);
+                await EnsureRustDeskListenerAsync(rustDesk, cancellationToken);
+                if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
+                    await AssertExactFirewallConfigurationAsync(snapshot.Ip, rustDesk, cancellationToken);
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.RemoteConfigured, cancellationToken);
+                remoteDesktopReady = true;
+                _progress.Report(new InstallProgress(
+                    68,
+                    "Private-network and direct remote-desktop recovery are ready; finishing management components…"));
+            }
+            catch (Exception remoteDesktopError) when (
+                remoteDesktopError is not OperationCanceledException)
+            {
+                try
+                {
+                    await ContainRustDeskAfterFailedSetupAsync(CancellationToken.None);
+                }
+                catch (Exception containmentError)
+                {
+                    throw new AggregateException(
+                        "Direct remote-desktop setup failed and RustDesk could not be safely disabled. " +
+                        "The private mesh remains joined, but Setup cannot leave an unverified listener running.",
+                        remoteDesktopError,
+                        containmentError);
+                }
+                AddInstallWarning("Direct remote desktop", remoteDesktopError);
+                _progress.Report(new InstallProgress(
+                    68,
+                    "The private mesh is connected; direct remote desktop needs repair. Continuing with SSH and Agent recovery…"));
+            }
+
+            // Everything below this fence is independently repairable from
+            // the verified Tailscale + RustDesk recovery path.  Do not tear
+            // down that path because a user profile, SSH capability, stable
+            // Guardian, controller tool, Agent, or coordinator is temporarily
+            // unavailable.
+            await TryDeferredEnsureAsync(
+                "Interactive user profile",
+                () => EnsureInteractiveUserProfileAsync(cancellationToken),
+                cancellationToken);
+
+            var guardianReady = await TryDeferredEnsureAsync(
+                "Fail-safe update Guardian",
+                () => EnsureGuardianAsync(guardianPayload, cancellationToken),
+                cancellationToken);
+            if (guardianReady)
+            {
+                _progress.Report(new InstallProgress(72, "Checking the Windows OpenSSH recovery component…"));
+                sshRecoveryReady = await TryEnsureOpenSshDeferredAsync(cancellationToken);
+            }
             else
-                await EnsureExistingAgentAsync(
-                    agentPayload, completedEnrollmentState, snapshot.Ip, cancellationToken);
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.AgentInstalled, cancellationToken);
-            if (ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
-                await AssertExactFirewallConfigurationAsync(snapshot.Ip, rustDesk, cancellationToken);
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.FirewallConfigured, cancellationToken);
-            OpticonComponentIntegration.Integrate(installedNetworkComponent, rustDeskInstallation.InstalledByOpticon);
+            {
+                AddInstallWarning(
+                    "Windows OpenSSH recovery",
+                    "OpenSSH recovery was deferred because its independent SYSTEM Guardian is not ready.");
+            }
+
+            try
+            {
+                if (!remoteDesktopReady
+                    && ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
+                    await EnsureAgentFirewallPolicyAsync(snapshot.Ip, cancellationToken);
+                await RecoverAgentInstallTransactionAsync(agentPayload, cancellationToken);
+                if (File.Exists(AppPaths.AgentConfigFile))
+                {
+                    var recoveredState = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
+                        .LoadAsync(cancellationToken);
+                    RequireSafeInvitationResume(recoveredState);
+                    if (recoveredState.CompletedInviteId == _invite.InviteId)
+                        completedEnrollmentState = recoveredState;
+                }
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.AgentInstallStarted, cancellationToken);
+                if (completedEnrollmentState is null)
+                    await EnsureAgentAsync(agentPayload, snapshot.Ip, cancellationToken);
+                else
+                    await EnsureExistingAgentAsync(
+                        agentPayload, completedEnrollmentState, snapshot.Ip, cancellationToken);
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.AgentInstalled, cancellationToken);
+                if (remoteDesktopReady
+                    && ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
+                    await AssertExactFirewallConfigurationAsync(snapshot.Ip, rustDesk!, cancellationToken);
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.FirewallConfigured, cancellationToken);
+
+                _progress.Report(new InstallProgress(94, "Starting the Opticon agent…"));
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.AgentStartRequested, cancellationToken);
+                var start = await RunSystemToolAsync(
+                    "schtasks.exe", ["/Run", "/TN", AgentTaskName],
+                    TimeSpan.FromSeconds(20), cancellationToken);
+                EnsureSuccess(start, "The Opticon background agent task could not be started");
+                if (ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions)
+                    && !await WaitForListeningExecutableAsync(
+                        45831,
+                        Path.Combine(AppPaths.AgentInstallDirectory, "Taildesk.Agent.exe"),
+                        TimeSpan.FromSeconds(30),
+                        cancellationToken))
+                    throw new InvalidOperationException(
+                        "The Opticon agent task started but did not open its private API listener on TCP 45831.");
+                await AdvanceMachineInstallTransactionAsync(
+                    MachineInstallTransactionPhase.AgentRunning, cancellationToken);
+                agentReady = true;
+            }
+            catch (Exception agentError) when (agentError is not OperationCanceledException)
+            {
+                try
+                {
+                    await RollbackAgentInstallTransactionAsync(CancellationToken.None);
+                }
+                catch (Exception rollbackError)
+                {
+                    throw new AggregateException(
+                        "The management Agent failed and its protected rollback did not complete. " +
+                        "Tailscale and RustDesk remain installed for recovery.",
+                        agentError,
+                        rollbackError);
+                }
+                AddInstallWarning("Opticon management Agent", agentError);
+                _progress.Report(new InstallProgress(
+                    100,
+                    remoteDesktopReady
+                        ? "Remote desktop is ready. The management Agent needs repair; see warnings."
+                        : "The private mesh is connected, but remote desktop and the management Agent need repair; see warnings."));
+                return CreateInstallResult(
+                    meshConnected, remoteDesktopReady, agentReady, sshRecoveryReady,
+                    enrollmentConfirmed);
+            }
+
+            try
+            {
+                OpticonComponentIntegration.Integrate(
+                    installedNetworkComponent,
+                    rustDeskInstallation?.InstalledByOpticon == true);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                AddInstallWarning("Installed-component bookkeeping", exception);
+            }
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.ComponentsIntegrated, cancellationToken);
 
-            await InstallControllerPayloadAsync(_invite.Role == DeviceRole.ControllerAndManaged, cancellationToken);
+            await TryDeferredEnsureAsync(
+                "Controller tools",
+                () => InstallControllerPayloadAsync(
+                    _invite.Role == DeviceRole.ControllerAndManaged, cancellationToken),
+                cancellationToken);
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.ControllerInstalled, cancellationToken);
 
-            _progress.Report(new InstallProgress(94, "Starting the Opticon agent…"));
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.AgentStartRequested, cancellationToken);
-            var start = await RunSystemToolAsync("schtasks.exe", ["/Run", "/TN", "Taildesk Agent"], TimeSpan.FromSeconds(20), cancellationToken);
-            if (ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions)
-                && !await WaitForListeningExecutableAsync(
-                    45831,
-                    Path.Combine(AppPaths.AgentInstallDirectory, "Taildesk.Agent.exe"),
-                    TimeSpan.FromSeconds(30),
-                    cancellationToken))
-                throw new InvalidOperationException("The Opticon agent task started but did not open its private API listener on TCP 45831.");
-            EnsureSuccess(start, "The Opticon background agent task could not be started");
-            await AdvanceMachineInstallTransactionAsync(
-                MachineInstallTransactionPhase.AgentRunning, cancellationToken);
             _progress.Report(new InstallProgress(96, "Waiting for the command center to confirm enrollment…"));
             await AdvanceMachineInstallTransactionAsync(
                 MachineInstallTransactionPhase.EnrollmentWaitStarted, cancellationToken);
-            if (ValidationEnabled(ClientInstallValidationStep.EnrollmentConfirmation))
-                await EnsureEnrollmentCommittedAsync(completedEnrollmentState, cancellationToken);
-            else
-                await CommitWithoutEnrollmentConfirmationAsync(cancellationToken);
-            await StartControllerTasksIfInstalledAsync(cancellationToken);
-            _progress.Report(new InstallProgress(100, "Connected. This machine is ready."));
+            try
+            {
+                if (ValidationEnabled(ClientInstallValidationStep.EnrollmentConfirmation))
+                {
+                    await EnsureEnrollmentCommittedAsync(completedEnrollmentState, cancellationToken);
+                    enrollmentConfirmed = true;
+                }
+                else
+                {
+                    await CommitWithoutEnrollmentConfirmationAsync(cancellationToken);
+                }
+            }
+            catch (TimeoutException timeout)
+            {
+                // The exact Agent task and listener already passed locally.
+                // Preserve its pending invitation so it can keep retrying the
+                // idempotent coordinator enrollment after Setup exits.
+                try
+                {
+                    enrollmentConfirmed = await CommitPendingEnrollmentAsync(cancellationToken);
+                }
+                catch (Exception completionError) when (
+                    completionError is not OperationCanceledException && _agentInstallCommitted)
+                {
+                    AddInstallWarning("Pending-enrollment cleanup", completionError);
+                }
+                if (!enrollmentConfirmed)
+                    AddInstallWarning("Command-center enrollment confirmation", timeout);
+            }
+            catch (Exception completionError) when (
+                completionError is not OperationCanceledException && _agentInstallCommitted)
+            {
+                // A verified receipt is the commit fence.  Cleanup or source-
+                // provenance housekeeping after that point must never roll an
+                // accepted Agent back.
+                enrollmentConfirmed = true;
+                AddInstallWarning("Post-enrollment cleanup", completionError);
+            }
+
+            await TryDeferredEnsureAsync(
+                "Controller task startup",
+                () => StartControllerTasksIfInstalledAsync(cancellationToken),
+                cancellationToken);
+            var finalMessage = _warnings.Count == 0
+                ? "Connected. This machine is ready."
+                : "Connected with recovery access. Some components need repair; see warnings.";
+            _progress.Report(new InstallProgress(100, finalMessage));
+            return CreateInstallResult(
+                meshConnected, remoteDesktopReady, agentReady, sshRecoveryReady,
+                enrollmentConfirmed);
         }
         catch (Exception installError)
         {
-            if (!_agentInstallCommitted)
+            if (!_agentInstallCommitted && _agentInstallTransaction is not null)
             {
                 try { await RollbackAgentInstallTransactionAsync(CancellationToken.None); }
                 catch (Exception rollbackError)
@@ -292,6 +486,96 @@ public sealed class InstallCoordinator
             _agentInstallLock?.Dispose();
             _agentInstallLock = null;
         }
+    }
+
+    private InstallResult CreateInstallResult(
+        bool meshConnected,
+        bool remoteDesktopReady,
+        bool agentReady,
+        bool sshRecoveryReady,
+        bool enrollmentConfirmed) => new(
+        meshConnected,
+        remoteDesktopReady,
+        agentReady,
+        sshRecoveryReady,
+        enrollmentConfirmed,
+        _warnings.ToArray());
+
+    private async Task<bool> TryDeferredEnsureAsync<T>(
+        string operation,
+        Func<Task<T>> ensure,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            _ = await ensure();
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            AddInstallWarning(operation, exception);
+            return false;
+        }
+    }
+
+    private async Task<bool> TryDeferredEnsureAsync(
+        string operation,
+        Func<Task> ensure,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            await ensure();
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            AddInstallWarning(operation, exception);
+            return false;
+        }
+    }
+
+    private async Task<bool> TryEnsureOpenSshDeferredAsync(
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await EnsureOpenSshAsync(
+                cancellationToken, scheduleRebootContinuation: false);
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            AddInstallWarning("Windows OpenSSH recovery", exception);
+            return false;
+        }
+    }
+
+    private void AddInstallWarning(string operation, Exception exception) =>
+        AddInstallWarning(operation, exception.Message);
+
+    private void AddInstallWarning(string operation, string detail)
+    {
+        static string Bounded(string value, int maximum)
+        {
+            var safe = new string(value
+                .Where(character => !char.IsControl(character) || character is '\r' or '\n' or '\t')
+                .ToArray()).Replace("\r", " ", StringComparison.Ordinal)
+                .Replace("\n", " ", StringComparison.Ordinal)
+                .Replace("\t", " ", StringComparison.Ordinal)
+                .Trim();
+            return safe.Length <= maximum ? safe : safe[..maximum];
+        }
+
+        var warning = new InstallWarning(
+            Bounded(operation, 96),
+            Bounded(string.IsNullOrWhiteSpace(detail) ? "The repair did not complete." : detail, 512));
+        _warnings.Add(warning);
+        _progress.Report(new InstallProgress(
+            98,
+            $"WARNING: {warning.Operation} — {warning.Detail}"));
     }
 
     private bool ValidationEnabled(ClientInstallValidationStep step) =>
@@ -315,43 +599,27 @@ public sealed class InstallCoordinator
             "The authenticated source build and its isolated .NET 10 environment are bound to this invitation."));
     }
 
-    private async Task<VerifiedPayload> EnsurePayloadVerifiedAsync(CancellationToken cancellationToken)
+    private Task<VerifiedPayload> EnsurePayloadVerifiedAsync(CancellationToken cancellationToken)
     {
-        var agentDirectory = Path.Combine(_bundleDirectory, "Payload", "Agent");
-        var agent = Path.Combine(agentDirectory, "Taildesk.Agent.exe");
-        if (!File.Exists(agent))
-            throw new FileNotFoundException(
-                $"The invitation bundle is incomplete (Payload\\Agent is missing from {_bundleDirectory}).", agent);
-        await ProductSigning.VerifyAuthenticodeAsync(agent, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var agentDirectory = Path.GetFullPath(Path.Combine(_bundleDirectory, "Payload", "Agent"));
+        var guardianDirectory = Path.GetFullPath(Path.Combine(
+            _bundleDirectory, "Payload", "UpdateGuardian"));
+        if (!IsPathWithinDirectory(agentDirectory, _bundleDirectory)
+            || !IsPathWithinDirectory(guardianDirectory, _bundleDirectory))
+            throw new InvalidDataException("A component payload path escaped the authenticated local build.");
 
-        var guardianDirectory = Path.Combine(_bundleDirectory, "Payload", "UpdateGuardian");
-        var guardian = Path.Combine(guardianDirectory, "Taildesk.UpdateGuardian.exe");
-        if (!File.Exists(guardian))
-            throw new FileNotFoundException(
-                $"The invitation bundle is incomplete (Payload\\UpdateGuardian is missing from {_bundleDirectory}).", guardian);
-        await ProductSigning.VerifyAuthenticodeAsync(guardian, cancellationToken);
-
-        if (_invite.Role == DeviceRole.ControllerAndManaged)
-        {
-            var controller = Path.Combine(_bundleDirectory, "Payload", "Admin");
-            var controllerExecutable = Path.Combine(controller, "Opticon.exe");
-            var cliExecutable = Path.Combine(controller, "Cli", "opticon.exe");
-            if (!File.Exists(controllerExecutable) || !File.Exists(cliExecutable))
-                throw new FileNotFoundException("This controller invite is missing its signed UI or CLI payload.");
-            await ProductSigning.VerifyAuthenticodeAsync(controllerExecutable, cancellationToken);
-            await ProductSigning.VerifyAuthenticodeAsync(cliExecutable, cancellationToken);
-            foreach (var executable in Directory.EnumerateFiles(controller, "*.exe", SearchOption.AllDirectories))
-                await ProductSigning.VerifyAuthenticodeAsync(executable, cancellationToken);
-            var installedController = Path.Combine(AppPaths.InstallDirectory, "Admin");
-            RequireInstalledControllerProcessesClosed(installedController, installedController + ".previous");
-        }
-
-        return new VerifiedPayload(
+        // SourceBuildProvenance already reverified the attested release before
+        // this coordinator starts.  Component-specific existence, exact tree,
+        // hash, and Authenticode checks intentionally occur inside the
+        // Guardian and Agent phases so a missing optional management payload
+        // cannot prevent Tailscale + RustDesk recovery from being established.
+        return Task.FromResult(new VerifiedPayload(
             agentDirectory,
             guardianDirectory,
             InstallerEnsureResult.Ready(
                 "EnsurePayloadVerifiedAsync",
-                "Every invite payload executable required for this role has a valid pinned signature."));
+                "The authenticated local build fixed the bounded component payload paths; each component is reverified immediately before use.")));
     }
 
     private async Task<InstallerEnsureResult> EnsureProtectedStorageAsync(
@@ -531,9 +799,7 @@ public sealed class InstallCoordinator
                        Path.GetFullPath(executable), StringComparison.OrdinalIgnoreCase)
                    && string.Equals(exec.Element(task + "Arguments")?.Value ?? string.Empty,
                        arguments, StringComparison.Ordinal)
-                   && principal?.Element(task + "UserId")?.Value == "S-1-5-18"
-                   && principal.Element(task + "LogonType")?.Value == "ServiceAccount"
-                   && principal.Element(task + "RunLevel")?.Value == "HighestAvailable"
+                   && IsSystemHighestPrincipal(principal, task)
                    && (!requiresBootTrigger || triggers.Any(trigger => trigger.Name == task + "BootTrigger"));
         }
         catch (Exception exception) when (exception is InvalidDataException or System.Xml.XmlException)
@@ -542,7 +808,9 @@ public sealed class InstallCoordinator
         }
     }
 
-    private async Task<InstallerEnsureResult> EnsureOpenSshAsync(CancellationToken cancellationToken)
+    private async Task<InstallerEnsureResult> EnsureOpenSshAsync(
+        CancellationToken cancellationToken,
+        bool scheduleRebootContinuation = true)
     {
         var openSshDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "OpenSSH");
@@ -560,9 +828,12 @@ public sealed class InstallCoordinator
             MachineInstallTransactionPersistence.RecordRebootState(
                 journal, rebootPending: true, operation: "EnsureOpenSshAsync");
             await MachineInstallTransactionPersistence.SaveAsync(journal, cancellationToken);
-            if (_resumeContext is null)
+            if (!scheduleRebootContinuation || _resumeContext is null)
                 throw new SetupRebootRequiredException(
-                    exception.Message + " Restart Windows, then rerun the original protected Opticon installer.");
+                    exception.Message +
+                    (scheduleRebootContinuation
+                        ? " Restart Windows, then rerun the original protected Opticon installer."
+                        : " Remote access remains available; restart Windows and run Setup repair later to enable SSH recovery."));
             await SetupResumeCoordinator.ScheduleAsync(_resumeContext, cancellationToken);
             throw new SetupRebootRequiredException(
                 exception.Message + " Setup saved its protected recovery state and will resume automatically after Windows restarts.");
@@ -907,7 +1178,14 @@ public sealed class InstallCoordinator
             _progress.Report(new InstallProgress(38, "Enabling this machine as an exit node…"));
             var advertise = await RunPrivilegedChildAsync(
                 tailscale, ["set", "--advertise-exit-node"], TimeSpan.FromSeconds(30), cancellationToken);
-            EnsureSuccess(advertise, "Tailscale could not advertise the exit node");
+            if (!advertise.Succeeded)
+            {
+                AddInstallWarning(
+                    "Exit-node advertisement",
+                    FirstProcessFailureDetail(
+                        advertise,
+                        "Tailscale joined the private mesh but could not advertise the optional exit route."));
+            }
         }
         await AdvanceMachineInstallTransactionAsync(
             MachineInstallTransactionPhase.NetworkPolicyApplied, cancellationToken);
@@ -1479,6 +1757,41 @@ public sealed class InstallCoordinator
         }
     }
 
+    private static bool IsMinimallyOwnedAgentTask(string xml, string expectedExecutable)
+    {
+        try
+        {
+            var document = ParseTaskXml(xml);
+            XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+            var root = document.Root;
+            var actions = root?.Element(task + "Actions")?.Elements().ToArray() ?? [];
+            var principals = root?.Element(task + "Principals")
+                ?.Elements(task + "Principal").ToArray() ?? [];
+            var triggers = root?.Element(task + "Triggers")?.Elements().ToArray() ?? [];
+            var exec = actions.SingleOrDefault();
+            var principal = principals.SingleOrDefault();
+            var command = exec?.Element(task + "Command")?.Value ?? string.Empty;
+            var arguments = exec?.Element(task + "Arguments")?.Value ?? string.Empty;
+            return root?.Name == task + "Task"
+                   && actions.Length == 1
+                   && exec?.Name == task + "Exec"
+                   && principals.Length == 1
+                   && triggers.Length == 1
+                   && triggers[0].Name == task + "BootTrigger"
+                   && string.Equals(
+                       Path.GetFullPath(command),
+                       Path.GetFullPath(expectedExecutable),
+                       StringComparison.OrdinalIgnoreCase)
+                   && string.IsNullOrWhiteSpace(arguments)
+                   && IsSystemHighestPrincipal(principal, task);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
     private static async Task<string?> QueryAgentTaskXmlAsync(CancellationToken cancellationToken)
         => await QueryTaskXmlAsync(AgentTaskName, cancellationToken);
 
@@ -1489,12 +1802,54 @@ public sealed class InstallCoordinator
         var result = await RunSystemToolAsync(
             "schtasks.exe", ["/Query", "/TN", taskName, "/XML"],
             TimeSpan.FromSeconds(20), cancellationToken);
-        if (!result.Succeeded) return null;
+        if (!result.Succeeded)
+        {
+            if (!await IsTaskPresentAtFixedNameAsync(taskName, cancellationToken)) return null;
+            var detail = (result.StandardError + " " + result.StandardOutput).Trim();
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(detail)
+                    ? $"Windows could not query scheduled task '{taskName}' (exit code {result.ExitCode})."
+                    : $"Windows could not query scheduled task '{taskName}': {detail}");
+        }
         var xml = result.StandardOutput.TrimStart('\uFEFF', '\r', '\n', ' ');
         if (xml.Length is <= 0 or > 256 * 1024)
             throw new InvalidDataException("The Agent scheduled-task XML has an invalid size.");
         _ = ParseTaskXml(xml);
         return xml;
+    }
+
+    private static async Task<bool> IsTaskPresentAtFixedNameAsync(
+        string taskName,
+        CancellationToken cancellationToken)
+    {
+        var environment = BuildPrivilegedEnvironment()
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        environment["TAILDESK_EXPECTED_TASK_NAME"] = taskName;
+        var result = await ProcessRunner.RunAsync(
+            SystemExecutable(@"WindowsPowerShell\v1.0\powershell.exe"),
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Restricted",
+                "-Command", TaskPresenceProbeScript
+            ],
+            TimeSpan.FromSeconds(20),
+            cancellationToken,
+            environment: environment,
+            clearEnvironment: true);
+        return RequireTaskPresenceProbeResult(taskName, result);
+    }
+
+    private static bool RequireTaskPresenceProbeResult(string taskName, ProcessResult result)
+    {
+        if (result.Succeeded) return true;
+        if (result.ExitCode == TaskPresenceProbeAbsentExitCode) return false;
+        var detail = (result.StandardError + " " + result.StandardOutput).Trim();
+        throw new InvalidDataException(
+            string.IsNullOrWhiteSpace(detail)
+                ? $"Windows could not prove whether scheduled task '{taskName}' is present (exit code {result.ExitCode})."
+                : $"Windows could not prove whether scheduled task '{taskName}' is present: {detail}");
     }
 
     private static XDocument ParseTaskXml(string xml)
@@ -1528,15 +1883,16 @@ public sealed class InstallCoordinator
             || actions.Length != 1 || exec?.Name != task + "Exec"
             || principals.Length != 1
             || triggers.Length != 1 || triggers[0].Name != task + "BootTrigger"
+            || triggers[0].Element(task + "Enabled")?.Value != "true"
             || !string.Equals(command, expected, StringComparison.OrdinalIgnoreCase)
             || !string.IsNullOrWhiteSpace(arguments)
-            || principal?.Element(task + "UserId")?.Value != "S-1-5-18"
-            || principal.Element(task + "LogonType")?.Value != "ServiceAccount"
-            || principal.Element(task + "RunLevel")?.Value != "HighestAvailable"
+            || !IsSystemHighestPrincipal(principal, task)
             || settings?.Element(task + "MultipleInstancesPolicy")?.Value != "IgnoreNew"
             || settings.Element(task + "DisallowStartIfOnBatteries")?.Value != "false"
             || settings.Element(task + "StopIfGoingOnBatteries")?.Value != "false"
             || settings.Element(task + "StartWhenAvailable")?.Value != "true"
+            || settings.Element(task + "AllowStartOnDemand")?.Value != "true"
+            || settings.Element(task + "Enabled")?.Value != "true"
             || settings.Element(task + "ExecutionTimeLimit")?.Value != "PT0S"
             || settings.Element(task + "RestartOnFailure")?.Element(task + "Interval")?.Value != "PT1M"
             || settings.Element(task + "RestartOnFailure")?.Element(task + "Count")?.Value != "20")
@@ -1556,7 +1912,6 @@ public sealed class InstallCoordinator
                 new XElement(task + "Principals",
                     new XElement(task + "Principal", new XAttribute("id", "Author"),
                         new XElement(task + "UserId", "S-1-5-18"),
-                        new XElement(task + "LogonType", "ServiceAccount"),
                         new XElement(task + "RunLevel", "HighestAvailable"))),
                 new XElement(task + "Settings",
                     new XElement(task + "MultipleInstancesPolicy", "IgnoreNew"),
@@ -1583,6 +1938,7 @@ public sealed class InstallCoordinator
         string xml,
         CancellationToken cancellationToken)
     {
+        xml = NormalizeSystemTaskXmlForImport(xml);
         var path = Path.Combine(
             AppPaths.SetupStagingDirectory, $"agent-task-{Guid.NewGuid():N}.xml");
         try
@@ -1605,10 +1961,114 @@ public sealed class InstallCoordinator
         CancellationToken cancellationToken)
     {
         var xml = BuildExactAgentTaskXml(executable);
-        await ImportAgentTaskXmlAsync(xml, cancellationToken);
-        var installed = await QueryAgentTaskXmlAsync(cancellationToken)
-                        ?? throw new InvalidDataException("Windows did not retain the Agent scheduled task.");
-        RequireExactAgentTaskXml(installed, executable);
+        Exception? xmlRegistrationError = null;
+        try
+        {
+            await ImportAgentTaskXmlAsync(xml, cancellationToken);
+            var imported = await QueryAgentTaskXmlAsync(cancellationToken)
+                           ?? throw new InvalidDataException("Windows did not retain the imported Agent scheduled task.");
+            RequireExactAgentTaskXml(imported, executable);
+            return;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Some Task Scheduler versions reject otherwise valid XML more
+            // aggressively than the command-line registration API. Keep a
+            // non-XML path so a schema quirk cannot strand the recovery Agent.
+            xmlRegistrationError = exception;
+        }
+
+        try
+        {
+            await RegisterAgentTaskWithCommandLineFallbackAsync(executable, cancellationToken);
+            var installed = await QueryAgentTaskXmlAsync(cancellationToken)
+                            ?? throw new InvalidDataException("Windows did not retain the fallback Agent scheduled task.");
+            RequireExactAgentTaskXml(installed, executable);
+        }
+        catch (Exception fallbackError) when (fallbackError is not OperationCanceledException)
+        {
+            Exception? cleanupError = null;
+            try
+            {
+                await DeleteMinimallyOwnedAgentTaskIfPresentAsync(
+                    executable, CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                cleanupError = exception;
+            }
+            throw new InvalidOperationException(
+                "Windows rejected both protected Agent task registration methods.",
+                new AggregateException(
+                    new[] { xmlRegistrationError, fallbackError, cleanupError }
+                        .OfType<Exception>()));
+        }
+    }
+
+    private static async Task DeleteMinimallyOwnedAgentTaskIfPresentAsync(
+        string executable,
+        CancellationToken cancellationToken)
+    {
+        var current = await QueryAgentTaskXmlAsync(cancellationToken);
+        if (current is null) return;
+        if (!IsMinimallyOwnedAgentTask(current, executable))
+            throw new InvalidDataException(
+                "The failed Agent registration left a same-named task whose exact Opticon ownership could not be proven.");
+        var delete = await RunSystemToolAsync(
+            "schtasks.exe", ["/Delete", "/TN", AgentTaskName, "/F"],
+            TimeSpan.FromSeconds(20), cancellationToken);
+        EnsureSystemToolSuccess(
+            delete, "The failed partial Agent task could not be removed");
+        if (await QueryAgentTaskXmlAsync(cancellationToken) is not null)
+            throw new InvalidDataException(
+                "The failed partial Agent task still exists after cleanup.");
+    }
+
+    private static async Task RegisterAgentTaskWithCommandLineFallbackAsync(
+        string executable,
+        CancellationToken cancellationToken)
+    {
+        var command = $"\"{Path.GetFullPath(executable)}\"";
+        var created = await RunSystemToolAsync(
+            "schtasks.exe",
+            ["/Create", "/TN", AgentTaskName, "/SC", "ONSTART", "/RU", "SYSTEM",
+                "/RL", "HIGHEST", "/TR", command, "/F"],
+            TimeSpan.FromSeconds(30), cancellationToken);
+        EnsureSystemToolSuccess(
+            created, "Windows could not create the SYSTEM Agent task through its compatibility API");
+
+        // schtasks.exe deliberately exposes only a subset of reliability
+        // settings. Apply the same no-battery-block and restart contract after
+        // the security principal, boot trigger, and exact command are fixed.
+        const string settingsScript =
+            "$ErrorActionPreference='Stop';" +
+            "$settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries " +
+            "-DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 20 " +
+            "-RestartInterval (New-TimeSpan -Minutes 1) " +
+            "-ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew;" +
+            "Set-ScheduledTask -TaskPath '\\' -TaskName 'Taildesk Agent' -Settings $settings | Out-Null";
+        var configured = await RunSystemToolAsync(
+            @"WindowsPowerShell\v1.0\powershell.exe",
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted",
+                "-Command", settingsScript],
+            TimeSpan.FromSeconds(30), cancellationToken);
+        EnsureSystemToolSuccess(
+            configured, "Windows could not apply the Agent task recovery settings");
+    }
+
+    private static bool IsSystemHighestPrincipal(XElement? principal, XNamespace task)
+    {
+        if (principal?.Element(task + "UserId")?.Value != "S-1-5-18"
+            || principal.Element(task + "RunLevel")?.Value != "HighestAvailable")
+            return false;
+
+        // TASK_LOGON_SERVICE_ACCOUNT is value 5 in the COM/API enum, but
+        // "ServiceAccount" is not in the Task Scheduler XML logonType XSD.
+        // Windows normally exports LocalSystem tasks with this element absent;
+        // tolerate the legacy spelling only when reading an existing task.
+        var logonType = principal.Element(task + "LogonType")?.Value;
+        return string.IsNullOrEmpty(logonType)
+               || logonType.Equals("ServiceAccount", StringComparison.Ordinal);
     }
 
     private static async Task RestoreAgentTaskSnapshotAsync(
@@ -1621,7 +2081,12 @@ public sealed class InstallCoordinator
         if (journal.HadPreviousTask)
         {
             RequireExactAgentTaskXml(journal.PreviousTaskXml, executable);
-            await ImportAgentTaskXmlAsync(journal.PreviousTaskXml, cancellationToken);
+            // The snapshot proves that the prior task had the exact semantic
+            // contract, but a legacy Scheduler export can contain the invalid
+            // XML lexical value <LogonType>ServiceAccount</LogonType>. Restore
+            // the same contract through the canonical registrar so rollback
+            // gets both the corrected XML and the secure command-line fallback.
+            await RegisterExactAgentTaskAsync(executable, cancellationToken);
             var restored = await QueryAgentTaskXmlAsync(cancellationToken)
                            ?? throw new InvalidDataException("The prior Agent task was not restored.");
             RequireExactAgentTaskXml(restored, executable);
@@ -1638,7 +2103,9 @@ public sealed class InstallCoordinator
         var current = await QueryAgentTaskXmlAsync(cancellationToken);
         if (current is not null)
         {
-            RequireExactAgentTaskXml(current, executable);
+            if (!IsMinimallyOwnedAgentTask(current, executable))
+                throw new InvalidDataException(
+                    "The first-install rollback found a same-named task whose exact Opticon ownership could not be proven.");
             var delete = await RunSystemToolAsync(
                 "schtasks.exe", ["/Delete", "/TN", AgentTaskName, "/F"],
                 TimeSpan.FromSeconds(20), cancellationToken);
@@ -2395,6 +2862,70 @@ public sealed class InstallCoordinator
         await AssertExactFirewallConfigurationAsync(tailscaleIp, rustDesk, cancellationToken);
     }
 
+    private async Task EnsureAgentFirewallPolicyAsync(
+        string tailscaleIp,
+        CancellationToken cancellationToken)
+    {
+        if (!IPAddress.TryParse(tailscaleIp, out var parsed)
+            || parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
+            || parsed.GetAddressBytes() is not [100, >= 64 and <= 127, _, _])
+            throw new InvalidDataException(
+                "The Agent firewall binding is not an authenticated Tailscale IPv4 address.");
+        await RequireFirewallProfilesSecureAsync(cancellationToken);
+        var agent = Path.GetFullPath(Path.Combine(
+            AppPaths.InstallDirectory, "Agent", "Taildesk.Agent.exe"));
+        _ = await RunSystemToolAsync(
+            "netsh.exe",
+            ["advfirewall", "firewall", "delete", "rule",
+                "name=Taildesk Agent (Tailscale only)", "group=Opticon"],
+            TimeSpan.FromSeconds(20), cancellationToken);
+        var added = await RunSystemToolAsync(
+            "netsh.exe",
+            ["advfirewall", "firewall", "add", "rule",
+                "name=Taildesk Agent (Tailscale only)", "group=Opticon", "dir=in",
+                "action=allow", "protocol=TCP", "localport=45831", $"localip={tailscaleIp}",
+                "remoteip=100.64.0.0/10", $"program={agent}", "profile=any", "enable=yes"],
+            TimeSpan.FromSeconds(30), cancellationToken);
+        EnsureSuccess(added, "Could not create the Tailscale-only Agent recovery firewall rule");
+
+        const string script =
+            "param([string]$ip,[string]$agent);$ErrorActionPreference='Stop';" +
+            "$rules=@(Get-NetFirewallRule -DisplayName 'Taildesk Agent (Tailscale only)' -ErrorAction Stop);" +
+            "if($rules.Count -ne 1){throw 'Agent firewall rule count drifted'};$r=$rules[0];" +
+            "if(-not $r.Enabled -or $r.Direction.ToString() -ne 'Inbound' -or $r.Action.ToString() -ne 'Allow' -or $r.Profile.ToString() -ne 'Any' -or $r.Group -ne 'Opticon'){throw 'Agent firewall rule contract drifted'};" +
+            "$app=@(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r);if($app.Count -ne 1 -or -not $app[0].Program.Equals($agent,[StringComparison]::OrdinalIgnoreCase)){throw 'Agent firewall application drifted'};" +
+            "$pf=@(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r);if($pf.Count -ne 1 -or $pf[0].Protocol.ToString() -ne 'TCP' -or $pf[0].LocalPort.ToString() -ne '45831'){throw 'Agent firewall port drifted'};" +
+            "$af=@(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r);$remote=(@($af[0].RemoteAddress)-join ',');$local=(@($af[0].LocalAddress)-join ',');" +
+            "if($af.Count -ne 1 -or @('100.64.0.0/10','100.64.0.0/255.192.0.0') -notcontains $remote -or $local -ne $ip){throw 'Agent firewall address drifted'}";
+        var verified = await RunSystemToolAsync(
+            @"WindowsPowerShell\v1.0\powershell.exe",
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted",
+                "-Command", script, tailscaleIp, agent],
+            TimeSpan.FromSeconds(30), cancellationToken);
+        EnsureSystemToolSuccess(
+            verified, "The Tailscale-only Agent recovery firewall rule did not verify");
+    }
+
+    private static async Task ContainRustDeskAfterFailedSetupAsync(
+        CancellationToken cancellationToken)
+    {
+        var service = await RunSystemToolAsync(
+            "sc.exe", ["query", "RustDesk"], TimeSpan.FromSeconds(10), cancellationToken);
+        if (!service.Succeeded)
+        {
+            if (service.ExitCode == 1060) return;
+            EnsureSystemToolSuccess(
+                service, "Windows could not determine whether the RustDesk service needed containment");
+        }
+        _ = await RunSystemToolAsync(
+            "sc.exe", ["stop", "RustDesk"], TimeSpan.FromSeconds(30), cancellationToken);
+        var disabled = await RunSystemToolAsync(
+            "sc.exe", ["config", "RustDesk", "start=", "disabled"],
+            TimeSpan.FromSeconds(15), cancellationToken);
+        EnsureSystemToolSuccess(
+            disabled, "RustDesk could not be disabled after remote-desktop setup failed");
+    }
+
     private async Task<InstallerEnsureResult> EnsureFirewallPolicyAsync(
         string tailscaleIp,
         string rustDesk,
@@ -2623,7 +3154,36 @@ public sealed class InstallCoordinator
                 TimeSpan.FromSeconds(20), cancellationToken);
             return;
         }
-        await ImportTaskXmlAsync(taskName, snapshot, cancellationToken);
+        await ImportTaskXmlAsync(
+            taskName, NormalizeSystemTaskXmlForImport(snapshot), cancellationToken);
+    }
+
+    private static string NormalizeSystemTaskXmlForImport(string xml)
+    {
+        var document = ParseTaskXml(xml);
+        document.Declaration = new XDeclaration("1.0", "utf-8", null);
+        XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+        var principals = document.Root?.Element(task + "Principals")
+            ?.Elements(task + "Principal").ToArray() ?? [];
+        if (principals.Length == 1)
+        {
+            var principal = principals[0];
+            var logonType = principal.Element(task + "LogonType");
+            if (principal.Element(task + "UserId")?.Value == "S-1-5-18"
+                && principal.Element(task + "RunLevel")?.Value == "HighestAvailable"
+                && logonType?.Value == "ServiceAccount")
+            {
+                // Normalize an older API/export spelling before sending the
+                // snapshot back through the stricter task-XML parser.
+                logonType.Remove();
+            }
+        }
+        // Every caller writes UTF-8 bytes. Re-serialize every imported string
+        // so a Scheduler export declaring UTF-16 cannot disagree with the file
+        // encoding supplied to schtasks.exe.
+        return document.Declaration + Environment.NewLine
+               + (document.Root?.ToString(SaveOptions.DisableFormatting)
+                  ?? throw new InvalidDataException("The scheduled-task XML has no root element."));
     }
 
     private static string BuildRouteKeeperTaskXml(string executable)
@@ -2639,7 +3199,7 @@ public sealed class InstallCoordinator
                     new XElement(task + "TimeTrigger",
                         new XElement(task + "Repetition", new XElement(task + "Interval", "PT5M")),
                         new XElement(task + "StartBoundary", start), new XElement(task + "Enabled", "true"))),
-                BuildTaskPrincipal(task, "S-1-5-18", "ServiceAccount", "HighestAvailable"),
+                BuildTaskPrincipal(task, "S-1-5-18", null, "HighestAvailable"),
                 BuildControllerTaskSettings(task, true),
                 new XElement(task + "Actions", new XAttribute("Context", "Author"),
                     new XElement(task + "Exec", new XElement(task + "Command", Path.GetFullPath(executable)),
@@ -2659,10 +3219,21 @@ public sealed class InstallCoordinator
                     new XElement(task + "Exec", new XElement(task + "Command", Path.GetFullPath(executable)))))).ToString(SaveOptions.DisableFormatting);
     }
 
-    private static XElement BuildTaskPrincipal(XNamespace task, string sid, string logonType, string runLevel) =>
-        new(task + "Principals", new XElement(task + "Principal", new XAttribute("id", "Author"),
-            new XElement(task + "UserId", sid), new XElement(task + "LogonType", logonType),
-            new XElement(task + "RunLevel", runLevel)));
+    private static XElement BuildTaskPrincipal(
+        XNamespace task,
+        string sid,
+        string? logonType,
+        string runLevel)
+    {
+        var principal = new XElement(
+            task + "Principal",
+            new XAttribute("id", "Author"),
+            new XElement(task + "UserId", sid));
+        if (!string.IsNullOrEmpty(logonType))
+            principal.Add(new XElement(task + "LogonType", logonType));
+        principal.Add(new XElement(task + "RunLevel", runLevel));
+        return new XElement(task + "Principals", principal);
+    }
 
     private static XElement BuildControllerTaskSettings(XNamespace task, bool enabled) =>
         new(task + "Settings", new XElement(task + "MultipleInstancesPolicy", "IgnoreNew"),
@@ -2675,7 +3246,8 @@ public sealed class InstallCoordinator
 
     private static void RequireExactRouteKeeperTaskXml(string xml, string executable)
     {
-        var task = RequireControllerTaskShape(xml, executable, "S-1-5-18", "ServiceAccount", "HighestAvailable", true);
+        var task = RequireControllerTaskShape(
+            xml, executable, "S-1-5-18", null, "HighestAvailable", true);
         XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
         var triggers = task.Element(ns + "Triggers")!.Elements().ToArray();
         var exec = task.Element(ns + "Actions")!.Elements().Single();
@@ -2705,7 +3277,7 @@ public sealed class InstallCoordinator
     }
 
     private static XElement RequireControllerTaskShape(
-        string xml, string executable, string sid, string logonType, string runLevel, bool enabled)
+        string xml, string executable, string sid, string? logonType, string runLevel, bool enabled)
     {
         var document = ParseTaskXml(xml);
         XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
@@ -2715,12 +3287,15 @@ public sealed class InstallCoordinator
         var settings = root?.Element(task + "Settings");
         var exec = actions.SingleOrDefault();
         var principal = principals.SingleOrDefault();
+        var principalMatches = logonType is null
+            ? IsSystemHighestPrincipal(principal, task)
+            : principal?.Element(task + "UserId")?.Value == sid
+              && principal.Element(task + "LogonType")?.Value == logonType
+              && principal.Element(task + "RunLevel")?.Value == runLevel;
         if (root?.Name != task + "Task" || actions.Length != 1 || exec?.Name != task + "Exec"
             || principals.Length != 1
             || !string.Equals(exec.Element(task + "Command")?.Value, Path.GetFullPath(executable), StringComparison.OrdinalIgnoreCase)
-            || principal?.Element(task + "UserId")?.Value != sid
-            || principal.Element(task + "LogonType")?.Value != logonType
-            || principal.Element(task + "RunLevel")?.Value != runLevel
+            || !principalMatches
             || settings?.Element(task + "MultipleInstancesPolicy")?.Value != "IgnoreNew"
             || settings.Element(task + "DisallowStartIfOnBatteries")?.Value != "false"
             || settings.Element(task + "StopIfGoingOnBatteries")?.Value != "false"
@@ -3384,6 +3959,11 @@ public sealed class InstallCoordinator
             || !FixedAsciiEquals(committed.AgentTokenHash, receipt.AgentTokenHash)
             || !FixedAsciiEquals(committed.AgentSha256, receipt.AgentSha256))
             throw new InvalidDataException("The protected enrollment success receipt did not verify after commit.");
+
+        // This durable, re-read receipt is the Agent commit fence. Nothing in
+        // later journal deletion, source bookkeeping, rollback-directory
+        // cleanup, or trust pruning may undo a coordinator-accepted Agent.
+        _agentInstallCommitted = true;
         if (_machineInstallTransaction is not null)
         {
             MachineInstallTransactionPersistence.RecordVerifiedRepair(
@@ -3396,9 +3976,51 @@ public sealed class InstallCoordinator
         }
         await CompleteMachineInstallTransactionAsync(cancellationToken);
         SourceBuildProvenance.CommitActiveInstallation();
-        _agentInstallCommitted = true;
         await FinalizeAgentInstallTransactionAsync(cancellationToken);
         SourceBuildProvenance.PruneInstalledTrust();
+    }
+
+    private async Task<bool> CommitPendingEnrollmentAsync(CancellationToken cancellationToken)
+    {
+        var state = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
+            .LoadAsync(cancellationToken);
+        if (EnrollmentMatchesInvitation(state))
+        {
+            // Reconcile the narrow race in which the Agent persisted the
+            // coordinator response immediately after the final polling read.
+            await CommitEnrollmentReceiptAsync(state, cancellationToken);
+            return true;
+        }
+        var expectedTokenHash = SecurityHelpers.HashToken(_invite.AgentToken);
+        if (state.PendingInviteId != _invite.InviteId
+            || state.CompletedInviteId is not null
+            || string.IsNullOrWhiteSpace(state.PendingInviteSecretProtected)
+            || state.DeviceId == Guid.Empty
+            || state.Role != _invite.Role
+            || !state.DeviceName.Equals(_invite.DeviceName, StringComparison.Ordinal)
+            || !state.CoordinatorUrl.Equals(_invite.CoordinatorUrl, StringComparison.Ordinal)
+            || !FixedAsciiEquals(state.AgentTokenHash, expectedTokenHash)
+            || !IPAddress.TryParse(state.BindAddress, out var address)
+            || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
+            || address.GetAddressBytes() is not [100, >= 64 and <= 127, _, _])
+            throw new InvalidDataException(
+                "The local Agent state cannot safely continue this invitation in the background.");
+
+        var agentExecutable = Path.Combine(
+            AppPaths.AgentInstallDirectory, "Taildesk.Agent.exe");
+        await ProductSigning.VerifyAuthenticodeAsync(agentExecutable, cancellationToken);
+        await RequireExactAgentTaskAsync(cancellationToken);
+
+        // The exact signed Agent, protected pending state, SYSTEM task, local
+        // API listener, firewall, and mesh identity were all verified by the
+        // caller. Preserve this generation so it can keep retrying the
+        // invitation's idempotent enrollment after Setup exits.
+        _agentInstallCommitted = true;
+        await CompleteMachineInstallTransactionAsync(cancellationToken);
+        SourceBuildProvenance.CommitActiveInstallation();
+        await FinalizeAgentInstallTransactionAsync(cancellationToken);
+        SourceBuildProvenance.PruneInstalledTrust();
+        return false;
     }
 
     private async Task CommitWithoutEnrollmentConfirmationAsync(CancellationToken cancellationToken)
@@ -3406,9 +4028,10 @@ public sealed class InstallCoordinator
         // Emergency policy skips the remote receipt comparison, not local
         // transaction completion. Leaving either journal pending would turn a
         // successful installation into a forced recovery on the next launch.
+        await RequireExactAgentTaskAsync(cancellationToken);
+        _agentInstallCommitted = true;
         await CompleteMachineInstallTransactionAsync(cancellationToken);
         SourceBuildProvenance.CommitActiveInstallation();
-        _agentInstallCommitted = true;
         await FinalizeAgentInstallTransactionAsync(cancellationToken);
         SourceBuildProvenance.PruneInstalledTrust();
     }
@@ -3946,7 +4569,11 @@ public sealed class InstallCoordinator
         uint reserved);
     private Dictionary<string, string> BuildSharedRoots(IEnumerable<string> requested)
     {
-        var profile = RequireInteractiveUserProfile();
+        // Shared folders are optional management convenience, not a recovery
+        // prerequisite.  A machine installed before first sign-in can enroll
+        // with no roots and add them on a later attended repair.
+        var profile = _userProfile;
+        if (profile is null) return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var known = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["Desktop"] = profile.Desktop,
@@ -4058,6 +4685,23 @@ public sealed class InstallCoordinator
             }
             throw new InvalidOperationException($"{message}: {detail}".Trim());
         }
+    }
+
+    private string FirstProcessFailureDetail(ProcessResult result, string fallback)
+    {
+        var detail = new[] { result.StandardError, result.StandardOutput }
+            .Select(value => value.Trim())
+            .FirstOrDefault(value => value.Length != 0) ?? fallback;
+        foreach (var secret in new[]
+                 {
+                     _invite.TailscaleAuthKey, _invite.AgentToken, _invite.InviteSecret,
+                     _invite.ControllerToken, _invite.RustDeskPassword
+                 })
+        {
+            if (!string.IsNullOrEmpty(secret))
+                detail = detail.Replace(secret, "[redacted]", StringComparison.Ordinal);
+        }
+        return detail;
     }
 
     private static void EnsureSystemToolSuccess(ProcessResult result, string message)

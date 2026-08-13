@@ -1265,6 +1265,7 @@ function Write-ProtectedTaskXml {
     try {
         $document = New-Object Xml.XmlDocument
         $document.PreserveWhitespace = $true
+        $document.XmlResolver = $null
         $document.LoadXml($Xml)
         $declaration = $document.FirstChild -as [Xml.XmlDeclaration]
         if ($null -eq $declaration) {
@@ -1272,6 +1273,24 @@ function Write-ProtectedTaskXml {
             [void]$document.PrependChild($declaration)
         } else {
             $declaration.Encoding = 'utf-8'
+        }
+
+        # Task Scheduler's COM/API enum calls SYSTEM logon
+        # "ServiceAccount", but that token is not legal in task XML. Older
+        # exports can nevertheless contain it. Normalize only the exact
+        # SYSTEM/highest principal; interactive and ambiguous principals are
+        # preserved byte-semantically apart from the UTF-8 declaration.
+        $namespace = New-Object Xml.XmlNamespaceManager($document.NameTable)
+        $namespace.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
+        foreach ($principal in $document.SelectNodes('/t:Task/t:Principals/t:Principal',$namespace)) {
+            $userId = $principal.SelectSingleNode('t:UserId',$namespace)
+            $runLevel = $principal.SelectSingleNode('t:RunLevel',$namespace)
+            $logonTypes = $principal.SelectNodes('t:LogonType',$namespace)
+            if ($null -ne $userId -and $userId.InnerText -ceq 'S-1-5-18' -and
+                $null -ne $runLevel -and $runLevel.InnerText -ceq 'HighestAvailable' -and
+                $logonTypes.Count -eq 1 -and $logonTypes[0].InnerText -ceq 'ServiceAccount') {
+                [void]$principal.RemoveChild($logonTypes[0])
+            }
         }
         $bytes = [Text.UTF8Encoding]::new($false).GetBytes($document.OuterXml)
         $stream.Write($bytes,0,$bytes.Length)
@@ -1315,7 +1334,7 @@ function New-RouteKeeperTaskXml {
     <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
     <TimeTrigger><Repetition><Interval>PT5M</Interval></Repetition><StartBoundary>$start</StartBoundary><Enabled>true</Enabled></TimeTrigger>
   </Triggers>
-  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority></Settings>
   <Actions Context="Author"><Exec><Command>$command</Command><Arguments>--controller-ip=$($script:ControllerIPv4)</Arguments></Exec></Actions>
 </Task>
@@ -1347,7 +1366,7 @@ function Assert-ExactRouteKeeperTask {
         (NodeText '/t:Task/t:Actions/t:Exec/t:Arguments') -cne "--controller-ip=$($script:ControllerIPv4)" -or
         (NodeText '/t:Task/t:Actions/@Context') -cne 'Author' -or
         (NodeText '/t:Task/t:Principals/t:Principal/t:UserId') -cne 'S-1-5-18' -or
-        (NodeText '/t:Task/t:Principals/t:Principal/t:LogonType') -cne 'ServiceAccount' -or
+        (NodeText '/t:Task/t:Principals/t:Principal/t:LogonType').Length -ne 0 -or
         (NodeText '/t:Task/t:Principals/t:Principal/t:RunLevel') -cne 'HighestAvailable' -or
         (NodeText '/t:Task/t:Settings/t:MultipleInstancesPolicy') -cne 'IgnoreNew' -or
         (NodeText '/t:Task/t:Settings/t:DisallowStartIfOnBatteries') -cne 'false' -or
@@ -1357,6 +1376,7 @@ function Assert-ExactRouteKeeperTask {
         (NodeText '/t:Task/t:Settings/t:RunOnlyIfNetworkAvailable') -cne 'false' -or
         (NodeText '/t:Task/t:Settings/t:StartWhenAvailable') -cne 'true' -or
         (NodeText '/t:Task/t:Settings/t:ExecutionTimeLimit') -cne 'PT0S' -or
+        @($triggerNodes | Where-Object { (NodeText ("/t:Task/t:Triggers/t:{0}/t:Enabled" -f $_.LocalName)) -cne 'true' }).Count -ne 0 -or
         (NodeText '/t:Task/t:Triggers/t:TimeTrigger/t:Repetition/t:Interval') -cne 'PT5M' -or
         $xml.SelectNodes('/t:Task/t:Triggers/t:TimeTrigger/t:Repetition/t:Duration',$namespace).Count -ne 0 -or
         $xml.SelectNodes('/t:Task/t:Triggers/t:BootTrigger',$namespace).Count -ne 1 -or
@@ -1440,14 +1460,18 @@ function Assert-ExactUiTask {
        $triggers.Count -ne 1 -or $triggers[0].LocalName -cne 'LogonTrigger' -or
        -not (UiNode '/t:Task/t:Actions/t:Exec/t:Command').Equals([IO.Path]::GetFullPath($Executable),[StringComparison]::OrdinalIgnoreCase) -or
        -not [string]::IsNullOrWhiteSpace((UiNode '/t:Task/t:Actions/t:Exec/t:Arguments')) -or
+       (UiNode '/t:Task/t:Actions/@Context') -cne 'Author' -or
        (UiNode '/t:Task/t:Principals/t:Principal/t:UserId') -cne $Sid -or
        (UiNode '/t:Task/t:Principals/t:Principal/t:LogonType') -cne 'InteractiveToken' -or
        (UiNode '/t:Task/t:Principals/t:Principal/t:RunLevel') -cne 'LeastPrivilege' -or
        (UiNode '/t:Task/t:Triggers/t:LogonTrigger/t:UserId') -cne $Sid -or
+       (UiNode '/t:Task/t:Triggers/t:LogonTrigger/t:Enabled') -cne 'true' -or
        (UiNode '/t:Task/t:Settings/t:MultipleInstancesPolicy') -cne 'IgnoreNew' -or
        (UiNode '/t:Task/t:Settings/t:DisallowStartIfOnBatteries') -cne 'false' -or
        (UiNode '/t:Task/t:Settings/t:StopIfGoingOnBatteries') -cne 'false' -or
        (UiNode '/t:Task/t:Settings/t:StartWhenAvailable') -cne 'true' -or
+       (UiNode '/t:Task/t:Settings/t:AllowStartOnDemand') -cne 'true' -or
+       (UiNode '/t:Task/t:Settings/t:Enabled') -cne 'true' -or
        (UiNode '/t:Task/t:Settings/t:ExecutionTimeLimit') -cne 'PT0S') { throw 'The command-center task does not match the exact least-privilege contract.' }
 }
 

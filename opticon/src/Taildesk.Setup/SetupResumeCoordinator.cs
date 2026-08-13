@@ -48,25 +48,70 @@ internal static class SetupResumeCoordinator
             InviteKeyProtected = SecretProtector.Protect(context.InviteKey, SecretScope.LocalMachine),
             CreatedAtUtc = DateTimeOffset.UtcNow
         }, cancellationToken);
-
-        var taskXml = BuildTaskXml(context.SetupExecutable);
-        var taskFile = Path.Combine(AppPaths.SetupStagingDirectory, $"setup-resume-{Guid.NewGuid():N}.xml");
         try
         {
-            await MachineStorageSecurity.WriteRestrictedFileAtomicAsync(
-                taskFile, System.Text.Encoding.UTF8.GetBytes(taskXml), cancellationToken);
-            var result = await ProcessRunner.RunAsync(
-                Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
-                ["/Create", "/TN", ResumeTaskName, "/XML", taskFile, "/F"],
-                TimeSpan.FromSeconds(30), cancellationToken);
-            if (!result.Succeeded)
-                throw new InvalidOperationException(
-                    "Windows could not schedule the protected Setup reboot continuation: " +
-                    (result.StandardError + " " + result.StandardOutput).Trim());
+            var taskXml = BuildTaskXml(context.SetupExecutable);
+            var taskFile = Path.Combine(
+                AppPaths.SetupStagingDirectory, $"setup-resume-{Guid.NewGuid():N}.xml");
+            try
+            {
+                await MachineStorageSecurity.WriteRestrictedFileAtomicAsync(
+                    taskFile, System.Text.Encoding.UTF8.GetBytes(taskXml), cancellationToken);
+                Exception? xmlRegistrationError = null;
+                try
+                {
+                    var result = await RunTaskToolAsync(
+                        ["/Create", "/TN", ResumeTaskName, "/XML", taskFile, "/F"],
+                        cancellationToken);
+                    EnsureTaskToolSuccess(
+                        result, "Windows refused the protected Setup reboot-continuation XML");
+                    await RequireResumeTaskAsync(context.SetupExecutable, cancellationToken);
+                    return;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    xmlRegistrationError = exception;
+                }
+
+                try
+                {
+                    // Keep a non-XML compatibility path. It carries no secret:
+                    // --resume loads the DPAPI-protected key from restricted state.
+                    var command = $"\"{Path.GetFullPath(context.SetupExecutable)}\" --resume";
+                    var fallback = await RunTaskToolAsync(
+                        ["/Create", "/TN", ResumeTaskName, "/SC", "ONLOGON", "/DELAY", "0000:15",
+                            "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", command, "/F"],
+                        cancellationToken);
+                    EnsureTaskToolSuccess(
+                        fallback, "Windows could not create the protected Setup reboot continuation");
+                    await ApplyFallbackSettingsAsync(cancellationToken);
+                    await RequireResumeTaskAsync(context.SetupExecutable, cancellationToken);
+                }
+                catch (Exception fallbackError) when (fallbackError is not OperationCanceledException)
+                {
+                    throw new InvalidOperationException(
+                        "Windows rejected both protected Setup reboot-continuation registration methods.",
+                        new AggregateException(xmlRegistrationError!, fallbackError));
+                }
+            }
+            finally
+            {
+                MachineStorageSecurity.DeleteRestrictedFileIfExists(taskFile);
+            }
         }
-        finally
+        catch (Exception registrationError)
         {
-            MachineStorageSecurity.DeleteRestrictedFileIfExists(taskFile);
+            try
+            {
+                await RemoveFailedRegistrationAsync();
+            }
+            catch (Exception cleanupError)
+            {
+                throw new InvalidOperationException(
+                    "Setup could not register or completely remove its reboot continuation.",
+                    new AggregateException(registrationError, cleanupError));
+            }
+            throw;
         }
     }
 
@@ -111,6 +156,134 @@ internal static class SetupResumeCoordinator
         MachineStorageSecurity.DeleteRestrictedFileIfExists(AppPaths.SetupResumeFile);
     }
 
+    private static Task<ProcessResult> RunTaskToolAsync(
+        IEnumerable<string> arguments,
+        CancellationToken cancellationToken) => ProcessRunner.RunAsync(
+        Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
+        arguments,
+        TimeSpan.FromSeconds(30),
+        cancellationToken);
+
+    private static void EnsureTaskToolSuccess(ProcessResult result, string message)
+    {
+        if (result.Succeeded) return;
+        var detail = (result.StandardError + " " + result.StandardOutput).Trim();
+        throw new InvalidOperationException(
+            string.IsNullOrWhiteSpace(detail) ? message : $"{message}: {detail}");
+    }
+
+    private static async Task ApplyFallbackSettingsAsync(
+        CancellationToken cancellationToken)
+    {
+        const string script =
+            "$ErrorActionPreference='Stop';" +
+            "$settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries " +
+            "-DontStopIfGoingOnBatteries -StartWhenAvailable " +
+            "-ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew;" +
+            "Set-ScheduledTask -TaskPath '\\' -TaskName 'Taildesk Setup Resume' " +
+            "-Settings $settings | Out-Null";
+        var result = await ProcessRunner.RunAsync(
+            Path.Combine(
+                Environment.SystemDirectory,
+                @"WindowsPowerShell\v1.0\powershell.exe"),
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted",
+                "-Command", script],
+            TimeSpan.FromSeconds(30),
+            cancellationToken);
+        EnsureTaskToolSuccess(
+            result, "Windows could not apply the Setup continuation reliability settings");
+    }
+
+    private static async Task RemoveFailedRegistrationAsync()
+    {
+        Exception? stateCleanupError = null;
+        Exception? taskCleanupError = null;
+        try
+        {
+            MachineStorageSecurity.DeleteRestrictedFileIfExists(AppPaths.SetupResumeFile);
+        }
+        catch (Exception exception)
+        {
+            stateCleanupError = exception;
+        }
+
+        try
+        {
+            var task = await RunTaskToolAsync(
+                ["/Delete", "/TN", ResumeTaskName, "/F"], CancellationToken.None);
+            if (!task.Succeeded && task.ExitCode != 1)
+                throw new InvalidOperationException(
+                    "Windows could not remove the incomplete Setup reboot continuation task: " +
+                    (task.StandardError + " " + task.StandardOutput).Trim());
+        }
+        catch (Exception exception)
+        {
+            taskCleanupError = exception;
+        }
+
+        if (stateCleanupError is not null || taskCleanupError is not null)
+            throw new AggregateException(
+                "The failed Setup reboot continuation could not be completely removed.",
+                new[] { stateCleanupError, taskCleanupError }.OfType<Exception>());
+    }
+
+    private static async Task RequireResumeTaskAsync(
+        string setupExecutable,
+        CancellationToken cancellationToken)
+    {
+        var query = await RunTaskToolAsync(
+            ["/Query", "/TN", ResumeTaskName, "/XML"], cancellationToken);
+        EnsureTaskToolSuccess(query, "Windows did not retain the Setup reboot continuation");
+        var xml = query.StandardOutput.TrimStart('\uFEFF', '\r', '\n', ' ');
+        if (xml.Length is <= 0 or > 256 * 1024)
+            throw new InvalidDataException("The Setup reboot-continuation task XML has an invalid size.");
+        using var reader = System.Xml.XmlReader.Create(
+            new StringReader(xml),
+            new System.Xml.XmlReaderSettings
+            {
+                DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = 256 * 1024
+            });
+        var document = XDocument.Load(reader, LoadOptions.None);
+        XNamespace task = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+        var root = document.Root;
+        var actions = root?.Element(task + "Actions")?.Elements().ToArray() ?? [];
+        var principals = root?.Element(task + "Principals")?.Elements(task + "Principal").ToArray() ?? [];
+        var triggers = root?.Element(task + "Triggers")?.Elements().ToArray() ?? [];
+        var exec = actions.Length == 1 ? actions[0] : null;
+        var principal = principals.Length == 1 ? principals[0] : null;
+        var trigger = triggers.Length == 1 ? triggers[0] : null;
+        var settings = root?.Element(task + "Settings");
+        var logonType = principal?.Element(task + "LogonType")?.Value;
+        if (root?.Name != task + "Task"
+            || actions.Length != 1 || exec?.Name != task + "Exec"
+            || root.Element(task + "Actions")?.Attribute("Context")?.Value != "Author"
+            || principals.Length != 1
+            || triggers.Length != 1 || trigger?.Name != task + "LogonTrigger"
+            || trigger?.Element(task + "Enabled")?.Value != "true"
+            || trigger?.Element(task + "Delay")?.Value != "PT15S"
+            || !string.Equals(
+                exec?.Element(task + "Command")?.Value,
+                Path.GetFullPath(setupExecutable),
+                StringComparison.OrdinalIgnoreCase)
+            || exec?.Element(task + "Arguments")?.Value != "--resume"
+            || principal?.Element(task + "UserId")?.Value != "S-1-5-18"
+            || (!string.IsNullOrEmpty(logonType)
+                && !logonType.Equals("ServiceAccount", StringComparison.Ordinal))
+            || principal?.Element(task + "RunLevel")?.Value != "HighestAvailable"
+            || settings?.Element(task + "MultipleInstancesPolicy")?.Value != "IgnoreNew"
+            || settings.Element(task + "DisallowStartIfOnBatteries")?.Value != "false"
+            || settings.Element(task + "StopIfGoingOnBatteries")?.Value != "false"
+            || settings.Element(task + "StartWhenAvailable")?.Value != "true"
+            || settings.Element(task + "AllowStartOnDemand")?.Value != "true"
+            || settings.Element(task + "Enabled")?.Value != "true"
+            || settings.Element(task + "RunOnlyIfNetworkAvailable")?.Value != "false"
+            || settings.Element(task + "ExecutionTimeLimit")?.Value != "PT2H")
+            throw new InvalidDataException(
+                "The Setup reboot continuation does not match its exact SYSTEM task contract.");
+    }
+
     private static void ValidateContext(SetupResumeContext context)
     {
         if (context.InviteId == Guid.Empty || string.IsNullOrWhiteSpace(context.InviteKey))
@@ -133,27 +306,29 @@ internal static class SetupResumeCoordinator
                 new XElement(task + "RegistrationInfo",
                     new XElement(task + "Description", ResumeTaskDescription)),
                 new XElement(task + "Triggers",
-                    new XElement(task + "BootTrigger",
-                        new XElement(task + "Enabled", "true"),
-                        new XElement(task + "Delay", "PT30S")),
-                    // The boot trigger covers an unattended restart. The
-                    // logon trigger retries if profile discovery correctly
-                    // deferred while Windows had no interactive session yet.
                     new XElement(task + "LogonTrigger",
                         new XElement(task + "Enabled", "true"),
                         new XElement(task + "Delay", "PT15S"))),
                 new XElement(task + "Principals",
                     new XElement(task + "Principal", new XAttribute("id", "Author"),
                         new XElement(task + "UserId", "S-1-5-18"),
-                        new XElement(task + "LogonType", "ServiceAccount"),
+                        // ServiceAccount is a Task Scheduler API enum value,
+                        // not a legal task-XML LogonType value.  SYSTEM is a
+                        // service account by virtue of its well-known SID;
+                        // Windows' own exported SYSTEM tasks omit LogonType.
                         new XElement(task + "RunLevel", "HighestAvailable"))),
                 new XElement(task + "Settings",
                     new XElement(task + "MultipleInstancesPolicy", "IgnoreNew"),
                     new XElement(task + "DisallowStartIfOnBatteries", "false"),
                     new XElement(task + "StopIfGoingOnBatteries", "false"),
                     new XElement(task + "StartWhenAvailable", "true"),
+                    new XElement(task + "AllowStartOnDemand", "true"),
                     new XElement(task + "Enabled", "true"),
-                    new XElement(task + "ExecutionTimeLimit", "PT0S")),
+                    new XElement(task + "RunOnlyIfNetworkAvailable", "false"),
+                    // Bound an abandoned session-0 continuation so a later
+                    // attended logon can retry, while leaving ample time for
+                    // slow Windows Installer and enrollment repair phases.
+                    new XElement(task + "ExecutionTimeLimit", "PT2H")),
                 new XElement(task + "Actions", new XAttribute("Context", "Author"),
                     new XElement(task + "Exec",
                         new XElement(task + "Command", Path.GetFullPath(setupExecutable)),

@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Xml;
+using System.Xml.Linq;
 using Microsoft.Win32.SafeHandles;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -36,6 +39,52 @@ internal static class LegacyOpticonRemoval
     private const uint DaclSecurityInformation = 0x00000004;
     private const uint ProtectedDaclSecurityInformation = 0x80000000;
     private const int FileDispositionInformationClass = 4;
+    private const int FileDispositionInformationExClass = 21;
+    private const uint FileDispositionDelete = 0x00000001;
+    private const uint FileDispositionForceImageSectionCheck = 0x00000004;
+    private const uint FileDispositionIgnoreReadonlyAttribute = 0x00000010;
+    private const uint ProcessQueryLimitedInformation = 0x00001000;
+    private const int ErrorAccessDenied = 5;
+    private const int ErrorNotSupported = 50;
+    private const int ErrorInvalidParameter = 87;
+    private const int ErrorCallNotImplemented = 120;
+    private const int ErrorPrivilegeNotHeld = 1314;
+    private const int ErrorSharingViolation = 32;
+    private const int ErrorLockViolation = 33;
+    private const int ErrorDirectoryNotEmpty = 145;
+    private const int TaskPresenceProbeAbsentExitCode = 3;
+    private const string TaskPresenceProbeScript = """
+        $ErrorActionPreference = 'Stop'
+        $service = $null
+        $folder = $null
+        $task = $null
+        try {
+            $service = New-Object -ComObject 'Schedule.Service'
+            $service.Connect()
+            $folder = $service.GetFolder('\')
+            try {
+                $task = $folder.GetTask($env:TAILDESK_EXPECTED_TASK_NAME)
+            } catch {
+                # HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND). All other COM,
+                # access, RPC, and PowerShell failures escape and therefore
+                # fail closed. PowerShell can surface this HRESULT as either a
+                # COMException or FileNotFoundException depending on runtime.
+                if ($_.Exception.HResult -eq -2147024894) { exit 3 }
+                throw
+            }
+            exit 0
+        } finally {
+            if ($null -ne $task) {
+                [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($task) | Out-Null
+            }
+            if ($null -ne $folder) {
+                [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($folder) | Out-Null
+            }
+            if ($null -ne $service) {
+                [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($service) | Out-Null
+            }
+        }
+        """;
     // Opticon releases registered components through these fixed task names;
     // they did not install an Opticon Windows service. Deliberately do not
     // enumerate or mutate generic Windows services during cleanup.
@@ -46,8 +95,16 @@ internal static class LegacyOpticonRemoval
         RemoteAdministrationProtocol.SshSupervisorTaskName,
         RemoteAdministrationProtocol.AgentTaskName,
         "Taildesk Fly Route",
-        "Opticon Command Center"
+        "Opticon Command Center",
+        "Taildesk Setup Resume"
     ];
+
+    /// <summary>
+    /// Rehearses every non-mutating fixed-root and fixed-task proof before the
+    /// source launcher crosses the destructive replacement boundary.
+    /// </summary>
+    internal static async Task<bool> PreflightLegacyInstallationIfPresentAsync() =>
+        await CreatePlanAsync() is not null;
 
     /// <summary>
     /// Runs only from the verified source launcher, after that launcher has
@@ -78,8 +135,20 @@ internal static class LegacyOpticonRemoval
         using var restorePrivilege = ScopedProcessPrivilege.Enable("SeRestorePrivilege");
 
         var sealedRoots = new List<PinnedDirectoryTree>();
+        var taskStateMutationAttempted = false;
+        var filesystemDeletionStarted = false;
         try
         {
+            report("Disabling Opticon scheduled tasks at their fixed names...");
+            foreach (var task in plan.Tasks)
+            {
+                // Record the mutation boundary before invoking schtasks. A
+                // failed process result is not proof that Task Scheduler made
+                // no change, so recovery must include this task as well.
+                taskStateMutationAttempted = true;
+                await SetTaskEnabledStateAsync(task.Name, enabled: false);
+            }
+
             report("Stopping Opticon scheduled tasks at their fixed names...");
             foreach (var task in plan.Tasks)
                 await EndTaskAsync(task.Name);
@@ -100,7 +169,59 @@ internal static class LegacyOpticonRemoval
                 var root = SealDirectoryTreeForDeletion(directory);
                 sealedRoots.Add(root);
             }
-            foreach (var root in sealedRoots) root.DeleteAllPinnedEntries();
+
+            var daclOnlySeals = sealedRoots.Sum(root => root.DaclOnlySealCount);
+            var pinnedOnlySeals = sealedRoots.Sum(root => root.PinnedOnlySealCount);
+            if (pinnedOnlySeals > 0)
+            {
+                report($"Windows refused ACL replacement on {pinnedOnlySeals} existing Opticon " +
+                       (pinnedOnlySeals == 1 ? "directory" : "directories") +
+                       "; cleanup retained exact no-reparse, no-share-delete handles and continued without path-based deletion.");
+            }
+            else if (daclOnlySeals > 0)
+            {
+                report($"Windows refused the protected-DACL flag on {daclOnlySeals} existing Opticon " +
+                       (daclOnlySeals == 1 ? "directory" : "directories") +
+                       "; cleanup applied the SYSTEM/Administrators DACL and retained exact pinned handles.");
+            }
+
+            // Reassert disabled state in case an already-running legacy
+            // process tried to re-enable its watchdog while the protected tree
+            // was being pinned. Then quiesce the same fixed task instances and
+            // path-verified processes immediately before dispositioning the
+            // exact handles.
+            foreach (var task in plan.Tasks)
+            {
+                await SetTaskEnabledStateAsync(task.Name, enabled: false);
+                await EndTaskAsync(task.Name);
+            }
+            await StopValidatedProcessesAsync(plan.InstallDirectory);
+
+            foreach (var root in sealedRoots)
+            {
+                // From this point forward, never re-enable a definition that
+                // could launch a partially deleted legacy installation.
+                filesystemDeletionStarted = true;
+                root.DeleteAllPinnedEntries();
+            }
+        }
+        catch (Exception removalError) when (!filesystemDeletionStarted)
+        {
+            if (taskStateMutationAttempted)
+            {
+                try
+                {
+                    await RestoreOriginalTaskEnabledStatesAsync(plan.Tasks);
+                }
+                catch (Exception restoreError)
+                {
+                    throw new AggregateException(
+                        "Opticon cleanup failed before deletion and one or more original scheduled-task states could not be restored.",
+                        removalError,
+                        restoreError);
+                }
+            }
+            throw;
         }
         finally { foreach (var root in sealedRoots) root.Dispose(); }
 
@@ -196,7 +317,7 @@ internal static class LegacyOpticonRemoval
         try
         {
             var root = OpenPinnedEntry(directory, directory: true, depth: 0);
-            SealDirectoryDacl(root);
+            tree.RecordAclSeal(SealDirectoryDacl(root));
             RequirePathStillHasIdentity(root);
             tree.Add(root);
             PinDirectoryChildren(tree, root);
@@ -228,7 +349,7 @@ internal static class LegacyOpticonRemoval
                     // to seal it through that handle.
                     entry.Dispose();
                     entry = OpenPinnedEntry(path, directory: true, depth: parent.Depth + 1);
-                    SealDirectoryDacl(entry);
+                    tree.RecordAclSeal(SealDirectoryDacl(entry));
                     RequirePathStillHasIdentity(entry);
                     tree.Add(entry);
                     PinDirectoryChildren(tree, entry);
@@ -255,12 +376,20 @@ internal static class LegacyOpticonRemoval
         var desiredAccess = Delete | FileReadAttributes | Synchronize;
         if (directory == true)
             desiredAccess |= WriteDac | FileListDirectory;
+        // A retained directory handle is also the quiescence boundary for its
+        // namespace. Omitting share-write as well as share-delete makes the
+        // preflight fail if an existing writer is still active and prevents a
+        // new writer from entering before handle-bound disposition. The
+        // short type-probe and regular-file handles retain share-write; every
+        // discovered directory is immediately reopened with this stricter
+        // boundary before traversal continues.
+        var shareMode = directory == true
+            ? FileShareRead
+            : FileShareRead | FileShareWrite;
         var handle = CreateFile(
             path,
             desiredAccess,
-            // Deliberately omit FILE_SHARE_DELETE.  The handle remains open
-            // until this exact node is removed through it.
-            FileShareRead | FileShareWrite,
+            shareMode,
             IntPtr.Zero,
             OpenExisting,
             FileFlagBackupSemantics | FileFlagOpenReparsePoint,
@@ -351,7 +480,7 @@ internal static class LegacyOpticonRemoval
         return information;
     }
 
-    private static void SealDirectoryDacl(PinnedEntry entry)
+    private static DirectorySealStrength SealDirectoryDacl(PinnedEntry entry)
     {
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
@@ -386,13 +515,37 @@ internal static class LegacyOpticonRemoval
                 IntPtr.Zero,
                 daclBuffer,
                 IntPtr.Zero);
-            if (result != 0)
-                throw new UnauthorizedAccessException(
-                    $"Could not seal the existing Opticon directory ACL at " +
-                    $"'{DescribeCleanupPath(entry.Path)}' with security information " +
-                    $"0x{securityInformation:X8} using handle access " +
-                    $"0x{(Delete | FileReadAttributes | Synchronize | WriteDac | FileListDirectory):X8} " +
-                    $"(Win32 error {result}).");
+            if (result == 0) return DirectorySealStrength.ProtectedDacl;
+
+            // Some legacy roots grant WRITE_DAC to the backup-intent handle
+            // but still reject PROTECTED_DACL_SECURITY_INFORMATION. Replacing
+            // the DACL without changing its protection bit still removes weak
+            // access from the directory itself, and the retained exact handle
+            // supplies the path-swap boundary for the short cleanup window.
+            if (IsAclSealCompatibilityError(result))
+            {
+                var daclOnlyResult = SetSecurityInfo(
+                    entry.Handle,
+                    SeFileObject,
+                    DaclSecurityInformation,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    daclBuffer,
+                    IntPtr.Zero);
+                if (daclOnlyResult == 0) return DirectorySealStrength.DaclOnly;
+
+                // ACL replacement is defense in depth: all deletion remains
+                // bound to validated handles opened without following reparse
+                // points or sharing delete. An ACL-denied legacy directory can
+                // therefore be removed safely without falling back to a path.
+                if (IsAclSealCompatibilityError(daclOnlyResult))
+                    return DirectorySealStrength.PinnedHandleOnly;
+
+                ThrowAclSealFailure(entry, DaclSecurityInformation, daclOnlyResult);
+            }
+
+            ThrowAclSealFailure(entry, securityInformation, result);
+            return DirectorySealStrength.PinnedHandleOnly;
         }
         finally
         {
@@ -400,17 +553,64 @@ internal static class LegacyOpticonRemoval
         }
     }
 
-    private static void MarkPinnedEntryForDeletion(SafeFileHandle handle)
+    private static bool IsAclSealCompatibilityError(uint result)
+        => result is ErrorAccessDenied or ErrorInvalidParameter or ErrorPrivilegeNotHeld;
+
+    private static void ThrowAclSealFailure(PinnedEntry entry, uint securityInformation, uint result)
+        => throw new UnauthorizedAccessException(
+            $"Could not seal the existing Opticon directory ACL at " +
+            $"'{DescribeCleanupPath(entry.Path)}' with security information " +
+            $"0x{securityInformation:X8} using handle access " +
+            $"0x{(Delete | FileReadAttributes | Synchronize | WriteDac | FileListDirectory):X8} " +
+            $"(Win32 error {result}).");
+
+    private static void MarkPinnedEntryForDeletion(PinnedEntry entry)
     {
-        var disposition = new FileDispositionInformation { DeleteFile = true };
-        if (!SetFileInformationByHandle(
-                handle,
-                FileDispositionInformationClass,
-                ref disposition,
-                Marshal.SizeOf<FileDispositionInformation>()))
-            throw new IOException(
-                $"Could not delete a pinned Opticon entry (Win32 error {Marshal.GetLastWin32Error()}).");
+        var extendedError = 0;
+        var legacyError = 0;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var extendedDisposition = new FileDispositionInformationEx
+            {
+                Flags = FileDispositionDelete
+                        | FileDispositionForceImageSectionCheck
+                        | FileDispositionIgnoreReadonlyAttribute
+            };
+            if (SetFileInformationByHandle(
+                    entry.Handle,
+                    FileDispositionInformationExClass,
+                    ref extendedDisposition,
+                    Marshal.SizeOf<FileDispositionInformationEx>()))
+                return;
+            extendedError = Marshal.GetLastWin32Error();
+
+            // FILE_DISPOSITION_INFO_EX is present on every supported Opticon
+            // Windows build, but retain the classic handle disposition for
+            // unusual filesystems that reject the extended flags.
+            var disposition = new FileDispositionInformation { DeleteFile = true };
+            if (SetFileInformationByHandle(
+                    entry.Handle,
+                    FileDispositionInformationClass,
+                    ref disposition,
+                    Marshal.SizeOf<FileDispositionInformation>()))
+                return;
+            legacyError = Marshal.GetLastWin32Error();
+
+            if (!IsTransientDeletionError(extendedError)
+                && !IsTransientDeletionError(legacyError)
+                && extendedError is not (ErrorNotSupported or ErrorInvalidParameter or ErrorCallNotImplemented))
+                break;
+            if (attempt < 4) Thread.Sleep(TimeSpan.FromMilliseconds(150 * (attempt + 1)));
+        }
+
+        throw new IOException(
+            $"Could not delete pinned Opticon path '{DescribeCleanupPath(entry.Path)}' " +
+            $"(extended Win32 error {extendedError}; " +
+            $"classic Win32 error {legacyError}).");
     }
+
+    private static bool IsTransientDeletionError(int error)
+        => error is ErrorAccessDenied or ErrorSharingViolation or ErrorLockViolation or ErrorDirectoryNotEmpty;
 
     private static void RequireRegularDirectoryTree(string directory)
     {
@@ -445,28 +645,149 @@ internal static class LegacyOpticonRemoval
 
     private static async Task<ValidatedTask?> QueryTaskIfPresentAsync(string taskName)
     {
-        var result = await RunSchtasksAsync(["/Query", "/TN", taskName]);
+        var result = await RunSchtasksAsync(["/Query", "/TN", taskName, "/XML"]);
         if (!result.Succeeded)
         {
-            if (IsTaskAbsent(result)) return null;
+            if (!await IsTaskPresentAtFixedNameAsync(taskName)) return null;
             throw new InvalidDataException(
                 $"Could not determine whether scheduled task '{taskName}' is present. No files were removed: {DescribeResult(result)}");
         }
-        return new ValidatedTask(taskName);
+        return new ValidatedTask(taskName, ReadTaskEnabledState(taskName, result.StandardOutput));
+    }
+
+    private static bool ReadTaskEnabledState(string taskName, string taskXml)
+    {
+        const int maximumTaskXmlCharacters = 1_048_576;
+        if (string.IsNullOrWhiteSpace(taskXml) || taskXml.Length > maximumTaskXmlCharacters)
+            throw new InvalidDataException(
+                $"Scheduled task '{taskName}' returned an empty or unexpectedly large definition. No files were removed.");
+
+        try
+        {
+            var settings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = maximumTaskXmlCharacters
+            };
+            using var text = new StringReader(taskXml);
+            using var reader = XmlReader.Create(text, settings);
+            var document = XDocument.Load(reader, LoadOptions.None);
+            var root = document.Root;
+            if (root is null || !root.Name.LocalName.Equals("Task", StringComparison.Ordinal))
+                throw new InvalidDataException("The scheduled-task definition has an unexpected root element.");
+
+            var taskNamespace = root.Name.Namespace;
+            var taskSettings = root.Elements(taskNamespace + "Settings").ToArray();
+            if (taskSettings.Length != 1)
+                throw new InvalidDataException("The scheduled-task definition does not contain exactly one Settings element.");
+
+            var enabledElements = taskSettings[0].Elements(taskNamespace + "Enabled").ToArray();
+            if (enabledElements.Length == 0)
+            {
+                // The Task Scheduler schema defaults Settings.Enabled to true.
+                return true;
+            }
+            if (enabledElements.Length != 1)
+                throw new InvalidDataException("The scheduled-task definition contains multiple Enabled settings.");
+
+            return enabledElements[0].Value.Trim() switch
+            {
+                "true" or "1" => true,
+                "false" or "0" => false,
+                _ => throw new InvalidDataException("The scheduled-task Enabled setting is invalid.")
+            };
+        }
+        catch (Exception exception) when (exception is XmlException or InvalidOperationException)
+        {
+            throw new InvalidDataException(
+                $"Could not read the enabled state of scheduled task '{taskName}'. No files were removed.",
+                exception);
+        }
+    }
+
+    private static async Task SetTaskEnabledStateAsync(string taskName, bool enabled)
+    {
+        var option = enabled ? "/ENABLE" : "/DISABLE";
+        var result = await RunSchtasksAsync(["/Change", "/TN", taskName, option]);
+        if (!result.Succeeded)
+            throw new InvalidOperationException(
+                $"Could not {(enabled ? "enable" : "disable")} validated Opticon task '{taskName}': {DescribeResult(result)}");
+
+        var observed = await QueryTaskIfPresentAsync(taskName);
+        if (observed is null || observed.WasEnabled != enabled)
+            throw new InvalidOperationException(
+                $"Windows did not confirm that validated Opticon task '{taskName}' was {(enabled ? "enabled" : "disabled")}.");
+    }
+
+    private static async Task RestoreOriginalTaskEnabledStatesAsync(IReadOnlyList<ValidatedTask> tasks)
+    {
+        var failures = new List<Exception>();
+        foreach (var task in tasks.Where(task => task.WasEnabled))
+        {
+            try
+            {
+                await SetTaskEnabledStateAsync(task.Name, enabled: true);
+            }
+            catch (Exception exception)
+            {
+                // Attempt every restoration even if an earlier task changed or
+                // disappeared. The aggregate preserves each recovery failure.
+                failures.Add(exception);
+            }
+        }
+
+        if (failures.Count > 0)
+            throw new AggregateException("One or more scheduled tasks could not be restored to their original enabled state.", failures);
     }
 
     private static async Task EndTaskAsync(string taskName)
     {
         var result = await RunSchtasksAsync(["/End", "/TN", taskName]);
-        if (result.Succeeded || IsTaskInactive(result)) return;
+        // schtasks localizes the "not running" diagnostic. Exit code 1 is
+        // also its documented ordinary no-active-instance result; the bounded
+        // path-verified process sweep below remains authoritative.
+        if (result.Succeeded || result.ExitCode == 1 || IsTaskInactive(result)) return;
         throw new InvalidOperationException($"Could not stop validated Opticon task '{taskName}': {DescribeResult(result)}");
     }
 
     private static async Task DeleteTaskAsync(string taskName)
     {
         var result = await RunSchtasksAsync(["/Delete", "/TN", taskName, "/F"]);
-        if (!result.Succeeded)
+        if (!result.Succeeded && await IsTaskPresentAtFixedNameAsync(taskName))
             throw new InvalidOperationException($"Could not delete validated Opticon task '{taskName}': {DescribeResult(result)}");
+    }
+
+    private static async Task<bool> IsTaskPresentAtFixedNameAsync(string taskName)
+    {
+        var executable = Path.GetFullPath(Path.Combine(
+            Environment.SystemDirectory,
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe"));
+        if (!File.Exists(executable) || (File.GetAttributes(executable) & FileAttributes.ReparsePoint) != 0)
+            throw new FileNotFoundException("The fixed Windows task-presence probe is unavailable.", executable);
+
+        var environment = BuildSystemToolEnvironment()
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        environment["TAILDESK_EXPECTED_TASK_NAME"] = taskName;
+        var result = await ProcessRunner.RunAsync(
+            executable,
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-Command", TaskPresenceProbeScript
+            ],
+            TimeSpan.FromSeconds(20),
+            environment: environment,
+            clearEnvironment: true);
+
+        if (result.Succeeded) return true;
+        if (result.ExitCode == TaskPresenceProbeAbsentExitCode) return false;
+        throw new InvalidDataException(
+            $"Could not prove whether scheduled task '{taskName}' is present. No files were removed: {DescribeResult(result)}");
     }
 
     private static async Task<ProcessResult> RunSchtasksAsync(IEnumerable<string> arguments)
@@ -489,12 +810,6 @@ internal static class LegacyOpticonRemoval
             ["PATH"] = Environment.SystemDirectory,
             ["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
         };
-    }
-
-    private static bool IsTaskAbsent(ProcessResult result)
-    {
-        var text = result.StandardOutput + "\n" + result.StandardError;
-        return result.ExitCode == 1 && text.Contains("cannot find", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsTaskInactive(ProcessResult result)
@@ -520,32 +835,142 @@ internal static class LegacyOpticonRemoval
         var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(installDirectory))
                             + Path.DirectorySeparatorChar;
         var expectedNames = Directory.EnumerateFiles(installDirectory, "*.exe", SearchOption.AllDirectories)
-            .Select(Path.GetFileNameWithoutExtension)
+            .Select(path => Path.GetFileNameWithoutExtension(path)!)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Require two consecutive quiet snapshots. A legacy Guardian can be
+        // configured for restart and an already-fired scheduled task can race
+        // the first snapshot; one point-in-time Process.GetProcesses call is
+        // therefore insufficient before deleting mapped executables.
+        var quietPasses = 0;
+        for (var pass = 0; pass < 8; pass++)
+        {
+            var found = await StopValidatedProcessPassAsync(canonicalRoot, expectedNames);
+            quietPasses = found == 0 ? quietPasses + 1 : 0;
+            if (quietPasses >= 2) return;
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+        }
+
+        throw new InvalidOperationException(
+            "An existing Opticon process kept restarting from the fixed installation root.");
+    }
+
+    private static async Task<int> StopValidatedProcessPassAsync(
+        string canonicalRoot,
+        IReadOnlySet<string> expectedNames)
+    {
+        var found = 0;
         foreach (var process in Process.GetProcesses())
         {
             using (process)
             {
-                if (!expectedNames.Contains(process.ProcessName)) continue;
-                string image;
-                try { image = Path.GetFullPath(process.MainModule?.FileName ?? string.Empty); }
-                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+                string processName;
+                try { processName = process.ProcessName; }
+                catch (Exception exception) when (exception is InvalidOperationException
+                                                  or System.ComponentModel.Win32Exception)
                 {
+                    continue;
+                }
+                if (!expectedNames.Contains(processName)) continue;
+                if (!TryGetProcessImagePath(process, out var image))
+                {
+                    try
+                    {
+                        if (process.HasExited) continue;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // The process exited between the name and image-path
+                        // observations, so there is no running instance left to
+                        // classify.
+                        continue;
+                    }
+                    catch (System.ComponentModel.Win32Exception exception)
+                    {
+                        throw new InvalidDataException(
+                            $"Could not prove whether a running process named '{processName}' belongs to Opticon. No Opticon files were removed.",
+                            exception);
+                    }
+
+                    // A still-running executable with a name present under the
+                    // fixed install root must be inspectable before cleanup can
+                    // safely decide that it is unrelated.
                     throw new InvalidDataException(
-                        $"Could not prove the path of a running process named '{process.ProcessName}'. No Opticon files were removed.", exception);
+                        $"Could not prove the path of a running process named '{processName}'. No Opticon files were removed.");
                 }
                 if (!image.StartsWith(canonicalRoot, StringComparison.OrdinalIgnoreCase)) continue;
+                found++;
                 try
                 {
                     process.Kill(entireProcessTree: true);
                     await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
                 }
-                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or TimeoutException)
+                catch (InvalidOperationException)
+                {
+                    // The process exited after the snapshot and before Kill.
+                }
+                catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or TimeoutException)
                 {
                     throw new InvalidOperationException(
                         $"Could not stop the existing Opticon process '{Path.GetFileName(image)}'.", exception);
                 }
             }
+        }
+        return found;
+    }
+
+    private static bool TryGetProcessImagePath(Process process, out string image)
+    {
+        image = string.Empty;
+        SafeProcessHandle? handle = null;
+        try
+        {
+            handle = OpenProcess(ProcessQueryLimitedInformation, inheritHandle: false, process.Id);
+            if (!handle.IsInvalid)
+            {
+                var capacity = 32_768u;
+                var buffer = new StringBuilder((int)capacity);
+                if (QueryFullProcessImageNameW(handle, flags: 0, buffer, ref capacity)
+                    && TryNormalizeImagePath(buffer.ToString(), out image))
+                    return true;
+            }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+                                          or ArgumentException
+                                          or NotSupportedException
+                                          or PathTooLongException)
+        {
+            // Fall through to MainModule, which can still work for processes
+            // that reject PROCESS_QUERY_LIMITED_INFORMATION on older builds.
+        }
+        finally
+        {
+            handle?.Dispose();
+        }
+
+        try { return TryNormalizeImagePath(process.MainModule?.FileName, out image); }
+        catch (Exception exception) when (exception is InvalidOperationException
+                                          or System.ComponentModel.Win32Exception
+                                          or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryNormalizeImagePath(string? candidate, out string image)
+    {
+        image = string.Empty;
+        if (string.IsNullOrWhiteSpace(candidate)) return false;
+        try
+        {
+            image = Path.GetFullPath(candidate);
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException
+                                          or NotSupportedException
+                                          or PathTooLongException)
+        {
+            return false;
         }
     }
 
@@ -557,15 +982,30 @@ internal static class LegacyOpticonRemoval
         internal IReadOnlyList<string> TaskNames => Tasks.Select(task => task.Name).ToArray();
     }
 
-    internal sealed record ValidatedTask(string Name);
+    internal sealed record ValidatedTask(string Name, bool WasEnabled);
+
+    private enum DirectorySealStrength
+    {
+        ProtectedDacl,
+        DaclOnly,
+        PinnedHandleOnly
+    }
 
     private sealed class PinnedDirectoryTree : IDisposable
     {
         private readonly List<PinnedEntry> _entries = [];
 
         internal int Count => _entries.Count;
+        internal int DaclOnlySealCount { get; private set; }
+        internal int PinnedOnlySealCount { get; private set; }
 
         internal void Add(PinnedEntry entry) => _entries.Add(entry);
+
+        internal void RecordAclSeal(DirectorySealStrength strength)
+        {
+            if (strength == DirectorySealStrength.DaclOnly) DaclOnlySealCount++;
+            else if (strength == DirectorySealStrength.PinnedHandleOnly) PinnedOnlySealCount++;
+        }
 
         internal void DeleteAllPinnedEntries()
         {
@@ -589,7 +1029,7 @@ internal static class LegacyOpticonRemoval
 
         private static void DeleteAndDispose(PinnedEntry entry)
         {
-            MarkPinnedEntryForDeletion(entry.Handle);
+            MarkPinnedEntryForDeletion(entry);
             entry.Dispose();
         }
 
@@ -651,6 +1091,12 @@ internal static class LegacyOpticonRemoval
         internal bool DeleteFile;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileDispositionInformationEx
+    {
+        internal uint Flags;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(
         string fileName,
@@ -674,6 +1120,28 @@ internal static class LegacyOpticonRemoval
         int fileInformationClass,
         ref FileDispositionInformation fileInformation,
         int bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle handle,
+        int fileInformationClass,
+        ref FileDispositionInformationEx fileInformation,
+        int bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        int processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageNameW(
+        SafeProcessHandle process,
+        int flags,
+        StringBuilder executableName,
+        ref uint size);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint SetSecurityInfo(

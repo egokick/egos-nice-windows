@@ -614,7 +614,11 @@ public sealed class SystemHealthChecker
                    && PathsEqual(Value(exec, "Command"), expectedHelper)
                    && Value(exec, "Arguments") == $"--controller-ip={FlyDedicatedIpv4}"
                    && Value(principal, "UserId") == "S-1-5-18"
-                   && Value(principal, "LogonType") == "ServiceAccount"
+                   // Canonical exports omit LogonType. Tolerate the legacy API
+                   // spelling when inspecting an already-registered task, but
+                   // never generate or re-import that invalid XML value.
+                   && (Value(principal, "LogonType").Length == 0
+                       || Value(principal, "LogonType") == "ServiceAccount")
                    && Value(principal, "RunLevel") == "HighestAvailable"
                    && triggerNodes.All(node => Value(node, "Enabled") == "true")
                    && repetition is not null

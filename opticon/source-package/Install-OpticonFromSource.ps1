@@ -15,7 +15,6 @@ param(
     [Parameter(Mandatory)][ValidateSet('win-x64', 'win-arm64')][string]$TargetRuntime,
     [Parameter(Mandatory)][ValidateSet('ManagedOnly', 'ControllerAndManaged')][string]$Role,
     [Parameter(Mandatory)][string]$InvitePath,
-    [Parameter(Mandatory)][string]$InviteKey,
     [Parameter(Mandatory)][string]$DotnetPath,
     [string]$ClientInstallValidationBase64 = ''
 )
@@ -202,16 +201,6 @@ try {
     }
     $attestationPath = Join-Path $release 'source-build-attestation.json'
     [IO.File]::WriteAllText($attestationPath, ($attestation | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
-
-    $setup = Join-Path $release 'Taildesk.Setup.exe'
-    $arguments = @(
-        "--hosted-invite=$InvitePath",
-        "--invite-key=$InviteKey",
-        "--source-attestation=$attestationPath"
-    )
-    & $setup @arguments
-    $setupExitCode = $LASTEXITCODE
-    if ($setupExitCode -ne 0) { throw "Locally built Opticon Setup returned $setupExitCode." }
 } finally {
     Pop-Location
 }

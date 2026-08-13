@@ -466,16 +466,69 @@ public sealed class ReleaseDeploymentService
             throw new InvalidDataException("The verified Opticon Fly Dockerfile does not copy the pinned dependency installers into the gateway image.");
 
         var fly = FindFlyCtl();
+        var deployIgnoreFile = CreateGatewayDeployIgnoreFile(gatewayDirectory);
         progress?.Report(progressMessage);
-        var result = await ProcessRunner.RunAsync(
-            fly,
-            ["deploy", "--app", GatewayAppName, "--remote-only", "--ha=false"],
-            TimeSpan.FromMinutes(20),
-            cancellationToken,
-            workingDirectory: gatewayDirectory);
+        var flyOutput = progress is null
+            ? null
+            : new Progress<string>(line => progress.Report("[fly] " + line));
+        ProcessResult result;
+        try
+        {
+            result = await ProcessRunner.RunAsync(
+                fly,
+                ["deploy", "--app", GatewayAppName, "--remote-only", "--ha=false", "--yes", "--ignorefile", deployIgnoreFile],
+                TimeSpan.FromMinutes(20),
+                cancellationToken,
+                workingDirectory: gatewayDirectory,
+                outputProgress: flyOutput);
+        }
+        finally
+        {
+            try { File.Delete(deployIgnoreFile); } catch { }
+        }
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 $"The Opticon Fly gateway update failed ({result.ExitCode}). {DescribeProcessFailure(result)}");
+    }
+
+    private static string CreateGatewayDeployIgnoreFile(string gatewayDirectory)
+    {
+        var manifestPath = RequireRegularFile(
+            Path.Combine(gatewayDirectory, "artifacts", "manifest.json"), "Opticon gateway release manifest");
+        using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
+        var root = manifest.RootElement;
+        if (!root.TryGetProperty("schemaVersion", out var schemaVersion)
+            || schemaVersion.GetInt32() != 2
+            || !root.TryGetProperty("artifacts", out var artifacts)
+            || artifacts.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException("The gateway release manifest is not a source-only manifest.");
+
+        var sourceLaunchers = artifacts.EnumerateArray()
+            .Where(artifact => artifact.TryGetProperty("product", out var product)
+                               && product.GetString() == "OpticonSource")
+            .Select(artifact => artifact.TryGetProperty("sourceLauncherFile", out var launcher)
+                ? launcher.GetString() ?? string.Empty
+                : string.Empty)
+            .ToArray();
+        if (sourceLaunchers.Length != 1
+            || !System.Text.RegularExpressions.Regex.IsMatch(
+                sourceLaunchers[0], @"^opticon-source-launcher-[0-9]+\.[0-9]+\.[0-9]+\.exe$",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+            throw new InvalidDataException("The source-only manifest does not declare exactly one safe gateway launcher.");
+        _ = RequireRegularFile(
+            Path.Combine(gatewayDirectory, "artifacts", sourceLaunchers[0]), "active Opticon source launcher");
+
+        var baseIgnore = RequireRegularFile(Path.Combine(gatewayDirectory, ".dockerignore"), "Opticon gateway Docker ignore file");
+        var temporary = Path.Combine(Path.GetTempPath(), $"opticon-fly-{Guid.NewGuid():N}.dockerignore");
+        var lines = new[]
+        {
+            File.ReadAllText(baseIgnore).TrimEnd(),
+            "# Include only the launcher selected by the current source-only manifest.",
+            "artifacts/opticon-source-launcher-*.exe",
+            $"!artifacts/{sourceLaunchers[0]}"
+        };
+        File.WriteAllText(temporary, string.Join(Environment.NewLine, lines) + Environment.NewLine, new UTF8Encoding(false));
+        return temporary;
     }
 
     /// <summary>

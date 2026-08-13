@@ -37,7 +37,10 @@ internal static class SourceBootstrapInstaller
     private const string Origin = "https://taildesk-egokick-control.fly.dev";
     private static readonly Regex HashPattern = new("^[a-f0-9]{64}$", RegexOptions.CultureInvariant);
 
-    internal static async Task RunAsync(SourceBootstrapRequest bootstrap, string launcherPath, Action<string> report)
+    internal static async Task<int> RunAsync(
+        SourceBootstrapRequest bootstrap,
+        string launcherPath,
+        Action<string> report)
     {
         string directory;
         Exception? protectedHandoffFailure = null;
@@ -120,11 +123,11 @@ internal static class SourceBootstrapInstaller
         var sourceManifest = await ExtractVerifiedAsync(sourceArchive, sourceDirectory, invite, validation);
         if (validation.IsEnabled(ClientInstallValidationStep.LauncherBinding))
             await VerifyLauncherMatchesArchiveAsync(launcherPath, sourceManifest);
-        // The signed launcher/archive pair may deliberately replace only the
-        // pre-protected 1.1.38 installation.  The remover presents a typed
-        // destructive confirmation and proves every target before Setup later
-        // enforces the strict machine-state ACL contract.
-        await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync(report);
+        // Keep the installed generation running until every replacement
+        // executable has been built and attested.  The final elevated Setup
+        // handoff performs the fixed-root replacement immediately before it
+        // starts convergence; an SDK/restore/publish failure therefore cannot
+        // strand a machine by deleting its existing remote-access lifelines.
         var targetRuntime = RuntimeInformation.OSArchitecture switch
         {
             Architecture.X64 => "win-x64",
@@ -138,6 +141,7 @@ internal static class SourceBootstrapInstaller
 
         report($"Building Opticon {invite.ReleaseVersion} locally with an approved .NET 10 SDK...");
         var installer = Path.Combine(sourceDirectory, "Install-OpticonFromSource.ps1");
+        var childEnvironment = BuildSanitizedEnvironment(directory, dotnet, validation);
         var result = await ProcessRunner.RunAsync(
             Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
             ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File", installer,
@@ -150,16 +154,79 @@ internal static class SourceBootstrapInstaller
                 "-ProductSigningCertificateBase64", sourceManifest.ProductSigningCertificateBase64,
                 "-SdkVersion", invite.SdkVersion, "-RuntimeVersion", invite.RuntimeVersion,
                 "-TargetRuntime", targetRuntime,
-                "-ClientInstallValidationBase64", Convert.ToBase64String(
-                    JsonSerializer.SerializeToUtf8Bytes(validation, JsonDefaults.Options)),
-                "-Role", invite.Role.ToString(),
-                "-InvitePath", invitePath, "-InviteKey", bootstrap.PrivateKey, "-DotnetPath", dotnet],
+                 "-ClientInstallValidationBase64", Convert.ToBase64String(
+                     JsonSerializer.SerializeToUtf8Bytes(validation, JsonDefaults.Options)),
+                 "-Role", invite.Role.ToString(),
+                 "-InvitePath", invitePath, "-DotnetPath", dotnet],
             TimeSpan.FromMinutes(45),
-            environment: BuildSanitizedEnvironment(directory, dotnet, validation), clearEnvironment: true);
+            environment: childEnvironment, clearEnvironment: true);
         if (!result.Succeeded)
             throw new InvalidOperationException("The authenticated local source build failed: " +
                                                 (result.StandardError + Environment.NewLine + result.StandardOutput).Trim());
+
+        // The bounded process above performs only restore, publish, hashing,
+        // and attestation. Never let its build deadline own the destructive
+        // Setup process: timing out that outer process after legacy removal
+        // would kill Setup and strand the machine between generations.
+        var releaseDirectory = Path.Combine(directory, "release");
+        var setup = Path.Combine(releaseDirectory, "Taildesk.Setup.exe");
+        var attestation = Path.Combine(releaseDirectory, "source-build-attestation.json");
+        if (!File.Exists(setup) || !File.Exists(attestation))
+            throw new FileNotFoundException(
+                "The authenticated source build did not produce its Setup handoff and attestation.");
+        if (validation.IsEnabled(ClientInstallValidationStep.ProtectedPaths))
+        {
+            HostedBootstrapper.RequireNoReparseTraversal(directory, releaseDirectory);
+            HostedBootstrapper.RequireNoReparseTraversal(releaseDirectory, setup);
+            HostedBootstrapper.RequireNoReparseTraversal(releaseDirectory, attestation);
+        }
+
+        report("The local build is attested. Running read-only elevated replacement checks before cleanup...");
+        return await RunAttestedSetupOutsideBuildDeadlineAsync(
+            setup,
+            attestation,
+            invitePath,
+            bootstrap.PrivateKey,
+            childEnvironment,
+            report);
     }
+
+    private static async Task<int> RunAttestedSetupOutsideBuildDeadlineAsync(
+        string setup,
+        string attestation,
+        string invitePath,
+        string inviteKey,
+        IReadOnlyDictionary<string, string?> childEnvironment,
+        Action<string> report)
+    {
+        var setupEnvironment = new Dictionary<string, string?>(
+            childEnvironment, StringComparer.OrdinalIgnoreCase)
+        {
+            [HostedBootstrapper.InvitePathEnvironmentVariable] = invitePath,
+            [HostedBootstrapper.InviteKeyEnvironmentVariable] = inviteKey
+        };
+        var result = await ProcessRunner.RunAsync(
+            setup,
+            [$"--source-attestation={attestation}", "--replace-existing"],
+            timeout: null,
+            cancellationToken: CancellationToken.None,
+            environment: setupEnvironment,
+            clearEnvironment: true);
+        if (!IsSuccessfulSetupHandoffExitCode(result.ExitCode))
+        {
+            var detail = (result.StandardError + Environment.NewLine + result.StandardOutput).Trim();
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(detail)
+                    ? $"The attested Opticon Setup returned {result.ExitCode}. Review its protected Setup log."
+                    : $"The attested Opticon Setup returned {result.ExitCode}: {detail}");
+        }
+        if (result.ExitCode == 3010)
+            report("Windows restart is required; protected Setup state will resume automatically after logon.");
+        return result.ExitCode;
+    }
+
+    private static bool IsSuccessfulSetupHandoffExitCode(int exitCode) =>
+        exitCode is 0 or 3010;
 
     private static void ValidateInvitation(InvitePayload invite)
     {

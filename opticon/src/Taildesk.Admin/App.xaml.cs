@@ -84,7 +84,8 @@ public partial class App : System.Windows.Application
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Opticon could not start", MessageBoxButton.OK, MessageBoxImage.Error);
+            var detail = exception.GetBaseException().Message;
+            MessageBox.Show(detail, "Opticon could not start", MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown(1);
         }
     }

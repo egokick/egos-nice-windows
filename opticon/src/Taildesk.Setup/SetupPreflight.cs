@@ -18,7 +18,8 @@ internal static class SetupPreflight
     internal static Task<InstallerPreflightReport> DiscoverElevatedAsync(
         InvitePayload invite,
         string bundleDirectory,
-        CancellationToken cancellationToken) => Task.Run(() =>
+        CancellationToken cancellationToken,
+        bool replacingValidatedLegacyInstallation = false) => Task.Run(() =>
     {
         cancellationToken.ThrowIfCancellationRequested();
         var report = new InstallerPreflightReport();
@@ -38,8 +39,10 @@ internal static class SetupPreflight
             if (string.IsNullOrWhiteSpace(root)) throw new IOException("Windows did not report the ProgramData volume.");
             var disk = new DriveInfo(root);
             if (!disk.IsReady || disk.AvailableFreeSpace < MinimumFreeBytes)
-                throw new IOException($"At least {MinimumFreeBytes / (1024 * 1024 * 1024)} GB free space is required on {root}.");
-        }, blocked: true);
+                throw new IOException(
+                    $"Less than {MinimumFreeBytes / (1024 * 1024 * 1024)} GB is free on {root}. " +
+                    "Setup will still attempt the mesh and remote-recovery baseline; later repairs may require more space.");
+        }, blocked: false);
 
         Probe(report, InstallerPreflightScope.Unelevated, "Invitation", () =>
         {
@@ -50,17 +53,29 @@ internal static class SetupPreflight
                 throw new InvalidDataException("The invitation has no canonical HTTPS coordinator endpoint.");
         }, blocked: true);
 
-        Probe(report, InstallerPreflightScope.Unelevated, "Payload", () =>
+        // Component availability is reported independently. The authenticated
+        // source binding remains a hard trust boundary, but a missing Agent or
+        // Guardian file is safe to skip while Setup establishes Tailscale and
+        // direct remote desktop for later repair.
+        var payloadRoot = Path.GetFullPath(bundleDirectory);
+        Probe(report, InstallerPreflightScope.Unelevated, "Agent payload", () =>
+            RequirePayload(payloadRoot, "Payload", "Agent", "Taildesk.Agent.exe"),
+            blocked: false);
+        Probe(report, InstallerPreflightScope.Unelevated, "Guardian payload", () =>
+            RequirePayload(payloadRoot, "Payload", "UpdateGuardian", "Taildesk.UpdateGuardian.exe"),
+            blocked: false);
+
+        if (invite.Role == DeviceRole.ControllerAndManaged)
         {
-            var root = Path.GetFullPath(bundleDirectory);
-            RequirePayload(root, "Payload", "Agent", "Taildesk.Agent.exe");
-            RequirePayload(root, "Payload", "UpdateGuardian", "Taildesk.UpdateGuardian.exe");
-            if (invite.Role == DeviceRole.ControllerAndManaged)
+            // A missing command-center payload must not prevent the Agent,
+            // private network, SSH, and remote desktop baseline from being
+            // installed. Keep it visible as a repair for a later pass.
+            Probe(report, InstallerPreflightScope.Unelevated, "Controller payload", () =>
             {
-                RequirePayload(root, "Payload", "Admin", "Opticon.exe");
-                RequirePayload(root, "Payload", "Admin", "Cli", "opticon.exe");
-            }
-        }, blocked: true);
+                RequirePayload(payloadRoot, "Payload", "Admin", "Opticon.exe");
+                RequirePayload(payloadRoot, "Payload", "Admin", "Cli", "opticon.exe");
+            }, blocked: false);
+        }
 
         ProbeRepair(report, "Build environment", () =>
         {
@@ -100,7 +115,7 @@ internal static class SetupPreflight
         Probe(report, InstallerPreflightScope.Elevated, "Interactive profile", () =>
         {
             _ = InteractiveUserProfile.Resolve();
-        }, blocked: true);
+        }, blocked: false);
 
         ProbeRepair(report, "Protected storage", () =>
         {
@@ -116,12 +131,20 @@ internal static class SetupPreflight
             catch (Exception exception)
             {
                 // Generic machine state can contain active secrets, so an ACL
-                // violation is a security block rather than an unsafe repair.
+                // violation is normally a security block rather than an unsafe
+                // repair. The source replacement path is the one exception: it
+                // has already proved that this is the exact fixed legacy tree
+                // which the authenticated invitation authorizes Setup to remove.
                 report.Add(new InstallerPreflightFinding(
                     InstallerPreflightScope.Elevated,
-                    InstallerPreflightSeverity.Blocked,
+                    replacingValidatedLegacyInstallation
+                        ? InstallerPreflightSeverity.Repair
+                        : InstallerPreflightSeverity.Blocked,
                     "Protected storage",
-                    exception.Message));
+                    exception.Message,
+                    replacingValidatedLegacyInstallation
+                        ? "Remove the validated legacy Opticon machine-state tree, then recreate protected storage."
+                        : null));
                 return null;
             }
         });
@@ -159,8 +182,8 @@ internal static class SetupPreflight
         {
             if (HasPendingReboot())
                 throw new InvalidOperationException(
-                    "Windows has a pending reboot; restart before Setup can verify OpenSSH recovery.");
-        }, blocked: true);
+                    "Windows has a pending reboot; restart after Setup if Windows defers OpenSSH recovery.");
+        }, blocked: false);
 
         return report;
     }, cancellationToken);

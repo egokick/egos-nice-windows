@@ -648,11 +648,15 @@ public partial class MainWindow : Window
 
     private void LoadSettingsControls()
     {
-        TailnetText.Text = _viewModel.Config.HeadscaleApiUrl;
-        OAuthIdText.Text = _viewModel.Config.HeadscaleUserId;
-        CoordinatorIpText.Text = _viewModel.Config.CoordinatorBindAddress;
-        InviteFolderText.Text = _viewModel.Config.InviteOutputDirectory;
-        RustDeskPathText.Text = _viewModel.Config.RustDeskPath;
+        // Existing configuration files may predate a field or explicitly
+        // contain JSON null. WPF TextBox.Text rejects null, so normalize at
+        // this UI boundary instead of preventing the Command Center from
+        // starting before Settings can be repaired.
+        TailnetText.Text = _viewModel.Config.HeadscaleApiUrl ?? string.Empty;
+        OAuthIdText.Text = _viewModel.Config.HeadscaleUserId ?? string.Empty;
+        CoordinatorIpText.Text = _viewModel.Config.CoordinatorBindAddress ?? string.Empty;
+        InviteFolderText.Text = _viewModel.Config.InviteOutputDirectory ?? string.Empty;
+        RustDeskPathText.Text = _viewModel.Config.RustDeskPath ?? string.Empty;
         var editable = _viewModel.Config.Mode == AdminMode.Primary;
         TailnetText.IsEnabled = OAuthIdText.IsEnabled = OAuthSecretText.IsEnabled = CoordinatorIpText.IsEnabled = editable;
     }

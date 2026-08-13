@@ -276,7 +276,7 @@ internal sealed class MaintenanceBootstrapCoordinator
             || config.CompletedInviteId is null
             || config.PendingInviteId is not null
             || string.IsNullOrWhiteSpace(config.AgentTokenHash)
-            || config.SharedRoots.Count == 0
+            || config.SharedRoots is null
             || config.ApiPort != AgentPort
             || !RemoteAdministrationProtocol.IsTailscaleIpv4(config.BindAddress)
             || !Uri.TryCreate(config.CoordinatorUrl, UriKind.Absolute, out var coordinator)
