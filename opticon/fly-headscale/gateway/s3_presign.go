@@ -23,6 +23,34 @@ type sourceDownloadSigner interface {
 	Presign(source bundleArtifact, now time.Time) (string, error)
 }
 
+// localArtifactSourceDownloadSigner is reachable only through the explicit
+// serve-local-e2e gateway command. It preserves the exact release manifest and
+// invitation source pins while replacing private S3 with the gateway's
+// read-only mounted artifact directory.
+type localArtifactSourceDownloadSigner struct {
+	publicOrigin string
+}
+
+func requireLocalE2EPublicOrigin(value string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" {
+		return "", errors.New("the local E2E public origin must be an HTTPS origin")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func (s *localArtifactSourceDownloadSigner) Presign(source bundleArtifact, _ time.Time) (string, error) {
+	if s == nil || !validSourceArtifact(source) {
+		return "", errors.New("the local E2E source release is invalid")
+	}
+	origin, err := requireLocalE2EPublicOrigin(s.publicOrigin)
+	if err != nil {
+		return "", err
+	}
+	return origin + artifactPrefix + url.PathEscape(source.File), nil
+}
+
 type s3SourceDownloadSigner struct {
 	bucket       string
 	region       string

@@ -1,0 +1,8 @@
+{
+    admin off
+}
+
+https://opticon-e2e.test:18443 {
+    tls internal
+    reverse_proxy gateway:8080
+}

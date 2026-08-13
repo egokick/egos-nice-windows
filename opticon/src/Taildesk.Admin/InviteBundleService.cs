@@ -12,11 +12,16 @@ public sealed class InviteBundleService
     private static readonly string[] SupportedRoots = ["Desktop", "Documents", "Downloads", "Pictures", "Videos"];
     private readonly AdminState _state;
     private readonly HeadscaleApiClient _headscale;
+    private readonly Func<CancellationToken, Task<string>> _tailnetResolver;
 
-    public InviteBundleService(AdminState state, HeadscaleApiClient headscale)
+    public InviteBundleService(
+        AdminState state,
+        HeadscaleApiClient headscale,
+        Func<CancellationToken, Task<string>>? tailnetResolver = null)
     {
         _state = state;
         _headscale = headscale;
+        _tailnetResolver = tailnetResolver ?? ReadCurrentTailnetAsync;
     }
 
     public async Task<InviteBundleResult> CreateAsync(
@@ -55,7 +60,7 @@ public sealed class InviteBundleService
         }
 
         progress?.Report("Checking the private network...");
-        var expectedTailnet = await ReadCurrentTailnetAsync(cancellationToken);
+        var expectedTailnet = await _tailnetResolver(cancellationToken);
         progress?.Report("Pinning this invitation to the exact authenticated source release...");
         var sourceRelease = await new OpticonSourceReleaseClient().GetCurrentAsync(_state.Config, cancellationToken);
         if (!string.Equals(sourceRelease.InstallProtocol, InvitationPolicy.SourceInstallProtocol, StringComparison.Ordinal))

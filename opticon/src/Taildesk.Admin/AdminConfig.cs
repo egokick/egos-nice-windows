@@ -33,7 +33,7 @@ public sealed class AdminConfig
 
 public sealed class AdminState
 {
-    private readonly JsonFileStore<AdminConfig> _store = new(AppPaths.AdminConfigFile);
+    private readonly JsonFileStore<AdminConfig> _store;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     // Enrollment, cancellation, registry snapshots, and device revocation must
@@ -42,6 +42,11 @@ public sealed class AdminState
 
     public AdminConfig Config { get; private set; } = new();
     public event EventHandler? Changed;
+
+    public AdminState(string? configPath = null)
+    {
+        _store = new JsonFileStore<AdminConfig>(configPath ?? AppPaths.AdminConfigFile);
+    }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {

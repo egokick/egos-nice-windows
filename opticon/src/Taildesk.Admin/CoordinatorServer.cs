@@ -13,12 +13,14 @@ public sealed class CoordinatorServer : IAsyncDisposable
 {
     private readonly AdminState _state;
     private readonly HeadscaleApiClient _headscale;
+    private readonly EnrollmentService _enrollment;
     private WebApplication? _app;
 
     public CoordinatorServer(AdminState state, HeadscaleApiClient headscale)
     {
         _state = state;
         _headscale = headscale;
+        _enrollment = new EnrollmentService(state, headscale);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -74,113 +76,9 @@ public sealed class CoordinatorServer : IAsyncDisposable
             return Results.Json(new EnrollmentResponse { Message = "Enrollment must originate from the reported Tailscale address." }, statusCode: 403);
         }
 
-        await _state.InviteGate.WaitAsync(cancellationToken);
-        try
-        {
-            var invite = _state.Config.Invites.FirstOrDefault(item => item.Id == request.InviteId);
-            if (invite is null
-                || !SecurityHelpers.FixedTimeEquals(invite.InviteSecretHash, SecurityHelpers.HashToken(request.InviteSecret)))
-            {
-                return Results.Json(new EnrollmentResponse { Message = "The invitation is invalid, expired, or already used." }, statusCode: 403);
-            }
-            if (invite.RedeemedAt.HasValue)
-            {
-                var enrolled = invite.EnrolledDeviceId.HasValue
-                    ? _state.Config.Devices.FirstOrDefault(item => item.Id == invite.EnrolledDeviceId.Value)
-                    : null;
-                return EnrollmentReplayPolicy.IsExactAcceptedReplay(invite, enrolled, request)
-                    ? Results.Ok(new EnrollmentResponse { Accepted = true, Message = "Enrollment was already completed." })
-                    : Results.Json(new EnrollmentResponse { Message = "The invitation was already used by a different enrollment identity." }, statusCode: 403);
-            }
-            if (invite.IsExpired)
-            {
-                return Results.Json(new EnrollmentResponse { Message = "The invitation is invalid, expired, or already used." }, statusCode: 403);
-            }
-
-            var authoritativeNodes = await _headscale.GetDevicesAsync(cancellationToken);
-            var authoritative = authoritativeNodes
-                .SingleOrDefault(item => item.Id.Equals(request.TailnetDeviceId, StringComparison.Ordinal));
-            var authoritativeHub = authoritativeNodes.SingleOrDefault(item =>
-                item.Ip.Equals(_state.Config.CoordinatorBindAddress, StringComparison.OrdinalIgnoreCase)
-                && item.Tags.Contains("tag:taildesk-hub", StringComparer.OrdinalIgnoreCase));
-            var expectedRoleTag = invite.Role == DeviceRole.ControllerAndManaged ? "tag:taildesk-controller" : "tag:taildesk-managed";
-            var oppositeRoleTag = invite.Role == DeviceRole.ControllerAndManaged ? "tag:taildesk-managed" : "tag:taildesk-controller";
-            var hasExpectedExitTag = authoritative?.Tags.Contains("tag:taildesk-exit", StringComparer.OrdinalIgnoreCase) == true;
-            if (authoritative is null || authoritativeHub is null
-                || !authoritative.Ip.Equals(request.TailscaleIp, StringComparison.OrdinalIgnoreCase)
-                || !authoritative.UserId.Equals(authoritativeHub.UserId, StringComparison.Ordinal)
-                || !authoritative.Tags.Contains(expectedRoleTag, StringComparer.OrdinalIgnoreCase)
-                || authoritative.Tags.Contains(oppositeRoleTag, StringComparer.OrdinalIgnoreCase)
-                || hasExpectedExitTag != invite.AdvertiseExitNode)
-            {
-                return Results.Json(new EnrollmentResponse { Message = "Headscale identity, user, address, or invitation tags did not match exactly." }, statusCode: 403);
-            }
-            if (_state.Config.Devices.Any(item => item.TailnetDeviceId.Equals(request.TailnetDeviceId, StringComparison.Ordinal)
-                                                  || item.TailscaleIp.Equals(request.TailscaleIp, StringComparison.OrdinalIgnoreCase)))
-            {
-                return Results.Json(new EnrollmentResponse { Message = "That Headscale node ID or Tailscale address is already enrolled. Revoke it before creating a replacement invitation." }, statusCode: 409);
-            }
-
-            var device = new DeviceRecord { Id = Guid.NewGuid() };
-            device.TailnetDeviceId = request.TailnetDeviceId;
-            device.Name = string.IsNullOrWhiteSpace(invite.DeviceName) ? request.HostName : invite.DeviceName;
-            device.HostName = request.HostName;
-            device.DnsName = request.DnsName;
-            device.TailscaleIp = request.TailscaleIp;
-            device.OperatingSystem = request.OperatingSystem;
-            device.AgentVersion = request.AgentVersion;
-            device.AgentTokenProtected = invite.AgentTokenProtected;
-            device.RustDeskPasswordProtected = invite.RustDeskPasswordProtected;
-            device.ControllerTokenProtected = invite.ControllerTokenProtected;
-            device.Role = invite.Role;
-            device.AdvertisesExitNode = invite.AdvertiseExitNode;
-            device.State = DeviceConnectionState.Online;
-            device.LastSeen = DateTimeOffset.UtcNow;
-            _state.Config.Devices.Add(device);
-            var oldExpiry = invite.ExpiresAt;
-            invite.RedeemedAt = DateTimeOffset.UtcNow;
-            invite.ExpiresAt = invite.RedeemedAt.Value;
-            invite.EnrolledDeviceId = device.Id;
-            try
-            {
-                await _state.SaveAsync(cancellationToken);
-            }
-            catch
-            {
-                _state.Config.Devices.Remove(device);
-                invite.RedeemedAt = null;
-                invite.ExpiresAt = oldExpiry;
-                invite.EnrolledDeviceId = null;
-                throw;
-            }
-
-            // Enrollment is durable before irreversible remote cleanup. A lost
-            // response is therefore safe to retry through the exact replay path.
-            try { await _headscale.RevokeKeyAsync(invite.TailscaleKeyId, CancellationToken.None); } catch { }
-            if (!string.IsNullOrWhiteSpace(invite.HostedInviteIdHash))
-            {
-                var hostedId = invite.HostedInviteIdHash;
-                var hostedUrl = invite.HostedUrlProtected;
-                try
-                {
-                    await new HostedInviteClient(_state).DeleteAsync(hostedId, CancellationToken.None);
-                    invite.HostedInviteIdHash = string.Empty;
-                    invite.HostedUrlProtected = string.Empty;
-                    try { await _state.SaveAsync(CancellationToken.None); }
-                    catch
-                    {
-                        invite.HostedInviteIdHash = hostedId;
-                        invite.HostedUrlProtected = hostedUrl;
-                    }
-                }
-                catch { /* Enrollment remains valid; the hosted object expires independently. */ }
-            }
-            return Results.Ok(new EnrollmentResponse { Accepted = true, Message = "Enrollment complete." });
-        }
-        finally
-        {
-            _state.InviteGate.Release();
-        }
+        var decision = await _enrollment.EnrollAsync(
+            request, _state.Config.CoordinatorBindAddress, cancellationToken);
+        return Results.Json(decision.Response, statusCode: decision.StatusCode);
     }
 
     private async Task<IResult> RegistryAsync(HttpContext context, CancellationToken cancellationToken)

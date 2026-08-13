@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -55,9 +56,11 @@ type testInput struct {
 	InvitationURL                string     `json:"invitationUrl"`
 	ExpectedRole                 string     `json:"expectedRole"`
 	Bundle                       artifact   `json:"bundle"`
+	Source                       artifact   `json:"source"`
 	Dependencies                 []artifact `json:"dependencies"`
 	InvitationCertificateBase64 string     `json:"invitationCertificateBase64"`
 	InvitationCertificateSHA1   string     `json:"invitationCertificateSha1"`
+	Enroll                       bool       `json:"enroll"`
 }
 
 type envelope struct {
@@ -92,6 +95,11 @@ type result struct {
 	Bundle              string    `json:"bundle"`
 	DependenciesChecked int       `json:"dependenciesChecked"`
 	NegativeTestsPassed int       `json:"negativeTestsPassed"`
+	InviteID            string    `json:"inviteId,omitempty"`
+	InviteSecret        string    `json:"inviteSecret,omitempty"`
+	TailnetDeviceID     string    `json:"tailnetDeviceId,omitempty"`
+	TailscaleIP         string    `json:"tailscaleIp,omitempty"`
+	DNSName             string    `json:"dnsName,omitempty"`
 }
 
 func main() {
@@ -120,7 +128,9 @@ func run() error {
 	landing, err := getLimited(client, landingURL, maxLanding)
 	if err != nil { return fmt.Errorf("download landing page: %w", err) }
 	landingText := string(landing)
-	for _, expected := range []string{"Install Opticon", input.Bundle.File, strings.ToLower(input.Bundle.SHA256), fmt.Sprint(input.Bundle.Size), input.InvitationCertificateSHA1} {
+	pinnedArtifact := input.Bundle
+	if input.Source.File != "" { pinnedArtifact = input.Source }
+	for _, expected := range []string{"Install Opticon", pinnedArtifact.File, strings.ToLower(pinnedArtifact.SHA256), fmt.Sprint(pinnedArtifact.Size), input.InvitationCertificateSHA1} {
 		if !strings.Contains(strings.ToLower(landingText), strings.ToLower(expected)) {
 			return fmt.Errorf("landing page omitted required pin %q", expected)
 		}
@@ -149,11 +159,22 @@ func run() error {
 	if err := validatePayload(payload, input.ExpectedRole); err != nil { return err }
 
 	origin := inviteURL.Scheme + "://" + inviteURL.Host
-	bundleURL := origin + "/opticon/artifacts/v1/" + url.PathEscape(input.Bundle.File)
-	bundlePath := filepath.Join(outputDir, "opticon-bundle.zip")
-	if err := downloadPinned(client, bundleURL, bundlePath, input.Bundle); err != nil { return fmt.Errorf("verify live bundle: %w", err) }
-	if err := verifyAndExtractBundle(bundlePath, input.ExpectedRole); err != nil { return err }
-	if err := assertTamperDetected(bundlePath, input.Bundle.SHA256); err != nil { return err }
+	verifiedFile := ""
+	if input.Source.File != "" {
+		verifiedFile = input.Source.File
+		sourceURL := strings.TrimRight(landingURL, "/") + "/source"
+		sourcePath := filepath.Join(outputDir, input.Source.File)
+		if err := downloadPinned(client, sourceURL, sourcePath, input.Source); err != nil { return fmt.Errorf("verify invitation source archive: %w", err) }
+		if err := verifySafeZip(sourcePath); err != nil { return err }
+		if err := assertTamperDetected(sourcePath, input.Source.SHA256); err != nil { return err }
+	} else {
+		verifiedFile = input.Bundle.File
+		bundleURL := origin + "/opticon/artifacts/v1/" + url.PathEscape(input.Bundle.File)
+		bundlePath := filepath.Join(outputDir, "opticon-bundle.zip")
+		if err := downloadPinned(client, bundleURL, bundlePath, input.Bundle); err != nil { return fmt.Errorf("verify live bundle: %w", err) }
+		if err := verifyAndExtractBundle(bundlePath, input.ExpectedRole); err != nil { return err }
+		if err := assertTamperDetected(bundlePath, input.Bundle.SHA256); err != nil { return err }
+	}
 
 	checked := 0
 	for _, dependency := range input.Dependencies {
@@ -165,14 +186,100 @@ func run() error {
 		}
 		checked++
 	}
-	if checked != 2 { return fmt.Errorf("expected two x64 dependencies, verified %d", checked) }
+	if input.Source.File == "" && checked != 2 { return fmt.Errorf("expected two x64 dependencies, verified %d", checked) }
 
-	output := result{Status: "passed", DeviceName: payload.DeviceName, Role: payload.Role, ExpiresAt: payload.ExpiresAt, Bundle: input.Bundle.File, DependenciesChecked: checked, NegativeTestsPassed: 2}
+	output := result{Status: "passed", DeviceName: payload.DeviceName, Role: payload.Role, ExpiresAt: payload.ExpiresAt, Bundle: verifiedFile, DependenciesChecked: checked, NegativeTestsPassed: 2}
+	if input.Enroll {
+		identity, err := joinTailnet(payload)
+		if err != nil { return err }
+		output.InviteID = payload.InviteID
+		output.InviteSecret = payload.InviteSecret
+		output.TailnetDeviceID = identity.ID
+		output.TailscaleIP = identity.IP
+		output.DNSName = identity.DNSName
+	}
 	encoded, err := json.MarshalIndent(output, "", "  ")
 	if err != nil { return err }
 	if err := os.WriteFile(filepath.Join(outputDir, "result.json"), encoded, 0600); err != nil { return err }
 	fmt.Printf("PASS disposable invitation, signed payload, live bundle, and %d pinned dependencies verified\n", checked)
+	if input.Enroll { select {} }
 	return nil
+}
+
+func verifySafeZip(path string) error {
+	archive, err := zip.OpenReader(path)
+	if err != nil { return fmt.Errorf("open source ZIP: %w", err) }
+	defer archive.Close()
+	foundManifest, foundSignature := false, false
+	for _, entry := range archive.File {
+		name := strings.ReplaceAll(entry.Name, "\\", "/")
+		clean := filepath.ToSlash(filepath.Clean(name))
+		if strings.HasPrefix(clean, "../") || strings.HasPrefix(name, "/") || clean != name {
+			return fmt.Errorf("unsafe source entry %q", entry.Name)
+		}
+		foundManifest = foundManifest || name == "source-manifest.json"
+		foundSignature = foundSignature || name == "source-manifest.sig"
+	}
+	if !foundManifest || !foundSignature { return errors.New("source archive omitted its signed inner manifest") }
+	return nil
+}
+
+type tailscaleIdentity struct {
+	ID      string
+	IP      string
+	DNSName string
+}
+
+func joinTailnet(payload invitePayload) (tailscaleIdentity, error) {
+	socket := "/tmp/opticon-tailscaled.sock"
+	state := "/tmp/opticon-tailscaled.state"
+	daemon := exec.Command("tailscaled", "--tun=userspace-networking", "--socket="+socket, "--state="+state)
+	daemon.Stdout, daemon.Stderr = os.Stderr, os.Stderr
+	if err := daemon.Start(); err != nil { return tailscaleIdentity{}, fmt.Errorf("start tailscaled: %w", err) }
+	for attempt := 0; attempt < 40; attempt++ {
+		status := exec.Command("tailscale", "--socket="+socket, "status", "--json")
+		if status.Run() == nil { break }
+		time.Sleep(250 * time.Millisecond)
+		if attempt == 39 { _ = daemon.Process.Kill(); return tailscaleIdentity{}, errors.New("tailscaled did not become ready") }
+	}
+	up := exec.Command("tailscale", "--socket="+socket, "up",
+		"--login-server="+payload.HeadscaleLoginURL,
+		"--auth-key="+payload.TailscaleAuthKey,
+		"--hostname="+payload.DeviceName,
+		"--accept-dns=false")
+	if data, err := up.CombinedOutput(); err != nil {
+		_ = daemon.Process.Kill()
+		return tailscaleIdentity{}, fmt.Errorf("tailscale up: %w: %s", err, strings.TrimSpace(string(data)))
+	}
+	for attempt := 0; attempt < 40; attempt++ {
+		status := exec.Command("tailscale", "--socket="+socket, "status", "--json")
+		data, err := status.Output()
+		if err == nil {
+			var snapshot struct {
+				BackendState string `json:"BackendState"`
+				Self struct {
+					ID string `json:"ID"`
+					DNSName string `json:"DNSName"`
+					HostName string `json:"HostName"`
+					TailscaleIPs []string `json:"TailscaleIPs"`
+				} `json:"Self"`
+			}
+			if json.Unmarshal(data, &snapshot) == nil && snapshot.BackendState == "Running" {
+				ip := ""
+				for _, candidate := range snapshot.Self.TailscaleIPs {
+					if strings.Contains(candidate, ".") { ip = candidate; break }
+				}
+				dns := strings.TrimSuffix(snapshot.Self.DNSName, ".")
+				if dns == "" { dns = snapshot.Self.HostName }
+				if snapshot.Self.ID != "" && ip != "" {
+					return tailscaleIdentity{ID: snapshot.Self.ID, IP: ip, DNSName: dns}, nil
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	_ = daemon.Process.Kill()
+	return tailscaleIdentity{}, errors.New("the enrolled Tailscale identity did not become available")
 }
 
 func getLimited(client *http.Client, address string, limit int64) ([]byte, error) {

@@ -1,0 +1,58 @@
+server_url: "https://opticon-e2e.test:18443"
+listen_addr: "127.0.0.1:8081"
+metrics_listen_addr: "127.0.0.1:9090"
+grpc_listen_addr: "127.0.0.1:50443"
+grpc_allow_insecure: false
+tls_cert_path: ""
+tls_key_path: ""
+trusted_proxies:
+  - "127.0.0.1/32"
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+allocation: sequential
+derp:
+  server:
+    enabled: true
+    region_id: 910
+    region_code: "opticon-e2e"
+    region_name: "Opticon local E2E"
+    verify_clients: true
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+  urls: []
+  paths: []
+  auto_update_enabled: false
+node:
+  expiry: 30d
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+log:
+  level: info
+  format: json
+policy:
+  mode: file
+  path: /etc/headscale/policy.hujson
+dns:
+  magic_dns: false
+  base_domain: "opticon-e2e.invalid"
+  override_local_dns: false
+  nameservers:
+    global: []
+  search_domains: []
+  extra_records: []
+unix_socket: /var/lib/headscale/headscale.sock
+unix_socket_permission: "0770"
+logtail:
+  enabled: false
+taildrop:
+  enabled: false
+auto_update:
+  enabled: false
+disable_check_updates: true

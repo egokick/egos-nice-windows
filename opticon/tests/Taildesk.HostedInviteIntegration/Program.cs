@@ -3,6 +3,87 @@ using System.Text.Json;
 using Taildesk.Admin;
 using Taildesk.Shared;
 
+if (args.Length == 7 && args[0].Equals("--local-e2e-create", StringComparison.OrdinalIgnoreCase))
+{
+    var configPath = Path.GetFullPath(args[1]);
+    var controlUrl = args[2];
+    var adminHmac = args[3];
+    var headscaleUserId = args[4];
+    var outputPath = Path.GetFullPath(args[5]);
+    var deviceName = args[6];
+    var localState = new AdminState(configPath);
+    await localState.InitializeAsync();
+    localState.Config.Mode = AdminMode.Primary;
+    localState.Config.SetupComplete = true;
+    localState.Config.HeadscaleApiUrl = controlUrl.TrimEnd('/') + "/opticon/v1/headscale/";
+    localState.Config.HeadscaleControlUrl = controlUrl;
+    localState.Config.HeadscaleUserId = headscaleUserId;
+    localState.Config.HeadscaleApiKeyProtected = SecretProtector.Protect(adminHmac);
+    localState.Config.CoordinatorUrl = "https://coordinator.opticon-e2e.test";
+    await localState.SaveAsync();
+    var localHeadscale = new HeadscaleApiClient(localState);
+    var created = await new InviteBundleService(
+        localState,
+        localHeadscale,
+        _ => Task.FromResult("opticon-local-e2e"))
+        .CreateAsync(deviceName, DeviceRole.ManagedOnly, false, ["Documents"]);
+    using var releaseHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+    using var manifestStream = await releaseHttp.GetStreamAsync(
+        controlUrl.TrimEnd('/') + "/opticon/artifacts/v1/manifest.json");
+    using var manifest = await JsonDocument.ParseAsync(manifestStream);
+    var source = manifest.RootElement.GetProperty("artifacts").EnumerateArray()
+        .Single(item => item.GetProperty("product").GetString() == "OpticonSource"
+                        && item.GetProperty("version").GetString() == created.Record.ReleaseVersion);
+    await File.WriteAllTextAsync(outputPath, JsonSerializer.Serialize(new
+    {
+        created.InvitationUrl,
+        ExpectedRole = "managedOnly",
+        Source = source,
+        Dependencies = Array.Empty<object>(),
+        InvitationCertificateBase64 = Convert.ToBase64String(InvitationSigning.PinnedCertificate.RawData),
+        InvitationCertificateSha1 = InvitationSigning.CertificateThumbprint,
+        Enroll = true
+    }, JsonDefaults.Options));
+    Console.WriteLine($"PASS local gateway invitation created for {created.Record.DeviceName}.");
+    return;
+}
+
+if (args.Length == 4 && args[0].Equals("--local-e2e-enroll", StringComparison.OrdinalIgnoreCase))
+{
+    var localState = new AdminState(Path.GetFullPath(args[1]));
+    await localState.InitializeAsync();
+    using var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.GetFullPath(args[2])));
+    var result = document.RootElement;
+    var request = new EnrollmentRequest
+    {
+        InviteId = Guid.Parse(result.GetProperty("inviteId").GetString()!),
+        InviteSecret = result.GetProperty("inviteSecret").GetString()!,
+        TailnetDeviceId = result.GetProperty("tailnetDeviceId").GetString()!,
+        HostName = result.GetProperty("deviceName").GetString()!,
+        DnsName = result.GetProperty("dnsName").GetString()!,
+        TailscaleIp = result.GetProperty("tailscaleIp").GetString()!,
+        OperatingSystem = "linux-container-e2e",
+        AgentVersion = typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "0.0.0"
+    };
+    var headscale = new HeadscaleApiClient(localState);
+    var decision = await new EnrollmentService(localState, headscale)
+        .EnrollAsync(request, args[3]);
+    if (decision.StatusCode != 200 || !decision.Response.Accepted)
+        throw new InvalidDataException($"Production enrollment rejected the Docker device: {decision.Response.Message}");
+
+    var agents = new AgentClient();
+    await using var schedules = new ScheduledTransferManager(localState, agents);
+    var viewModel = new MainViewModel(localState, headscale, agents, new TransferManager(), schedules);
+    using var refreshTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    await viewModel.RefreshAsync(refreshTimeout.Token);
+    var visible = viewModel.Devices.SingleOrDefault(item => item.TailnetDeviceId == request.TailnetDeviceId)
+                  ?? throw new InvalidDataException("The real Command Center refresh did not display the enrolled Docker device.");
+    if (visible.State != DeviceConnectionState.TailscaleOnly)
+        throw new InvalidDataException($"The Docker device appeared in Command Center as {visible.State}, not TailscaleOnly.");
+    Console.WriteLine($"PASS Command Center displays {visible.Name} at {visible.TailscaleIp} as connected (Tailscale only).");
+    return;
+}
+
 var state = new AdminState();
 await state.InitializeAsync();
 if (state.Config.Mode != AdminMode.Primary || !state.Config.SetupComplete)

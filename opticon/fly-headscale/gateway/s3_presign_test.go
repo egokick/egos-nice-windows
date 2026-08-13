@@ -7,6 +7,30 @@ import (
 	"time"
 )
 
+func TestLocalArtifactSourceDownloadSigner(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	source := productionArtifact(bundleArtifact{
+		Product: "OpticonSource", Version: "1.2.18", Architecture: "source",
+		File: "opticon-source-1.2.18.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.18/opticon-source-1.2.18.zip",
+		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
+		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+		SourceLauncherFile: "opticon-source-launcher-1.2.18.exe", SourceLauncherSize: 1024,
+		SourceLauncherSHA256: hash,
+	})
+	signer := &localArtifactSourceDownloadSigner{publicOrigin: "https://opticon-e2e.test:8443"}
+	location, err := signer.Presign(source, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location != "https://opticon-e2e.test:8443/opticon/artifacts/v1/opticon-source-1.2.18.zip" {
+		t.Fatalf("unexpected local source location %q", location)
+	}
+	if _, err := requireLocalE2EPublicOrigin("http://opticon-e2e.test:8443"); err == nil {
+		t.Fatal("an HTTP local origin was accepted")
+	}
+}
+
 func TestS3SourceDownloadSignerIsExactAndShortLived(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	source := productionArtifact(bundleArtifact{

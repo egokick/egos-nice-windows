@@ -117,6 +117,10 @@ func main() {
 	if os.Geteuid() != 65532 {
 		log.Fatalf("refusing unexpected runtime uid %d", os.Geteuid())
 	}
+	localE2E := len(os.Args) == 2 && os.Args[1] == "serve-local-e2e"
+	if len(os.Args) > 1 && !localE2E {
+		log.Fatal("unsupported gateway command")
+	}
 	secret := os.Getenv("OPTICON_ADMIN_HMAC_KEY")
 	headscaleKey := os.Getenv("HEADSCALE_API_KEY")
 	if len(secret) < 32 || headscaleKey == "" {
@@ -125,9 +129,21 @@ func main() {
 	if err := configureProductionTrust(); err != nil {
 		log.Fatal(err)
 	}
-	sourceSigner, err := newS3SourceDownloadSignerFromEnvironment()
-	if err != nil {
-		log.Fatal(err)
+	var sourceSigner sourceDownloadSigner
+	var publicOrigin string
+	if localE2E {
+		var err error
+		publicOrigin, err = requireLocalE2EPublicOrigin(os.Getenv("OPTICON_E2E_PUBLIC_ORIGIN"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		sourceSigner = &localArtifactSourceDownloadSigner{publicOrigin: publicOrigin}
+	} else {
+		var err error
+		sourceSigner, err = newS3SourceDownloadSignerFromEnvironment()
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	child := exec.Command("/ko-app/headscale", "serve")
@@ -159,15 +175,18 @@ func main() {
 		}
 		r.Header.Set("X-Forwarded-Proto", "https")
 	}
-	appName := strings.TrimSpace(os.Getenv("FLY_APP_NAME"))
-	if appName == "" {
-		log.Fatal("FLY_APP_NAME is missing")
+	if !localE2E {
+		appName := strings.TrimSpace(os.Getenv("FLY_APP_NAME"))
+		if appName == "" {
+			log.Fatal("FLY_APP_NAME is missing")
+		}
+		publicOrigin = "https://" + appName + ".fly.dev"
 	}
 	g := &gateway{proxy: proxy, adminSecret: []byte(secret), headscaleKey: headscaleKey, sourceSigner: sourceSigner, now: time.Now,
 		artifactDir: "/opt/opticon/artifacts", bundleDir: "/var/lib/headscale/opticon-artifacts", inviteDir: "/var/lib/headscale/opticon-invites",
 		nonceDir:     "/var/lib/headscale/opticon-nonces",
 		manifestPath: "/var/lib/headscale/opticon-release/manifest.json",
-		publicOrigin: "https://" + appName + ".fly.dev", nonces: make(map[string]time.Time),
+		publicOrigin: publicOrigin, nonces: make(map[string]time.Time),
 		adminSlots: make(chan struct{}, 16), artifactSlots: make(chan struct{}, 8),
 		proxySlots: make(chan struct{}, 64), streamSlots: make(chan struct{}, 64)}
 	if err := os.MkdirAll(g.inviteDir, 0700); err != nil {

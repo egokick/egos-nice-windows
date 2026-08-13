@@ -1,0 +1,51 @@
+name: opticon-local-e2e
+
+services:
+  gateway:
+    build:
+      context: ../../fly-headscale
+    command: ["serve-local-e2e"]
+    restart: "no"
+    user: "0:0"
+    environment:
+      OPTICON_MIGRATE_PERMISSIONS: "1"
+      OPTICON_ADMIN_HMAC_KEY: "${OPTICON_E2E_ADMIN_HMAC_KEY}"
+      HEADSCALE_API_KEY: "${OPTICON_E2E_HEADSCALE_API_KEY}"
+      OPTICON_SOURCE_RELEASE_KEY_ID: "${OPTICON_E2E_SOURCE_KEY_ID}"
+      OPTICON_PRODUCT_SIGNER_THUMBPRINT: "${OPTICON_E2E_PRODUCT_SIGNER}"
+      OPTICON_SIGNING_PROFILE: "${OPTICON_E2E_SIGNING_PROFILE}"
+      OPTICON_E2E_PUBLIC_ORIGIN: "https://opticon-e2e.test:18443"
+    volumes:
+      - ../../fly-headscale/artifacts:/opt/opticon/artifacts:ro
+      - ./headscale.yaml:/etc/headscale/config.yaml:ro
+      - ../../fly-headscale/policy.hujson:/etc/headscale/policy.hujson:ro
+      - headscale-state:/var/lib/headscale
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+        aliases:
+          - opticon-e2e.test
+
+  caddy:
+    image: caddy:2.10.2
+    restart: "no"
+    ports:
+      - "127.0.0.1:18443:18443/tcp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      control:
+
+volumes:
+  headscale-state:
+  caddy-data:
+  caddy-config:
+
+networks:
+  control:
+    driver: bridge
