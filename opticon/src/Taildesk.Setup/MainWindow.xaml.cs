@@ -149,18 +149,25 @@ public partial class MainWindow : Window
                 AppendLog($"Authenticated local source build {_invite.ReleaseVersion} was reverified after elevation.");
                 if (replaceExisting)
                 {
-                    var replacingValidatedLegacyInstallation =
-                        await LegacyOpticonRemoval.PreflightLegacyInstallationIfPresentAsync();
-                    var replacementPreflight = await SetupPreflight.DiscoverElevatedAsync(
-                        _invite,
-                        AppContext.BaseDirectory,
-                        CancellationToken.None,
-                        replacingValidatedLegacyInstallation);
-                    ReportReplacementPreflight(replacementPreflight);
-                    if (replacementPreflight.IsBlocked)
-                        throw new SetupPreflightBlockedException(replacementPreflight);
-                    AppendLog(
-                        "Elevated replacement preflight completed without changing installed files or tasks.");
+                    if (validation.IsEnabled(ClientInstallValidationStep.SetupPreflight))
+                    {
+                        var replacingValidatedLegacyInstallation =
+                            await LegacyOpticonRemoval.PreflightLegacyInstallationIfPresentAsync();
+                        var replacementPreflight = await SetupPreflight.DiscoverElevatedAsync(
+                            _invite,
+                            AppContext.BaseDirectory,
+                            CancellationToken.None,
+                            replacingValidatedLegacyInstallation);
+                        ReportReplacementPreflight(replacementPreflight);
+                        if (replacementPreflight.IsBlocked)
+                            throw new SetupPreflightBlockedException(replacementPreflight);
+                        AppendLog(
+                            "Elevated replacement preflight completed without changing installed files or tasks.");
+                    }
+                    else
+                    {
+                        AppendLog("Elevated replacement validation was disabled by the published client-install policy.");
+                    }
                     await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync(message =>
                     {
                         StatusText.Text = message;

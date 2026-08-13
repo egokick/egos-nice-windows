@@ -227,7 +227,7 @@ internal static class HostedBootstrapper
     }
 
     internal static async Task DownloadAsync(HttpClient client, string url, string destination, long? expectedSize,
-        long maximumSize, string? expectedHash)
+        long maximumSize, string? expectedHash, bool validateTransport = true)
     {
         if (maximumSize <= 0) throw new ArgumentOutOfRangeException(nameof(maximumSize));
         if (expectedSize.HasValue && (expectedSize.Value <= 0 || expectedSize.Value > maximumSize))
@@ -236,7 +236,7 @@ internal static class HostedBootstrapper
         {
             using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
             response.EnsureSuccessStatusCode();
-            if (response.Content.Headers.ContentEncoding.Count != 0)
+            if (validateTransport && response.Content.Headers.ContentEncoding.Count != 0)
                 throw new InvalidDataException("Encoded Opticon downloads are not accepted.");
             if (response.Content.Headers.ContentLength is long declared
                 && (declared > maximumSize || (expectedSize.HasValue && declared != expectedSize.Value)))

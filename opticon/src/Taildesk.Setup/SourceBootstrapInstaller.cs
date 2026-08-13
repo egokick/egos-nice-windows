@@ -105,7 +105,7 @@ internal static class SourceBootstrapInstaller
         var dotnet = await RequireSdkAsync(invite.SdkVersion, directory, validation, report);
 
         var sourceArchive = Path.Combine(directory, invite.SourceFile);
-        var selectedSourceArchive = ResolveSourceArchive(bootstrap, launcherPath, invite);
+        var selectedSourceArchive = ResolveSourceArchive(bootstrap, launcherPath, invite, validation);
         if (selectedSourceArchive is null)
         {
             report("Downloading the hash-pinned Opticon source archive...");
@@ -281,7 +281,8 @@ internal static class SourceBootstrapInstaller
     private static string? ResolveSourceArchive(
         SourceBootstrapRequest bootstrap,
         string launcherPath,
-        InvitePayload invite)
+        InvitePayload invite,
+        ClientInstallValidationPolicy validation)
     {
         var candidates = new List<string>();
         if (!string.IsNullOrWhiteSpace(bootstrap.SourceArchivePath))
@@ -299,12 +300,14 @@ internal static class SourceBootstrapInstaller
         }
         var existing = candidates.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(path => File.Exists(path)
-                           && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0
-                           && string.Equals(Path.GetFileName(path), invite.SourceFile, StringComparison.Ordinal))
+                           && (!validation.IsEnabled(ClientInstallValidationStep.ProtectedPaths)
+                               || (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0)
+                           && (!validation.IsEnabled(ClientInstallValidationStep.LauncherBinding)
+                               || string.Equals(Path.GetFileName(path), invite.SourceFile, StringComparison.Ordinal)))
             .ToArray();
-        if (existing.Length > 1)
+        if (validation.IsEnabled(ClientInstallValidationStep.LauncherBinding) && existing.Length > 1)
             throw new InvalidDataException("More than one adjacent Opticon source archive matched the signed invitation.");
-        return existing.Length == 1 ? existing[0] : null;
+        return existing.FirstOrDefault();
     }
 
     private static async Task DownloadPresignedSourceAsync(
@@ -328,10 +331,15 @@ internal static class SourceBootstrapInstaller
                 StringComparison.Ordinal)
             || string.IsNullOrWhiteSpace(location.Query)))
             throw new InvalidDataException("The Opticon source authorization returned an unexpected download location.");
-        await HostedBootstrapper.DownloadAsync(client, location.AbsoluteUri, destination,
+        var downloadUrl = location.IsAbsoluteUri
+            ? location.AbsoluteUri
+            : new Uri(response.RequestMessage?.RequestUri ?? new Uri(authorizationUrl), location).AbsoluteUri;
+        var validateDownload = validation.IsEnabled(ClientInstallValidationStep.DownloadIntegrity);
+        await HostedBootstrapper.DownloadAsync(client, downloadUrl, destination,
             validation.IsEnabled(ClientInstallValidationStep.DownloadIntegrity) ? invite.SourceSize : null,
-            256L * 1024 * 1024,
-            validation.IsEnabled(ClientInstallValidationStep.DownloadIntegrity) ? invite.SourceSha256 : null);
+            validateDownload ? 256L * 1024 * 1024 : long.MaxValue,
+            validateDownload ? invite.SourceSha256 : null,
+            validateTransport: validateDownload);
     }
 
     private static async Task CopyAndVerifyAsync(string source, string destination, long size, string hash)
@@ -375,29 +383,45 @@ internal static class SourceBootstrapInstaller
         if (validation.IsEnabled(ClientInstallValidationStep.ProtectedPaths))
             HostedBootstrapper.RequireNoReparseTraversal(Path.GetDirectoryName(destination)!, destination);
         using var archive = ZipFile.OpenRead(archivePath);
-        if (archive.Entries.Count is < 3 or > 4096) throw new InvalidDataException("The source archive entry count is invalid.");
+        if (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
+            && archive.Entries.Count is < 3 or > 4096)
+            throw new InvalidDataException("The source archive entry count is invalid.");
         var entries = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in archive.Entries)
         {
             var name = Normalize(entry.FullName);
             if (entry.FullName.EndsWith('/') || entry.FullName.EndsWith('\\'))
-                throw new InvalidDataException("The source archive contains an undeclared directory entry.");
-            if (!entries.TryAdd(name, entry)) throw new InvalidDataException("The source archive contains a duplicate path.");
+            {
+                if (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity))
+                    throw new InvalidDataException("The source archive contains an undeclared directory entry.");
+                continue;
+            }
+            if (!entries.TryAdd(name, entry)
+                && validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity))
+                throw new InvalidDataException("The source archive contains a duplicate path.");
         }
         if (!entries.TryGetValue("source-manifest.json", out var manifestEntry)
-            || !entries.TryGetValue("source-manifest.sig", out var signatureEntry)
-            || manifestEntry.Length is <= 0 or > 1024 * 1024 || signatureEntry.Length is <= 0 or > 16 * 1024)
+            || !entries.TryGetValue("source-manifest.sig", out var signatureEntry))
             throw new InvalidDataException("The source archive lacks its bounded signed inner manifest.");
-        var manifestBytes = await ReadEntryAsync(manifestEntry, 1024 * 1024);
+        if ((validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
+             || validation.IsEnabled(ClientInstallValidationStep.DownloadIntegrity))
+            && (manifestEntry.Length is <= 0 or > 1024 * 1024
+                || signatureEntry.Length is <= 0 or > 16 * 1024))
+            throw new InvalidDataException("The source archive lacks its bounded signed inner manifest.");
+        var validateMetadataBounds = validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
+                                     || validation.IsEnabled(ClientInstallValidationStep.DownloadIntegrity);
+        var manifestBytes = await ReadEntryAsync(manifestEntry, validateMetadataBounds ? 1024 * 1024 : int.MaxValue);
         if (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
             && !FixedHash(Convert.ToHexString(SHA256.HashData(manifestBytes)).ToLowerInvariant(), invite.SourceManifestSha256))
             throw new InvalidDataException("The source inner manifest hash does not match the signed invitation.");
-        byte[] signature;
-        try { signature = Convert.FromBase64String(Encoding.UTF8.GetString(await ReadEntryAsync(signatureEntry, 16 * 1024)).Trim()); }
-        catch (FormatException exception) { throw new InvalidDataException("The source inner-manifest signature is malformed.", exception); }
-        if (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
-            && !SourceReleaseSigning.Verify(manifestBytes, signature))
-            throw new InvalidDataException("The source inner-manifest RSA-PSS signature is invalid.");
+        if (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity))
+        {
+            byte[] signature;
+            try { signature = Convert.FromBase64String(Encoding.UTF8.GetString(await ReadEntryAsync(signatureEntry, 16 * 1024)).Trim()); }
+            catch (FormatException exception) { throw new InvalidDataException("The source inner-manifest signature is malformed.", exception); }
+            if (!SourceReleaseSigning.Verify(manifestBytes, signature))
+                throw new InvalidDataException("The source inner-manifest RSA-PSS signature is invalid.");
+        }
         var manifest = JsonSerializer.Deserialize<SourceReleaseManifest>(manifestBytes, JsonDefaults.Options)
                        ?? throw new InvalidDataException("The source inner manifest is empty.");
         if (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
@@ -420,18 +444,24 @@ internal static class SourceBootstrapInstaller
         foreach (var file in manifest.Files)
         {
             var relative = Normalize(file.Path);
-            if (!declared.Add(relative) || !entries.TryGetValue(relative, out var entry)
-                || (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
-                    && (file.Size <= 0 || file.Size != entry.Length || !HashPattern.IsMatch(file.Sha256))))
+            var declaredOnce = declared.Add(relative);
+            var hasEntry = entries.TryGetValue(relative, out var entry);
+            if ((!declaredOnce || !hasEntry
+                 || (file.Size <= 0 || file.Size != entry!.Length || !HashPattern.IsMatch(file.Sha256)))
+                && validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity))
                 throw new InvalidDataException($"The source inner manifest has an invalid declaration for {relative}.");
-            expanded = checked(expanded + file.Size);
-            if (expanded > 512L * 1024 * 1024) throw new InvalidDataException("The source archive expands beyond its limit.");
+            if (!declaredOnce || !hasEntry) continue;
+            expanded = checked(expanded + (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
+                ? file.Size : entry!.Length));
+            if (validation.IsEnabled(ClientInstallValidationStep.DownloadIntegrity)
+                && expanded > 512L * 1024 * 1024)
+                throw new InvalidDataException("The source archive expands beyond its limit.");
             var output = SafeDestination(destination, relative);
             Directory.CreateDirectory(Path.GetDirectoryName(output)!);
             if (validation.IsEnabled(ClientInstallValidationStep.ProtectedPaths))
                 HostedBootstrapper.RequireNoReparseTraversal(destination, Path.GetDirectoryName(output)!);
-            await ExtractEntryAsync(entry, output,
-                validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity) ? file.Size : entry.Length,
+            await ExtractEntryAsync(entry!, output,
+                validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity) ? file.Size : entry!.Length,
                 validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity) ? file.Sha256 : null);
         }
         if (validation.IsEnabled(ClientInstallValidationStep.SourceArchiveAuthenticity)
@@ -448,7 +478,8 @@ internal static class SourceBootstrapInstaller
     {
         var programFiles = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
         var dotnet = Path.GetFullPath(Path.Combine(programFiles, "dotnet", "dotnet.exe"));
-        if (!dotnet.StartsWith(Path.TrimEndingDirectorySeparator(programFiles) + Path.DirectorySeparatorChar,
+        if (validation.IsEnabled(ClientInstallValidationStep.ProtectedPaths)
+            && !dotnet.StartsWith(Path.TrimEndingDirectorySeparator(programFiles) + Path.DirectorySeparatorChar,
                 StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The fixed .NET SDK host escaped Program Files.");
         if (validation.IsEnabled(ClientInstallValidationStep.ProtectedPaths))
@@ -512,8 +543,9 @@ internal static class SourceBootstrapInstaller
             using var client = DirectHttp.CreateClient(TimeSpan.FromMinutes(30));
             using var response = await client.GetAsync(downloadUri, HttpCompletionOption.ResponseHeadersRead);
             response.EnsureSuccessStatusCode();
-            if (response.Content.Headers.ContentEncoding.Count != 0
-                || response.Content.Headers.ContentLength is > 1024L * 1024 * 1024)
+            if (validation.IsEnabled(ClientInstallValidationStep.DependencyIntegrity)
+                && (response.Content.Headers.ContentEncoding.Count != 0
+                    || response.Content.Headers.ContentLength is > 1024L * 1024 * 1024))
                 throw new InvalidDataException("The pinned .NET SDK download has invalid transport metadata.");
             await using var source = await response.Content.ReadAsStreamAsync();
             await using var target = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None,
@@ -526,7 +558,8 @@ internal static class SourceBootstrapInstaller
                 var read = await source.ReadAsync(buffer);
                 if (read == 0) break;
                 total = checked(total + read);
-                if (total > 1024L * 1024 * 1024)
+                if (validation.IsEnabled(ClientInstallValidationStep.DependencyIntegrity)
+                    && total > 1024L * 1024 * 1024)
                     throw new InvalidDataException("The pinned .NET SDK download exceeded its size limit.");
                 hash.AppendData(buffer, 0, read);
                 await target.WriteAsync(buffer.AsMemory(0, read));
@@ -563,7 +596,10 @@ internal static class SourceBootstrapInstaller
         var environment = BuildSanitizedEnvironment(protectedRoot, dotnet, validation);
         var sdks = await ProcessRunner.RunAsync(dotnet, ["--list-sdks"], TimeSpan.FromSeconds(30),
             cancellationToken, environment: environment, clearEnvironment: true);
-        return sdks.Succeeded && DotNetSdkPolicy.InventoryContainsAcceptedSdk(sdks.StandardOutput);
+        if (!sdks.Succeeded) return false;
+        return validation.IsEnabled(ClientInstallValidationStep.DependencyIntegrity)
+            ? DotNetSdkPolicy.InventoryContainsAcceptedSdk(sdks.StandardOutput)
+            : Regex.IsMatch(sdks.StandardOutput, "(?m)^10\\.[0-9]+\\.[0-9]+\\s");
     }
 
     private static bool CertificateBytesMatch(string base64, X509Certificate2 expected)

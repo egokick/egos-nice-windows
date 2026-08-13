@@ -20,7 +20,7 @@ public sealed class AdminConfig
     public string HeadscaleUserId { get; set; } = string.Empty;
     public string HeadscaleApiKeyProtected { get; set; } = string.Empty;
     public string CoordinatorBindAddress { get; set; } = string.Empty;
-    public int CoordinatorPort { get; set; } = 45830;
+    public int CoordinatorPort { get; set; } = RemoteAdministrationProtocol.CoordinatorPort;
     public string CoordinatorUrl { get; set; } = string.Empty;
     public string ControllerTokenProtected { get; set; } = string.Empty;
     public string InviteOutputDirectory { get; set; } = PrivateStorage.InviteDirectory;
@@ -112,11 +112,5 @@ public sealed class AdminState
     public DeviceRecord? FindDevice(Guid id) => Config.Devices.FirstOrDefault(device => device.Id == id);
 
     private static bool IsExpectedPrivateCoordinatorOrigin(Uri coordinator) =>
-        coordinator.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-        && coordinator.Port == 45830
-        && coordinator.AbsolutePath == "/"
-        && string.IsNullOrEmpty(coordinator.UserInfo)
-        && string.IsNullOrEmpty(coordinator.Query)
-        && string.IsNullOrEmpty(coordinator.Fragment)
-        && RemoteAdministrationProtocol.IsTailscaleIpv4(coordinator.Host);
+        RemoteAdministrationProtocol.IsCanonicalPrivateCoordinatorUrl(coordinator.AbsoluteUri);
 }

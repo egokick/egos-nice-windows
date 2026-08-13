@@ -48,9 +48,8 @@ internal static class SetupPreflight
         {
             if (invite.InviteId == Guid.Empty || invite.ExpiresAt <= DateTimeOffset.UtcNow)
                 throw new InvalidDataException("The invitation is expired or invalid.");
-            if (!Uri.TryCreate(invite.CoordinatorUrl, UriKind.Absolute, out var coordinator)
-                || coordinator.Scheme != Uri.UriSchemeHttps || coordinator.UserInfo.Length != 0)
-                throw new InvalidDataException("The invitation has no canonical HTTPS coordinator endpoint.");
+            if (!RemoteAdministrationProtocol.IsCanonicalPrivateCoordinatorUrl(invite.CoordinatorUrl))
+                throw new InvalidDataException("The invitation has no canonical private Tailscale coordinator endpoint.");
         }, blocked: true);
 
         // Component availability is reported independently. The authenticated

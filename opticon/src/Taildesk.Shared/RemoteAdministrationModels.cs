@@ -6,6 +6,7 @@ namespace Taildesk.Shared;
 public static class RemoteAdministrationProtocol
 {
     public const int UpdateVersion = 1;
+    public const int CoordinatorPort = 45830;
     public const int SshPort = 45832;
     public const string AgentTaskName = "Taildesk Agent";
     public const string GuardianTaskName = "Taildesk Update Guardian";
@@ -59,6 +60,19 @@ public static class RemoteAdministrationProtocol
             return false;
         var bytes = address.GetAddressBytes();
         return bytes[0] == 100 && bytes[1] is >= 64 and <= 127;
+    }
+
+    public static bool IsCanonicalPrivateCoordinatorUrl(string? value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var coordinator))
+            return false;
+        return coordinator.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+               && coordinator.Port == CoordinatorPort
+               && coordinator.AbsolutePath == "/"
+               && string.IsNullOrEmpty(coordinator.UserInfo)
+               && string.IsNullOrEmpty(coordinator.Query)
+               && string.IsNullOrEmpty(coordinator.Fragment)
+               && IsTailscaleIpv4(coordinator.Host);
     }
 
     public static bool IsSshLeaseWithinRequestedLifetime(

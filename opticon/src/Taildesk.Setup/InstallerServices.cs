@@ -163,8 +163,9 @@ public sealed class InstallCoordinator
             }
             if (_machineInstallTransaction is not null)
             {
-                MachineInstallTransactionPersistence.RequireMatches(
-                    _machineInstallTransaction, sourceBinding);
+                if (ValidationEnabled(ClientInstallValidationStep.MachineState))
+                    MachineInstallTransactionPersistence.RequireMatches(
+                        _machineInstallTransaction, sourceBinding);
                 canResumeExistingSession = MachineInstallTransactionPersistence.RequiresNetworkRollForward(
                     _machineInstallTransaction)
                     || _machineInstallTransaction.TailscaleReauthenticationApproved;
@@ -177,7 +178,8 @@ public sealed class InstallCoordinator
                 _progress.Report(new InstallProgress(4,
                     "A torn protected Agent journal was quarantined; the signed Agent generation will be revalidated and repaired."));
             }
-            if (!hasInterruptedAgentInstall && File.Exists(AppPaths.AgentConfigFile))
+            if (ValidationEnabled(ClientInstallValidationStep.MachineState)
+                && !hasInterruptedAgentInstall && File.Exists(AppPaths.AgentConfigFile))
             {
                 var installedState = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
                     .LoadAsync(cancellationToken);
@@ -322,7 +324,8 @@ public sealed class InstallCoordinator
                     && ValidationEnabled(ClientInstallValidationStep.FirewallPolicy))
                     await EnsureAgentFirewallPolicyAsync(snapshot.Ip, cancellationToken);
                 await RecoverAgentInstallTransactionAsync(agentPayload, cancellationToken);
-                if (File.Exists(AppPaths.AgentConfigFile))
+                if (ValidationEnabled(ClientInstallValidationStep.MachineState)
+                    && File.Exists(AppPaths.AgentConfigFile))
                 {
                     var recoveredState = await new MachineJsonFileStore<AgentConfig>(AppPaths.AgentConfigFile)
                         .LoadAsync(cancellationToken);
@@ -605,8 +608,9 @@ public sealed class InstallCoordinator
         var agentDirectory = Path.GetFullPath(Path.Combine(_bundleDirectory, "Payload", "Agent"));
         var guardianDirectory = Path.GetFullPath(Path.Combine(
             _bundleDirectory, "Payload", "UpdateGuardian"));
-        if (!IsPathWithinDirectory(agentDirectory, _bundleDirectory)
-            || !IsPathWithinDirectory(guardianDirectory, _bundleDirectory))
+        if (ValidationEnabled(ClientInstallValidationStep.ProtectedPaths)
+            && (!IsPathWithinDirectory(agentDirectory, _bundleDirectory)
+                || !IsPathWithinDirectory(guardianDirectory, _bundleDirectory)))
             throw new InvalidDataException("A component payload path escaped the authenticated local build.");
 
         // SourceBuildProvenance already reverified the attested release before
@@ -1129,7 +1133,8 @@ public sealed class InstallCoordinator
                 MachineInstallTransactionPhase.NetworkEnrollmentStarted, cancellationToken);
             var up = await RunPrivilegedChildAsync(tailscale,
                 TailscaleCommandLine.BuildEnrollmentArguments(
-                    _invite.HeadscaleLoginUrl, _invite.TailscaleAuthKey, SafeHostName(_invite.DeviceName)),
+                    _invite.HeadscaleLoginUrl, _invite.TailscaleAuthKey,
+                    TailscaleCommandLine.NormalizeHostName(_invite.DeviceName, Environment.MachineName)),
                 TimeSpan.FromMinutes(2), cancellationToken);
             if (!up.Succeeded)
             {
@@ -1346,8 +1351,9 @@ public sealed class InstallCoordinator
     {
         if (_machineInstallTransaction is not null)
         {
-            MachineInstallTransactionPersistence.RequireMatches(
-                _machineInstallTransaction, sourceBinding);
+            if (ValidationEnabled(ClientInstallValidationStep.MachineState))
+                MachineInstallTransactionPersistence.RequireMatches(
+                    _machineInstallTransaction, sourceBinding);
             return;
         }
 
@@ -1425,7 +1431,8 @@ public sealed class InstallCoordinator
         string tailscaleIp,
         CancellationToken cancellationToken)
     {
-        if (!EnrollmentMatchesInvitation(completedState))
+        if (ValidationEnabled(ClientInstallValidationStep.MachineState)
+            && !EnrollmentMatchesInvitation(completedState))
             throw new InvalidDataException("The completed Agent configuration no longer matches this invitation.");
 
         if (await IsCompletedAgentReadyAsync(source, completedState, tailscaleIp, cancellationToken))
@@ -1444,7 +1451,7 @@ public sealed class InstallCoordinator
         await InstallAgentCoreAsync(source, tailscaleIp, completedState, cancellationToken);
         if (ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions))
         {
-            await VerifyPayloadDirectoryCopyAsync(
+            await VerifyPayloadDirectoryCopyIfEnabledAsync(
                 source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
             await RequireExactAgentTaskAsync(cancellationToken);
         }
@@ -1483,7 +1490,10 @@ public sealed class InstallCoordinator
             if (File.Exists(destination))
                 throw new InvalidDataException("The Agent installation path is a file.");
             var hadPreviousAgent = Directory.Exists(destination);
-            if (hadPreviousAgent) await VerifyInstalledExecutableDirectoryAsync(destination, cancellationToken);
+            if (hadPreviousAgent
+                && (ValidationEnabled(ClientInstallValidationStep.PayloadAuthenticity)
+                    || ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions)))
+                await VerifyInstalledExecutableDirectoryAsync(destination, cancellationToken);
             var previousAgentFiles = hadPreviousAgent
                 ? await CreateAgentInstallFileRecordsAsync(destination, cancellationToken)
                 : [];
@@ -1513,7 +1523,7 @@ public sealed class InstallCoordinator
             _agentInstallTransaction = journal;
 
             CopyDirectory(source, candidate);
-            await VerifyPayloadDirectoryCopyAsync(
+            await VerifyPayloadDirectoryCopyIfEnabledAsync(
                 source, candidate, verifyDestinationExecutables: false, cancellationToken);
 
             _ = await RunSystemToolAsync(
@@ -1521,7 +1531,9 @@ public sealed class InstallCoordinator
             await RequireAgentProcessesClosedAsync(destination, cancellationToken);
             if (hadPreviousAgent)
             {
-                await VerifyInstalledExecutableDirectoryAsync(destination, cancellationToken);
+                if (ValidationEnabled(ClientInstallValidationStep.PayloadAuthenticity)
+                    || ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions))
+                    await VerifyInstalledExecutableDirectoryAsync(destination, cancellationToken);
                 journal.PreviousAgentFiles = await CreateAgentInstallFileRecordsAsync(destination, cancellationToken);
             }
             CryptographicOperations.ZeroMemory(journal.PreviousConfig);
@@ -1551,16 +1563,17 @@ public sealed class InstallCoordinator
             Directory.Move(candidate, destination);
             journal.Phase = AgentInstallTransactionPhase.CandidateActivated;
             await AgentInstallTransactionPersistence.SaveAsync(journal, cancellationToken);
-            await VerifyPayloadDirectoryCopyAsync(
+            await VerifyPayloadDirectoryCopyIfEnabledAsync(
                 source, destination, verifyDestinationExecutables: true, CancellationToken.None);
         }
         else
         {
-            if (_agentInstallTransaction.InviteId != _invite.InviteId
-                || _agentInstallTransaction.Phase is < AgentInstallTransactionPhase.CandidateActivated
-                    or >= AgentInstallTransactionPhase.RollbackStarted)
+            if (ValidationEnabled(ClientInstallValidationStep.MachineState)
+                && (_agentInstallTransaction.InviteId != _invite.InviteId
+                    || _agentInstallTransaction.Phase is < AgentInstallTransactionPhase.CandidateActivated
+                        or >= AgentInstallTransactionPhase.RollbackStarted))
                 throw new InvalidDataException("The recovered Agent installation transaction cannot resume this invitation.");
-            await VerifyPayloadDirectoryCopyAsync(
+            await VerifyPayloadDirectoryCopyIfEnabledAsync(
                 source, destination, verifyDestinationExecutables: true, cancellationToken);
         }
 
@@ -1621,7 +1634,7 @@ public sealed class InstallCoordinator
                 || !state.BindAddress.Equals(tailscaleIp, StringComparison.OrdinalIgnoreCase)
                 || !FixedAsciiEquals(state.AgentTokenHash, SecurityHelpers.HashToken(_invite.AgentToken)))
                 return false;
-            await VerifyPayloadDirectoryCopyAsync(
+            await VerifyPayloadDirectoryCopyIfEnabledAsync(
                 source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
             await RequireExactAgentTaskAsync(cancellationToken);
             return true;
@@ -1645,7 +1658,7 @@ public sealed class InstallCoordinator
             return false;
         try
         {
-            await VerifyPayloadDirectoryCopyAsync(
+            await VerifyPayloadDirectoryCopyIfEnabledAsync(
                 source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
             await RequireExactAgentTaskAsync(cancellationToken);
             return true;
@@ -1694,12 +1707,13 @@ public sealed class InstallCoordinator
         }
     }
 
-    private static async Task<string?> CaptureAgentTaskSnapshotAsync(
+    private async Task<string?> CaptureAgentTaskSnapshotAsync(
         bool hadPreviousAgent,
         string installedDirectory,
         CancellationToken cancellationToken)
     {
         var xml = await QueryAgentTaskXmlAsync(cancellationToken);
+        if (!ValidationEnabled(ClientInstallValidationStep.MachineState)) return xml;
         if (hadPreviousAgent)
         {
             if (xml is null)
@@ -2130,7 +2144,7 @@ public sealed class InstallCoordinator
             && Directory.Exists(rollbackDirectory) == journal.HadPreviousAgent
             && !File.Exists(rollbackDirectory))
         {
-            await VerifyPayloadDirectoryCopyAsync(
+            await VerifyPayloadDirectoryCopyIfEnabledAsync(
                 source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
             journal.Phase = AgentInstallTransactionPhase.CandidateActivated;
             await AgentInstallTransactionPersistence.SaveAsync(journal, cancellationToken);
@@ -2148,7 +2162,10 @@ public sealed class InstallCoordinator
             && receipt.AgentInstallOperationId == journal.OperationId
             && receipt.InviteId == journal.InviteId)
         {
-            await VerifyCommittedReceiptAgentAsync(receipt, cancellationToken);
+            if (ValidationEnabled(ClientInstallValidationStep.MachineState)
+                || ValidationEnabled(ClientInstallValidationStep.PayloadAuthenticity)
+                || ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions))
+                await VerifyCommittedReceiptAgentAsync(receipt, cancellationToken);
             _agentInstallCommitted = true;
             await FinalizeAgentInstallTransactionAsync(cancellationToken);
             return;
@@ -2159,7 +2176,7 @@ public sealed class InstallCoordinator
                 and < AgentInstallTransactionPhase.RollbackStarted
             && Directory.Exists(AppPaths.AgentInstallDirectory))
         {
-            await VerifyPayloadDirectoryCopyAsync(
+            await VerifyPayloadDirectoryCopyIfEnabledAsync(
                 source, AppPaths.AgentInstallDirectory, verifyDestinationExecutables: true, cancellationToken);
             return;
         }
@@ -2264,6 +2281,7 @@ public sealed class InstallCoordinator
 
     private void RequireSafeInvitationResume(AgentConfig state)
     {
+        if (!ValidationEnabled(ClientInstallValidationStep.MachineState)) return;
         if (state.CompletedInviteId is Guid completed && completed != _invite.InviteId)
             throw new InvalidOperationException(
                 "This machine is already enrolled through a different invitation. " +
@@ -2432,6 +2450,20 @@ public sealed class InstallCoordinator
         }
     }
 
+    private Task VerifyPayloadDirectoryCopyIfEnabledAsync(
+        string source,
+        string destination,
+        bool verifyDestinationExecutables,
+        CancellationToken cancellationToken)
+    {
+        if (!ValidationEnabled(ClientInstallValidationStep.PayloadAuthenticity)
+            && !ValidationEnabled(ClientInstallValidationStep.SourceBuildProvenance)
+            && !ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions))
+            return Task.CompletedTask;
+        return VerifyPayloadDirectoryCopyAsync(
+            source, destination, verifyDestinationExecutables, cancellationToken);
+    }
+
     private static async Task VerifyPayloadDirectoryCopyAsync(
         string source,
         string destination,
@@ -2557,7 +2589,7 @@ public sealed class InstallCoordinator
         EnsureSuccess(settings, "Could not apply fail-safe update-guardian recovery/watchdog settings");
     }
 
-    private static async Task InstallGuardianFreshTransactionalAsync(
+    private async Task InstallGuardianFreshTransactionalAsync(
         string source,
         string destination,
         CancellationToken cancellationToken)
@@ -2634,10 +2666,10 @@ public sealed class InstallCoordinator
         await new MachineJsonFileStore<GuardianInstallTransactionJournal>(AppPaths.GuardianInstallTransactionFile)
             .SaveAsync(journal, cancellationToken);
         CopyDirectory(source, staging);
-        await VerifyPayloadDirectoryCopyAsync(
+        await VerifyPayloadDirectoryCopyIfEnabledAsync(
             source, staging, verifyDestinationExecutables: false, cancellationToken);
         Directory.Move(staging, destination);
-        await VerifyPayloadDirectoryCopyAsync(
+        await VerifyPayloadDirectoryCopyIfEnabledAsync(
             source, destination, verifyDestinationExecutables: true, CancellationToken.None);
         MachineStorageSecurity.DeleteRestrictedFileIfExists(AppPaths.GuardianInstallTransactionFile);
     }
@@ -4028,7 +4060,8 @@ public sealed class InstallCoordinator
         // Emergency policy skips the remote receipt comparison, not local
         // transaction completion. Leaving either journal pending would turn a
         // successful installation into a forced recovery on the next launch.
-        await RequireExactAgentTaskAsync(cancellationToken);
+        if (ValidationEnabled(ClientInstallValidationStep.ComponentPostconditions))
+            await RequireExactAgentTaskAsync(cancellationToken);
         _agentInstallCommitted = true;
         await CompleteMachineInstallTransactionAsync(cancellationToken);
         SourceBuildProvenance.CommitActiveInstallation();
@@ -4060,7 +4093,9 @@ public sealed class InstallCoordinator
     private bool ExistingSessionHasExpectedDeviceName(LocalTailscaleSnapshot snapshot)
     {
         var dnsLabel = snapshot.DnsName.Split('.', 2, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
-        return dnsLabel.Equals(SafeHostName(_invite.DeviceName), StringComparison.OrdinalIgnoreCase);
+        return dnsLabel.Equals(
+            TailscaleCommandLine.NormalizeHostName(_invite.DeviceName, Environment.MachineName),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ReadTailnet(JsonElement root)
@@ -4103,7 +4138,8 @@ public sealed class InstallCoordinator
                 if (ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity)
                     && response.Content.Headers.ContentLength != artifact.Size)
                     throw new InvalidDataException("The dependency response omitted or changed its pinned Content-Length.");
-                if (response.Content.Headers.ContentEncoding.Count != 0)
+                if (ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity)
+                    && response.Content.Headers.ContentEncoding.Count != 0)
                     throw new InvalidDataException("Encoded dependency responses are not accepted.");
                 await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
                 using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -4116,7 +4152,7 @@ public sealed class InstallCoordinator
                     while (true)
                     {
                         var maximumSize = ValidationEnabled(ClientInstallValidationStep.DependencyIntegrity)
-                            ? artifact.Size : 1024L * 1024 * 1024;
+                            ? artifact.Size : long.MaxValue;
                         var remaining = maximumSize - total;
                         var requested = checked((int)Math.Min(buffer.Length, Math.Max(1L, remaining + 1)));
                         var read = await source.ReadAsync(buffer.AsMemory(0, requested), cancellationToken);
@@ -4647,12 +4683,6 @@ public sealed class InstallCoordinator
     {
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe");
         return File.Exists(path) ? path : throw new FileNotFoundException("Tailscale was installed but tailscale.exe was not found.");
-    }
-
-    private static string SafeHostName(string value)
-    {
-        var safe = new string(value.ToLowerInvariant().Select(character => char.IsLetterOrDigit(character) ? character : '-').ToArray()).Trim('-');
-        return string.IsNullOrWhiteSpace(safe) ? Environment.MachineName.ToLowerInvariant() : safe[..Math.Min(safe.Length, 63)];
     }
 
     private void EnsureInviteIsValid()

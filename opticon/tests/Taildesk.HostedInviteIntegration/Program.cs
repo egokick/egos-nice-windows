@@ -22,6 +22,10 @@ if (args.Length == 7 && args[0].Equals("--local-e2e-create", StringComparison.Or
     localState.Config.CoordinatorUrl = "https://coordinator.opticon-e2e.test";
     await localState.SaveAsync();
     var localHeadscale = new HeadscaleApiClient(localState);
+    var preflight = await new ReleaseDeploymentService(localState)
+        .PrepareAsync(typeof(Program).Assembly.GetName().Version!.ToString(3), forceRedeploy: true);
+    if (preflight.TargetIsOlder || preflight.GatewayReleaseProtocol < ReleaseDeploymentService.RequiredGatewayReleaseProtocol)
+        throw new InvalidDataException("The real release preflight rejected the local Docker deployment.");
     var created = await new InviteBundleService(
         localState,
         localHeadscale,
@@ -37,6 +41,8 @@ if (args.Length == 7 && args[0].Equals("--local-e2e-create", StringComparison.Or
     await File.WriteAllTextAsync(outputPath, JsonSerializer.Serialize(new
     {
         created.InvitationUrl,
+        ExpectedInvitationSchema = InvitationPolicy.HostedLinkSchemaVersion,
+        ExpectedTailscaleHostName = TailscaleCommandLine.NormalizeHostName(created.Record.DeviceName, Environment.MachineName),
         ExpectedRole = "managedOnly",
         Source = source,
         Dependencies = Array.Empty<object>(),
@@ -53,27 +59,27 @@ if (args.Length == 4 && args[0].Equals("--local-e2e-enroll", StringComparison.Or
     var localState = new AdminState(Path.GetFullPath(args[1]));
     await localState.InitializeAsync();
     using var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.GetFullPath(args[2])));
-    var result = document.RootElement;
+    var enrollmentResult = document.RootElement;
     var request = new EnrollmentRequest
     {
-        InviteId = Guid.Parse(result.GetProperty("inviteId").GetString()!),
-        InviteSecret = result.GetProperty("inviteSecret").GetString()!,
-        TailnetDeviceId = result.GetProperty("tailnetDeviceId").GetString()!,
-        HostName = result.GetProperty("deviceName").GetString()!,
-        DnsName = result.GetProperty("dnsName").GetString()!,
-        TailscaleIp = result.GetProperty("tailscaleIp").GetString()!,
+        InviteId = Guid.Parse(enrollmentResult.GetProperty("inviteId").GetString()!),
+        InviteSecret = enrollmentResult.GetProperty("inviteSecret").GetString()!,
+        TailnetDeviceId = enrollmentResult.GetProperty("tailnetDeviceId").GetString()!,
+        HostName = enrollmentResult.GetProperty("deviceName").GetString()!,
+        DnsName = enrollmentResult.GetProperty("dnsName").GetString()!,
+        TailscaleIp = enrollmentResult.GetProperty("tailscaleIp").GetString()!,
         OperatingSystem = "linux-container-e2e",
         AgentVersion = typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "0.0.0"
     };
-    var headscale = new HeadscaleApiClient(localState);
-    var decision = await new EnrollmentService(localState, headscale)
+    var localHeadscale = new HeadscaleApiClient(localState);
+    var decision = await new EnrollmentService(localState, localHeadscale)
         .EnrollAsync(request, args[3]);
     if (decision.StatusCode != 200 || !decision.Response.Accepted)
         throw new InvalidDataException($"Production enrollment rejected the Docker device: {decision.Response.Message}");
 
     var agents = new AgentClient();
     await using var schedules = new ScheduledTransferManager(localState, agents);
-    var viewModel = new MainViewModel(localState, headscale, agents, new TransferManager(), schedules);
+    var viewModel = new MainViewModel(localState, localHeadscale, agents, new TransferManager(), schedules);
     using var refreshTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
     await viewModel.RefreshAsync(refreshTimeout.Token);
     var visible = viewModel.Devices.SingleOrDefault(item => item.TailnetDeviceId == request.TailnetDeviceId)

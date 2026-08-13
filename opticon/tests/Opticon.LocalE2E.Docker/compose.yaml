@@ -14,7 +14,8 @@ services:
       OPTICON_SOURCE_RELEASE_KEY_ID: "${OPTICON_E2E_SOURCE_KEY_ID}"
       OPTICON_PRODUCT_SIGNER_THUMBPRINT: "${OPTICON_E2E_PRODUCT_SIGNER}"
       OPTICON_SIGNING_PROFILE: "${OPTICON_E2E_SIGNING_PROFILE}"
-      OPTICON_E2E_PUBLIC_ORIGIN: "https://opticon-e2e.test:18443"
+      OPTICON_E2E_PUBLIC_ORIGIN: "https://localhost:18443"
+      HEADSCALE_SERVER_URL: "https://localhost:18443"
     volumes:
       - ../../fly-headscale/artifacts:/opt/opticon/artifacts:ro
       - ./headscale.yaml:/etc/headscale/config.yaml:ro
@@ -24,8 +25,6 @@ services:
       - no-new-privileges:true
     networks:
       control:
-        aliases:
-          - opticon-e2e.test
 
   caddy:
     image: caddy:2.10.2

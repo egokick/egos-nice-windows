@@ -6,14 +6,14 @@ param(
     [Parameter(Mandatory)][string]$SourceSha256,
     [Parameter(Mandatory)][string]$SourceManifestSha256,
     [Parameter(Mandatory)][string]$SourceManifestKeyId,
-    [Parameter(Mandatory)][ValidateSet('Production','OwnerManaged')][string]$SigningProfile,
+    [Parameter(Mandatory)][string]$SigningProfile,
     [Parameter(Mandatory)][string]$SourceReleaseCertificateBase64,
     [Parameter(Mandatory)][string]$ProductSignerThumbprint,
     [Parameter(Mandatory)][string]$ProductSigningCertificateBase64,
     [Parameter(Mandatory)][string]$SdkVersion,
     [Parameter(Mandatory)][string]$RuntimeVersion,
-    [Parameter(Mandatory)][ValidateSet('win-x64', 'win-arm64')][string]$TargetRuntime,
-    [Parameter(Mandatory)][ValidateSet('ManagedOnly', 'ControllerAndManaged')][string]$Role,
+    [Parameter(Mandatory)][string]$TargetRuntime,
+    [Parameter(Mandatory)][string]$Role,
     [Parameter(Mandatory)][string]$InvitePath,
     [Parameter(Mandatory)][string]$DotnetPath,
     [string]$ClientInstallValidationBase64 = ''
@@ -43,7 +43,8 @@ if ((Test-ClientValidationEnabled 'InvitationConstraints') -and ($SourceVersion 
     $ProductSignerThumbprint -notmatch '^[A-F0-9]{40}$' -or
     $SourceManifestKeyId -eq 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
     $ProductSignerThumbprint -eq 'FF1114DD5E2D113B4BC9EB1E65EAAE3051226A53' -or
-    $ProductSignerThumbprint -eq $SourceManifestKeyId -or
+    $ProductSignerThumbprint -eq $SourceManifestKeyId -or $SigningProfile -notin @('Production', 'OwnerManaged') -or
+    $TargetRuntime -notin @('win-x64', 'win-arm64') -or $Role -notin @('ManagedOnly', 'ControllerAndManaged') -or
     $SdkVersion -ne '10.*.*' -or $RuntimeVersion -ne '10.0.10')) {
     throw 'The source build pins are invalid or unsupported.'
 }
@@ -95,7 +96,8 @@ try {
     $release = Join-Path $handoffRoot 'release'
     if (Test-Path -LiteralPath $release) { throw 'The protected release directory already exists.' }
     New-Item -Path $release -ItemType Directory | Out-Null
-    if ((Get-Item -LiteralPath $release -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    if ((Test-ClientValidationEnabled 'ProtectedPaths') -and
+        ((Get-Item -LiteralPath $release -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw 'The protected release directory is a reparse point.'
     }
 
@@ -150,11 +152,17 @@ try {
     $setupBuild = Join-Path $release '.setup-build'
     Publish-OpticonProject 'src\Taildesk.Setup\Taildesk.Setup.csproj' $setupBuild
     $setupFiles = @(Get-ChildItem -LiteralPath $setupBuild -File -Recurse)
-    if ($setupFiles.Count -ne 1 -or $setupFiles[0].Name -ne 'Taildesk.Setup.exe' -or
-        -not $setupFiles[0].DirectoryName.Equals([IO.Path]::GetFullPath($setupBuild), [StringComparison]::OrdinalIgnoreCase)) {
+    $setupExecutable = Join-Path $setupBuild 'Taildesk.Setup.exe'
+    if (-not (Test-Path -LiteralPath $setupExecutable -PathType Leaf)) {
+        throw 'The local Setup publish did not produce Taildesk.Setup.exe.'
+    }
+    if (((Test-ClientValidationEnabled 'PayloadAuthenticity') -or
+         (Test-ClientValidationEnabled 'SourceBuildProvenance')) -and
+        ($setupFiles.Count -ne 1 -or $setupFiles[0].Name -ne 'Taildesk.Setup.exe' -or
+         -not $setupFiles[0].DirectoryName.Equals([IO.Path]::GetFullPath($setupBuild), [StringComparison]::OrdinalIgnoreCase))) {
         throw 'The local Setup publish was not the expected complete single-file application.'
     }
-    Move-Item -LiteralPath $setupFiles[0].FullName -Destination (Join-Path $release 'Taildesk.Setup.exe')
+    Move-Item -LiteralPath $setupExecutable -Destination (Join-Path $release 'Taildesk.Setup.exe')
     Remove-Item -LiteralPath $setupBuild -Recurse -Force
     Publish-OpticonProject 'src\Taildesk.Agent\Taildesk.Agent.csproj' (Join-Path $release 'Payload\Agent')
     Publish-OpticonProject 'src\Taildesk.UpdateGuardian\Taildesk.UpdateGuardian.csproj' (Join-Path $release 'Payload\UpdateGuardian')
@@ -173,7 +181,8 @@ try {
     $releasePrefix = [IO.Path]::GetFullPath($release).TrimEnd('\') + '\'
     foreach ($file in Get-ChildItem -LiteralPath $release -File -Recurse | Sort-Object FullName) {
         $full = [IO.Path]::GetFullPath($file.FullName)
-        if (-not $full.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        if ((Test-ClientValidationEnabled 'ProtectedPaths') -and
+            -not $full.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'A locally built payload escaped the protected release stage.'
         }
         $files += [ordered]@{
@@ -182,7 +191,9 @@ try {
             sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
         }
     }
-    if ($files.Count -lt 3) { throw 'The locally built payload is incomplete.' }
+    if ((Test-ClientValidationEnabled 'SourceBuildProvenance') -and $files.Count -lt 3) {
+        throw 'The locally built payload is incomplete.'
+    }
     $attestation = [ordered]@{
         schemaVersion = 3
         releaseVersion = $SourceVersion
