@@ -38,7 +38,7 @@ public sealed class OpticonSourceReleaseClient
         var current = typeof(OpticonSourceReleaseClient).Assembly.GetName().Version
                       ?? throw new InvalidOperationException("The command-center release version is unavailable.");
         var currentVersion = $"{current.Major}.{current.Minor}.{current.Build}";
-        var manifestUri = new Uri(control, "/opticon/artifacts/v1/manifest.json");
+        var manifestUri = new Uri(control, "/opticon/artifacts/v1/update-manifest.json");
         using var request = new HttpRequestMessage(HttpMethod.Get, manifestUri);
         request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true, NoStore = true };
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);

@@ -42,7 +42,7 @@ public sealed class OpticonReleaseClient
             || controlOrigin.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException("The Opticon HTTPS control origin is not configured.");
 
-        var manifestUri = new Uri(controlOrigin, "/opticon/artifacts/v1/manifest.json");
+        var manifestUri = new Uri(controlOrigin, "/opticon/artifacts/v1/update-manifest.json");
         using var request = new HttpRequestMessage(HttpMethod.Get, manifestUri);
         request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true, NoStore = true };
         using var response = await _http.SendAsync(

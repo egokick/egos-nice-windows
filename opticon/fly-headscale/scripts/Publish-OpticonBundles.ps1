@@ -111,7 +111,8 @@ if (-not (Test-Path -LiteralPath $ArtifactDirectory -PathType Container) -or
     ((Get-Item -LiteralPath $ArtifactDirectory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     throw 'ArtifactDirectory must be an existing regular directory, not a reparse point.'
 }
-$manifestPath = Join-Path $ArtifactDirectory "manifest.json"
+$manifestFile = if ($SourceOnly) { 'update-manifest.json' } else { 'manifest.json' }
+$manifestPath = Join-Path $ArtifactDirectory $manifestFile
 $script:VerifiedSourceReleaseCertificateRawData = $null
 $script:AwsScratchDirectory = $null
 $stageReceiptKind = 'OpticonSourceReleaseStage'
@@ -1011,7 +1012,12 @@ function Invoke-CloudFrontVerification {
 }
 
 function Read-PublicManifestBounded {
-    $uri = [Uri]::new($controlOriginUri, '/opticon/artifacts/v1/manifest.json')
+    $publicManifestPath = if ($SourceOnly) {
+        '/opticon/artifacts/v1/update-manifest.json'
+    } else {
+        '/opticon/artifacts/v1/manifest.json'
+    }
+    $uri = [Uri]::new($controlOriginUri, $publicManifestPath)
     $handler = [System.Net.Http.HttpClientHandler]::new()
     $handler.UseProxy = $false
     $handler.AllowAutoRedirect = $false
@@ -1121,7 +1127,12 @@ function Publish-ManifestAtomically([byte[]]$Body) {
     $secret = [Text.Encoding]::UTF8.GetBytes($secretText)
     $secretText = $null
     try {
-        $uri = [Uri]::new($controlOriginUri, "/opticon/v1/releases/manifest")
+        $adminManifestPath = if ($SourceOnly) {
+            '/opticon/v1/releases/update-manifest'
+        } else {
+            '/opticon/v1/releases/manifest'
+        }
+        $uri = [Uri]::new($controlOriginUri, $adminManifestPath)
         $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString([Globalization.CultureInfo]::InvariantCulture)
         $nonceBytes = [byte[]]::new(18)
         $rng = [Security.Cryptography.RandomNumberGenerator]::Create()

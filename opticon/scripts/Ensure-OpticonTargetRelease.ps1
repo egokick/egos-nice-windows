@@ -11,10 +11,10 @@ param(
     [string]$ClientInstallValidationBase64 = '',
     [switch]$ForceRedeploy,
     [switch]$CheckOnly,
-    # Build/upload/verify the immutable device bundles, but leave the live
-    # invitation manifest untouched until a later explicit commit.
+    # Build/upload/verify the immutable install bundles and source update, but
+    # leave both live manifests untouched until a later explicit commit.
     [switch]$StageOnly,
-    # Publish the locally verified device-bundle manifest without rebuilding.
+    # Publish both locally verified release manifests without rebuilding.
     [switch]$CommitStaged
 )
 
@@ -25,6 +25,7 @@ if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -lt [Vers
 Add-Type -AssemblyName System.Net.Http
 $opticonRoot = Split-Path $PSScriptRoot -Parent
 $publisher = Join-Path $opticonRoot 'fly-headscale\scripts\Publish-OpticonBundles.ps1'
+$sourcePublisher = Join-Path $opticonRoot 'fly-headscale\scripts\Publish-OpticonSourceRelease.ps1'
 
 function Get-SourceVersion {
     $propertiesPath = Join-Path $opticonRoot 'Directory.Build.props'
@@ -42,7 +43,7 @@ function Assert-StableVersion([string]$Value) {
     }
 }
 
-function Get-ReleaseManifest {
+function Get-ReleaseManifest([switch]$Update) {
     if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
         return Get-Content -Raw -LiteralPath $ManifestPath | ConvertFrom-Json
     }
@@ -52,7 +53,12 @@ function Get-ReleaseManifest {
         -not [string]::IsNullOrWhiteSpace($origin.UserInfo)) {
         throw 'The Opticon control origin must be an HTTPS origin without credentials.'
     }
-    $uri = [Uri]::new($origin, '/opticon/artifacts/v1/manifest.json')
+    $manifestRoute = if ($Update) {
+        '/opticon/artifacts/v1/update-manifest.json'
+    } else {
+        '/opticon/artifacts/v1/manifest.json'
+    }
+    $uri = [Uri]::new($origin, $manifestRoute)
     $handler = [Net.Http.HttpClientHandler]::new()
     $handler.UseProxy = $false
     $handler.AllowAutoRedirect = $false
@@ -97,6 +103,20 @@ function Test-CompleteRelease($Manifest, [string]$ReleaseVersion) {
     return $true
 }
 
+function Test-CompleteUpdateRelease($Manifest, [string]$ReleaseVersion) {
+    if ([int]$Manifest.schemaVersion -ne 2) { return $false }
+    $release = @($Manifest.artifacts | Where-Object { $_.version -eq $ReleaseVersion })
+    if ($release.Count -ne 1 -or [string]$release[0].product -ne 'OpticonSource' -or
+        [string]$release[0].architecture -ne 'source' -or
+        [string]$release[0].file -ne "opticon-source-$ReleaseVersion.zip" -or
+        [long]$release[0].size -le 0 -or [string]$release[0].sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        return $false
+    }
+    try { $download = [Uri][string]$release[0].downloadUrl } catch { return $false }
+    return $download.IsAbsoluteUri -and $download.Scheme -eq 'https' -and
+        $download.AbsolutePath -eq "/opticon/releases/$ReleaseVersion/$($release[0].file)"
+}
+
 if ([string]::IsNullOrWhiteSpace($Version)) { $Version = Get-SourceVersion }
 Assert-StableVersion $Version
 if ($StageOnly -and $CommitStaged) {
@@ -108,8 +128,12 @@ if (($StageOnly -or $CommitStaged) -and $CheckOnly) {
 $manifest = $null
 $manifestReadFailure = $null
 try { $manifest = Get-ReleaseManifest } catch { $manifestReadFailure = $_ }
-if (-not $ForceRedeploy -and $null -ne $manifest -and (Test-CompleteRelease $manifest $Version)) {
-    Write-Host "Opticon target release $Version is already deployed and complete." -ForegroundColor Green
+$updateManifest = $null
+$updateManifestReadFailure = $null
+try { $updateManifest = Get-ReleaseManifest -Update } catch { $updateManifestReadFailure = $_ }
+if (-not $ForceRedeploy -and $null -ne $manifest -and $null -ne $updateManifest -and
+    (Test-CompleteRelease $manifest $Version) -and (Test-CompleteUpdateRelease $updateManifest $Version)) {
+    Write-Host "Opticon install and update release $Version are already deployed and complete." -ForegroundColor Green
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $false; Deployed = $false }
     return
 }
@@ -140,7 +164,12 @@ if ($CheckOnly) {
         -ProductCertificateThumbprint $ProductCertificateThumbprint `
         -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath `
         -ClientInstallValidationBase64 $ClientInstallValidationBase64 -ForceRedeploy:$ForceRedeploy -CheckOnly
-    Write-Host "Opticon target release $Version passed non-mutating publisher readiness checks." -ForegroundColor Green
+    & $sourcePublisher -Version $Version -ControlOrigin $ControlOrigin -SigningProfile $SigningProfile `
+        -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
+        -ProductCertificateThumbprint $ProductCertificateThumbprint `
+        -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath `
+        -ClientInstallValidationBase64 $ClientInstallValidationBase64 -ForceRedeploy:$ForceRedeploy -CheckOnly
+    Write-Host "Opticon install and update release $Version passed non-mutating publisher readiness checks." -ForegroundColor Green
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false; Ready = $true }
     return
 }
@@ -171,24 +200,45 @@ $publisherArguments = @{
     ForceRedeploy = $ForceRedeploy
 }
 if ($StageOnly) {
-    Write-Host "Staging immutable Opticon device bundles $Version; the live invitation manifest will remain unchanged." -ForegroundColor Yellow
+    Write-Host "Staging immutable Opticon install and update artifacts $Version; both live manifests will remain unchanged." -ForegroundColor Yellow
     $publisherArguments.SkipManifestPublish = $true
 } elseif ($CommitStaged) {
-    Write-Host "Publishing the verified staged Opticon device-bundle manifest $Version without rebuilding." -ForegroundColor Yellow
+    Write-Host "Publishing the verified Opticon install and update manifests $Version without rebuilding." -ForegroundColor Yellow
     $publisherArguments.SkipBuild = $true
 } else {
     Write-Host "Opticon target release $Version is absent, incomplete, or unservable; publishing the signed device bundles now." -ForegroundColor Yellow
 }
 & $publisher @publisherArguments
 if ($StageOnly) {
-    Write-Host "Opticon device bundles $Version are staged and fully verified; the live invitation manifest is unchanged." -ForegroundColor Green
+    & $sourcePublisher -Version $Version -ControlOrigin $ControlOrigin -SigningProfile $SigningProfile `
+        -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
+        -ProductCertificateThumbprint $ProductCertificateThumbprint `
+        -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath `
+        -ClientInstallValidationBase64 $ClientInstallValidationBase64 -ForceRedeploy:$ForceRedeploy -StageOnly
+    Write-Host "Opticon install and update artifacts $Version are staged and fully verified; both live manifests are unchanged." -ForegroundColor Green
     [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $false; Staged = $true }
     return
 }
 
-$manifest = Get-ReleaseManifest
-if (-not (Test-CompleteRelease $manifest $Version)) {
-    throw "Publisher returned successfully, but live Opticon target release $Version is incomplete."
+if ($CommitStaged) {
+    & $sourcePublisher -Version $Version -ControlOrigin $ControlOrigin -SigningProfile $SigningProfile `
+        -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
+        -ProductCertificateThumbprint $ProductCertificateThumbprint `
+        -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath `
+        -ClientInstallValidationBase64 $ClientInstallValidationBase64 -ForceRedeploy:$ForceRedeploy -CommitStaged
+} else {
+    & $sourcePublisher -Version $Version -ControlOrigin $ControlOrigin -SigningProfile $SigningProfile `
+        -SourceReleaseCertificateThumbprint $SourceReleaseCertificateThumbprint `
+        -ProductCertificateThumbprint $ProductCertificateThumbprint `
+        -Rfc3161TimestampUrl $Rfc3161TimestampUrl -SignToolPath $SignToolPath `
+        -ClientInstallValidationBase64 $ClientInstallValidationBase64 -ForceRedeploy:$ForceRedeploy
 }
-Write-Host "Opticon target release $Version is deployed and complete." -ForegroundColor Green
+
+$manifest = Get-ReleaseManifest
+$updateManifest = Get-ReleaseManifest -Update
+if (-not (Test-CompleteRelease $manifest $Version) -or
+    -not (Test-CompleteUpdateRelease $updateManifest $Version)) {
+    throw "Publisher returned successfully, but the live Opticon install or update release $Version is incomplete."
+}
+Write-Host "Opticon install and update release $Version are deployed and complete." -ForegroundColor Green
 [pscustomobject]@{ Version = $Version; DeploymentRequired = $true; Deployed = $true }

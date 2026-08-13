@@ -804,9 +804,68 @@ func TestSourceOnlyManifestHasOneSignedArchivePerRelease(t *testing.T) {
 	}
 }
 
+func TestInstallAndUpdateManifestChannelsCoexistAndRejectCrossPublication(t *testing.T) {
+	root := t.TempDir()
+	installPath := filepath.Join(root, "release", "manifest.json")
+	updatePath := filepath.Join(root, "release", "update-manifest.json")
+	if err := os.MkdirAll(filepath.Dir(installPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	hash := strings.Repeat("a", 64)
+	install := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{
+		productionArtifact(bundleArtifact{Product: "OpticonBundle", Version: "1.2.1", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.2.1-managed-win-x64.zip", Size: 2048, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.1/opticon-bundle-1.2.1-managed-win-x64.zip"}),
+		productionArtifact(bundleArtifact{Product: "OpticonBundle", Version: "1.2.1", Role: "ControllerAndManaged", Architecture: "x64", File: "opticon-bundle-1.2.1-controller-win-x64.zip", Size: 2048, SHA256: hash, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.1/opticon-bundle-1.2.1-controller-win-x64.zip"}),
+		productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.2.1", Architecture: "x64", File: "opticon-bootstrap-1.2.1.exe", Size: 2048, SHA256: hash, SignerThumbprint: testProductionProductSigner, DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.1/opticon-bootstrap-1.2.1.exe"}),
+	}}
+	update := artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{productionArtifact(bundleArtifact{
+		Product: "OpticonSource", Version: "1.2.1", Architecture: "source",
+		File: "opticon-source-1.2.1.zip", Size: 2048, SHA256: hash,
+		DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.2.1/opticon-source-1.2.1.zip",
+		SDKVersion:  pinnedSDKVersion, RuntimeVersion: pinnedRuntimeVersion,
+		TargetRuntimes: []string{"win-x64", "win-arm64"}, SourceManifestSHA256: hash,
+		SourceLauncherFile: "opticon-source-launcher-1.2.1.exe", SourceLauncherSize: 1024, SourceLauncherSHA256: hash,
+	})}}
+	installBytes, _ := json.Marshal(install)
+	updateBytes, _ := json.Marshal(update)
+	if err := os.WriteFile(installPath, installBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(updatePath, updateBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	g := &gateway{artifactDir: root, manifestPath: installPath, updateManifestPath: updatePath, adminSecret: secret, nonces: make(map[string]time.Time)}
+
+	for _, test := range []struct {
+		path   string
+		schema int
+	}{
+		{path: artifactPrefix + "manifest.json", schema: 1},
+		{path: artifactPrefix + "update-manifest.json", schema: sourceOnlyManifestSchema},
+	} {
+		result := httptest.NewRecorder()
+		g.ServeHTTP(result, httptest.NewRequest(http.MethodGet, test.path, nil))
+		var published artifactManifest
+		if result.Code != http.StatusOK || json.Unmarshal(result.Body.Bytes(), &published) != nil || published.SchemaVersion != test.schema {
+			t.Fatalf("public channel %s did not serve schema %d: %d %s", test.path, test.schema, result.Code, result.Body.String())
+		}
+	}
+
+	wrongInstall := httptest.NewRecorder()
+	g.ServeHTTP(wrongInstall, signedRouteRequest(secret, http.MethodPut, releaseAdminPath, "wrong-install-channel-nonce-01", updateBytes))
+	if wrongInstall.Code != http.StatusBadRequest {
+		t.Fatalf("install channel accepted schema 2: %d", wrongInstall.Code)
+	}
+	wrongUpdate := httptest.NewRecorder()
+	g.ServeHTTP(wrongUpdate, signedRouteRequest(secret, http.MethodPut, updateReleaseAdminPath, "wrong-update-channel-nonce-001", installBytes))
+	if wrongUpdate.Code != http.StatusBadRequest {
+		t.Fatalf("update channel accepted schema 1: %d", wrongUpdate.Code)
+	}
+}
+
 func TestForcedSameVersionSourcePublicationProceedsWithActiveInvitationAndNeedsNoLease(t *testing.T) {
 	root := t.TempDir()
-	manifestPath := filepath.Join(root, "release", "manifest.json")
+	manifestPath := filepath.Join(root, "release", "update-manifest.json")
 	inviteDir := filepath.Join(root, "invites")
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0700); err != nil {
 		t.Fatal(err)
@@ -841,27 +900,21 @@ func TestForcedSameVersionSourcePublicationProceedsWithActiveInvitationAndNeedsN
 		t.Fatal(err)
 	}
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	g := &gateway{artifactDir: root, manifestPath: manifestPath, inviteDir: inviteDir,
+	g := &gateway{artifactDir: root, updateManifestPath: manifestPath, inviteDir: inviteDir,
 		adminSecret: secret, nonces: make(map[string]time.Time)}
-
-	preflight, err := g.buildReleasePreflight("1.2.1", time.Now(), true)
-	if err != nil || preflight.GatewayReleaseProtocol != releaseProtocolVersion || preflight.AlreadyDeployed ||
-		!preflight.ForceRedeploy || !preflight.RequiresInvitationRemoval {
-		t.Fatalf("forced same-version preflight was not publishable: %+v, %v", preflight, err)
-	}
 	next := current
 	next.Artifacts = append([]bundleArtifact(nil), current.Artifacts...)
 	next.Artifacts[0].SHA256 = strings.Repeat("b", 64)
 	next.Artifacts[0].SourceManifestSHA256 = strings.Repeat("c", 64)
 	next.Artifacts[0].ClientInstallValidation = clientInstallValidationPolicy{DisableAll: true}
 	body, _ := json.Marshal(next)
-	request := signedRouteRequest(secret, http.MethodPut, releaseAdminPath, "forced-release-nonce-012345", body)
+	request := signedRouteRequest(secret, http.MethodPut, updateReleaseAdminPath, "forced-release-nonce-012345", body)
 	result := httptest.NewRecorder()
 	g.ServeHTTP(result, request)
 	if result.Code != http.StatusCreated {
 		t.Fatalf("forced same-version publication returned %d: %s", result.Code, result.Body.String())
 	}
-	published, err := g.readArtifactManifest()
+	published, err := g.readUpdateArtifactManifest()
 	if err != nil || published.Artifacts[0].SHA256 != strings.Repeat("b", 64) ||
 		!published.Artifacts[0].ClientInstallValidation.DisableAll {
 		t.Fatalf("forced same-version publication did not commit exact replacement: %+v, %v", published, err)
@@ -870,7 +923,7 @@ func TestForcedSameVersionSourcePublicationProceedsWithActiveInvitationAndNeedsN
 
 func TestAuthenticatedSourceOnlyManifestReplacesUnservableLegacyMarker(t *testing.T) {
 	root := t.TempDir()
-	manifestPath := filepath.Join(root, "release", "manifest.json")
+	manifestPath := filepath.Join(root, "release", "update-manifest.json")
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -897,13 +950,13 @@ func TestAuthenticatedSourceOnlyManifestReplacesUnservableLegacyMarker(t *testin
 	})}}
 	body, _ := json.Marshal(next)
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	g := &gateway{artifactDir: root, manifestPath: manifestPath, adminSecret: secret, nonces: make(map[string]time.Time)}
+	g := &gateway{artifactDir: root, updateManifestPath: manifestPath, adminSecret: secret, nonces: make(map[string]time.Time)}
 	result := httptest.NewRecorder()
-	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPut, releaseAdminPath, "source-only-recovery-nonce-0123", body))
+	g.ServeHTTP(result, signedRouteRequest(secret, http.MethodPut, updateReleaseAdminPath, "source-only-recovery-nonce-0123", body))
 	if result.Code != http.StatusCreated {
 		t.Fatalf("source-only recovery returned %d: %s", result.Code, result.Body.String())
 	}
-	published, err := g.readArtifactManifest()
+	published, err := g.readUpdateArtifactManifest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,7 +1057,7 @@ func TestSourceOnlyInvitationPinsNoReleaseBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{source}})
-	if err := os.WriteFile(filepath.Join(root, "manifest.json"), encoded, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "update-manifest.json"), encoded, 0600); err != nil {
 		t.Fatal(err)
 	}
 	secret := []byte("0123456789abcdef0123456789abcdef")
@@ -1405,8 +1458,17 @@ func releasePreflightGatewayFixture(t *testing.T, keyID string) (*gateway, []byt
 		SourceLauncherFile: "opticon-source-launcher-1.2.1.exe", SourceLauncherSize: 12,
 		SourceLauncherSHA256: hash,
 	})
-	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{source}})
+	install := artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{
+		productionArtifact(bundleArtifact{Product: "OpticonBundle", Version: "1.2.1", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.2.1-managed-win-x64.zip", Size: 2048, SHA256: hash, DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.1/opticon-bundle-1.2.1-managed-win-x64.zip"}),
+		productionArtifact(bundleArtifact{Product: "OpticonBundle", Version: "1.2.1", Role: "ControllerAndManaged", Architecture: "x64", File: "opticon-bundle-1.2.1-controller-win-x64.zip", Size: 2048, SHA256: hash, DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.1/opticon-bundle-1.2.1-controller-win-x64.zip"}),
+		productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.2.1", Architecture: "x64", File: "opticon-bootstrap-1.2.1.exe", Size: 2048, SHA256: hash, SignerThumbprint: testProductionProductSigner, DownloadURL: "https://d222.cloudfront.net/opticon/releases/1.2.1/opticon-bootstrap-1.2.1.exe"}),
+	}}
+	manifest, _ := json.Marshal(install)
 	if err := os.WriteFile(filepath.Join(root, "manifest.json"), manifest, 0600); err != nil {
+		t.Fatal(err)
+	}
+	updateManifest, _ := json.Marshal(artifactManifest{SchemaVersion: sourceOnlyManifestSchema, Artifacts: []bundleArtifact{source}})
+	if err := os.WriteFile(filepath.Join(root, "update-manifest.json"), updateManifest, 0600); err != nil {
 		t.Fatal(err)
 	}
 	idHash := strings.Repeat("d", 64)

@@ -10,9 +10,9 @@ using Taildesk.Shared;
 namespace Taildesk.Admin;
 
 /// <summary>
-/// Authenticated, gateway-authoritative state for deploying the source archive
-/// used by new invitations. It intentionally contains no invitation ciphertext
-/// or enrollment credentials.
+/// Authenticated, gateway-authoritative state for deploying the install bundles
+/// and source-update archive. It intentionally contains no invitation
+/// ciphertext or enrollment credentials.
 /// </summary>
 public sealed class ReleaseDeploymentPreflight
 {
@@ -68,7 +68,7 @@ public sealed record DeployedReleaseArtifactRow(
 /// </summary>
 public sealed class ReleaseDeploymentService
 {
-    public const int RequiredGatewayReleaseProtocol = 4;
+    public const int RequiredGatewayReleaseProtocol = 5;
     private const string ReleaseScriptRelativePath = "scripts\\Ensure-OpticonTargetRelease.ps1";
     private const string PublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonSourceRelease.ps1";
     private const string BundlePublisherRelativePath = "fly-headscale\\scripts\\Publish-OpticonBundles.ps1";
@@ -124,8 +124,8 @@ public sealed class ReleaseDeploymentService
     }
 
     /// <summary>
-    /// Publishes the gateway image after the device bundles have been staged,
-    /// before the new binary manifest is made live.
+    /// Publishes the gateway image after the install and update artifacts have
+    /// been staged, before either new manifest is made live.
     /// </summary>
     public async Task DeployGatewayForStagedReleaseAsync(
         string targetVersion,
@@ -142,7 +142,7 @@ public sealed class ReleaseDeploymentService
         await VerifyGatewayDependencyInputsAsync(gatewayDirectory, cancellationToken);
         await DeployGatewayAsync(
             prerequisites,
-            $"Updating the Opticon Fly gateway with the staged {normalizedTarget} signed installer…",
+            $"Updating the Opticon Fly gateway with the staged {normalizedTarget} install and update artifacts…",
             progress,
             cancellationToken);
         progress?.Report("Verifying the deployed gateway serves every pinned Tailscale and RustDesk installer…");
@@ -158,10 +158,10 @@ public sealed class ReleaseDeploymentService
     }
 
     /// <summary>
-    /// Builds, signs, uploads, and fully verifies the immutable device bundles
-    /// without changing the live invite manifest. This must finish before any
-    /// accepted invitation is revoked, so a build/S3/CloudFront failure leaves
-    /// the previous invite release completely usable.
+    /// Builds, signs, uploads, and fully verifies the immutable install bundles
+    /// and source update without changing either live manifest. This must finish
+    /// before any accepted invitation is revoked, so a build/S3/CloudFront
+    /// failure leaves the previous release completely usable.
     /// </summary>
     public async Task StageAsync(
         string targetVersion,
@@ -174,7 +174,7 @@ public sealed class ReleaseDeploymentService
         BuildSigningTrust.RequirePublishable();
         var normalizedTarget = NormalizeStableVersion(targetVersion);
         ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
-        progress?.Report($"Staging and verifying signed device bundles {normalizedTarget}…");
+        progress?.Report($"Staging and verifying install and update artifacts {normalizedTarget}…");
         var publisherOutput = progress is null ? null : new Progress<string>(line => progress.Report("[publisher] " + line));
         var result = await ProcessRunner.RunAsync(
             prerequisites.PowerShell,
@@ -185,8 +185,8 @@ public sealed class ReleaseDeploymentService
             outputProgress: publisherOutput);
         if (!result.Succeeded)
             throw new InvalidOperationException(
-                "The Opticon device bundles could not be staged and verified. " + DescribePublisherFailure(result));
-        progress?.Report($"Signed device bundles {normalizedTarget} are staged and verified.");
+                "The Opticon install and update artifacts could not be staged and verified. " + DescribePublisherFailure(result));
+        progress?.Report($"Install and update artifacts {normalizedTarget} are staged and verified.");
     }
 
     public async Task PublishAsync(
@@ -202,7 +202,7 @@ public sealed class ReleaseDeploymentService
         ValidatePublisherPrerequisites(prerequisites, normalizedTarget);
         await VerifyStagedPublisherAsync(prerequisites, normalizedTarget, cancellationToken);
 
-        progress?.Report($"Publishing staged device bundles {normalizedTarget} to the invite manifest…");
+        progress?.Report($"Publishing staged install and update manifests {normalizedTarget}…");
         var environment = PublisherEnvironment(prerequisites);
         var publisherOutput = progress is null ? null : new Progress<string>(line => progress.Report("[publisher] " + line));
         var result = await ProcessRunner.RunAsync(
@@ -215,7 +215,7 @@ public sealed class ReleaseDeploymentService
         if (!result.Succeeded)
             throw new InvalidOperationException(
                 "The verified Opticon staged-release commit did not complete. " + DescribePublisherFailure(result));
-        progress?.Report($"Device release {normalizedTarget} was published and verified.");
+        progress?.Report($"Install and update release {normalizedTarget} was published and verified.");
     }
 
     public async Task VerifyPublisherReadinessAsync(

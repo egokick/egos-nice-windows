@@ -30,13 +30,14 @@ import (
 )
 
 const (
-	releaseProtocolVersion    = 4
+	releaseProtocolVersion    = 5
 	adminPrefix               = "/opticon/v1/headscale/"
 	artifactPrefix            = "/opticon/artifacts/v1/"
 	inviteAdminPrefix         = "/opticon/v1/invitations/"
 	inviteInventoryPath       = "/opticon/v1/invitations"
 	bundleAdminPrefix         = "/opticon/v1/bundles/"
 	releaseAdminPath          = "/opticon/v1/releases/manifest"
+	updateReleaseAdminPath    = "/opticon/v1/releases/update-manifest"
 	releasePreflightPath      = "/opticon/v1/releases/preflight"
 	releaseRevokeActivePath   = "/opticon/v1/releases/revoke-active"
 	invitePublicPrefix        = "/opticon/i/"
@@ -75,28 +76,29 @@ var trustedProductSignerThumbprint string
 var trustedSigningProfile string
 
 type gateway struct {
-	proxy             *httputil.ReverseProxy
-	adminSecret       []byte
-	headscaleKey      string
-	headscaleAdminURL string
-	sourceSigner      sourceDownloadSigner
-	now               func() time.Time
-	artifactDir       string
-	manifestPath      string
-	bundleDir         string
-	inviteDir         string
-	nonceDir          string
-	publicOrigin      string
-	nonces            map[string]time.Time
-	nonceMu           sync.Mutex
-	inviteMu          sync.Mutex
-	bundleMu          sync.Mutex
-	manifestMu        sync.RWMutex
-	adminSlots        chan struct{}
-	artifactSlots     chan struct{}
-	proxySlots        chan struct{}
-	streamSlots       chan struct{}
-	downloadClient    *http.Client
+	proxy              *httputil.ReverseProxy
+	adminSecret        []byte
+	headscaleKey       string
+	headscaleAdminURL  string
+	sourceSigner       sourceDownloadSigner
+	now                func() time.Time
+	artifactDir        string
+	manifestPath       string
+	updateManifestPath string
+	bundleDir          string
+	inviteDir          string
+	nonceDir           string
+	publicOrigin       string
+	nonces             map[string]time.Time
+	nonceMu            sync.Mutex
+	inviteMu           sync.Mutex
+	bundleMu           sync.Mutex
+	manifestMu         sync.RWMutex
+	adminSlots         chan struct{}
+	artifactSlots      chan struct{}
+	proxySlots         chan struct{}
+	streamSlots        chan struct{}
+	downloadClient     *http.Client
 }
 
 func main() {
@@ -187,9 +189,10 @@ func main() {
 	}
 	g := &gateway{proxy: proxy, adminSecret: []byte(secret), headscaleKey: headscaleKey, sourceSigner: sourceSigner, now: time.Now,
 		artifactDir: "/opt/opticon/artifacts", bundleDir: "/var/lib/headscale/opticon-artifacts", inviteDir: "/var/lib/headscale/opticon-invites",
-		nonceDir:     "/var/lib/headscale/opticon-nonces",
-		manifestPath: "/var/lib/headscale/opticon-release/manifest.json",
-		publicOrigin: publicOrigin, nonces: make(map[string]time.Time),
+		nonceDir:           "/var/lib/headscale/opticon-nonces",
+		manifestPath:       "/var/lib/headscale/opticon-release/manifest.json",
+		updateManifestPath: "/var/lib/headscale/opticon-release/update-manifest.json",
+		publicOrigin:       publicOrigin, nonces: make(map[string]time.Time),
 		adminSlots: make(chan struct{}, 16), artifactSlots: make(chan struct{}, 8),
 		proxySlots: make(chan struct{}, 64), streamSlots: make(chan struct{}, 64)}
 	if err := os.MkdirAll(g.inviteDir, 0700); err != nil {
@@ -202,6 +205,9 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := seedDynamicManifest(g.manifestPath, filepath.Join(g.artifactDir, "manifest.json")); err != nil {
+		log.Fatal(err)
+	}
+	if err := seedOptionalDynamicManifest(g.updateManifestPath, filepath.Join(g.artifactDir, "update-manifest.json")); err != nil {
 		log.Fatal(err)
 	}
 	if err := migrateBundleUploads("/var/lib/headscale", g.artifactDir, g.bundleDir); err != nil {
@@ -239,7 +245,11 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == releaseAdminPath {
-		g.releaseManifestAdmin(w, r)
+		g.releaseManifestAdmin(w, r, false)
+		return
+	}
+	if r.URL.Path == updateReleaseAdminPath {
+		g.releaseManifestAdmin(w, r, true)
 		return
 	}
 	if r.URL.Path == releasePreflightPath {
@@ -360,7 +370,11 @@ func (g *gateway) artifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if name == "manifest.json" {
-		g.publicArtifactManifest(w, r)
+		g.publicArtifactManifest(w, r, false)
+		return
+	}
+	if name == "update-manifest.json" {
+		g.publicArtifactManifest(w, r, true)
 		return
 	}
 	if g.artifactSlots != nil {
@@ -620,8 +634,16 @@ type clientInstallValidationPolicy struct {
 	DisabledSteps []string `json:"disabledSteps,omitempty"`
 }
 
-func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request) {
-	manifest, err := g.readArtifactManifest()
+func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request, update bool) {
+	var manifest artifactManifest
+	var err error
+	fileName := "manifest.json"
+	if update {
+		manifest, err = g.readUpdateArtifactManifest()
+		fileName = "update-manifest.json"
+	} else {
+		manifest, err = g.readArtifactManifest()
+	}
 	if err != nil {
 		http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable)
 		return
@@ -642,7 +664,7 @@ func (g *gateway) publicArtifactManifest(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
-	w.Header().Set("Content-Disposition", `attachment; filename="manifest.json"`)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -657,7 +679,7 @@ func (g *gateway) readArtifactManifest() (artifactManifest, error) {
 }
 
 func (g *gateway) readArtifactManifestUnlocked() (artifactManifest, error) {
-	manifest, err := g.readStoredArtifactManifestUnlocked()
+	manifest, err := g.readStoredArtifactManifestAtPathUnlocked(g.artifactManifestPath())
 	if err != nil {
 		return artifactManifest{}, err
 	}
@@ -667,11 +689,8 @@ func (g *gateway) readArtifactManifestUnlocked() (artifactManifest, error) {
 	return manifest, nil
 }
 
-// readStoredArtifactManifestUnlocked performs only the bounded structural read
-// needed to migrate an older, now-untrusted release manifest. Callers must not
-// serve or select artifacts from this result without validateArtifactManifest.
-func (g *gateway) readStoredArtifactManifestUnlocked() (artifactManifest, error) {
-	data, err := os.ReadFile(g.artifactManifestPath())
+func (g *gateway) readStoredArtifactManifestAtPathUnlocked(path string) (artifactManifest, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return artifactManifest{}, err
 	}
@@ -688,11 +707,52 @@ func (g *gateway) readStoredArtifactManifestUnlocked() (artifactManifest, error)
 	return manifest, nil
 }
 
+func (g *gateway) readUpdateArtifactManifest() (artifactManifest, error) {
+	g.manifestMu.RLock()
+	defer g.manifestMu.RUnlock()
+	manifest, err := g.readUpdateArtifactManifestUnlocked()
+	if err == nil {
+		return manifest, nil
+	}
+	if !os.IsNotExist(err) {
+		return artifactManifest{}, err
+	}
+	// Transition compatibility: before protocol 5, a schema-2 update manifest
+	// occupied the install-manifest path. Accept it only while the dedicated
+	// update manifest has not yet been published.
+	legacy, legacyErr := g.readArtifactManifestUnlocked()
+	if legacyErr != nil || legacy.SchemaVersion != sourceOnlyManifestSchema {
+		return artifactManifest{}, err
+	}
+	return legacy, nil
+}
+
+func (g *gateway) readUpdateArtifactManifestUnlocked() (artifactManifest, error) {
+	manifest, err := g.readStoredArtifactManifestAtPathUnlocked(g.updateArtifactManifestPath())
+	if err != nil {
+		return artifactManifest{}, err
+	}
+	if manifest.SchemaVersion != sourceOnlyManifestSchema {
+		return artifactManifest{}, errors.New("update manifest must use the source-only schema")
+	}
+	if err := validateArtifactManifest(manifest); err != nil {
+		return artifactManifest{}, err
+	}
+	return manifest, nil
+}
+
 func (g *gateway) artifactManifestPath() string {
 	if g.manifestPath != "" {
 		return g.manifestPath
 	}
 	return filepath.Join(g.artifactDir, "manifest.json")
+}
+
+func (g *gateway) updateArtifactManifestPath() string {
+	if g.updateManifestPath != "" {
+		return g.updateManifestPath
+	}
+	return filepath.Join(g.artifactDir, "update-manifest.json")
 }
 
 func validateArtifactManifest(manifest artifactManifest) error {
@@ -779,6 +839,20 @@ func seedDynamicManifest(target, fallback string) error {
 	return writeFileAtomically(target, data)
 }
 
+func seedOptionalDynamicManifest(target, fallback string) error {
+	if _, err := os.Stat(target); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := os.Stat(fallback); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return seedDynamicManifest(target, fallback)
+}
+
 func writeFileAtomically(path string, data []byte) error {
 	temporary := path + ".tmp"
 	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
@@ -804,7 +878,7 @@ func writeFileAtomically(path string, data []byte) error {
 	return syncDirectory(filepath.Dir(path))
 }
 
-func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
+func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request, update bool) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -827,18 +901,45 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid manifest", http.StatusBadRequest)
 		return
 	}
+	requiredSchema := 1
+	manifestPath := g.artifactManifestPath()
+	if update {
+		requiredSchema = sourceOnlyManifestSchema
+		manifestPath = g.updateArtifactManifestPath()
+	}
+	if next.SchemaVersion != requiredSchema {
+		http.Error(w, "manifest schema does not match the release channel", http.StatusBadRequest)
+		return
+	}
 	g.manifestMu.Lock()
 	defer g.manifestMu.Unlock()
-	current, err := g.readArtifactManifestUnlocked()
+	var current artifactManifest
+	if update {
+		current, err = g.readUpdateArtifactManifestUnlocked()
+		if os.IsNotExist(err) {
+			// Preserve the downgrade guard while migrating a protocol-4 gateway
+			// whose schema-2 update history still occupies manifest.json.
+			legacy, legacyErr := g.readArtifactManifestUnlocked()
+			if legacyErr == nil && legacy.SchemaVersion == sourceOnlyManifestSchema {
+				current, err = legacy, nil
+			}
+		}
+	} else {
+		current, err = g.readArtifactManifestUnlocked()
+	}
 	if err != nil {
-		// A trust-domain rotation can make the last otherwise well-formed
-		// manifest unservable. Preserve its version/dependency downgrade guards,
-		// but permit only this authenticated endpoint to replace it with a fully
-		// validated manifest. Active invitations are still checked below.
-		current, err = g.readStoredArtifactManifestUnlocked()
-		if err != nil {
-			http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable)
-			return
+		if update && os.IsNotExist(err) {
+			current = artifactManifest{}
+		} else {
+			// A trust-domain rotation can make the last otherwise well-formed
+			// manifest unservable. Preserve its version/dependency downgrade guards,
+			// but permit only this authenticated endpoint to replace it with a fully
+			// validated manifest. Active invitations are still checked below.
+			current, err = g.readStoredArtifactManifestAtPathUnlocked(manifestPath)
+			if err != nil {
+				http.Error(w, "release manifest unavailable", http.StatusServiceUnavailable)
+				return
+			}
 		}
 	}
 	currentVersion, currentOK := highestReleaseVersion(current)
@@ -862,7 +963,7 @@ func (g *gateway) releaseManifestAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pinned dependencies changed", http.StatusConflict)
 		return
 	}
-	err = writeFileAtomically(g.artifactManifestPath(), body)
+	err = writeFileAtomically(manifestPath, body)
 	if err != nil {
 		http.Error(w, "storage unavailable", http.StatusInternalServerError)
 		return
@@ -1218,9 +1319,9 @@ func highestBundleVersion(manifest artifactManifest) (string, bool) {
 	return selected, selected != ""
 }
 
-// highestReleaseVersion selects the authoritative release item for the active
-// manifest protocol. Schema 1 remains readable only for the one-way migration;
-// schema 2 has no binary bundle, so the signed source archive is authoritative.
+// highestReleaseVersion selects the authoritative item for either independent
+// release channel. Schema 1 is the install channel; schema 2 is the source
+// update channel and therefore has no binary bundle.
 func highestReleaseVersion(manifest artifactManifest) (string, bool) {
 	if manifest.SchemaVersion != sourceOnlyManifestSchema {
 		return highestBundleVersion(manifest)
@@ -1243,9 +1344,7 @@ func highestReleaseVersion(manifest artifactManifest) (string, bool) {
 
 func samePinnedDependencies(left, right artifactManifest) bool {
 	// Source-only releases carry their restore inputs in the signed archive and
-	// do not use gateway/S3 dependency objects. Moving from schema 1 is safe
-	// only in this direction; active legacy invitations are checked separately
-	// before the manifest is committed.
+	// do not use gateway/S3 dependency objects.
 	if right.SchemaVersion == sourceOnlyManifestSchema {
 		return true
 	}
@@ -1998,7 +2097,7 @@ func (g *gateway) bundleForRole(role string) (bundleArtifact, error) {
 }
 
 func (g *gateway) sourceForInvite(invite hostedInvite) (bundleArtifact, error) {
-	manifest, err := g.readArtifactManifest()
+	manifest, err := g.readUpdateArtifactManifest()
 	if err != nil {
 		return bundleArtifact{}, err
 	}
@@ -2107,13 +2206,18 @@ func (g *gateway) artifactByFile(name string) (bundleArtifact, error) {
 	if filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
 		return bundleArtifact{}, errors.New("artifact filename is invalid")
 	}
-	manifest, err := g.readArtifactManifest()
-	if err != nil {
-		return bundleArtifact{}, err
+	manifests := make([]artifactManifest, 0, 2)
+	if manifest, err := g.readArtifactManifest(); err == nil {
+		manifests = append(manifests, manifest)
 	}
-	for _, artifact := range manifest.Artifacts {
-		if artifact.File == name && artifact.Size > 0 {
-			return artifact, nil
+	if manifest, err := g.readUpdateArtifactManifest(); err == nil {
+		manifests = append(manifests, manifest)
+	}
+	for _, manifest := range manifests {
+		for _, artifact := range manifest.Artifacts {
+			if artifact.File == name && artifact.Size > 0 {
+				return artifact, nil
+			}
 		}
 	}
 	return bundleArtifact{}, errors.New("artifact is not declared")

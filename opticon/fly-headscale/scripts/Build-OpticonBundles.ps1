@@ -4,7 +4,7 @@ param(
     [string]$Runtime = "win-x64",
     [ValidateSet("Production", "OwnerManaged")]
     [string]$SigningProfile = "Production",
-    [string]$Version = "1.2.22",
+    [string]$Version = "1.2.23",
     [string]$MinimumGuardianVersion = "1.1.2",
     # SourceOnly is the v2 release path: it produces exactly one signed source
     # archive and deliberately emits no standalone bundle/bootstrap artifact.
@@ -696,8 +696,17 @@ try {
 Assert-ProductSigningCertificate -Certificate $productCertificate -RequirePublicTrust ($SigningProfile -eq 'Production')
 $sourceReleaseCertificateBase64 = [Convert]::ToBase64String($sourceReleaseCertificate.RawData)
 $productSigningCertificateBase64 = [Convert]::ToBase64String($productCertificate.RawData)
-$manifestPath = Join-Path $artifactDirectory "manifest.json"
-$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+$manifestFile = if ($SourceOnly) { "update-manifest.json" } else { "manifest.json" }
+$manifestPath = Join-Path $artifactDirectory $manifestFile
+$manifest = if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+} else {
+    [pscustomobject]@{ schemaVersion = if ($SourceOnly) { 2 } else { 1 }; artifacts = @() }
+}
+if (($SourceOnly -and [int]$manifest.schemaVersion -ne 2) -or
+    (-not $SourceOnly -and [int]$manifest.schemaVersion -ne 1)) {
+    throw "$manifestFile belongs to the wrong Opticon release channel."
+}
 $retiredObsoleteLegacyMigrationArtifacts = @()
 $normalizedArtifacts = [Collections.Generic.List[object]]::new()
 foreach ($artifact in @($manifest.artifacts)) {
