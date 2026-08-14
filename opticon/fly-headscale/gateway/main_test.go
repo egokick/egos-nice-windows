@@ -65,8 +65,9 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	bundleBytes := []byte("signed reusable bundle fixture")
 	bundleHash := sha256.Sum256(bundleBytes)
 	bundle := productionArtifact(bundleArtifact{Product: "OpticonBundle", Version: "1.0.0", Role: "ManagedOnly", Architecture: "x64", File: "opticon-bundle-1.0.0-managed-win-x64.zip", Size: int64(len(bundleBytes)), SHA256: hex.EncodeToString(bundleHash[:]), DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.0.0/opticon-bundle-1.0.0-managed-win-x64.zip"})
-	hash := strings.Repeat("b", 64)
-	bootstrap := productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.0.0", Architecture: "x64", File: "opticon-bootstrap-1.0.0.exe", Size: 20, SHA256: hash, SignerThumbprint: strings.Repeat("C", 40), DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.0.0/opticon-bootstrap-1.0.0.exe"})
+	bootstrapBytes := bytes.Repeat([]byte{0x7a}, 20)
+	bootstrapHash := sha256.Sum256(bootstrapBytes)
+	bootstrap := productionArtifact(bundleArtifact{Product: "OpticonBootstrap", Version: "1.0.0", Architecture: "x64", File: "opticon-bootstrap-1.0.0.exe", Size: int64(len(bootstrapBytes)), SHA256: hex.EncodeToString(bootstrapHash[:]), SignerThumbprint: strings.Repeat("C", 40), DownloadURL: "https://d111.cloudfront.net/opticon/releases/1.0.0/opticon-bootstrap-1.0.0.exe"})
 	manifest, _ := json.Marshal(artifactManifest{SchemaVersion: 1, Artifacts: []bundleArtifact{bundle, bootstrap}})
 	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), manifest, 0600); err != nil {
 		t.Fatal(err)
@@ -96,8 +97,11 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	}
 	landing := landingResult.Body.String()
 	if !strings.Contains(landing, "Mom &amp; Dad PC") || strings.Contains(landing, bundle.DownloadURL) ||
-		strings.Contains(landing, bootstrap.DownloadURL) || !strings.Contains(landing, "crypto.subtle.digest") ||
-		!strings.Contains(landing, "URL.createObjectURL(blob)") || strings.Contains(landing, "ExecutionPolicy") {
+		strings.Contains(landing, bootstrap.DownloadURL) || strings.Contains(landing, "fetch(") ||
+		strings.Contains(landing, "URL.createObjectURL") || strings.Contains(landing, "crypto.subtle") ||
+		!strings.Contains(landing, `href="/opticon/i/`+publicID+`/bootstrap"`) ||
+		!strings.Contains(landing, "download.download='Install-Opticon-"+publicID+"--'+key+'--"+bootstrap.SHA256+".exe'") ||
+		strings.Contains(landing, "ExecutionPolicy") {
 		t.Fatal("landing page did not offer exactly one pinned signed installer safely")
 	}
 	if !strings.Contains(landingResult.Header().Get("Content-Security-Policy"), "connect-src 'self'") ||
@@ -118,7 +122,6 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	if downloadResult.Code != http.StatusOK || !bytes.Equal(downloadResult.Body.Bytes(), ciphertext) {
 		t.Fatal("encrypted invitation download changed")
 	}
-	bootstrapBytes := bytes.Repeat([]byte{0x7a}, int(bootstrap.Size))
 	g.downloadClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.String() != bootstrap.DownloadURL {
 			t.Fatalf("bootstrap relay requested the wrong artifact: %s", request.URL)
@@ -133,7 +136,10 @@ func TestHostedInvitationLifecycle(t *testing.T) {
 	bootstrapResult := httptest.NewRecorder()
 	g.ServeHTTP(bootstrapResult, httptest.NewRequest(http.MethodGet, invitePublicPrefix+publicID+"/bootstrap", nil))
 	if bootstrapResult.Code != http.StatusOK || !bytes.Equal(bootstrapResult.Body.Bytes(), bootstrapBytes) ||
-		bootstrapResult.Header().Get("Content-Type") != "application/vnd.microsoft.portable-executable" {
+		bootstrapResult.Header().Get("Content-Type") != "application/vnd.microsoft.portable-executable" ||
+		bootstrapResult.Header().Get("Content-Length") != strconv.FormatInt(bootstrap.Size, 10) ||
+		bootstrapResult.Header().Get("Access-Control-Allow-Origin") != "" ||
+		bootstrapResult.Header().Get("Content-Disposition") != "" {
 		t.Fatal("same-origin bootstrap relay did not return the exact declared installer")
 	}
 
