@@ -14,12 +14,6 @@ internal static class SimpleDeviceInstaller
 {
     private const string Origin = "https://taildesk-egokick-control.fly.dev";
     private const string AgentServiceName = "OpticonAgent";
-    private static readonly string[] HistoricalTasks =
-    [
-        "Taildesk Agent", "Taildesk Update Guardian", "Taildesk Update Guardian Watchdog",
-        "Taildesk SSH Supervisor", "Taildesk Fly Route", "Opticon Command Center",
-        "Taildesk Setup Resume"
-    ];
     private static readonly string[] FirewallRules =
     [
         "Opticon Agent (Tailscale only)", "Taildesk Agent (Tailscale only)",
@@ -33,10 +27,7 @@ internal static class SimpleDeviceInstaller
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(report);
-        var staging = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "OpticonBootstrap", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(staging);
+        string? staging = null;
         try
         {
             report("Verifying invitation...");
@@ -47,26 +38,27 @@ internal static class SimpleDeviceInstaller
             await ProductSigning.VerifyAuthenticodeAsync(launcher, cancellationToken);
 
             using var http = DirectHttp.CreateClient(TimeSpan.FromMinutes(20));
-            var invitePath = Path.Combine(staging, "invite.tdinvite");
-            await HostedBootstrapper.DownloadAsync(http,
+            var encrypted = await HostedBootstrapper.DownloadBytesAsync(http,
                 $"{Origin}/opticon/i/{Uri.EscapeDataString(bootstrap.PublicId)}/invite.tdinvite",
-                invitePath, expectedSize: null, maximumSize: 64 * 1024, expectedHash: null);
-            var encrypted = await File.ReadAllBytesAsync(invitePath, cancellationToken);
+                maximumSize: 64 * 1024, cancellationToken);
             var signedEnvelope = HostedInviteFile.Decrypt(bootstrap.PrivateKey, encrypted);
             InvitePayload invite;
             try { invite = HostedInviteFile.ReadSigned(signedEnvelope); }
             finally { CryptographicOperations.ZeroMemory(signedEnvelope); }
             ValidateInvitation(invite);
 
+            report("Repairing legacy Opticon setup...");
+            await ResetOpticonAsync(report, cancellationToken);
+            MachineStorageSecurity.EnsureOpticonMachineState();
+
+            staging = HostedBootstrapper.CreateProtectedHandoffDirectory();
+            var invitePath = Path.Combine(staging, "invite.tdinvite");
+            await File.WriteAllBytesAsync(invitePath, encrypted, cancellationToken);
             var bundlePath = Path.Combine(staging, invite.BundleFile);
             await HostedBootstrapper.DownloadAsync(http, invite.BundleDownloadUrl, bundlePath,
                 invite.BundleSize, 512L * 1024 * 1024, invite.BundleSha256);
             var release = Path.Combine(staging, "release");
             await ExtractAndVerifyBundleAsync(bundlePath, release, invite, cancellationToken);
-
-            report("Resetting Opticon...");
-            await ResetOpticonAsync(cancellationToken);
-            MachineStorageSecurity.EnsureOpticonMachineState();
 
             report("Connecting private network...");
             var architecture = RuntimeInformation.OSArchitecture;
@@ -172,7 +164,7 @@ internal static class SimpleDeviceInstaller
         }
         finally
         {
-            try { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); } catch { }
+            try { if (staging is not null && Directory.Exists(staging)) Directory.Delete(staging, recursive: true); } catch { }
         }
     }
 
@@ -263,20 +255,13 @@ internal static class SimpleDeviceInstaller
         }
     }
 
-    private static async Task ResetOpticonAsync(CancellationToken cancellationToken)
+    private static async Task ResetOpticonAsync(Action<string> report, CancellationToken cancellationToken)
     {
         _ = await ProcessRunner.RunAsync("sc.exe", ["stop", AgentServiceName], TimeSpan.FromSeconds(20), cancellationToken);
-        foreach (var task in HistoricalTasks)
-        {
-            _ = await ProcessRunner.RunAsync("schtasks.exe", ["/End", "/TN", task], TimeSpan.FromSeconds(15), cancellationToken);
-            _ = await ProcessRunner.RunAsync("schtasks.exe", ["/Delete", "/TN", task, "/F"], TimeSpan.FromSeconds(15), cancellationToken);
-        }
-        StopProcessesFromRoot(AppPaths.InstallDirectory);
+        await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync(report);
         _ = await ProcessRunner.RunAsync("sc.exe", ["delete", AgentServiceName], TimeSpan.FromSeconds(20), cancellationToken);
         await WaitForServiceDeletionAsync(AgentServiceName, cancellationToken);
-        DeleteFixedRoot(AppPaths.InstallDirectory);
-        DeleteFixedRoot(AppPaths.MachineDataDirectory);
-        DeleteFixedRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "OpticonProvenance"));
+        LegacyOpticonRemoval.RemoveInstallerResidueIfPresent(report);
     }
 
     private static async Task WaitForServiceDeletionAsync(string serviceName, CancellationToken cancellationToken)
@@ -289,35 +274,6 @@ internal static class SimpleDeviceInstaller
             await Task.Delay(500, cancellationToken);
         }
         throw new InvalidOperationException($"Windows did not remove the {serviceName} service within 15 seconds.");
-    }
-
-    private static void StopProcessesFromRoot(string directory)
-    {
-        var prefix = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)) + Path.DirectorySeparatorChar;
-        foreach (var process in Process.GetProcesses())
-        {
-            using (process)
-            {
-                if (process.Id == Environment.ProcessId) continue;
-                try
-                {
-                    var image = Path.GetFullPath(process.MainModule?.FileName ?? string.Empty);
-                    if (!image.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
-                    process.Kill(entireProcessTree: true);
-                    process.WaitForExit(10_000);
-                }
-                catch { }
-            }
-        }
-    }
-
-    private static void DeleteFixedRoot(string path)
-    {
-        var full = Path.GetFullPath(path);
-        if (!Directory.Exists(full) && !File.Exists(full)) return;
-        if ((File.GetAttributes(full) & FileAttributes.ReparsePoint) != 0)
-            throw new IOException($"The fixed Opticon root is a reparse point and was not removed: {full}");
-        if (Directory.Exists(full)) Directory.Delete(full, recursive: true); else File.Delete(full);
     }
 
     private static async Task<string> DownloadDependencyAsync(

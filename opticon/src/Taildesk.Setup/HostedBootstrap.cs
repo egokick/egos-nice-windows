@@ -267,4 +267,34 @@ internal static class HostedBootstrapper
             throw;
         }
     }
+
+    internal static async Task<byte[]> DownloadBytesAsync(
+        HttpClient client,
+        string url,
+        long maximumSize,
+        CancellationToken cancellationToken)
+    {
+        if (maximumSize <= 0 || maximumSize > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(maximumSize));
+        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        if (response.Content.Headers.ContentEncoding.Count != 0)
+            throw new InvalidDataException("Encoded Opticon downloads are not accepted.");
+        if (response.Content.Headers.ContentLength is long declared && declared > maximumSize)
+            throw new InvalidDataException("The Opticon download exceeded its size limit.");
+
+        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var output = new MemoryStream(
+            response.Content.Headers.ContentLength is long length ? checked((int)length) : 0);
+        var buffer = new byte[16 * 1024];
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            if (output.Length + read > maximumSize)
+                throw new InvalidDataException("The Opticon download exceeded its size limit.");
+            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+        }
+        return output.ToArray();
+    }
 }

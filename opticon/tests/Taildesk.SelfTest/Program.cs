@@ -1691,6 +1691,8 @@ static void TestReleaseDistributionDesign()
     var sourceBootstrap = Read("src", "Taildesk.Setup", "SourceBootstrapInstaller.cs");
     var sdkRequirementDialog = Read("src", "Taildesk.Setup", "SdkRequirementDialog.cs");
     var legacyRemoval = Read("src", "Taildesk.Setup", "LegacyOpticonRemoval.cs");
+    var simpleInstaller = Read("src", "Taildesk.Setup", "SimpleDeviceInstaller.cs");
+    var reinstallCleanup = Read("scripts", "Reset-Opticon-ForReinstall.ps1");
     var setupPrivilege = Read("src", "Taildesk.Setup", "ScopedProcessPrivilege.cs");
     var sourceInstaller = Read("source-package", "Install-OpticonFromSource.ps1");
     var sourceNuget = Read("source-package", "NuGet.Config");
@@ -1698,6 +1700,32 @@ static void TestReleaseDistributionDesign()
     var agentInstallJournal = Read("src", "Taildesk.Shared", "AgentInstallTransactionPersistence.cs");
     var setupInstaller = Read("src", "Taildesk.Setup", "InstallerServices.cs");
     var setupWindow = Read("src", "Taildesk.Setup", "MainWindow.xaml.cs");
+    var inMemoryInvite = simpleInstaller.IndexOf("HostedBootstrapper.DownloadBytesAsync", StringComparison.Ordinal);
+    var initialCleanup = simpleInstaller.IndexOf("await ResetOpticonAsync(report", StringComparison.Ordinal);
+    var protectedStaging = simpleInstaller.IndexOf("HostedBootstrapper.CreateProtectedHandoffDirectory", StringComparison.Ordinal);
+    var bundleDownload = simpleInstaller.IndexOf("invite.BundleDownloadUrl", StringComparison.Ordinal);
+    Assert(simpleInstaller.Contains(
+               "await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync(report)",
+               StringComparison.Ordinal)
+           && simpleInstaller.Contains(
+               "LegacyOpticonRemoval.RemoveInstallerResidueIfPresent(report)",
+               StringComparison.Ordinal)
+           && !simpleInstaller.Contains("private static void DeleteFixedRoot", StringComparison.Ordinal)
+           && inMemoryInvite >= 0
+           && initialCleanup > inMemoryInvite
+           && protectedStaging > initialCleanup
+           && bundleDownload > protectedStaging
+           && legacyRemoval.Contains("\"OpticonBootstrap\", \"OpticonBootstrapUnvalidated\"", StringComparison.Ordinal)
+           && legacyRemoval.Contains("Guid.TryParseExact", StringComparison.Ordinal),
+        "the one-click installer must run hardened legacy ACL cleanup before installing files");
+    Assert(reinstallCleanup.Contains("$MaximumTreeEntries = 100000", StringComparison.Ordinal)
+           && reinstallCleanup.Contains("'/SKIPSL'", StringComparison.Ordinal)
+           && reinstallCleanup.Contains("'/T', '/C', '/L', '/Q'", StringComparison.Ordinal)
+           && reinstallCleanup.Contains("'*S-1-5-18:F'", StringComparison.Ordinal)
+           && reinstallCleanup.Contains("'*S-1-5-32-544:F'", StringComparison.Ordinal)
+           && reinstallCleanup.Contains("'OpticonAgent'", StringComparison.Ordinal)
+           && reinstallCleanup.Contains("Tailscale and RustDesk installations and identities were left unchanged", StringComparison.Ordinal),
+        "the standalone reinstall reset must stay bounded, no-reparse, ACL repairing, and connectivity preserving");
     Assert(template.Contains("BucketOwnerEnforced", StringComparison.Ordinal)
            && template.Contains("BlockPublicPolicy: true", StringComparison.Ordinal)
            && template.Contains("DenyInsecureTransport", StringComparison.Ordinal)

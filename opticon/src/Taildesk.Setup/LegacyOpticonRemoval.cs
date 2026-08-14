@@ -240,6 +240,70 @@ internal static class LegacyOpticonRemoval
         report("The existing Opticon installation was removed. Tailscale and RustDesk were left unchanged.");
     }
 
+    /// <summary>
+    /// Removes fixed machine-level residue that is not part of the active
+    /// bootstrap handoff. This uses the same pinned, no-reparse deletion path
+    /// as legacy installation cleanup so stale protected ACLs cannot block a
+    /// fresh one-click installation.
+    /// </summary>
+    internal static void RemoveInstallerResidueIfPresent(Action<string> report)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        var provenance = RequireDirectChild(programData, "OpticonProvenance");
+        var regularRoots = RequireDirectoryOrAbsent(provenance, "Opticon installer residue")
+            ? new[] { provenance }
+            : [];
+        foreach (var path in regularRoots) RequireRegularDirectoryTree(path);
+
+        var cachePlans = new List<(string Root, string[] Children)>();
+        foreach (var name in new[] { "OpticonBootstrap", "OpticonBootstrapUnvalidated" })
+        {
+            var root = RequireDirectChild(programData, name);
+            if (!RequireDirectoryOrAbsent(root, "Opticon bootstrap cache")) continue;
+            var children = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.TopDirectoryOnly).ToArray();
+            if (children.Length > 256)
+                throw new InvalidDataException("Opticon cleanup refused an unexpectedly large bootstrap cache.");
+            foreach (var child in children)
+            {
+                if (!Directory.Exists(child)
+                    || !Guid.TryParseExact(Path.GetFileName(child), "N", out _))
+                    throw new InvalidDataException("Opticon cleanup found an unexpected bootstrap cache entry.");
+                RequireRegularDirectoryTree(child);
+            }
+            cachePlans.Add((root, children));
+        }
+        if (regularRoots.Length == 0 && cachePlans.Count == 0) return;
+
+        using var backupPrivilege = ScopedProcessPrivilege.Enable("SeBackupPrivilege");
+        using var restorePrivilege = ScopedProcessPrivilege.Enable("SeRestorePrivilege");
+        report("Removing protected residue from earlier Opticon setup attempts...");
+        foreach (var path in regularRoots)
+        {
+            using var root = SealDirectoryTreeForDeletion(path);
+            root.DeleteAllPinnedEntries();
+            if (Directory.Exists(path) || File.Exists(path))
+                throw new IOException("Protected Opticon installer residue could not be removed completely.");
+        }
+        foreach (var (rootPath, children) in cachePlans)
+        {
+            // Process each GUID handoff independently. This keeps the original
+            // per-tree 4096-handle safety bound while allowing many stale
+            // source-build handoffs to be removed from one fixed cache root.
+            foreach (var child in children)
+            {
+                using var childTree = SealDirectoryTreeForDeletion(child);
+                childTree.DeleteAllPinnedEntries();
+                if (Directory.Exists(child) || File.Exists(child))
+                    throw new IOException("A protected Opticon bootstrap handoff could not be removed completely.");
+            }
+            using var rootTree = SealDirectoryTreeForDeletion(rootPath);
+            rootTree.DeleteAllPinnedEntries();
+            if (Directory.Exists(rootPath) || File.Exists(rootPath))
+                throw new IOException("The protected Opticon bootstrap cache could not be removed completely.");
+        }
+    }
+
     private static async Task<RemovalPlan?> CreatePlanAsync()
     {
         var installDirectory = RequireDirectChild(
