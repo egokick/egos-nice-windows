@@ -83,11 +83,17 @@ public partial class MainWindow : Window
                 Environment.ExitCode = 1;
                 var bootstrap = HostedBootstrapper.ParseSourceLaunch(arguments, Environment.ProcessPath);
                 StatusText.Text = "Verifying the signed Opticon device installer...";
-                var handoffExitCode = await HostedBootstrapper.LaunchSourceOnlyAsync(bootstrap, message =>
-                {
-                    StatusText.Text = message;
-                    AppendLog(message);
-                });
+                var activeHandoffDirectory = string.IsNullOrWhiteSpace(_logPath)
+                    ? null
+                    : Path.GetDirectoryName(_logPath);
+                var handoffExitCode = await HostedBootstrapper.LaunchSourceOnlyAsync(
+                    bootstrap,
+                    message =>
+                    {
+                        StatusText.Text = message;
+                        AppendLog(message);
+                    },
+                    activeHandoffDirectory);
                 Environment.ExitCode = handoffExitCode;
                 Close();
                 return;

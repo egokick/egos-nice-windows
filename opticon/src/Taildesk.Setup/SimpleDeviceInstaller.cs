@@ -24,6 +24,7 @@ internal static class SimpleDeviceInstaller
     internal static async Task<int> RunAsync(
         SourceBootstrapRequest bootstrap,
         Action<string> report,
+        string? activeHandoffDirectory,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(report);
@@ -48,7 +49,7 @@ internal static class SimpleDeviceInstaller
             ValidateInvitation(invite);
 
             report("Repairing legacy Opticon setup...");
-            await ResetOpticonAsync(report, cancellationToken);
+            await ResetOpticonAsync(report, activeHandoffDirectory, cancellationToken);
             MachineStorageSecurity.EnsureOpticonMachineState();
 
             staging = HostedBootstrapper.CreateProtectedHandoffDirectory();
@@ -255,13 +256,16 @@ internal static class SimpleDeviceInstaller
         }
     }
 
-    private static async Task ResetOpticonAsync(Action<string> report, CancellationToken cancellationToken)
+    private static async Task ResetOpticonAsync(
+        Action<string> report,
+        string? activeHandoffDirectory,
+        CancellationToken cancellationToken)
     {
         _ = await ProcessRunner.RunAsync("sc.exe", ["stop", AgentServiceName], TimeSpan.FromSeconds(20), cancellationToken);
         await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync(report);
         _ = await ProcessRunner.RunAsync("sc.exe", ["delete", AgentServiceName], TimeSpan.FromSeconds(20), cancellationToken);
         await WaitForServiceDeletionAsync(AgentServiceName, cancellationToken);
-        LegacyOpticonRemoval.RemoveInstallerResidueIfPresent(report);
+        LegacyOpticonRemoval.RemoveInstallerResidueIfPresent(report, activeHandoffDirectory);
     }
 
     private static async Task WaitForServiceDeletionAsync(string serviceName, CancellationToken cancellationToken)

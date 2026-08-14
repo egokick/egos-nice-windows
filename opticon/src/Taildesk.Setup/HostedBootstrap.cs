@@ -76,9 +76,12 @@ internal static class HostedBootstrapper
             bound.Success ? bound.Groups["hash"].Value.ToLowerInvariant() : null);
     }
 
-    internal static async Task<int> LaunchSourceOnlyAsync(SourceBootstrapRequest bootstrap, Action<string> report)
+    internal static async Task<int> LaunchSourceOnlyAsync(
+        SourceBootstrapRequest bootstrap,
+        Action<string> report,
+        string? activeHandoffDirectory)
     {
-        return await SimpleDeviceInstaller.RunAsync(bootstrap, report);
+        return await SimpleDeviceInstaller.RunAsync(bootstrap, report, activeHandoffDirectory);
     }
 
     private static string? ReadOptionalArgument(IReadOnlyList<string> arguments, string prefix)

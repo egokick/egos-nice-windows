@@ -1708,7 +1708,7 @@ static void TestReleaseDistributionDesign()
                "await LegacyOpticonRemoval.RemoveLegacyInstallationIfPresentAsync(report)",
                StringComparison.Ordinal)
            && simpleInstaller.Contains(
-               "LegacyOpticonRemoval.RemoveInstallerResidueIfPresent(report)",
+               "LegacyOpticonRemoval.RemoveInstallerResidueIfPresent(report, activeHandoffDirectory)",
                StringComparison.Ordinal)
            && !simpleInstaller.Contains("private static void DeleteFixedRoot", StringComparison.Ordinal)
            && inMemoryInvite >= 0
@@ -1716,7 +1716,11 @@ static void TestReleaseDistributionDesign()
            && protectedStaging > initialCleanup
            && bundleDownload > protectedStaging
            && legacyRemoval.Contains("\"OpticonBootstrap\", \"OpticonBootstrapUnvalidated\"", StringComparison.Ordinal)
-           && legacyRemoval.Contains("Guid.TryParseExact", StringComparison.Ordinal),
+           && legacyRemoval.Contains("Guid.TryParseExact", StringComparison.Ordinal)
+           && legacyRemoval.Contains("retainsActiveHandoff", StringComparison.Ordinal)
+           && legacyRemoval.Contains("The active Opticon bootstrap handoff disappeared during cleanup", StringComparison.Ordinal)
+           && hostedBootstrap.Contains("activeHandoffDirectory", StringComparison.Ordinal)
+           && setupWindow.Contains("Path.GetDirectoryName(_logPath)", StringComparison.Ordinal),
         "the one-click installer must run hardened legacy ACL cleanup before installing files");
     Assert(reinstallCleanup.Contains("$MaximumTreeEntries = 100000", StringComparison.Ordinal)
            && reinstallCleanup.Contains("'/SKIPSL'", StringComparison.Ordinal)
