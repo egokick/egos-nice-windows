@@ -56,8 +56,13 @@ internal static class Program
         var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "OpticonUninstall", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        var staged = Path.Combine(root, "Uninstall-Opticon.exe");
-        File.Copy(Environment.ProcessPath ?? throw new InvalidOperationException("The uninstaller path is unavailable."), staged);
+        var source = Environment.ProcessPath ?? throw new InvalidOperationException("The uninstaller path is unavailable.");
+        var sourceDirectory = Path.GetDirectoryName(source)
+            ?? throw new InvalidOperationException("The uninstaller directory is unavailable.");
+        foreach (var file in Directory.EnumerateFiles(sourceDirectory))
+            File.Copy(file, Path.Combine(root, Path.GetFileName(file)));
+
+        var staged = Path.Combine(root, Path.GetFileName(source));
         var start = new ProcessStartInfo(staged) { UseShellExecute = true, Verb = "runas" };
         start.ArgumentList.Add("--staged");
         if (quiet) start.ArgumentList.Add("--quiet");
